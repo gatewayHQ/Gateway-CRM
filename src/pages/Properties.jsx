@@ -153,6 +153,7 @@ export default function PropertiesPage({ db, setDb, activeAgent }) {
         </div>
       ) : (
         <div className="card" style={{ padding:0, overflow:'hidden' }}>
+          <div className="data-table-wrap">
           <table className="data-table">
             <thead><tr><th>Address</th><th>Type</th><th>Status</th><th>Price</th><th>Beds/Baths</th><th>Sq Ft</th><th>MLS #</th><th>Agent</th><th></th></tr></thead>
             <tbody>
@@ -174,6 +175,7 @@ export default function PropertiesPage({ db, setDb, activeAgent }) {
               })}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 

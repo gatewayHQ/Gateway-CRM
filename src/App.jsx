@@ -43,6 +43,7 @@ export default function App() {
   const [compose, setCompose] = useState(null)
   const [agentSwitcher, setAgentSwitcher] = useState(false)
   const [globalSearch, setGlobalSearch] = useState('')
+  const [mobileMore, setMobileMore] = useState(false)
 
   useEffect(() => {
     supabase.auth.getSession()
@@ -202,6 +203,44 @@ export default function App() {
             </div>
           </div>
         </Modal>
+      )}
+
+      {/* ── Mobile bottom nav ── */}
+      <nav className="mobile-nav">
+        {[NAV[0], NAV[1], NAV[3], NAV[4]].map(n => (
+          <button key={n.id} className={`mobile-nav__item${route === n.id ? ' active' : ''}`}
+            onClick={() => setRoute(n.id)}>
+            <Icon name={n.icon} size={22} />
+            <span>{n.label}</span>
+          </button>
+        ))}
+        <button className={`mobile-nav__item${mobileMore ? ' active' : ''}`}
+          onClick={() => setMobileMore(m => !m)}>
+          <Icon name="more" size={22} />
+          <span>More</span>
+        </button>
+      </nav>
+
+      {/* ── Mobile "More" sheet ── */}
+      {mobileMore && (
+        <div className="mobile-menu-backdrop" onClick={() => setMobileMore(false)}>
+          <div className="mobile-menu" onClick={e => e.stopPropagation()}>
+            <div className="mobile-menu__handle" />
+            <div className="mobile-menu__label">Navigation</div>
+            {[NAV[2], NAV[5], NAV[6], NAV[7]].map(n => (
+              <div key={n.id} className={`mobile-menu__item${route === n.id ? ' active' : ''}`}
+                onClick={() => { setRoute(n.id); setMobileMore(false) }}>
+                <Icon name={n.icon} size={20} />
+                <span>{n.label}</span>
+              </div>
+            ))}
+            <div className="mobile-menu__divider" />
+            <div className="mobile-menu__item danger" onClick={() => { setMobileMore(false); signOut() }}>
+              <Icon name="logout" size={20} />
+              <span>Sign out</span>
+            </div>
+          </div>
+        </div>
       )}
 
       <ToastHost />

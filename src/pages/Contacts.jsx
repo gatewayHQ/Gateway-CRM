@@ -173,6 +173,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
           action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Contact</button>} />
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+          <div className="data-table-wrap">
           <table className="data-table">
             <thead>
               <tr>
@@ -220,6 +221,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
               })}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
