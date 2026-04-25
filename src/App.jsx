@@ -9,6 +9,7 @@ import TasksPage from './pages/Tasks.jsx'
 import TemplatesPage, { ComposeModal } from './pages/Templates.jsx'
 import TeamPage from './pages/Team.jsx'
 import SettingsPage from './pages/Settings.jsx'
+import LoginPage from './pages/Login.jsx'
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: 'dashboard' },
@@ -33,6 +34,7 @@ const TITLES = {
 }
 
 export default function App() {
+  const [session, setSession] = useState(undefined)
   const [db, setDb] = useState({ contacts:[], properties:[], deals:[], tasks:[], agents:[], templates:[] })
   const [loading, setLoading] = useState(true)
   const [route, setRoute] = useState('dashboard')
@@ -43,6 +45,13 @@ export default function App() {
   const [globalSearch, setGlobalSearch] = useState('')
 
   useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session ?? null))
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, s) => setSession(s))
+    return () => subscription.unsubscribe()
+  }, [])
+
+  useEffect(() => {
+    if (!session) return
     const load = async () => {
       const [contacts, properties, deals, tasks, agents, templates] = await Promise.all([
         supabase.from('contacts').select('*').order('created_at', { ascending: false }),
@@ -58,7 +67,21 @@ export default function App() {
       setLoading(false)
     }
     load()
-  }, [])
+  }, [session])
+
+  const signOut = async () => {
+    await supabase.auth.signOut()
+    setDb({ contacts:[], properties:[], deals:[], tasks:[], agents:[], templates:[] })
+    setLoading(true)
+  }
+
+  if (session === undefined) return (
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100vh' }}>
+      <Loading />
+    </div>
+  )
+
+  if (session === null) return <LoginPage />
 
   const activeAgent = db.agents.find(a => a.id === activeAgentId) || db.agents[0]
   const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose }
@@ -134,6 +157,9 @@ export default function App() {
               </div>
             </div>
           )}
+          <button className="btn btn--ghost btn--icon" onClick={signOut} title="Sign out" style={{ marginLeft: 4 }}>
+            <Icon name="logout" size={16} />
+          </button>
         </header>
 
         {route === 'dashboard' && <Dashboard {...props} />}
