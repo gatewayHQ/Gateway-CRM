@@ -1,6 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
+import LeadCapturePage from './pages/LeadCapture.jsx'
 import './styles/app.css'
 
 class ErrorBoundary extends React.Component {
@@ -30,8 +31,10 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+const isLeadPage = window.location.pathname === '/lead'
+
 ReactDOM.createRoot(document.getElementById('root')).render(
   <ErrorBoundary>
-    <App />
+    {isLeadPage ? <LeadCapturePage /> : <App />}
   </ErrorBoundary>
 )
