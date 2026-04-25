@@ -34,7 +34,7 @@ const TITLES = {
 }
 
 export default function App() {
-  const [session, setSession] = useState(undefined)
+  const [session, setSession] = useState(null)
   const [db, setDb] = useState({ contacts:[], properties:[], deals:[], tasks:[], agents:[], templates:[] })
   const [loading, setLoading] = useState(true)
   const [route, setRoute] = useState('dashboard')
@@ -83,13 +83,7 @@ export default function App() {
     setLoading(true)
   }
 
-  if (session === undefined) return (
-    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100vh' }}>
-      <Loading />
-    </div>
-  )
-
-  if (session === null) return <LoginPage />
+  if (!session) return <LoginPage />
 
   const activeAgent = db.agents.find(a => a.id === activeAgentId) || db.agents[0]
   const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose }
