@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Badge, Drawer, EmptyState, ConfirmDialog, Modal, pushToast } from '../components/UI.jsx'
 
@@ -10,9 +11,49 @@ function TemplateDrawer({ open, onClose, template, agents, onSave }) {
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
   const [preview, setPreview] = useState(false)
+  const [aiOpen, setAiOpen] = useState(false)
+  const [aiPrompt, setAiPrompt] = useState('')
+  const [generating, setGenerating] = useState(false)
 
-  React.useEffect(() => { setForm(template || blank); setErrors({}) }, [template, open])
+  React.useEffect(() => { setForm(template || blank); setErrors({}); setAiOpen(false); setAiPrompt('') }, [template, open])
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
+
+  const generateWithAI = async () => {
+    const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY
+    if (!apiKey) {
+      pushToast('Add VITE_ANTHROPIC_API_KEY to your Vercel environment variables', 'error')
+      return
+    }
+    if (!aiPrompt.trim()) { pushToast('Enter a prompt first', 'error'); return }
+    setGenerating(true)
+    setForm(p => ({ ...p, body: '' }))
+    try {
+      const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true })
+      const stream = client.messages.stream({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{
+          role: 'user',
+          content: `You are a professional real estate email writer for Gateway Real Estate Advisors. Write an email body template based on: "${aiPrompt.trim()}"
+
+Rules:
+- Use merge tags where appropriate: {{firstName}}, {{lastName}}, {{agentName}}, {{propertyAddress}}, {{dealValue}}
+- Professional, warm, and concise tone (under 200 words)
+- Include a salutation like "Hi {{firstName}}," and a sign-off like "Best, {{agentName}}"
+- Return ONLY the email body — no subject line, no explanations`
+        }],
+      })
+      for await (const chunk of stream) {
+        if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
+          setForm(prev => ({ ...prev, body: prev.body + chunk.delta.text }))
+        }
+      }
+      pushToast('Template generated')
+    } catch (err) {
+      pushToast('AI generation failed: ' + err.message, 'error')
+    }
+    setGenerating(false)
+  }
 
   const previewBody = (form.body||'')
     .replace(/{{firstName}}/g, 'Jane').replace(/{{lastName}}/g, 'Smith')
@@ -47,6 +88,45 @@ function TemplateDrawer({ open, onClose, template, agents, onSave }) {
           <div className="form-group"><label className="form-label">Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Any Agent</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
         </div>
         <div className="form-group"><label className="form-label required">Subject Line</label><input className={`form-control${errors.subject?' error':''}`} value={form.subject} onChange={e=>set('subject',e.target.value)} placeholder="e.g. Welcome to Gateway — Next Steps" /></div>
+        <div className="form-group">
+          <div style={{ marginBottom: 12, border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
+            <button
+              type="button"
+              onClick={() => setAiOpen(o => !o)}
+              style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', background: aiOpen ? 'var(--gw-slate)' : 'var(--gw-bone)', border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600, color: aiOpen ? '#fff' : 'var(--gw-slate)', transition: 'all 150ms', fontFamily: 'var(--font-body)' }}>
+              <Icon name="sparkles" size={14} />
+              AI Generate
+              <span style={{ marginLeft: 'auto', fontSize: 10, opacity: 0.6 }}>{aiOpen ? '▲' : '▼'}</span>
+            </button>
+            {aiOpen && (
+              <div style={{ padding: 12, background: 'var(--gw-sky)', borderTop: '1px solid var(--gw-border)' }}>
+                <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 8 }}>
+                  Describe the email you need and Claude will write it for you.
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input
+                    className="form-control"
+                    style={{ flex: 1, fontSize: 13 }}
+                    placeholder="e.g. Follow-up after a showing with next steps"
+                    value={aiPrompt}
+                    onChange={e => setAiPrompt(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && generateWithAI()}
+                    disabled={generating}
+                  />
+                  <button className="btn btn--primary btn--sm" onClick={generateWithAI} disabled={generating || !aiPrompt.trim()} style={{ whiteSpace: 'nowrap' }}>
+                    {generating ? <><Icon name="refresh" size={12} /> Writing…</> : <><Icon name="sparkles" size={12} /> Generate</>}
+                  </button>
+                </div>
+                {!import.meta.env.VITE_ANTHROPIC_API_KEY && (
+                  <div style={{ marginTop: 8, fontSize: 11, color: 'var(--gw-amber)' }}>
+                    Add <code style={{ background: 'rgba(0,0,0,0.06)', padding: '0 4px', borderRadius: 3 }}>VITE_ANTHROPIC_API_KEY</code> to your Vercel environment variables to enable AI generation.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
         <div className="form-group">
           <div style={{ display:'flex', justifyContent:'space-between', marginBottom:5 }}>
             <label className="form-label" style={{ margin:0 }}>Body</label>
