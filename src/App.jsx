@@ -45,9 +45,17 @@ export default function App() {
   const [globalSearch, setGlobalSearch] = useState('')
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setSession(data.session ?? null))
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, s) => setSession(s))
-    return () => subscription.unsubscribe()
+    supabase.auth.getSession()
+      .then(({ data }) => setSession(data.session ?? null))
+      .catch(() => setSession(null))
+    let subscription
+    try {
+      const { data } = supabase.auth.onAuthStateChange((_e, s) => setSession(s ?? null))
+      subscription = data.subscription
+    } catch {
+      setSession(null)
+    }
+    return () => subscription?.unsubscribe()
   }, [])
 
   useEffect(() => {
