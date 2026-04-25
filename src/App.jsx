@@ -72,7 +72,9 @@ export default function App() {
       ])
       const agentsData = agents.data || []
       setDb({ contacts: contacts.data||[], properties: properties.data||[], deals: deals.data||[], tasks: tasks.data||[], agents: agentsData, templates: templates.data||[] })
-      if (agentsData.length > 0) setActiveAgentId(agentsData[0].id)
+      const loggedInEmail = session?.user?.email?.toLowerCase()
+      const matched = agentsData.find(a => a.email?.toLowerCase() === loggedInEmail)
+      setActiveAgentId(matched?.id ?? agentsData[0]?.id ?? null)
       setLoading(false)
     }
     load()
