@@ -3,6 +3,8 @@ import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Badge, Drawer, EmptyState, ConfirmDialog, Modal, pushToast } from '../components/UI.jsx'
 
+const getAnthropicKey = () => import.meta.env.VITE_ANTHROPIC_API_KEY || localStorage.getItem('gw_anthropic_key') || ''
+
 const MERGE_TAGS = ['{{firstName}}','{{lastName}}','{{agentName}}','{{propertyAddress}}','{{dealValue}}']
 
 function TemplateDrawer({ open, onClose, template, agents, onSave }) {
@@ -19,11 +21,8 @@ function TemplateDrawer({ open, onClose, template, agents, onSave }) {
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
 
   const generateWithAI = async () => {
-    const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY
-    if (!apiKey) {
-      pushToast('Add VITE_ANTHROPIC_API_KEY to your Vercel environment variables', 'error')
-      return
-    }
+    const apiKey = getAnthropicKey()
+    if (!apiKey) { pushToast('Add your Anthropic API key in Settings → AI Configuration', 'error'); return }
     if (!aiPrompt.trim()) { pushToast('Enter a prompt first', 'error'); return }
     setGenerating(true)
     setForm(p => ({ ...p, body: '' }))
@@ -117,11 +116,6 @@ Rules:
                     {generating ? <><Icon name="refresh" size={12} /> Writing…</> : <><Icon name="sparkles" size={12} /> Generate</>}
                   </button>
                 </div>
-                {!import.meta.env.VITE_ANTHROPIC_API_KEY && (
-                  <div style={{ marginTop: 8, fontSize: 11, color: 'var(--gw-amber)' }}>
-                    Add <code style={{ background: 'rgba(0,0,0,0.06)', padding: '0 4px', borderRadius: 3 }}>VITE_ANTHROPIC_API_KEY</code> to your Vercel environment variables to enable AI generation.
-                  </div>
-                )}
               </div>
             )}
           </div>
