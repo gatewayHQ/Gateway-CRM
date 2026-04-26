@@ -54,6 +54,14 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, onSave 
   )
 }
 
+const AUTO_TASKS = {
+  qualified:        { title: d => `Schedule showing — ${d.title}`,            type: 'showing',   priority: 'high',   daysOut: 2 },
+  showing:          { title: d => `Send post-showing follow-up — ${d.title}`, type: 'follow-up', priority: 'medium', daysOut: 1 },
+  offer:            { title: d => `Prepare & submit offer — ${d.title}`,      type: 'document',  priority: 'high',   daysOut: 2 },
+  'under-contract': { title: d => `Order inspection — ${d.title}`,            type: 'follow-up', priority: 'high',   daysOut: 5 },
+  closed:           { title: d => `Request referral — ${d.title}`,            type: 'follow-up', priority: 'low',    daysOut: 7 },
+}
+
 export default function PipelinePage({ db, setDb, activeAgent }) {
   const [drawer, setDrawer] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -81,7 +89,29 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
   const moveStage = async (dealId, newStage) => {
     await supabase.from('deals').update({ stage: newStage, updated_at: new Date().toISOString() }).eq('id', dealId)
     setDb(p => ({ ...p, deals: p.deals.map(d => d.id === dealId ? { ...d, stage: newStage } : d) }))
-    pushToast(`Deal moved to ${STAGE_LABELS[newStage]}`)
+    pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
+
+    const auto = AUTO_TASKS[newStage]
+    if (!auto) return
+    const deal = deals.find(d => d.id === dealId)
+    if (!deal) return
+    const due = new Date()
+    due.setDate(due.getDate() + auto.daysOut)
+    due.setHours(9, 0, 0, 0)
+    const { data: newTask } = await supabase.from('tasks').insert([{
+      title: auto.title(deal),
+      type: auto.type,
+      priority: auto.priority,
+      due_date: due.toISOString(),
+      agent_id: deal.agent_id || null,
+      contact_id: deal.contact_id || null,
+      deal_id: dealId,
+      completed: false,
+    }]).select().single()
+    if (newTask) {
+      setDb(p => ({ ...p, tasks: [newTask, ...(p.tasks || [])] }))
+      pushToast(`Task auto-created: ${newTask.title}`, 'info')
+    }
   }
 
   const stageDeals = (stage) => deals.filter(d => d.stage === stage)

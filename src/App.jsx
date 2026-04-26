@@ -14,6 +14,7 @@ import LoginPage from './pages/Login.jsx'
 import LeadsPage from './pages/Leads.jsx'
 import OmPage from './pages/Om.jsx'
 import SocialPage from './pages/Social.jsx'
+import QuickAdd from './pages/QuickAdd.jsx'
 
 const BASE_NAV = [
   { id: 'dashboard',  label: 'Dashboard',      icon: 'dashboard' },
@@ -390,6 +391,7 @@ export default function App() {
         </div>
       )}
 
+      <QuickAdd db={db} setDb={setDb} activeAgent={activeAgent} />
       <ToastHost />
     </div>
   )

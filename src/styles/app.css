@@ -552,3 +552,38 @@ select.form-control { cursor: pointer; }
     color: var(--gw-mist); padding: 8px 22px 4px;
   }
 }
+
+/* ── FAB (Quick Add) ── */
+.fab-wrap {
+  position: fixed; bottom: 28px; right: 28px; z-index: 500;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
+}
+.fab-btn {
+  width: 52px; height: 52px; border-radius: 50%;
+  background: var(--gw-slate); border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.25); color: #fff;
+  transition: background 200ms, transform 200ms;
+}
+.fab-btn:hover { background: var(--gw-slate-2); transform: scale(1.06); }
+.fab-btn--open { background: var(--gw-red); }
+.fab-btn--open:hover { background: #a93226; }
+.fab-menu {
+  display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+  animation: fabIn 150ms ease;
+}
+@keyframes fabIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fab-option {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 16px 9px 12px; color: #fff; border: none;
+  border-radius: 22px; cursor: pointer; white-space: nowrap;
+  font-family: var(--font-body); font-size: 13px; font-weight: 600;
+  box-shadow: 0 3px 12px rgba(0,0,0,0.2); transition: transform 150ms;
+}
+.fab-option:hover { transform: translateX(-3px); }
+@media (max-width: 768px) {
+  .fab-wrap { bottom: 82px; right: 20px; }
+}
