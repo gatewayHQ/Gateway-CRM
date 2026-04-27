@@ -1,92 +1,170 @@
 import React, { useState } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { formatDate, formatPhone, contactFullName } from '../lib/helpers.js'
-import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import { formatDate, formatPhone, calcHeatScore } from '../lib/helpers.js'
+import { Icon, Badge, Avatar, HeatBadge, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
-function ActivityTimeline({ contact, deals, tasks, agents }) {
-  const contactDeals = (deals || []).filter(d => d.contact_id === contact?.id)
-  const contactTasks = (tasks || []).filter(t => t.contact_id === contact?.id)
+const ACTIVITY_TYPES = ['note','call','email','meeting','showing']
+const ACTIVITY_ICONS = { note:'note', call:'phone', email:'mail', meeting:'calendar', showing:'building' }
+const ACTIVITY_COLORS = {
+  note:    { bg:'var(--gw-bone)',       border:'var(--gw-border)',  icon:'var(--gw-mist)' },
+  call:    { bg:'#e8f4fd',             border:'var(--gw-azure)',   icon:'var(--gw-azure)' },
+  email:   { bg:'var(--gw-sky)',        border:'var(--gw-azure)',   icon:'var(--gw-azure)' },
+  meeting: { bg:'#f0ebff',             border:'var(--gw-purple)',  icon:'var(--gw-purple)' },
+  showing: { bg:'var(--gw-green-light)', border:'var(--gw-green)', icon:'var(--gw-green)' },
+}
+
+function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivityAdded }) {
+  const [type, setType]       = useState('note')
+  const [body, setBody]       = useState('')
+  const [saving, setSaving]   = useState(false)
+
+  const contactDeals      = (deals      || []).filter(d => d.contact_id === contact?.id)
+  const contactTasks      = (tasks      || []).filter(t => t.contact_id === contact?.id)
+  const contactActivities = (activities || []).filter(a => a.contact_id === contact?.id)
 
   const entries = [
-    ...contactDeals.map(d => ({ kind: 'deal', date: d.created_at, data: d })),
-    ...contactTasks.map(t => ({ kind: 'task', date: t.due_date || t.created_at, data: t })),
-    ...(contact?.created_at ? [{ kind: 'created', date: contact.created_at, data: contact }] : []),
+    ...contactActivities.map(a => ({ kind: 'activity', date: a.created_at, data: a })),
+    ...contactDeals.map(d      => ({ kind: 'deal',     date: d.created_at, data: d })),
+    ...contactTasks.map(t      => ({ kind: 'task',     date: t.due_date || t.created_at, data: t })),
+    ...(contact?.created_at    ? [{ kind: 'created',   date: contact.created_at, data: contact }] : []),
   ].sort((a, b) => new Date(b.date) - new Date(a.date))
 
-  if (entries.length === 0) return (
-    <div style={{ padding: '40px 24px', textAlign: 'center' }}>
-      <div style={{ fontSize: 32, marginBottom: 12 }}>📋</div>
-      <div style={{ fontWeight: 600, marginBottom: 6 }}>No activity yet</div>
-      <div style={{ fontSize: 13, color: 'var(--gw-mist)' }}>Deals and tasks linked to this contact will appear here.</div>
-    </div>
-  )
+  const logActivity = async () => {
+    if (!body.trim()) return
+    setSaving(true)
+    const { data, error } = await supabase.from('activities').insert([{
+      contact_id: contact.id,
+      agent_id:   activeAgent?.id || null,
+      type,
+      body: body.trim(),
+    }]).select().single()
+    setSaving(false)
+    if (error) { pushToast(error.message, 'error'); return }
+    pushToast(`${type.charAt(0).toUpperCase() + type.slice(1)} logged`)
+    setBody('')
+    onActivityAdded(data)
+  }
 
   const STAGE_COLORS = { lead:'var(--gw-mist)', qualified:'var(--gw-azure)', showing:'var(--gw-azure)', offer:'var(--gw-amber)', 'under-contract':'var(--gw-purple)', closed:'var(--gw-green)', lost:'var(--gw-red)' }
+  const fmt = (d) => new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 
   return (
-    <div style={{ padding: '8px 0' }}>
-      {entries.map((entry, i) => {
-        const isLast = i === entries.length - 1
-        if (entry.kind === 'deal') {
-          const d = entry.data
-          return (
-            <div key={`deal-${d.id}`} style={{ display: 'flex', gap: 12, padding: '12px 24px', position: 'relative' }}>
-              {!isLast && <div style={{ position: 'absolute', left: 35, top: 36, bottom: 0, width: 2, background: 'var(--gw-border)' }} />}
-              <div style={{ width: 22, height: 22, borderRadius: '50%', background: 'var(--gw-sky)', border: '2px solid var(--gw-azure)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>
-                <Icon name="pipeline" size={10} style={{ color: 'var(--gw-azure)' }} />
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 13 }}>{d.title}</div>
-                <div style={{ fontSize: 11, marginTop: 2, display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ color: STAGE_COLORS[d.stage] || 'var(--gw-mist)', fontWeight: 600, textTransform: 'capitalize' }}>{d.stage.replace('-', ' ')}</span>
-                  {d.value > 0 && <span style={{ color: 'var(--gw-mist)' }}>{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(d.value)}</span>}
-                </div>
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--gw-mist)', whiteSpace: 'nowrap', marginTop: 2 }}>{new Date(entry.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
-            </div>
-          )
-        }
-        if (entry.kind === 'task') {
-          const t = entry.data
-          const overdue = !t.completed && t.due_date && new Date(t.due_date) < new Date()
-          const typeIcon = t.type === 'call' ? 'phone' : t.type === 'email' ? 'mail' : t.type === 'showing' ? 'building' : 'tasks'
-          return (
-            <div key={`task-${t.id}`} style={{ display: 'flex', gap: 12, padding: '12px 24px', position: 'relative' }}>
-              {!isLast && <div style={{ position: 'absolute', left: 35, top: 36, bottom: 0, width: 2, background: 'var(--gw-border)' }} />}
-              <div style={{ width: 22, height: 22, borderRadius: '50%', background: t.completed ? 'var(--gw-green-light)' : 'var(--gw-bone)', border: `2px solid ${t.completed ? 'var(--gw-green)' : 'var(--gw-border)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>
-                <Icon name={t.completed ? 'check' : typeIcon} size={10} style={{ color: t.completed ? 'var(--gw-green)' : 'var(--gw-mist)' }} />
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 13, textDecoration: t.completed ? 'line-through' : 'none', color: t.completed ? 'var(--gw-mist)' : 'inherit' }}>{t.title}</div>
-                <div style={{ fontSize: 11, marginTop: 2, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)', fontWeight: overdue ? 600 : 400 }}>
-                  {t.completed ? 'Completed' : overdue ? 'Overdue' : t.priority + ' priority'} · {t.type}
-                </div>
-              </div>
-              <div style={{ fontSize: 11, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)', whiteSpace: 'nowrap', marginTop: 2 }}>
-                {t.due_date ? new Date(t.due_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}
-              </div>
-            </div>
-          )
-        }
-        // created
-        return (
-          <div key="created" style={{ display: 'flex', gap: 12, padding: '12px 24px' }}>
-            <div style={{ width: 22, height: 22, borderRadius: '50%', background: 'var(--gw-gold-light)', border: '2px solid var(--gw-gold)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>
-              <Icon name="contacts" size={10} style={{ color: 'var(--gw-gold)' }} />
-            </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 600, fontSize: 13 }}>Added to CRM</div>
-              <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2 }}>Contact record created</div>
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--gw-mist)', whiteSpace: 'nowrap', marginTop: 2 }}>{new Date(entry.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</div>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Log form */}
+      <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--gw-border)', background: 'var(--gw-bone)', flexShrink: 0 }}>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+          {ACTIVITY_TYPES.map(t => (
+            <button key={t} onClick={() => setType(t)}
+              style={{ padding: '3px 10px', borderRadius: 14, border: `1px solid ${type === t ? 'var(--gw-azure)' : 'var(--gw-border)'}`, background: type === t ? 'var(--gw-azure)' : '#fff', color: type === t ? '#fff' : 'var(--gw-ink)', cursor: 'pointer', fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-body)', transition: 'all 120ms' }}>
+              {t.charAt(0).toUpperCase() + t.slice(1)}
+            </button>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input className="form-control" style={{ flex: 1, fontSize: 13 }}
+            placeholder={`Log a ${type}…`}
+            value={body} onChange={e => setBody(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && !e.shiftKey && logActivity()}
+            disabled={saving} />
+          <button className="btn btn--primary btn--sm" onClick={logActivity} disabled={saving || !body.trim()} style={{ whiteSpace: 'nowrap' }}>
+            {saving ? '…' : 'Log'}
+          </button>
+        </div>
+      </div>
+
+      {/* Timeline */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
+        {entries.length === 0 ? (
+          <div style={{ padding: '40px 24px', textAlign: 'center' }}>
+            <div style={{ fontSize: 32, marginBottom: 12 }}>📋</div>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>No activity yet</div>
+            <div style={{ fontSize: 13, color: 'var(--gw-mist)' }}>Log a call, note, or email above to get started.</div>
           </div>
-        )
-      })}
+        ) : (
+          entries.map((entry, i) => {
+            const isLast = i === entries.length - 1
+
+            if (entry.kind === 'activity') {
+              const a = entry.data
+              const c = ACTIVITY_COLORS[a.type] || ACTIVITY_COLORS.note
+              return (
+                <div key={`act-${a.id}`} style={{ display: 'flex', gap: 12, padding: '10px 16px', position: 'relative' }}>
+                  {!isLast && <div style={{ position: 'absolute', left: 27, top: 34, bottom: 0, width: 2, background: 'var(--gw-border)' }} />}
+                  <div style={{ width: 22, height: 22, borderRadius: '50%', background: c.bg, border: `2px solid ${c.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>
+                    <Icon name={ACTIVITY_ICONS[a.type] || 'note'} size={10} style={{ color: c.icon }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'capitalize', color: 'var(--gw-mist)', marginBottom: 2 }}>{a.type}</div>
+                    <div style={{ fontSize: 13, lineHeight: 1.5 }}>{a.body}</div>
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--gw-mist)', whiteSpace: 'nowrap', marginTop: 2 }}>{fmt(a.created_at)}</div>
+                </div>
+              )
+            }
+
+            if (entry.kind === 'deal') {
+              const d = entry.data
+              return (
+                <div key={`deal-${d.id}`} style={{ display: 'flex', gap: 12, padding: '10px 16px', position: 'relative' }}>
+                  {!isLast && <div style={{ position: 'absolute', left: 27, top: 34, bottom: 0, width: 2, background: 'var(--gw-border)' }} />}
+                  <div style={{ width: 22, height: 22, borderRadius: '50%', background: 'var(--gw-sky)', border: '2px solid var(--gw-azure)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>
+                    <Icon name="pipeline" size={10} style={{ color: 'var(--gw-azure)' }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{d.title}</div>
+                    <div style={{ fontSize: 11, marginTop: 2, display: 'flex', gap: 8 }}>
+                      <span style={{ color: STAGE_COLORS[d.stage] || 'var(--gw-mist)', fontWeight: 600, textTransform: 'capitalize' }}>{d.stage.replace('-', ' ')}</span>
+                      {d.value > 0 && <span style={{ color: 'var(--gw-mist)' }}>{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(d.value)}</span>}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--gw-mist)', whiteSpace: 'nowrap', marginTop: 2 }}>{fmt(entry.date)}</div>
+                </div>
+              )
+            }
+
+            if (entry.kind === 'task') {
+              const t = entry.data
+              const overdue  = !t.completed && t.due_date && new Date(t.due_date) < new Date()
+              const typeIcon = t.type === 'call' ? 'phone' : t.type === 'email' ? 'mail' : t.type === 'showing' ? 'building' : 'tasks'
+              return (
+                <div key={`task-${t.id}`} style={{ display: 'flex', gap: 12, padding: '10px 16px', position: 'relative' }}>
+                  {!isLast && <div style={{ position: 'absolute', left: 27, top: 34, bottom: 0, width: 2, background: 'var(--gw-border)' }} />}
+                  <div style={{ width: 22, height: 22, borderRadius: '50%', background: t.completed ? 'var(--gw-green-light)' : 'var(--gw-bone)', border: `2px solid ${t.completed ? 'var(--gw-green)' : 'var(--gw-border)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>
+                    <Icon name={t.completed ? 'check' : typeIcon} size={10} style={{ color: t.completed ? 'var(--gw-green)' : 'var(--gw-mist)' }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: 13, textDecoration: t.completed ? 'line-through' : 'none', color: t.completed ? 'var(--gw-mist)' : 'inherit' }}>{t.title}</div>
+                    <div style={{ fontSize: 11, marginTop: 2, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)', fontWeight: overdue ? 600 : 400 }}>
+                      {t.completed ? 'Completed' : overdue ? 'Overdue' : t.priority + ' priority'} · {t.type}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)', whiteSpace: 'nowrap', marginTop: 2 }}>
+                    {t.due_date ? fmt(t.due_date) : '—'}
+                  </div>
+                </div>
+              )
+            }
+
+            return (
+              <div key="created" style={{ display: 'flex', gap: 12, padding: '10px 16px' }}>
+                <div style={{ width: 22, height: 22, borderRadius: '50%', background: '#fef9ec', border: '2px solid var(--gw-amber)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>
+                  <Icon name="contacts" size={10} style={{ color: 'var(--gw-amber)' }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>Added to CRM</div>
+                  <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2 }}>Contact record created</div>
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--gw-mist)', whiteSpace: 'nowrap', marginTop: 2 }}>{new Date(entry.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</div>
+              </div>
+            )
+          })
+        )}
+      </div>
     </div>
   )
 }
 
-function ContactDrawer({ open, onClose, contact, agents, deals, tasks, onSave }) {
+function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activities, activeAgent, onSave, onActivityAdded }) {
   const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[] }
   const [form, setForm] = useState(contact || blank)
   const [errors, setErrors] = useState({})
@@ -121,9 +199,10 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, onSave })
     onSave(); onClose()
   }
 
-  const contactDeals = (deals || []).filter(d => d.contact_id === contact?.id)
-  const contactTasks = (tasks || []).filter(t => t.contact_id === contact?.id)
-  const activityCount = contactDeals.length + contactTasks.length
+  const contactDeals      = (deals      || []).filter(d => d.contact_id === contact?.id)
+  const contactTasks      = (tasks      || []).filter(t => t.contact_id === contact?.id)
+  const contactActivities = (activities || []).filter(a => a.contact_id === contact?.id)
+  const activityCount     = contactDeals.length + contactTasks.length + contactActivities.length
 
   const tabBtn = (id, label, count) => (
     <button onClick={() => setTab(id)} style={{
@@ -201,11 +280,211 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, onSave })
       )}
 
       {tab === 'activity' && (
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-          <ActivityTimeline contact={contact} deals={deals} tasks={tasks} agents={agents} />
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <ActivityTab
+            contact={contact} deals={deals} tasks={tasks}
+            activities={activities} activeAgent={activeAgent}
+            onActivityAdded={onActivityAdded} />
         </div>
       )}
     </Drawer>
+  )
+}
+
+// ── Simple RFC-4180 CSV parser ──────────────────────────────────────────────
+function parseCSV(text) {
+  const rows = []
+  const lines = text.split(/\r?\n/)
+  for (const line of lines) {
+    if (!line.trim()) continue
+    const row = []
+    let cur = '', inQ = false
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]
+      if (ch === '"') { inQ = !inQ }
+      else if (ch === ',' && !inQ) { row.push(cur.trim()); cur = '' }
+      else { cur += ch }
+    }
+    row.push(cur.trim())
+    rows.push(row)
+  }
+  return rows
+}
+
+const IMPORT_FIELDS = ['first_name','last_name','email','phone','type','source','status','notes']
+const IMPORT_LABELS = { first_name:'First Name', last_name:'Last Name', email:'Email', phone:'Phone', type:'Type', source:'Source', status:'Status', notes:'Notes' }
+
+function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
+  const [step, setStep]         = useState(1)   // 1=upload  2=map  3=preview  4=importing
+  const [headers, setHeaders]   = useState([])
+  const [rows, setRows]         = useState([])
+  const [mapping, setMapping]   = useState({})
+  const [progress, setProgress] = useState(0)
+  const [errors, setErrors]     = useState([])
+
+  const handleFile = (file) => {
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const parsed = parseCSV(e.target.result)
+      if (parsed.length < 2) { alert('File must have a header row and at least one data row.'); return }
+      const hdrs = parsed[0]
+      setHeaders(hdrs)
+      setRows(parsed.slice(1))
+      // Auto-map headers that match field names
+      const auto = {}
+      hdrs.forEach((h, i) => {
+        const norm = h.toLowerCase().replace(/\s+/g,'_')
+        const match = IMPORT_FIELDS.find(f => f === norm || f.replace('_','') === norm.replace('_',''))
+        if (match) auto[match] = i
+      })
+      setMapping(auto)
+      setStep(2)
+    }
+    reader.readAsText(file)
+  }
+
+  const preview = rows.slice(0, 5).map(row => {
+    const obj = {}
+    IMPORT_FIELDS.forEach(f => { if (mapping[f] !== undefined) obj[f] = row[mapping[f]] || '' })
+    return obj
+  })
+
+  const doImport = async () => {
+    setStep(4); setProgress(0); setErrors([])
+    const validTypes   = ['buyer','seller','landlord','tenant','investor']
+    const validSources = ['referral','website','open house','social','other']
+    const validStatus  = ['active','cold','closed']
+    const CHUNK = 50
+    let done = 0, errs = []
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const chunk = rows.slice(i, i + CHUNK).map(row => {
+        const r = {}
+        IMPORT_FIELDS.forEach(f => { if (mapping[f] !== undefined) r[f] = (row[mapping[f]] || '').trim() })
+        return {
+          first_name: r.first_name || '(Unknown)',
+          last_name:  r.last_name  || '',
+          email:      r.email  || null,
+          phone:      r.phone  || null,
+          type:       validTypes.includes(r.type?.toLowerCase())     ? r.type.toLowerCase()   : 'buyer',
+          source:     validSources.includes(r.source?.toLowerCase()) ? r.source.toLowerCase() : 'other',
+          status:     validStatus.includes(r.status?.toLowerCase())  ? r.status.toLowerCase() : 'active',
+          notes:      r.notes  || null,
+          assigned_agent_id: activeAgent?.id || null,
+          tags: [],
+        }
+      })
+      const { error } = await supabase.from('contacts').insert(chunk)
+      if (error) errs.push(`Rows ${i+1}–${i+CHUNK}: ${error.message}`)
+      done += chunk.length
+      setProgress(Math.round(done / rows.length * 100))
+    }
+    setErrors(errs)
+    if (errs.length === 0) {
+      pushToast(`${rows.length} contacts imported`)
+      onImported()
+      onClose()
+    }
+  }
+
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(10,14,28,0.5)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:900, padding:24 }}>
+      <div style={{ background:'#fff', borderRadius:14, width:'100%', maxWidth:560, boxShadow:'var(--shadow-modal)', display:'flex', flexDirection:'column', maxHeight:'90vh' }}>
+        {/* Header */}
+        <div style={{ padding:'20px 24px', borderBottom:'1px solid var(--gw-border)', display:'flex', justifyContent:'space-between', alignItems:'center', flexShrink:0 }}>
+          <div>
+            <div className="eyebrow-label">Contacts</div>
+            <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Import CSV</h3>
+          </div>
+          <button className="drawer__close" onClick={onClose}><Icon name="x" size={18} /></button>
+        </div>
+
+        {/* Step 1 — Upload */}
+        {step === 1 && (
+          <div style={{ padding:24, flex:1, overflowY:'auto' }}>
+            <p style={{ fontSize:13, color:'var(--gw-mist)', lineHeight:1.6, marginTop:0 }}>
+              Upload a CSV with contacts. First row must be headers. Supported columns: <strong>first_name, last_name, email, phone, type, source, status, notes</strong>.
+            </p>
+            <label style={{ display:'block', border:'2px dashed var(--gw-border)', borderRadius:'var(--radius)', padding:'36px 24px', textAlign:'center', cursor:'pointer', transition:'all 150ms' }}
+              onDragOver={e => { e.preventDefault(); e.currentTarget.style.borderColor = 'var(--gw-azure)' }}
+              onDragLeave={e => { e.currentTarget.style.borderColor = 'var(--gw-border)' }}
+              onDrop={e => { e.preventDefault(); handleFile(e.dataTransfer.files[0]) }}>
+              <Icon name="upload" size={28} style={{ color:'var(--gw-border)', marginBottom:10 }} />
+              <div style={{ fontWeight:600, marginBottom:6 }}>Drop CSV here or click to browse</div>
+              <div style={{ fontSize:12, color:'var(--gw-mist)' }}>CSV files only</div>
+              <input type="file" accept=".csv,text/csv" style={{ display:'none' }} onChange={e => handleFile(e.target.files[0])} />
+            </label>
+          </div>
+        )}
+
+        {/* Step 2 — Map columns */}
+        {step === 2 && (
+          <div style={{ padding:24, flex:1, overflowY:'auto' }}>
+            <p style={{ fontSize:13, color:'var(--gw-mist)', marginTop:0, lineHeight:1.6 }}>
+              Map your CSV columns to CRM fields. <strong>{rows.length} rows</strong> detected.
+            </p>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:20 }}>
+              {IMPORT_FIELDS.map(field => (
+                <React.Fragment key={field}>
+                  <div style={{ display:'flex', alignItems:'center', fontSize:13, fontWeight:600 }}>
+                    {IMPORT_LABELS[field]}{['first_name','last_name'].includes(field) && <span style={{ color:'var(--gw-red)', marginLeft:2 }}>*</span>}
+                  </div>
+                  <select className="form-control" style={{ fontSize:12 }} value={mapping[field] ?? ''} onChange={e => setMapping(p => ({ ...p, [field]: e.target.value === '' ? undefined : Number(e.target.value) }))}>
+                    <option value="">— Skip —</option>
+                    {headers.map((h, i) => <option key={i} value={i}>{h}</option>)}
+                  </select>
+                </React.Fragment>
+              ))}
+            </div>
+            <div style={{ display:'flex', gap:8 }}>
+              <button className="btn btn--secondary" onClick={() => setStep(1)}>Back</button>
+              <button className="btn btn--primary" onClick={() => setStep(3)} disabled={mapping.first_name === undefined}>Preview →</button>
+            </div>
+          </div>
+        )}
+
+        {/* Step 3 — Preview */}
+        {step === 3 && (
+          <div style={{ padding:24, flex:1, overflowY:'auto' }}>
+            <p style={{ fontSize:13, color:'var(--gw-mist)', marginTop:0 }}>
+              Preview of first {Math.min(5, rows.length)} rows (importing <strong>{rows.length} contacts</strong> total):
+            </p>
+            <div style={{ overflowX:'auto', marginBottom:20 }}>
+              <table className="import-preview-table">
+                <thead>
+                  <tr>{IMPORT_FIELDS.filter(f => mapping[f] !== undefined).map(f => <th key={f}>{IMPORT_LABELS[f]}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {preview.map((row, i) => (
+                    <tr key={i}>{IMPORT_FIELDS.filter(f => mapping[f] !== undefined).map(f => <td key={f}>{row[f] || '—'}</td>)}</tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display:'flex', gap:8 }}>
+              <button className="btn btn--secondary" onClick={() => setStep(2)}>Back</button>
+              <button className="btn btn--primary" onClick={doImport}><Icon name="import" size={13} /> Import {rows.length} Contacts</button>
+            </div>
+          </div>
+        )}
+
+        {/* Step 4 — Progress */}
+        {step === 4 && (
+          <div style={{ padding:40, textAlign:'center', flex:1 }}>
+            <div style={{ fontWeight:600, fontSize:16, marginBottom:16 }}>Importing…</div>
+            <div style={{ height:8, background:'var(--gw-border)', borderRadius:4, marginBottom:12, overflow:'hidden' }}>
+              <div style={{ width:`${progress}%`, height:'100%', background:'var(--gw-azure)', borderRadius:4, transition:'width 200ms ease' }} />
+            </div>
+            <div style={{ fontSize:13, color:'var(--gw-mist)' }}>{progress}% complete</div>
+            {errors.length > 0 && (
+              <div style={{ marginTop:16, textAlign:'left' }}>
+                {errors.map((e, i) => <div key={i} style={{ fontSize:12, color:'var(--gw-red)', marginBottom:4 }}>{e}</div>)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -219,17 +498,22 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
   const [confirm, setConfirm] = useState(null)
   const [sortKey, setSortKey] = useState('created_at')
   const [sortDir, setSortDir] = useState('desc')
+  const [filterHeat, setFilterHeat] = useState('')
+  const [importModal, setImportModal] = useState(false)
 
-  const contacts = db.contacts || []
-  const agents = db.agents || []
+  const contacts    = db.contacts    || []
+  const agents      = db.agents      || []
+  const activities  = db.activities  || []
+  const deals       = db.deals       || []
 
   const filtered = contacts.filter(c => {
     const name = `${c.first_name} ${c.last_name}`.toLowerCase()
     const q = search.toLowerCase()
     if (q && !name.includes(q) && !(c.email||'').toLowerCase().includes(q) && !(c.phone||'').includes(q)) return false
-    if (filterType && c.type !== filterType) return false
-    if (filterStatus && c.status !== filterStatus) return false
-    if (filterAgent && c.assigned_agent_id !== filterAgent) return false
+    if (filterType   && c.type               !== filterType)   return false
+    if (filterStatus && c.status             !== filterStatus) return false
+    if (filterAgent  && c.assigned_agent_id  !== filterAgent)  return false
+    if (filterHeat   && calcHeatScore(c, activities, deals)    !== filterHeat) return false
     return true
   }).sort((a, b) => {
     let av = a[sortKey]||'', bv = b[sortKey]||''
@@ -262,7 +546,10 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
           <div className="page-title">Contacts</div>
           <div className="page-sub">{contacts.length} total contacts</div>
         </div>
-        <button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Contact</button>
+        <div style={{ display:'flex', gap:8 }}>
+          <button className="btn btn--secondary" onClick={() => setImportModal(true)}><Icon name="import" size={14} /> Import CSV</button>
+          <button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Contact</button>
+        </div>
       </div>
 
       <div className="filters-bar">
@@ -282,6 +569,12 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
           <option value="">All Agents</option>
           {agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
+        <select className="filter-select" value={filterHeat} onChange={e=>setFilterHeat(e.target.value)}>
+          <option value="">All Heat</option>
+          <option value="hot">🔥 Hot</option>
+          <option value="warm">▲ Warm</option>
+          <option value="cold">– Cold</option>
+        </select>
       </div>
 
       {filtered.length === 0 ? (
@@ -294,6 +587,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
             <thead>
               <tr>
                 <th className="sortable" onClick={() => sort('first_name')}>Name <SortIcon k="first_name" /></th>
+                <th>Heat</th>
                 <th>Type</th>
                 <th>Status</th>
                 <th className="sortable" onClick={() => sort('phone')}>Phone <SortIcon k="phone" /></th>
@@ -319,6 +613,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
                         </div>
                       </div>
                     </td>
+                    <td><HeatBadge score={calcHeatScore(c, activities, deals)} /></td>
                     <td><Badge variant={c.type}>{c.type}</Badge></td>
                     <td><Badge variant={c.status}>{c.status}</Badge></td>
                     <td style={{ fontFamily:'var(--font-mono)', fontSize:12 }}>{formatPhone(c.phone)}</td>
@@ -341,8 +636,22 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
         </div>
       )}
 
-      <ContactDrawer open={drawer} onClose={() => setDrawer(false)} contact={editing} agents={agents} deals={db.deals||[]} tasks={db.tasks||[]} onSave={reload} />
+      <ContactDrawer
+        open={drawer} onClose={() => setDrawer(false)}
+        contact={editing} agents={agents} deals={deals}
+        tasks={db.tasks||[]} activities={activities}
+        activeAgent={activeAgent}
+        onActivityAdded={act => setDb(p => ({ ...p, activities: [act, ...(p.activities || [])] }))}
+        onSave={reload}
+      />
       {confirm && <ConfirmDialog message="This will permanently delete this contact." onConfirm={() => deleteContact(confirm)} onCancel={() => setConfirm(null)} />}
+      {importModal && (
+        <CSVImportModal
+          agents={agents} activeAgent={activeAgent}
+          onClose={() => setImportModal(false)}
+          onImported={reload}
+        />
+      )}
     </div>
   )
 }

@@ -27,7 +27,7 @@ function TemplateDrawer({ open, onClose, template, agents, onSave }) {
     setGenerating(true)
     setForm(p => ({ ...p, body: '' }))
     try {
-      const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true })
+      const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true, timeout: 90000 })
       const stream = client.messages.stream({
         model: 'claude-sonnet-4-6',
         max_tokens: 1024,
@@ -49,7 +49,8 @@ Rules:
       }
       pushToast('Template generated')
     } catch (err) {
-      pushToast('AI generation failed: ' + err.message, 'error')
+      const isTimeout = err.message?.toLowerCase().includes('timeout') || err.message?.toLowerCase().includes('idle')
+      pushToast(isTimeout ? 'Connection timed out — try again' : 'AI generation failed: ' + err.message, 'error')
     }
     setGenerating(false)
   }
