@@ -3,13 +3,301 @@ import { supabase } from '../lib/supabase.js'
 import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
+const DEFAULT_STEPS = [
+  'Title Search Ordered',
+  'Earnest Money Deposited',
+  'Home Inspection Scheduled',
+  'Inspection Report Reviewed',
+  'Appraisal Ordered',
+  'Appraisal Report Received',
+  'Financing Conditionally Approved',
+  'Financing Fully Approved',
+  'Final Walkthrough Scheduled',
+  'Closing Disclosure Reviewed',
+  'Closing Documents Signed',
+  'Keys & Possession Transferred',
+]
+
+const CHECKLIST_STAGES = ['under-contract','closed']
+
+function ChecklistTab({ deal }) {
+  const [steps, setSteps]       = useState([])
+  const [loading, setLoading]   = useState(true)
+  const [newTitle, setNewTitle] = useState('')
+  const [adding, setAdding]     = useState(false)
+  const [ready, setReady]       = useState(true)
+
+  React.useEffect(() => {
+    if (!deal?.id) return
+    loadSteps()
+  }, [deal?.id])
+
+  const loadSteps = async () => {
+    setLoading(true)
+    const { data, error } = await supabase
+      .from('transaction_steps')
+      .select('*')
+      .eq('deal_id', deal.id)
+      .order('sort_order', { ascending: true })
+    if (error) { setReady(false); setLoading(false); return }
+    if (data.length === 0 && CHECKLIST_STAGES.includes(deal.stage)) {
+      await autoCreate()
+    } else {
+      setSteps(data)
+    }
+    setLoading(false)
+  }
+
+  const autoCreate = async () => {
+    const rows = DEFAULT_STEPS.map((title, i) => ({ deal_id: deal.id, title, completed: false, sort_order: i }))
+    const { data } = await supabase.from('transaction_steps').insert(rows).select()
+    setSteps(data || [])
+    pushToast('Closing checklist created', 'info')
+  }
+
+  const toggle = async (step) => {
+    const now = new Date().toISOString()
+    const patch = { completed: !step.completed, completed_at: !step.completed ? now : null }
+    await supabase.from('transaction_steps').update(patch).eq('id', step.id)
+    setSteps(p => p.map(s => s.id === step.id ? { ...s, ...patch } : s))
+  }
+
+  const addStep = async () => {
+    if (!newTitle.trim()) return
+    setAdding(true)
+    const { data, error } = await supabase.from('transaction_steps').insert([{
+      deal_id: deal.id, title: newTitle.trim(), completed: false, sort_order: steps.length,
+    }]).select().single()
+    setAdding(false)
+    if (error) { pushToast(error.message, 'error'); return }
+    setSteps(p => [...p, data])
+    setNewTitle('')
+  }
+
+  const removeStep = async (id) => {
+    await supabase.from('transaction_steps').delete().eq('id', id)
+    setSteps(p => p.filter(s => s.id !== id))
+  }
+
+  if (!ready) return (
+    <div style={{ padding: 24, textAlign: 'center', color: 'var(--gw-mist)' }}>
+      <Icon name="alert" size={20} style={{ marginBottom: 8 }} />
+      <div style={{ fontSize: 13 }}>transaction_steps table not found.</div>
+      <div style={{ fontSize: 12, marginTop: 4 }}>Run the SQL from the setup guide to enable checklists.</div>
+    </div>
+  )
+
+  if (loading) return <div style={{ padding: 24, color: 'var(--gw-mist)', fontSize: 13 }}>Loading checklist…</div>
+
+  const doneCount = steps.filter(s => s.completed).length
+  const pct       = steps.length > 0 ? Math.round(doneCount / steps.length * 100) : 0
+
+  return (
+    <div style={{ padding: 16, overflowY: 'auto', flex: 1 }}>
+      {/* Progress bar */}
+      {steps.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+            <span>{doneCount}/{steps.length} complete</span>
+            <span style={{ color: pct === 100 ? 'var(--gw-green)' : 'var(--gw-mist)' }}>{pct}%</span>
+          </div>
+          <div style={{ height: 6, background: 'var(--gw-border)', borderRadius: 3, overflow: 'hidden' }}>
+            <div style={{ width: `${pct}%`, height: '100%', background: pct === 100 ? 'var(--gw-green)' : 'var(--gw-azure)', borderRadius: 3, transition: 'width 300ms ease' }} />
+          </div>
+        </div>
+      )}
+
+      {/* Steps */}
+      {steps.length === 0 && !CHECKLIST_STAGES.includes(deal.stage) && (
+        <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--gw-mist)', fontSize: 13 }}>
+          Checklist auto-creates when this deal reaches <strong>Under Contract</strong>.<br />
+          Or add steps manually below.
+        </div>
+      )}
+
+      {steps.map(step => (
+        <div key={step.id} onClick={() => toggle(step)}
+          style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 'var(--radius)', cursor: 'pointer', marginBottom: 3, transition: 'background 120ms' }}
+          onMouseEnter={e => e.currentTarget.style.background = 'var(--gw-bone)'}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <div style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${step.completed ? 'var(--gw-green)' : 'var(--gw-border)'}`, background: step.completed ? 'var(--gw-green)' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, transition: 'all 150ms' }}>
+            {step.completed && <Icon name="check" size={11} style={{ color: '#fff' }} />}
+          </div>
+          <span style={{ flex: 1, fontSize: 13, textDecoration: step.completed ? 'line-through' : 'none', color: step.completed ? 'var(--gw-mist)' : 'var(--gw-ink)' }}>
+            {step.title}
+          </span>
+          {step.completed && step.completed_at && (
+            <span style={{ fontSize: 10, color: 'var(--gw-mist)', whiteSpace: 'nowrap' }}>
+              {new Date(step.completed_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+            </span>
+          )}
+          <button className="btn btn--ghost btn--icon" style={{ padding: 2, opacity: 0.4 }}
+            onClick={e => { e.stopPropagation(); removeStep(step.id) }}>
+            <Icon name="x" size={11} />
+          </button>
+        </div>
+      ))}
+
+      {/* Add custom step */}
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <input className="form-control" style={{ flex: 1, fontSize: 13 }}
+          placeholder="Add a step…"
+          value={newTitle} onChange={e => setNewTitle(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && addStep()}
+          disabled={adding} />
+        <button className="btn btn--secondary btn--sm" onClick={addStep} disabled={adding || !newTitle.trim()}>
+          Add
+        </button>
+      </div>
+    </div>
+  )
+}
+
+const BUCKET = 'deal-documents'
+
+function formatBytes(bytes) {
+  if (!bytes) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function DocumentsTab({ deal }) {
+  const [files, setFiles]         = useState([])
+  const [loading, setLoading]     = useState(true)
+  const [uploading, setUploading] = useState(false)
+  const [bucketReady, setBucketReady] = useState(true)
+  const [dragOver, setDragOver]   = useState(false)
+  const fileRef                   = React.useRef()
+
+  React.useEffect(() => { if (deal?.id) loadFiles() }, [deal?.id])
+
+  const loadFiles = async () => {
+    setLoading(true)
+    const { data, error } = await supabase.storage.from(BUCKET).list(`deal-${deal.id}`, { sortBy: { column: 'created_at', order: 'desc' } })
+    if (error?.message?.includes('not found') || error?.message?.includes('does not exist')) {
+      setBucketReady(false); setLoading(false); return
+    }
+    setFiles((data || []).filter(f => f.name !== '.emptyFolderPlaceholder'))
+    setLoading(false)
+  }
+
+  const upload = async (file) => {
+    if (!file) return
+    if (file.size > 50 * 1024 * 1024) { pushToast('File must be under 50 MB', 'error'); return }
+    setUploading(true)
+    const path = `deal-${deal.id}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`
+    const { error } = await supabase.storage.from(BUCKET).upload(path, file, { upsert: false })
+    setUploading(false)
+    if (error) { pushToast(error.message, 'error'); return }
+    pushToast(`${file.name} uploaded`)
+    loadFiles()
+  }
+
+  const download = async (fileName) => {
+    const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(`deal-${deal.id}/${fileName}`, 60)
+    if (error) { pushToast('Could not create download link', 'error'); return }
+    const a = document.createElement('a')
+    a.href = data.signedUrl; a.download = fileName; a.target = '_blank'
+    document.body.appendChild(a); a.click(); document.body.removeChild(a)
+  }
+
+  const remove = async (fileName) => {
+    const { error } = await supabase.storage.from(BUCKET).remove([`deal-${deal.id}/${fileName}`])
+    if (error) { pushToast(error.message, 'error'); return }
+    pushToast('File deleted', 'info')
+    setFiles(p => p.filter(f => f.name !== fileName))
+  }
+
+  if (!bucketReady) return (
+    <div style={{ padding: 20 }}>
+      <div style={{ background: '#fff8ec', border: '1px solid var(--gw-amber)', borderRadius: 'var(--radius)', padding: 16, fontSize: 13, lineHeight: 1.7 }}>
+        <strong>Storage bucket setup required.</strong><br />
+        In your <strong>Supabase dashboard → Storage</strong>, create a private bucket named <code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3 }}>deal-documents</code>, then add this RLS policy:
+        <pre style={{ background: 'var(--gw-slate)', color: '#e2e8f0', padding: 10, borderRadius: 6, fontSize: 11, marginTop: 8, overflowX: 'auto' }}>
+{`create policy "agents_deal_docs"
+on storage.objects for all to authenticated
+using  (bucket_id = 'deal-documents')
+with check (bucket_id = 'deal-documents');`}
+        </pre>
+        <button className="btn btn--secondary btn--sm" style={{ marginTop: 8 }} onClick={() => { setBucketReady(true); loadFiles() }}>
+          <Icon name="refresh" size={12} /> Retry
+        </button>
+      </div>
+    </div>
+  )
+
+  if (loading) return <div style={{ padding: 24, fontSize: 13, color: 'var(--gw-mist)' }}>Loading files…</div>
+
+  return (
+    <div style={{ padding: 16, overflowY: 'auto', flex: 1 }}>
+      {/* Drop zone */}
+      <div
+        style={{ border: `2px dashed ${dragOver ? 'var(--gw-azure)' : 'var(--gw-border)'}`, borderRadius: 'var(--radius)', padding: '20px 16px', textAlign: 'center', cursor: 'pointer', marginBottom: 16, background: dragOver ? 'var(--gw-sky)' : 'transparent', transition: 'all 150ms' }}
+        onClick={() => fileRef.current.click()}
+        onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={e => { e.preventDefault(); setDragOver(false); upload(e.dataTransfer.files[0]) }}>
+        <input ref={fileRef} type="file" style={{ display: 'none' }} onChange={e => upload(e.target.files[0])} />
+        {uploading ? (
+          <div style={{ fontSize: 13, color: 'var(--gw-azure)', fontWeight: 600 }}>Uploading…</div>
+        ) : (
+          <>
+            <Icon name="upload" size={22} style={{ color: 'var(--gw-border)', marginBottom: 6 }} />
+            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--gw-ink)' }}>Drop a file or click to upload</div>
+            <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 3 }}>PDF, Word, images — max 50 MB · Stored securely in Supabase</div>
+          </>
+        )}
+      </div>
+
+      {/* File list */}
+      {files.length === 0 ? (
+        <div style={{ textAlign: 'center', color: 'var(--gw-mist)', fontSize: 13, padding: '16px 0' }}>
+          No documents yet. Upload contracts, inspections, or any deal files.
+        </div>
+      ) : (
+        files.map(file => {
+          const ext = file.name.split('.').pop().toUpperCase()
+          const displayName = file.name.replace(/^\d+-/, '')
+          return (
+            <div key={file.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', marginBottom: 6, background: '#fff' }}>
+              <div style={{ width: 34, height: 34, borderRadius: 6, background: 'var(--gw-sky)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: 9, fontWeight: 700, color: 'var(--gw-azure)', letterSpacing: '0.03em' }}>
+                {ext.slice(0, 4)}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={displayName}>{displayName}</div>
+                <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>
+                  {formatBytes(file.metadata?.size)}
+                  {file.created_at && <> · {new Date(file.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</>}
+                </div>
+              </div>
+              <button className="btn btn--ghost btn--icon btn--sm" title="Download" onClick={() => download(file.name)}>
+                <Icon name="download" size={13} />
+              </button>
+              <button className="btn btn--ghost btn--icon btn--sm" title="Delete" onClick={() => remove(file.name)}>
+                <Icon name="trash" size={13} />
+              </button>
+            </div>
+          )
+        })
+      )}
+    </div>
+  )
+}
+
 function DealDrawer({ open, onClose, deal, agents, contacts, properties, onSave }) {
   const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'' }
-  const [form, setForm] = useState(deal || blank)
+  const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
+  const [tab, setTab]       = useState('details')
 
-  React.useEffect(() => { setForm(deal ? {...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : ''} : blank); setErrors({}) }, [deal, open])
+  React.useEffect(() => {
+    setForm(deal ? { ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '' } : blank)
+    setErrors({})
+    setTab('details')
+  }, [deal, open])
+
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
 
   const save = async () => {
@@ -31,25 +319,53 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, onSave 
     onSave(); onClose()
   }
 
+  const isExisting = !!deal?.id
+
   return (
-    <Drawer open={open} onClose={onClose} title={deal?.id ? 'Edit Deal' : 'Add Deal'}>
-      <div className="drawer__body">
-        <div className="form-group"><label className="form-label required">Deal Title</label><input className={`form-control${errors.title?' error':''}`} value={form.title} onChange={e=>set('title',e.target.value)} placeholder="e.g. 123 Main St Purchase" /></div>
-        <div className="form-group"><label className="form-label">Stage</label><select className="form-control" value={form.stage} onChange={e=>set('stage',e.target.value)}>{STAGE_ORDER.map(s=><option key={s} value={s}>{STAGE_LABELS[s]}</option>)}</select></div>
-        <div className="form-row">
-          <div className="form-group"><label className="form-label">Deal Value</label><input className="form-control" type="number" value={form.value||''} onChange={e=>set('value',e.target.value)} placeholder="0" /></div>
-          <div className="form-group"><label className="form-label">Probability %</label><input className="form-control" type="number" min="0" max="100" value={form.probability||0} onChange={e=>set('probability',e.target.value)} /></div>
+    <Drawer open={open} onClose={onClose} title={deal?.id ? (form.title || 'Edit Deal') : 'Add Deal'} width={500}>
+      {/* Tab bar — only for existing deals */}
+      {isExisting && (
+        <div className="drawer-tabs">
+          {[['details','Details'],['checklist','Checklist'],['documents','Documents']].map(([id, label]) => (
+            <button key={id} className={`drawer-tab${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}>
+              {label}
+            </button>
+          ))}
         </div>
-        <div className="form-group"><label className="form-label">Expected Close Date</label><input className="form-control" type="date" value={form.expected_close_date||''} onChange={e=>set('expected_close_date',e.target.value)} /></div>
-        <div className="form-group"><label className="form-label">Contact</label><SearchDropdown items={contacts} value={form.contact_id} onSelect={v=>set('contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
-        <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
-        <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
-        <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} /></div>
-      </div>
-      <div className="drawer__foot">
-        <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-        <button className="btn btn--primary" onClick={save} disabled={saving}>{saving?'Saving…':'Save Deal'}</button>
-      </div>
+      )}
+
+      {/* Details tab */}
+      {tab === 'details' && (
+        <>
+          <div className="drawer__body">
+            <div className="form-group"><label className="form-label required">Deal Title</label><input className={`form-control${errors.title?' error':''}`} value={form.title} onChange={e=>set('title',e.target.value)} placeholder="e.g. 123 Main St Purchase" /></div>
+            <div className="form-group"><label className="form-label">Stage</label><select className="form-control" value={form.stage} onChange={e=>set('stage',e.target.value)}>{STAGE_ORDER.map(s=><option key={s} value={s}>{STAGE_LABELS[s]}</option>)}</select></div>
+            <div className="form-row">
+              <div className="form-group"><label className="form-label">Deal Value</label><input className="form-control" type="number" value={form.value||''} onChange={e=>set('value',e.target.value)} placeholder="0" /></div>
+              <div className="form-group"><label className="form-label">Probability %</label><input className="form-control" type="number" min="0" max="100" value={form.probability||0} onChange={e=>set('probability',e.target.value)} /></div>
+            </div>
+            <div className="form-group"><label className="form-label">Expected Close Date</label><input className="form-control" type="date" value={form.expected_close_date||''} onChange={e=>set('expected_close_date',e.target.value)} /></div>
+            <div className="form-group"><label className="form-label">Contact</label><SearchDropdown items={contacts} value={form.contact_id} onSelect={v=>set('contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
+            <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
+            <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+            <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} /></div>
+          </div>
+          <div className="drawer__foot">
+            <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
+            <button className="btn btn--primary" onClick={save} disabled={saving}>{saving?'Saving…':'Save Deal'}</button>
+          </div>
+        </>
+      )}
+
+      {/* Checklist tab */}
+      {tab === 'checklist' && isExisting && (
+        <ChecklistTab deal={deal} />
+      )}
+
+      {/* Documents tab */}
+      {tab === 'documents' && isExisting && (
+        <DocumentsTab deal={deal} />
+      )}
     </Drawer>
   )
 }
