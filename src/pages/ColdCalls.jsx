@@ -150,7 +150,7 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
       return idx >= 0 ? (row[idx] || '').trim() || null : null
     }
 
-    const leads = rows.map(row => ({
+    const importLeads = rows.map(row => ({
       list_id: list.id,
       property_address: getVal(row,'property_address'),
       town: getVal(row,'town'), state: getVal(row,'state'),
@@ -165,6 +165,22 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
       remarks: getVal(row,'remarks'), status: 'new', agent_id: listAgent || null,
     }))
 
+    // Duplicate detection — flag leads whose phone matches an existing contact
+    const dupePhoneSet = new Set()
+    const allImportPhones = importLeads.flatMap(l => l.phones).map(p => p.replace(/\D/g,''))
+    if (allImportPhones.length > 0) {
+      const { data: existingContacts } = await supabase.from('contacts').select('phones')
+      for (const c of (existingContacts || [])) {
+        for (const p of (c.phones || [])) { dupePhoneSet.add(p.replace(/\D/g,'')) }
+      }
+    }
+    let dupeCount = 0
+    const leads = importLeads.map(l => {
+      const isDupe = (l.phones || []).some(p => dupePhoneSet.has(p.replace(/\D/g,'')))
+      if (isDupe) dupeCount++
+      return isDupe ? { ...l, remarks: l.remarks ? `${l.remarks} [Possible duplicate]` : '[Possible duplicate]' } : l
+    })
+
     let done = 0
     for (let i = 0; i < leads.length; i += 50) {
       const { error } = await supabase.from('cold_call_leads').insert(leads.slice(i, i + 50))
@@ -173,7 +189,7 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
       setProgress(Math.round(done / leads.length * 100))
     }
     setImporting(false)
-    pushToast(`Imported ${done} leads`)
+    pushToast(dupeCount > 0 ? `Imported ${done} leads — ${dupeCount} flagged as possible duplicates` : `Imported ${done} leads`)
     onUploaded(); onClose()
   }
 
@@ -289,8 +305,36 @@ function ConvertModal({ lead, agents, activeAgent, onClose, onConverted }) {
   const save = async () => {
     if (!form.first_name.trim()) { pushToast('First name required', 'error'); return }
     setSaving(true)
-    const { data, error } = await supabase.from('contacts').insert([form]).select().single()
+    const contactPayload = {
+      first_name: form.first_name, last_name: form.last_name,
+      phones: form.phone ? [form.phone] : [],
+      emails: form.email ? [form.email] : [],
+      type: form.type, status: form.status, source: form.source,
+      assigned_agent_id: form.assigned_agent_id || null,
+      notes: form.notes, tags: form.tags,
+    }
+    const { data, error } = await supabase.from('contacts').insert([contactPayload]).select().single()
     if (error) { setSaving(false); pushToast(error.message, 'error'); return }
+
+    // Create linked property
+    if (lead?.property_address) {
+      await supabase.from('properties').insert([{
+        address: [lead.property_address, lead.town, lead.state].filter(Boolean).join(', '),
+        type: lead.prop_type || 'residential',
+        details: { category: lead.prop_type || 'residential', unit_count: lead.unit_count || null },
+        contact_id: data.id, status: 'active',
+      }])
+    }
+
+    // Log call notes as activity on contact timeline
+    if (lead?.call_notes?.trim()) {
+      await supabase.from('activities').insert([{
+        contact_id: data.id,
+        agent_id: form.assigned_agent_id || null,
+        type: 'call', body: lead.call_notes,
+      }])
+    }
+
     await supabase.from('cold_call_leads').update({ status: 'converted', contact_id: data.id }).eq('id', lead.id)
     setSaving(false)
     pushToast(`Contact created: ${form.first_name} ${form.last_name}`)
@@ -374,7 +418,19 @@ function PowerDialer({ leads, startIndex, agents, activeAgent, onClose, onUpdate
   const updateStatus = async (status, extra = {}) => {
     setSaving(true)
     const patch = { status, call_notes: notes, called_at: new Date().toISOString(), ...extra }
+    if (status === 'called') patch.call_count = (lead.call_count || 0) + 1
     await supabase.from('cold_call_leads').update(patch).eq('id', lead.id)
+    if (status === 'callback' && extra.callback_date) {
+      await supabase.from('tasks').insert([{
+        title: `Callback: ${lead.contact_name || lead.property_address || 'Cold Call Lead'}`,
+        type: 'call', priority: 'high',
+        due_date: `${extra.callback_date}T09:00`,
+        agent_id: activeAgent?.id || null,
+        notes: notes || null,
+        completed: false,
+      }])
+      pushToast('Callback task created')
+    }
     onUpdate(lead.id, patch)
     setSaving(false)
     if (status !== 'converted') advance()
@@ -529,6 +585,7 @@ export default function ColdCallsPage({ db, activeAgent }) {
   const [dialer, setDialer]           = useState(false)
   const [dialerStart, setDialerStart] = useState(0)
   const [convertLead, setConvertLead] = useState(null)
+  const [filterAgent, setFilterAgent] = useState('all')
   const [ready, setReady]             = useState(true)
 
   const agents = db?.agents || []
@@ -562,7 +619,9 @@ export default function ColdCallsPage({ db, activeAgent }) {
     pushToast('List deleted', 'info')
   }
 
-  const filtered = filterStatus === 'all' ? leads : leads.filter(l => l.status === filterStatus)
+  const filtered = leads
+    .filter(l => filterStatus === 'all' || l.status === filterStatus)
+    .filter(l => filterAgent === 'all' || l.agent_id === filterAgent)
 
   const stats = {
     total:     leads.length,
@@ -642,6 +701,12 @@ export default function ColdCallsPage({ db, activeAgent }) {
                   <span style={{background:'#fff3cd',color:'#856404',padding:'2px 7px',borderRadius:8}}>{stats.callback} callback</span>
                   <span style={{background:'var(--gw-green-light)',color:'var(--gw-green)',padding:'2px 7px',borderRadius:8}}>{stats.converted} converted</span>
                 </div>
+                {agents.length > 1 && (
+                  <select className="form-control" style={{width:'auto',fontSize:11,padding:'3px 8px',height:28}} value={filterAgent} onChange={e=>setFilterAgent(e.target.value)}>
+                    <option value="all">All Agents</option>
+                    {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                )}
                 <button className="btn btn--primary btn--sm"
                   onClick={()=>{ const i=leads.findIndex(l=>l.status==='new'); setDialerStart(i>=0?i:0); setDialer(true) }}
                   disabled={leads.filter(l=>l.status==='new').length===0}>
@@ -695,7 +760,10 @@ export default function ColdCallsPage({ db, activeAgent }) {
                               <td style={{padding:'9px 12px'}}>
                                 {(lead.phones||[]).slice(0,2).map((p,i)=><div key={i} style={{fontFamily:'var(--font-mono)',fontSize:11,marginBottom:1}}>{p}</div>)}
                               </td>
-                              <td style={{padding:'9px 12px'}}><StatusBadge status={lead.status}/></td>
+                              <td style={{padding:'9px 12px'}}>
+                                <StatusBadge status={lead.status}/>
+                                {(lead.call_count > 0) && <span style={{marginLeft:5,background:'var(--gw-azure)',color:'#fff',padding:'1px 6px',borderRadius:8,fontSize:10,fontWeight:700}}>{lead.call_count}×</span>}
+                              </td>
                               <td style={{padding:'9px 12px'}}>
                                 <div style={{display:'flex',gap:4}}>
                                   <button className="btn btn--ghost btn--icon btn--sm" title="Open in dialer"
