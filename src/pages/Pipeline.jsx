@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase.js'
 import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
-const DEFAULT_STEPS = [
+const DEFAULT_STEPS_RESIDENTIAL = [
   'Title Search Ordered',
   'Earnest Money Deposited',
   'Home Inspection Scheduled',
@@ -18,7 +18,25 @@ const DEFAULT_STEPS = [
   'Keys & Possession Transferred',
 ]
 
+const DEFAULT_STEPS_COMMERCIAL = [
+  'Title Search Ordered',
+  'Earnest Money Deposited',
+  'Environmental Due Diligence (Phase I)',
+  'Property Inspection Ordered',
+  'Inspection Report Reviewed',
+  'Survey Ordered',
+  'Survey Received & Approved',
+  'Zoning & Entitlements Verified',
+  'Financing Commitment Received',
+  'Lease Review (if applicable)',
+  'Closing Disclosure Reviewed',
+  'Closing Documents Signed',
+  'Keys & Possession Transferred',
+]
+
 const CHECKLIST_STAGES = ['under-contract','closed']
+
+const DEFAULT_KEY_DATE_TYPES = ['Closing','Financing Contingency','Inspection','HUD Approval','Appraisal','Lease Start Date','Possession Date']
 
 function ChecklistTab({ deal }) {
   const [steps, setSteps]       = useState([])
@@ -26,6 +44,8 @@ function ChecklistTab({ deal }) {
   const [newTitle, setNewTitle] = useState('')
   const [adding, setAdding]     = useState(false)
   const [ready, setReady]       = useState(true)
+
+  const defaultSteps = deal?.prop_category === 'commercial' ? DEFAULT_STEPS_COMMERCIAL : DEFAULT_STEPS_RESIDENTIAL
 
   React.useEffect(() => {
     if (!deal?.id) return
@@ -49,10 +69,10 @@ function ChecklistTab({ deal }) {
   }
 
   const autoCreate = async () => {
-    const rows = DEFAULT_STEPS.map((title, i) => ({ deal_id: deal.id, title, completed: false, sort_order: i }))
+    const rows = defaultSteps.map((title, i) => ({ deal_id: deal.id, title, completed: false, sort_order: i }))
     const { data } = await supabase.from('transaction_steps').insert(rows).select()
     setSteps(data || [])
-    pushToast('Closing checklist created', 'info')
+    pushToast(`${deal?.prop_category === 'commercial' ? 'Commercial' : 'Residential'} closing checklist created`, 'info')
   }
 
   const toggle = async (step) => {
@@ -111,6 +131,7 @@ function ChecklistTab({ deal }) {
       {steps.length === 0 && !CHECKLIST_STAGES.includes(deal.stage) && (
         <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--gw-mist)', fontSize: 13 }}>
           Checklist auto-creates when this deal reaches <strong>Under Contract</strong>.<br />
+          {deal?.prop_category === 'commercial' ? 'Commercial closing steps will be loaded.' : 'Residential closing steps will be loaded.'}<br />
           Or add steps manually below.
         </div>
       )}
@@ -148,6 +169,112 @@ function ChecklistTab({ deal }) {
         <button className="btn btn--secondary btn--sm" onClick={addStep} disabled={adding || !newTitle.trim()}>
           Add
         </button>
+      </div>
+    </div>
+  )
+}
+
+function KeyDatesTab({ deal }) {
+  const [dates, setDates]         = useState([])
+  const [saving, setSaving]       = useState(false)
+  const [newType, setNewType]     = useState('')
+  const [customType, setCustomType] = useState('')
+  const [showCustom, setShowCustom] = useState(false)
+
+  React.useEffect(() => {
+    if (!deal?.id) return
+    const existing = deal.comp_data?.key_dates
+    if (existing && existing.length > 0) {
+      setDates(existing)
+    } else {
+      setDates(DEFAULT_KEY_DATE_TYPES.map(type => ({ type, date: '' })))
+    }
+  }, [deal?.id])
+
+  const persist = async (updated) => {
+    setSaving(true)
+    const comp_data = { ...(deal.comp_data || {}), key_dates: updated }
+    await supabase.from('deals').update({ comp_data, updated_at: new Date().toISOString() }).eq('id', deal.id)
+    setSaving(false)
+  }
+
+  const updateDate = (i, date) => {
+    const updated = dates.map((d, idx) => idx === i ? { ...d, date } : d)
+    setDates(updated)
+    persist(updated)
+  }
+
+  const addRow = (type) => {
+    const t = type.trim()
+    if (!t || dates.some(d => d.type.toLowerCase() === t.toLowerCase())) return
+    const updated = [...dates, { type: t, date: '' }]
+    setDates(updated)
+    persist(updated)
+    setNewType(''); setCustomType(''); setShowCustom(false)
+  }
+
+  const removeRow = (i) => {
+    const updated = dates.filter((_, idx) => idx !== i)
+    setDates(updated)
+    persist(updated)
+  }
+
+  const usedTypes = new Set(dates.map(d => d.type))
+  const availableTypes = DEFAULT_KEY_DATE_TYPES.filter(t => !usedTypes.has(t))
+
+  return (
+    <div style={{ padding: 16, overflowY: 'auto', flex: 1 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>{saving ? 'Saving…' : 'Changes auto-saved'}</div>
+      </div>
+
+      {dates.map((row, i) => (
+        <div key={row.type} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+          <div style={{ flex: '0 0 160px', fontSize: 13, fontWeight: 600, color: 'var(--gw-ink)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {row.type}
+          </div>
+          <input
+            type="date"
+            className="form-control"
+            style={{ flex: 1, fontSize: 13 }}
+            value={row.date || ''}
+            onChange={e => updateDate(i, e.target.value)}
+          />
+          <button className="btn btn--ghost btn--icon btn--sm" title="Remove" onClick={() => removeRow(i)} style={{ opacity: 0.5 }}>
+            <Icon name="x" size={12} />
+          </button>
+        </div>
+      ))}
+
+      {/* Add date row */}
+      <div style={{ marginTop: 16, borderTop: '1px solid var(--gw-border)', paddingTop: 14 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--gw-mist)', marginBottom: 8 }}>Add Date</div>
+        {!showCustom ? (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {availableTypes.map(t => (
+              <button key={t} className="btn btn--secondary btn--sm" style={{ fontSize: 11 }} onClick={() => addRow(t)}>
+                + {t}
+              </button>
+            ))}
+            <button className="btn btn--secondary btn--sm" style={{ fontSize: 11 }} onClick={() => setShowCustom(true)}>
+              + Custom…
+            </button>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              className="form-control"
+              style={{ flex: 1, fontSize: 13 }}
+              placeholder="Date type name…"
+              value={customType}
+              onChange={e => setCustomType(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && addRow(customType)}
+              autoFocus
+            />
+            <button className="btn btn--primary btn--sm" onClick={() => addRow(customType)} disabled={!customType.trim()}>Add</button>
+            <button className="btn btn--secondary btn--sm" onClick={() => { setShowCustom(false); setCustomType('') }}>Cancel</button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -330,7 +457,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, onSave 
       {/* Tab bar — only for existing deals */}
       {isExisting && (
         <div className="drawer-tabs">
-          {[['details','Details'],['checklist','Checklist'],['documents','Documents']].map(([id, label]) => (
+          {[['details','Details'],['dates','Key Dates'],['checklist','Checklist'],['documents','Documents']].map(([id, label]) => (
             <button key={id} className={`drawer-tab${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}>
               {label}
             </button>
@@ -487,6 +614,11 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, onSave 
             <button className="btn btn--primary" onClick={save} disabled={saving}>{saving?'Saving…':'Save Deal'}</button>
           </div>
         </>
+      )}
+
+      {/* Key Dates tab */}
+      {tab === 'dates' && isExisting && (
+        <KeyDatesTab deal={deal} />
       )}
 
       {/* Checklist tab */}

@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, pushToast } from '../components/UI.jsx'
 
@@ -58,15 +58,45 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
   const [clearing, setClearing] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const [copied, setCopied] = useState(null)
-  const [aiKey, setAiKey] = useState(() => localStorage.getItem('gw_anthropic_key') || '')
-  const [aiKeySaved, setAiKeySaved] = useState(false)
-  const [showKey, setShowKey] = useState(false)
 
-  const saveAiKey = () => {
+  // AI key — loaded from Supabase auth metadata (persists across devices)
+  const [aiKey, setAiKey]         = useState('')
+  const [aiKeySaved, setAiKeySaved] = useState(false)
+  const [showAiKey, setShowAiKey] = useState(false)
+
+  // Resend key — same storage strategy
+  const [resendKey, setResendKey]         = useState('')
+  const [resendKeySaved, setResendKeySaved] = useState(false)
+  const [showResendKey, setShowResendKey]   = useState(false)
+  const [resendFrom, setResendFrom]         = useState('')
+  const [resendFromSaved, setResendFromSaved] = useState(false)
+
+  // Load keys from Supabase auth user metadata on mount
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!user) return
+      const meta = user.user_metadata || {}
+      setAiKey(meta.anthropic_key || localStorage.getItem('gw_anthropic_key') || '')
+      setResendKey(meta.resend_key || localStorage.getItem('gw_resend_key') || '')
+      setResendFrom(meta.resend_from || localStorage.getItem('gw_resend_from') || '')
+    })
+  }, [])
+
+  const saveAiKey = async () => {
+    await supabase.auth.updateUser({ data: { anthropic_key: aiKey.trim() } })
     localStorage.setItem('gw_anthropic_key', aiKey.trim())
     setAiKeySaved(true)
     setTimeout(() => setAiKeySaved(false), 2000)
-    pushToast('AI key saved')
+    pushToast('AI key saved — works on all your devices now')
+  }
+
+  const saveResendKey = async () => {
+    await supabase.auth.updateUser({ data: { resend_key: resendKey.trim(), resend_from: resendFrom.trim() } })
+    localStorage.setItem('gw_resend_key', resendKey.trim())
+    localStorage.setItem('gw_resend_from', resendFrom.trim())
+    setResendKeySaved(true)
+    setTimeout(() => setResendKeySaved(false), 2000)
+    pushToast('Email settings saved')
   }
 
   const copy = (text, key) => {
@@ -156,7 +186,6 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
             <div className="settings-section__title">Website Lead Tracking</div>
             <div className="settings-section__sub" style={{ marginBottom: 0 }}>Capture visitor activity and leads from your real estate website</div>
           </div>
-          {/* Toggle switch */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, marginTop: 4 }}>
             <span style={{ fontSize: 12, color: 'var(--gw-mist)' }}>{websiteEnabled ? 'Enabled' : 'Hidden'}</span>
             <div onClick={toggleWebsite} style={{
@@ -181,8 +210,6 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
 
         {websiteEnabled && (
           <div style={{ marginTop: 20, display: 'flex', flexDirection: 'column', gap: 20 }}>
-
-            {/* Step 1: SQL */}
             <div>
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'var(--gw-slate)', color: '#fff', fontSize: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>1</span>
@@ -194,60 +221,44 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
                 <Icon name="copy" size={12} /> {copied === 'sql' ? 'Copied!' : 'Copy SQL'}
               </button>
             </div>
-
-            {/* Step 2: Tracking script */}
             <div>
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'var(--gw-slate)', color: '#fff', fontSize: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>2</span>
                 Add the tracking script to your website
               </div>
-              <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 8 }}>Paste this into the <code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3, fontSize: 11 }}>&lt;head&gt;</code> of every page on your website:</div>
+              <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 8 }}>Paste this into the <code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3, fontSize: 11 }}>&lt;head&gt;</code> of every page:</div>
               <code style={codeStyle}>{TRACKING_SCRIPT}</code>
               <button className="btn btn--secondary btn--sm" style={{ marginTop: 8 }} onClick={() => copy(TRACKING_SCRIPT, 'script')}>
                 <Icon name="copy" size={12} /> {copied === 'script' ? 'Copied!' : 'Copy Script'}
               </button>
             </div>
-
-            {/* Step 3: Per-listing tag */}
             <div>
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'var(--gw-slate)', color: '#fff', fontSize: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>3</span>
                 Tag each property listing page
               </div>
-              <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 8 }}>Add this tag anywhere on each listing page, replacing the values with the agent's ID (from their profile URL) and the property address:</div>
               <code style={{ ...codeStyle, maxHeight: 'none' }}>{`<div data-gw-agent="AGENT-UUID-HERE"\n     data-gw-property="123 Main St, Sioux Falls, SD"></div>`}</code>
             </div>
-
-            {/* Step 4: Lead capture URL */}
             <div>
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'var(--gw-slate)', color: '#fff', fontSize: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>4</span>
                 Add "Contact Agent" buttons on your listings
               </div>
-              <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 8 }}>Link each listing's contact button to this URL pattern (replace the values):</div>
               <code style={{ ...codeStyle, maxHeight: 'none' }}>{`${window.location.origin}/lead?agent=AGENT-UUID&property=123+Main+St`}</code>
-              <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 8 }}>
-                Find each agent's UUID in their Team profile. The visitor fills out a short form and the lead appears instantly in Website Leads.
-              </div>
             </div>
-
-            {/* Agent UUID helper */}
             <div style={{ background: 'var(--gw-sky)', border: '1px solid #c5d9f5', borderRadius: 'var(--radius)', padding: 14 }}>
               <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: 'var(--gw-azure)' }}>Agent UUIDs</div>
               {(db.agents || []).length === 0
-                ? <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>No agents added yet. Add agents in the Team section.</div>
+                ? <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>No agents added yet.</div>
                 : (db.agents || []).map(a => (
                     <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
                       <span style={{ fontSize: 13, fontWeight: 600, minWidth: 140 }}>{a.name}</span>
                       <code style={{ fontSize: 10, background: '#fff', padding: '2px 8px', borderRadius: 4, color: 'var(--gw-slate)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.id}</code>
-                      <button className="btn btn--ghost btn--icon btn--sm" onClick={() => copy(a.id, a.id)} title="Copy UUID">
-                        <Icon name="copy" size={12} />
-                      </button>
+                      <button className="btn btn--ghost btn--icon btn--sm" onClick={() => copy(a.id, a.id)}><Icon name="copy" size={12} /></button>
                     </div>
                   ))
               }
             </div>
-
           </div>
         )}
       </div>
@@ -255,34 +266,101 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
       {/* ── AI Configuration ── */}
       <div className="settings-section">
         <div className="settings-section__title">AI Configuration</div>
-        <div className="settings-section__sub">Used for AI-generated email templates in the Templates page</div>
+        <div className="settings-section__sub">Powers AI email generation in the Templates page. Key is saved to your account — works on any device you log in from.</div>
         <div style={{ maxWidth: 480 }}>
           <div className="form-group">
             <label className="form-label">Anthropic API Key</label>
             <div style={{ display: 'flex', gap: 8 }}>
               <input
                 className="form-control"
-                type={showKey ? 'text' : 'password'}
+                type={showAiKey ? 'text' : 'password'}
                 value={aiKey}
                 onChange={e => setAiKey(e.target.value)}
                 placeholder="sk-ant-..."
-                style={{ flex: 1, fontFamily: aiKey && !showKey ? 'var(--font-mono)' : undefined }}
+                style={{ flex: 1, fontFamily: aiKey && !showAiKey ? 'var(--font-mono)' : undefined }}
               />
-              <button className="btn btn--ghost btn--icon" onClick={() => setShowKey(v => !v)} title={showKey ? 'Hide' : 'Show'}>
+              <button className="btn btn--ghost btn--icon" onClick={() => setShowAiKey(v => !v)}>
                 <Icon name="eye" size={15} />
               </button>
             </div>
-            <div className="form-hint">
-              Get your key at <strong>console.anthropic.com</strong> → API Keys. Stored locally in your browser only.
-            </div>
+            <div className="form-hint">Get your key at <strong>console.anthropic.com</strong> → API Keys.</div>
           </div>
           <button className="btn btn--primary btn--sm" onClick={saveAiKey} disabled={!aiKey.trim()}>
             {aiKeySaved ? '✓ Saved' : 'Save Key'}
           </button>
           {aiKey && (
-            <button className="btn btn--ghost btn--sm" style={{ marginLeft: 8 }} onClick={() => { setAiKey(''); localStorage.removeItem('gw_anthropic_key'); pushToast('Key removed') }}>
-              Remove
-            </button>
+            <button className="btn btn--ghost btn--sm" style={{ marginLeft: 8 }} onClick={async () => {
+              await supabase.auth.updateUser({ data: { anthropic_key: '' } })
+              localStorage.removeItem('gw_anthropic_key')
+              setAiKey('')
+              pushToast('Key removed')
+            }}>Remove</button>
+          )}
+        </div>
+      </div>
+
+      {/* ── Email Sending (Resend) ── */}
+      <div className="settings-section">
+        <div className="settings-section__title">Email Sending</div>
+        <div className="settings-section__sub">
+          Uses <strong>Resend</strong> to send emails directly from the CRM. Free tier: 3,000 emails/month.{' '}
+          Sign up at <strong>resend.com</strong>, verify your domain, and paste your API key below.
+        </div>
+
+        {/* Setup steps */}
+        <div style={{ background: 'var(--gw-sky)', border: '1px solid #c5d9f5', borderRadius: 'var(--radius)', padding: 14, marginBottom: 20, fontSize: 12, lineHeight: 1.8 }}>
+          <strong style={{ fontSize: 13 }}>Quick setup (5 min):</strong>
+          <ol style={{ margin: '8px 0 0 16px', padding: 0 }}>
+            <li>Go to <strong>resend.com</strong> → sign up for free</li>
+            <li>Click <strong>Domains</strong> → Add Domain → enter your domain (e.g. <code style={{ background: '#fff', padding: '1px 5px', borderRadius: 3 }}>gatewayrealestate.com</code>)</li>
+            <li>Add the DNS records Resend shows you (takes ~5 min to verify)</li>
+            <li>Go to <strong>API Keys</strong> → Create API Key → paste it below</li>
+            <li>Set your From address to any email on your verified domain</li>
+          </ol>
+          <div style={{ marginTop: 8, color: 'var(--gw-mist)' }}>
+            No domain yet? Use <code style={{ background: '#fff', padding: '1px 4px', borderRadius: 3 }}>onboarding@resend.dev</code> as the From address during testing — it works without domain verification.
+          </div>
+        </div>
+
+        <div style={{ maxWidth: 480 }}>
+          <div className="form-group">
+            <label className="form-label">Resend API Key</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                className="form-control"
+                type={showResendKey ? 'text' : 'password'}
+                value={resendKey}
+                onChange={e => setResendKey(e.target.value)}
+                placeholder="re_..."
+                style={{ flex: 1, fontFamily: resendKey && !showResendKey ? 'var(--font-mono)' : undefined }}
+              />
+              <button className="btn btn--ghost btn--icon" onClick={() => setShowResendKey(v => !v)}>
+                <Icon name="eye" size={15} />
+              </button>
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">From Address</label>
+            <input
+              className="form-control"
+              type="email"
+              value={resendFrom}
+              onChange={e => setResendFrom(e.target.value)}
+              placeholder="Agent Name <agent@yourdomain.com>"
+            />
+            <div className="form-hint">Must match your verified Resend domain. Format: <code>Name &lt;email@domain.com&gt;</code></div>
+          </div>
+          <button className="btn btn--primary btn--sm" onClick={saveResendKey} disabled={!resendKey.trim()}>
+            {resendKeySaved ? '✓ Saved' : 'Save Email Settings'}
+          </button>
+          {resendKey && (
+            <button className="btn btn--ghost btn--sm" style={{ marginLeft: 8 }} onClick={async () => {
+              await supabase.auth.updateUser({ data: { resend_key: '', resend_from: '' } })
+              localStorage.removeItem('gw_resend_key')
+              localStorage.removeItem('gw_resend_from')
+              setResendKey(''); setResendFrom('')
+              pushToast('Email settings removed')
+            }}>Remove</button>
           )}
         </div>
       </div>
@@ -296,7 +374,7 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
         </div>
         {confirmClear && (
           <div style={{ marginTop:16, padding:16, background:'var(--gw-red-light)', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)' }}>
-            <div style={{ fontWeight:600, marginBottom:8, color:'var(--gw-red)' }}>⚠️ This will permanently delete all contacts, properties, deals, tasks, and templates.</div>
+            <div style={{ fontWeight:600, marginBottom:8, color:'var(--gw-red)' }}>This will permanently delete all contacts, properties, deals, tasks, and templates.</div>
             <div style={{ display:'flex', gap:8 }}>
               <button className="btn btn--danger btn--sm" onClick={clearAll} disabled={clearing}>{clearing?'Clearing…':'Yes, delete everything'}</button>
               <button className="btn btn--secondary btn--sm" onClick={() => setConfirmClear(false)}>Cancel</button>

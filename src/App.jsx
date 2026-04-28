@@ -16,6 +16,7 @@ import OmPage from './pages/Om.jsx'
 import SocialPage from './pages/Social.jsx'
 import ReportsPage from './pages/Reports.jsx'
 import SequencesPage from './pages/Sequences.jsx'
+import ColdCallsPage from './pages/ColdCalls.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
 
 const BASE_NAV = [
@@ -23,6 +24,7 @@ const BASE_NAV = [
   { id: 'contacts',   label: 'Contacts',        icon: 'contacts' },
   { id: 'properties', label: 'Properties',      icon: 'building' },
   { id: 'pipeline',   label: 'Pipeline',        icon: 'pipeline' },
+  { id: 'coldcalls',  label: 'Cold Call Lists', icon: 'phone' },
   { id: 'commission', label: 'Commission',      icon: 'commission' },
   { id: 'tasks',      label: 'Tasks',           icon: 'tasks' },
   { id: 'team',       label: 'Team',            icon: 'team' },
@@ -40,6 +42,7 @@ const TITLES = {
   contacts:   { title: 'Contacts',         crumb: 'CRM · People' },
   properties: { title: 'Properties',       crumb: 'Database · Listings' },
   pipeline:   { title: 'Pipeline',         crumb: 'Deals · Kanban' },
+  coldcalls:  { title: 'Cold Call Lists',  crumb: 'Prospecting · Dialer' },
   commission: { title: 'Commission',       crumb: 'Deals · Earnings' },
   tasks:      { title: 'Tasks',            crumb: 'Follow-ups · Reminders' },
   team:       { title: 'Team',             crumb: 'Agents · Roster' },
@@ -317,6 +320,7 @@ export default function App() {
         {route === 'contacts'   && <ContactsPage {...props} />}
         {route === 'properties' && <PropertiesPage {...props} />}
         {route === 'pipeline'   && <PipelinePage {...props} />}
+        {route === 'coldcalls'  && <ColdCallsPage  db={db} activeAgent={activeAgent} />}
         {route === 'commission' && <CommissionPage {...props} />}
         {route === 'tasks'      && <TasksPage {...props} />}
         {route === 'team'       && <TeamPage {...props} onSwitchAgent={id => setActiveAgentId(id)} />}

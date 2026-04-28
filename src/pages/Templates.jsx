@@ -1,9 +1,13 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Badge, Drawer, EmptyState, ConfirmDialog, Modal, pushToast } from '../components/UI.jsx'
 
-const getAnthropicKey = () => import.meta.env.VITE_ANTHROPIC_API_KEY || localStorage.getItem('gw_anthropic_key') || ''
+// Load from Supabase auth metadata first (cross-device), fall back to localStorage
+async function loadUserKey(metaField, localKey) {
+  const { data: { user } } = await supabase.auth.getUser()
+  return user?.user_metadata?.[metaField] || localStorage.getItem(localKey) || ''
+}
 
 const MERGE_TAGS = ['{{firstName}}','{{lastName}}','{{agentName}}','{{propertyAddress}}','{{dealValue}}']
 
@@ -21,7 +25,7 @@ function TemplateDrawer({ open, onClose, template, agents, onSave }) {
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
 
   const generateWithAI = async () => {
-    const apiKey = getAnthropicKey()
+    const apiKey = await loadUserKey('anthropic_key', 'gw_anthropic_key')
     if (!apiKey) { pushToast('Add your Anthropic API key in Settings → AI Configuration', 'error'); return }
     if (!aiPrompt.trim()) { pushToast('Enter a prompt first', 'error'); return }
     setGenerating(true)
@@ -149,27 +153,91 @@ Rules:
 }
 
 export function ComposeModal({ ctx, db, activeAgent, onClose }) {
-  const [to, setTo] = useState(ctx?.to || '')
+  const [to, setTo]           = useState(ctx?.to || '')
   const [subject, setSubject] = useState(ctx?.subject || '')
-  const [body, setBody] = useState(ctx?.body || '')
+  const [body, setBody]       = useState('')
   const [sending, setSending] = useState(false)
+  const [resendReady, setResendReady] = useState(null) // null=loading, true/false
+  const [resendKey, setResendKey]   = useState('')
+  const [resendFrom, setResendFrom] = useState('')
 
-  const resolveBody = (b) => b
-    .replace(/{{firstName}}/g, ctx?.contactName?.split(' ')[0] || 'there')
-    .replace(/{{lastName}}/g, ctx?.contactName?.split(' ')[1] || '')
-    .replace(/{{agentName}}/g, activeAgent?.name || '')
+  // Resolve merge tags using real contact data from ctx
+  const contact = ctx?.contactId ? (db?.contacts || []).find(c => c.id === ctx.contactId) : null
+  const agent   = activeAgent || {}
+
+  const resolve = (text) => (text || '')
+    .replace(/{{firstName}}/g,       contact?.first_name || ctx?.contactName?.split(' ')[0] || 'there')
+    .replace(/{{lastName}}/g,        contact?.last_name  || ctx?.contactName?.split(' ')[1] || '')
+    .replace(/{{agentName}}/g,       agent.name || '')
     .replace(/{{propertyAddress}}/g, ctx?.propertyAddress || '')
-    .replace(/{{dealValue}}/g, ctx?.dealValue || '')
+    .replace(/{{dealValue}}/g,       ctx?.dealValue || '')
+
+  // Pre-fill resolved body and load Resend key on mount
+  useEffect(() => {
+    setBody(resolve(ctx?.body || ''))
+    loadUserKey('resend_key', 'gw_resend_key').then(k => {
+      setResendKey(k)
+      setResendReady(!!k)
+    })
+    loadUserKey('resend_from', 'gw_resend_from').then(f => setResendFrom(f))
+  }, [])
 
   const send = async () => {
+    if (!to) { pushToast('Enter a recipient email', 'error'); return }
     setSending(true)
-    if (ctx?.templateId) {
-      await supabase.from('templates').update({ usage_count: supabase.rpc('increment', { x: 1 }) }).eq('id', ctx.templateId)
+
+    if (resendKey) {
+      try {
+        const fromAddr = resendFrom || (agent.email ? `${agent.name || 'Gateway'} <${agent.email}>` : 'onboarding@resend.dev')
+        const res = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${resendKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: fromAddr,
+            to: [to],
+            subject: subject || '(no subject)',
+            text: body,
+          }),
+        })
+        const result = await res.json()
+        if (!res.ok) {
+          setSending(false)
+          pushToast(`Send failed: ${result.message || result.name || 'Unknown error'}`, 'error')
+          return
+        }
+
+        // Log the sent email as an activity
+        if (contact?.id) {
+          await supabase.from('activities').insert([{
+            contact_id: contact.id,
+            agent_id: agent.id || null,
+            type: 'email',
+            notes: `Sent: "${subject}"\n\n${body}`,
+          }])
+        }
+
+        if (ctx?.templateId) {
+          await supabase.from('templates').update({ usage_count: (ctx.usageCount || 0) + 1 }).eq('id', ctx.templateId)
+        }
+
+        setSending(false)
+        pushToast(`Email sent to ${to}`)
+        onClose()
+      } catch (err) {
+        setSending(false)
+        pushToast('Send failed: ' + err.message, 'error')
+      }
+    } else {
+      // No Resend key — open mailto as fallback
+      const mailto = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+      window.open(mailto, '_blank')
+      setSending(false)
+      pushToast('Opened in your email client (set up Resend in Settings to send directly)')
+      onClose()
     }
-    await new Promise(r => setTimeout(r, 800))
-    setSending(false)
-    pushToast(`Email sent to ${to}`)
-    onClose()
   }
 
   return (
@@ -178,19 +246,29 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
         <div><div className="eyebrow-label">New Message</div><h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Compose Email</h3></div>
         <button className="drawer__close" onClick={onClose}><Icon name="x" size={18} /></button>
       </div>
+
+      {resendReady === false && (
+        <div style={{ margin: '0 24px', marginTop: 16, padding: '10px 14px', background: '#fff8ec', border: '1px solid var(--gw-amber)', borderRadius: 'var(--radius)', fontSize: 12, lineHeight: 1.6 }}>
+          <strong>Email sending not configured.</strong> Set up Resend in <strong>Settings → Email Sending</strong> to send directly from the CRM.
+          Clicking Send will open your local email client instead.
+        </div>
+      )}
+
       <div className="modal__body" style={{ padding:0 }}>
         <div style={{ borderBottom:'1px solid var(--gw-border)' }}>
           <div className="compose-field"><label>To</label><input value={to} onChange={e=>setTo(e.target.value)} placeholder="recipient@email.com" /></div>
-          <div className="compose-field"><label>From</label><input value={activeAgent?.email||''} readOnly style={{ color:'var(--gw-mist)' }} /></div>
+          <div className="compose-field"><label>From</label><input value={resendFrom || agent.email || ''} readOnly style={{ color:'var(--gw-mist)' }} /></div>
           <div className="compose-field"><label>Subject</label><input value={subject} onChange={e=>setSubject(e.target.value)} placeholder="Subject line…" /></div>
         </div>
         <div style={{ padding:'0 24px' }}>
-          <textarea className="compose-body" value={resolveBody(body)} onChange={e=>setBody(e.target.value)} placeholder="Write your message here…" />
+          <textarea className="compose-body" value={body} onChange={e=>setBody(e.target.value)} placeholder="Write your message here…" />
         </div>
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Discard</button>
-        <button className="btn btn--primary" onClick={send} disabled={sending || !to}><Icon name="send" size={13} />{sending?'Sending…':'Send Email'}</button>
+        <button className="btn btn--primary" onClick={send} disabled={sending || !to}>
+          <Icon name="send" size={13} />{sending ? 'Sending…' : resendKey ? 'Send Email' : 'Open in Mail App'}
+        </button>
       </div>
     </Modal>
   )
