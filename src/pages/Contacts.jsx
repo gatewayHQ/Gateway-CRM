@@ -166,19 +166,34 @@ function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivit
 
 function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activities, activeAgent, onSave, onActivityAdded }) {
   const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[] }
+  const blankProp = { address:'', list_price:'', type:'residential', subtype:'', beds:'', baths:'', sqft:'', garage:'', details:{} }
   const [form, setForm] = useState(contact || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
   const [tab, setTab] = useState('details')
+  const [addProp, setAddProp] = useState(false)
+  const [propForm, setPropForm] = useState(blankProp)
 
-  React.useEffect(() => { setForm(contact || blank); setErrors({}); setTab('details') }, [contact, open])
+  React.useEffect(() => {
+    setForm(contact || blank)
+    setErrors({})
+    setTab('details')
+    setAddProp(false)
+    setPropForm(blankProp)
+  }, [contact, open])
 
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
+  const setP = (k, v) => setPropForm(p => ({...p, [k]: v}))
+  const setPD = (k, v) => setPropForm(p => ({...p, details: {...(p.details||{}), [k]: v}}))
+
+  const COMM_SUBTYPES = ['multifamily','office','land','retail','industrial','mixed-use']
+  const isComm = propForm.type === 'commercial'
 
   const validate = () => {
     const e = {}
     if (!form.first_name.trim()) e.first_name = true
     if (!form.last_name.trim()) e.last_name = true
+    if (addProp && !propForm.address.trim()) e.prop_address = true
     setErrors(e)
     return Object.keys(e).length === 0
   }
@@ -187,15 +202,37 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
     if (!validate()) return
     setSaving(true)
     const payload = { ...form, tags: typeof form.tags === 'string' ? form.tags.split(',').map(t=>t.trim()).filter(Boolean) : form.tags }
-    let error
+    let error, contactId
     if (contact?.id) {
-      ({ error } = await supabase.from('contacts').update(payload).eq('id', contact.id))
+      ;({ error } = await supabase.from('contacts').update(payload).eq('id', contact.id))
+      contactId = contact.id
     } else {
-      ({ error } = await supabase.from('contacts').insert([payload]))
+      const { data, error: e } = await supabase.from('contacts').insert([payload]).select().single()
+      error = e; contactId = data?.id
     }
+    if (error) { setSaving(false); pushToast(error.message, 'error'); return }
+
+    if (addProp && propForm.address.trim() && contactId) {
+      const propPayload = {
+        address: propForm.address.trim(),
+        type: propForm.type === 'commercial' ? (propForm.subtype || 'commercial') : 'residential',
+        list_price: propForm.list_price ? Number(propForm.list_price) : null,
+        beds: propForm.beds ? Number(propForm.beds) : null,
+        baths: propForm.baths ? Number(propForm.baths) : null,
+        sqft: propForm.sqft ? Number(propForm.sqft) : null,
+        garage: propForm.garage ? Number(propForm.garage) : 0,
+        details: { ...propForm.details, category: propForm.type },
+        contact_id: contactId,
+        status: 'active',
+      }
+      const { error: pe } = await supabase.from('properties').insert([propPayload])
+      if (pe) pushToast(`Contact saved but property failed: ${pe.message}`, 'error')
+      else pushToast('Contact & property saved')
+    } else {
+      pushToast(contact?.id ? 'Contact updated' : 'Contact added')
+    }
+
     setSaving(false)
-    if (error) { pushToast(error.message, 'error'); return }
-    pushToast(contact?.id ? 'Contact updated' : 'Contact added')
     onSave(); onClose()
   }
 
@@ -271,6 +308,108 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
             </div>
             <div className="form-group"><label className="form-label">Tags</label><input className="form-control" value={Array.isArray(form.tags)?form.tags.join(', '):(form.tags||'')} onChange={e=>set('tags',e.target.value)} placeholder="vip, referral, hot-lead" /><div className="form-hint">Comma separated</div></div>
             <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} placeholder="Add notes…" /></div>
+
+            {/* ── Inline Add Property ────────────────────────────────── */}
+            {!contact?.id && (
+              <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 14, marginTop: 4 }}>
+                <button type="button" onClick={() => setAddProp(p => !p)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, background: addProp ? 'var(--gw-sky)' : 'var(--gw-bone)', border: `1px solid ${addProp ? 'var(--gw-azure)' : 'var(--gw-border)'}`, borderRadius: 'var(--radius)', padding: '8px 14px', cursor: 'pointer', width: '100%', fontFamily: 'var(--font-body)', fontSize: 13, fontWeight: 600, color: addProp ? 'var(--gw-azure)' : 'var(--gw-slate)', transition: 'all 150ms' }}>
+                  <Icon name="plus" size={14} />
+                  {addProp ? 'Remove Property' : 'Add a Property'}
+                  <span style={{ marginLeft: 'auto', fontSize: 10, opacity: 0.5 }}>{addProp ? '▲' : '▼'}</span>
+                </button>
+
+                {addProp && (
+                  <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 0 }}>
+                    <div className="form-group">
+                      <label className="form-label required">Property Address</label>
+                      <input className={`form-control${errors.prop_address?' error':''}`} value={propForm.address} onChange={e=>setP('address',e.target.value)} placeholder="123 Main St, City, State" />
+                    </div>
+
+                    {/* Residential / Commercial toggle */}
+                    <div className="form-group">
+                      <label className="form-label">Category</label>
+                      <div style={{ display:'flex', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
+                        {['residential','commercial'].map(cat => (
+                          <button key={cat} type="button" onClick={() => { setP('type', cat); setP('subtype','') }}
+                            style={{ flex:1, padding:'7px 0', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, transition:'all 150ms',
+                              background: propForm.type === cat ? 'var(--gw-slate)' : '#fff',
+                              color:      propForm.type === cat ? '#fff'            : 'var(--gw-mist)' }}>
+                            {cat.charAt(0).toUpperCase()+cat.slice(1)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Commercial subtype */}
+                    {isComm && (
+                      <div className="form-group">
+                        <label className="form-label">Commercial Type</label>
+                        <select className="form-control" value={propForm.subtype||''} onChange={e=>setP('subtype',e.target.value)}>
+                          <option value="">— Select type —</option>
+                          {COMM_SUBTYPES.map(t=><option key={t} value={t}>{t.charAt(0).toUpperCase()+t.slice(1)}</option>)}
+                        </select>
+                      </div>
+                    )}
+
+                    <div className="form-group">
+                      <label className="form-label">{isComm ? 'Asking Price' : 'List Price'}</label>
+                      <input className="form-control" type="number" value={propForm.list_price||''} onChange={e=>setP('list_price',e.target.value)} placeholder="0" />
+                    </div>
+
+                    {/* Residential fields */}
+                    {!isComm && (
+                      <>
+                        <div className="form-row">
+                          <div className="form-group"><label className="form-label">Beds</label><input className="form-control" type="number" value={propForm.beds||''} onChange={e=>setP('beds',e.target.value)} /></div>
+                          <div className="form-group"><label className="form-label">Baths</label><input className="form-control" type="number" step="0.5" value={propForm.baths||''} onChange={e=>setP('baths',e.target.value)} /></div>
+                        </div>
+                        <div className="form-row">
+                          <div className="form-group"><label className="form-label">Sq Ft</label><input className="form-control" type="number" value={propForm.sqft||''} onChange={e=>setP('sqft',e.target.value)} /></div>
+                          <div className="form-group"><label className="form-label">Garage</label>
+                            <select className="form-control" value={propForm.garage??''} onChange={e=>setP('garage',e.target.value)}>
+                              <option value="">—</option><option value="0">No Garage</option><option value="1">1 Car</option><option value="2">2 Car</option><option value="3">3+ Car</option>
+                            </select>
+                          </div>
+                        </div>
+                      </>
+                    )}
+
+                    {/* Commercial — multifamily */}
+                    {isComm && propForm.subtype === 'multifamily' && (
+                      <div className="form-row">
+                        <div className="form-group"><label className="form-label">Total Units</label><input className="form-control" type="number" value={propForm.details?.total_units||''} onChange={e=>setPD('total_units',e.target.value)} /></div>
+                        <div className="form-group"><label className="form-label">Sq Ft (total)</label><input className="form-control" type="number" value={propForm.sqft||''} onChange={e=>setP('sqft',e.target.value)} /></div>
+                      </div>
+                    )}
+
+                    {/* Commercial — office / retail / industrial */}
+                    {isComm && ['office','retail','industrial'].includes(propForm.subtype) && (
+                      <div className="form-row">
+                        <div className="form-group"><label className="form-label">Sq Ft</label><input className="form-control" type="number" value={propForm.sqft||''} onChange={e=>setP('sqft',e.target.value)} /></div>
+                        <div className="form-group"><label className="form-label">Price / SF</label><input className="form-control" type="number" step="0.01" value={propForm.details?.price_per_sf||''} onChange={e=>setPD('price_per_sf',e.target.value)} /></div>
+                      </div>
+                    )}
+
+                    {/* Commercial — land */}
+                    {isComm && propForm.subtype === 'land' && (
+                      <div className="form-row">
+                        <div className="form-group"><label className="form-label">Acres</label><input className="form-control" type="number" step="0.01" value={propForm.details?.acres||''} onChange={e=>setPD('acres',e.target.value)} /></div>
+                        <div className="form-group"><label className="form-label">Zoning</label><input className="form-control" value={propForm.details?.zoning||''} onChange={e=>setPD('zoning',e.target.value)} placeholder="R-1, C-2…" /></div>
+                      </div>
+                    )}
+
+                    {/* Commercial — mixed-use */}
+                    {isComm && propForm.subtype === 'mixed-use' && (
+                      <div className="form-row">
+                        <div className="form-group"><label className="form-label">Sq Ft</label><input className="form-control" type="number" value={propForm.sqft||''} onChange={e=>setP('sqft',e.target.value)} /></div>
+                        <div className="form-group"><label className="form-label">Units</label><input className="form-control" type="number" value={propForm.details?.total_units||''} onChange={e=>setPD('total_units',e.target.value)} /></div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <div className="drawer__foot">
             <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
