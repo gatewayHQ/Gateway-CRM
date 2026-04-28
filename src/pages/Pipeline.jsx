@@ -286,19 +286,23 @@ with check (bucket_id = 'deal-documents');`}
 }
 
 function DealDrawer({ open, onClose, deal, agents, contacts, properties, onSave }) {
-  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'' }
+  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
   const [tab, setTab]       = useState('details')
 
   React.useEffect(() => {
-    setForm(deal ? { ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '' } : blank)
+    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {} } : blank)
     setErrors({})
     setTab('details')
   }, [deal, open])
 
-  const set = (k, v) => setForm(p => ({...p, [k]: v}))
+  const set  = (k, v) => setForm(p => ({...p, [k]: v}))
+  const setCD = (k, v) => setForm(p => ({...p, comp_data: {...(p.comp_data||{}), [k]: v}}))
+  const cd = form.comp_data || {}
+
+  const COMM_SUBTYPES = ['multifamily','office','land','retail','industrial','mixed-use']
 
   const save = async () => {
     const e = {}
@@ -339,16 +343,144 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, onSave 
         <>
           <div className="drawer__body">
             <div className="form-group"><label className="form-label required">Deal Title</label><input className={`form-control${errors.title?' error':''}`} value={form.title} onChange={e=>set('title',e.target.value)} placeholder="e.g. 123 Main St Purchase" /></div>
+
+            {/* Residential / Commercial toggle */}
+            <div className="form-group">
+              <label className="form-label">Property Category</label>
+              <div style={{ display:'flex', gap:0, border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
+                {['residential','commercial'].map(cat => (
+                  <button key={cat} type="button" onClick={() => { set('prop_category', cat); if (cat==='residential') set('prop_subtype','') }}
+                    style={{ flex:1, padding:'7px 0', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, transition:'all 150ms',
+                      background: form.prop_category === cat ? 'var(--gw-slate)' : '#fff',
+                      color:      form.prop_category === cat ? '#fff'            : 'var(--gw-mist)' }}>
+                    {cat.charAt(0).toUpperCase()+cat.slice(1)}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Commercial subtype */}
+            {form.prop_category === 'commercial' && (
+              <div className="form-group">
+                <label className="form-label">Commercial Type</label>
+                <select className="form-control" value={form.prop_subtype||''} onChange={e=>set('prop_subtype',e.target.value)}>
+                  <option value="">— Select type —</option>
+                  {COMM_SUBTYPES.map(t=><option key={t} value={t}>{t.charAt(0).toUpperCase()+t.slice(1)}</option>)}
+                </select>
+              </div>
+            )}
+
             <div className="form-group"><label className="form-label">Stage</label><select className="form-control" value={form.stage} onChange={e=>set('stage',e.target.value)}>{STAGE_ORDER.map(s=><option key={s} value={s}>{STAGE_LABELS[s]}</option>)}</select></div>
             <div className="form-row">
-              <div className="form-group"><label className="form-label">Deal Value</label><input className="form-control" type="number" value={form.value||''} onChange={e=>set('value',e.target.value)} placeholder="0" /></div>
+              <div className="form-group"><label className="form-label">Sale / Deal Value</label><input className="form-control" type="number" value={form.value||''} onChange={e=>set('value',e.target.value)} placeholder="0" /></div>
               <div className="form-group"><label className="form-label">Probability %</label><input className="form-control" type="number" min="0" max="100" value={form.probability||0} onChange={e=>set('probability',e.target.value)} /></div>
             </div>
             <div className="form-group"><label className="form-label">Expected Close Date</label><input className="form-control" type="date" value={form.expected_close_date||''} onChange={e=>set('expected_close_date',e.target.value)} /></div>
             <div className="form-group"><label className="form-label">Contact</label><SearchDropdown items={contacts} value={form.contact_id} onSelect={v=>set('contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
             <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
-            <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} /></div>
+
+            {/* ── Comp Data ─────────────────────────────────────── */}
+            <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
+              <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:12 }}>Comp Data</div>
+
+              {form.prop_category === 'residential' && (
+                <>
+                  <div className="form-row">
+                    <div className="form-group"><label className="form-label">Beds</label><input className="form-control" type="number" value={cd.beds||''} onChange={e=>setCD('beds',e.target.value)} /></div>
+                    <div className="form-group"><label className="form-label">Baths</label><input className="form-control" type="number" step="0.5" value={cd.baths||''} onChange={e=>setCD('baths',e.target.value)} /></div>
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group"><label className="form-label">Sq Ft</label><input className="form-control" type="number" value={cd.sqft||''} onChange={e=>setCD('sqft',e.target.value)} /></div>
+                    <div className="form-group"><label className="form-label">Garage</label>
+                      <select className="form-control" value={cd.garage??''} onChange={e=>setCD('garage',e.target.value)}>
+                        <option value="">—</option><option value="0">No Garage</option><option value="1">1 Car</option><option value="2">2 Car</option><option value="3">3+ Car</option>
+                      </select>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {form.prop_category === 'commercial' && form.prop_subtype === 'multifamily' && (
+                <>
+                  <div className="form-row">
+                    <div className="form-group"><label className="form-label">Total Units</label><input className="form-control" type="number" value={cd.total_units||''} onChange={e=>setCD('total_units',e.target.value)} /></div>
+                    <div className="form-group"><label className="form-label">Price / Unit</label><input className="form-control" type="number" value={cd.price_per_unit||''} onChange={e=>setCD('price_per_unit',e.target.value)} /></div>
+                  </div>
+                  <div className="form-group"><label className="form-label">Unit Mix</label><input className="form-control" value={cd.unit_mix||''} onChange={e=>setCD('unit_mix',e.target.value)} placeholder="e.g. 10×1BR, 5×2BR" /></div>
+                  <div className="form-row">
+                    <div className="form-group"><label className="form-label">City / County</label><input className="form-control" value={cd.city||''} onChange={e=>setCD('city',e.target.value)} /></div>
+                    <div className="form-group"><label className="form-label">Sq Ft (total)</label><input className="form-control" type="number" value={cd.sqft||''} onChange={e=>setCD('sqft',e.target.value)} /></div>
+                  </div>
+                </>
+              )}
+
+              {form.prop_category === 'commercial' && form.prop_subtype === 'land' && (
+                <>
+                  <div className="form-row">
+                    <div className="form-group"><label className="form-label">Acres</label><input className="form-control" type="number" step="0.01" value={cd.acres||''} onChange={e=>setCD('acres',e.target.value)} /></div>
+                    <div className="form-group"><label className="form-label">Sq Ft</label><input className="form-control" type="number" value={cd.sqft||''} onChange={e=>setCD('sqft',e.target.value)} /></div>
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group"><label className="form-label">Status</label>
+                      <select className="form-control" value={cd.land_status||''} onChange={e=>setCD('land_status',e.target.value)}>
+                        <option value="">—</option><option value="raw">Raw Land</option><option value="developed">Developed</option><option value="ready">Ready to Build</option>
+                      </select>
+                    </div>
+                    <div className="form-group"><label className="form-label">Zoning</label><input className="form-control" value={cd.zoning||''} onChange={e=>setCD('zoning',e.target.value)} placeholder="R-1, C-2…" /></div>
+                  </div>
+                </>
+              )}
+
+              {form.prop_category === 'commercial' && form.prop_subtype === 'office' && (
+                <>
+                  <div className="form-row">
+                    <div className="form-group"><label className="form-label">Sq Ft</label><input className="form-control" type="number" value={cd.sqft||''} onChange={e=>setCD('sqft',e.target.value)} /></div>
+                    <div className="form-group"><label className="form-label">Price / SF</label><input className="form-control" type="number" step="0.01" value={cd.price_per_sf||''} onChange={e=>setCD('price_per_sf',e.target.value)} /></div>
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group"><label className="form-label">Class</label>
+                      <select className="form-control" value={cd.class||''} onChange={e=>setCD('class',e.target.value)}>
+                        <option value="">—</option><option value="A">Class A</option><option value="B">Class B</option><option value="C">Class C</option>
+                      </select>
+                    </div>
+                    <div className="form-group"><label className="form-label">Floors</label><input className="form-control" type="number" value={cd.floors||''} onChange={e=>setCD('floors',e.target.value)} /></div>
+                  </div>
+                </>
+              )}
+
+              {form.prop_category === 'commercial' && form.prop_subtype === 'retail' && (
+                <>
+                  <div className="form-row">
+                    <div className="form-group"><label className="form-label">Sq Ft</label><input className="form-control" type="number" value={cd.sqft||''} onChange={e=>setCD('sqft',e.target.value)} /></div>
+                    <div className="form-group"><label className="form-label">Price / SF</label><input className="form-control" type="number" step="0.01" value={cd.price_per_sf||''} onChange={e=>setCD('price_per_sf',e.target.value)} /></div>
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group"><label className="form-label">Frontage (ft)</label><input className="form-control" type="number" value={cd.frontage||''} onChange={e=>setCD('frontage',e.target.value)} /></div>
+                    <div className="form-group"><label className="form-label">Parking Spaces</label><input className="form-control" type="number" value={cd.parking||''} onChange={e=>setCD('parking',e.target.value)} /></div>
+                  </div>
+                </>
+              )}
+
+              {form.prop_category === 'commercial' && form.prop_subtype === 'industrial' && (
+                <>
+                  <div className="form-row">
+                    <div className="form-group"><label className="form-label">Sq Ft</label><input className="form-control" type="number" value={cd.sqft||''} onChange={e=>setCD('sqft',e.target.value)} /></div>
+                    <div className="form-group"><label className="form-label">Price / SF</label><input className="form-control" type="number" step="0.01" value={cd.price_per_sf||''} onChange={e=>setCD('price_per_sf',e.target.value)} /></div>
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group"><label className="form-label">Clear Height (ft)</label><input className="form-control" type="number" value={cd.clear_height||''} onChange={e=>setCD('clear_height',e.target.value)} /></div>
+                    <div className="form-group"><label className="form-label">Loading Docks</label><input className="form-control" type="number" value={cd.loading_docks||''} onChange={e=>setCD('loading_docks',e.target.value)} /></div>
+                  </div>
+                </>
+              )}
+
+              {form.prop_category === 'commercial' && !form.prop_subtype && (
+                <div style={{ fontSize:12, color:'var(--gw-mist)', textAlign:'center', padding:'8px 0' }}>Select a commercial type above to enter comp data.</div>
+              )}
+            </div>
+
+            <div className="form-group" style={{ marginTop:4 }}><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} /></div>
           </div>
           <div className="drawer__foot">
             <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
