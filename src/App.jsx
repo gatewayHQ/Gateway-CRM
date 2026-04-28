@@ -14,6 +14,8 @@ import LoginPage from './pages/Login.jsx'
 import LeadsPage from './pages/Leads.jsx'
 import OmPage from './pages/Om.jsx'
 import SocialPage from './pages/Social.jsx'
+import ReportsPage from './pages/Reports.jsx'
+import SequencesPage from './pages/Sequences.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
 
 const BASE_NAV = [
@@ -25,6 +27,8 @@ const BASE_NAV = [
   { id: 'tasks',      label: 'Tasks',           icon: 'tasks' },
   { id: 'team',       label: 'Team',            icon: 'team' },
   { id: 'templates',  label: 'Email Templates', icon: 'mail' },
+  { id: 'sequences',  label: 'Drip Sequences',  icon: 'sequences' },
+  { id: 'reports',    label: 'Reports',         icon: 'reports' },
   { id: 'om',         label: 'OM Generator',    icon: 'om' },
   { id: 'social',     label: 'Social Media',    icon: 'social' },
   { id: 'leads',      label: 'Website Leads',   icon: 'leads' },
@@ -40,6 +44,8 @@ const TITLES = {
   tasks:      { title: 'Tasks',            crumb: 'Follow-ups · Reminders' },
   team:       { title: 'Team',             crumb: 'Agents · Roster' },
   templates:  { title: 'Email Templates',  crumb: 'Communications · Library' },
+  sequences:  { title: 'Drip Sequences',   crumb: 'Marketing · Automation' },
+  reports:    { title: 'Reports',          crumb: 'Analytics · ROI' },
   om:         { title: 'OM Generator',     crumb: 'Tools · Documents' },
   social:     { title: 'Social Media',     crumb: 'Tools · Content' },
   leads:      { title: 'Website Leads',    crumb: 'Marketing · Captures' },
@@ -137,7 +143,7 @@ function AgentOnboardingModal({ session, onComplete }) {
 
 export default function App() {
   const [session, setSession] = useState(null)
-  const [db, setDb] = useState({ contacts: [], properties: [], deals: [], tasks: [], agents: [], templates: [], commissions: [], commissionsReady: true })
+  const [db, setDb] = useState({ contacts: [], properties: [], deals: [], tasks: [], agents: [], templates: [], commissions: [], commissionsReady: true, activities: [], activitiesReady: true })
   const [loading, setLoading] = useState(true)
   const [route, setRoute] = useState('dashboard')
   const [collapsed, setCollapsed] = useState(false)
@@ -170,7 +176,7 @@ export default function App() {
   useEffect(() => {
     if (!session) return
     const load = async () => {
-      const [contacts, properties, deals, tasks, agents, templates, commissionsRes] = await Promise.all([
+      const [contacts, properties, deals, tasks, agents, templates, commissionsRes, activitiesRes] = await Promise.all([
         supabase.from('contacts').select('*').order('created_at', { ascending: false }),
         supabase.from('properties').select('*').order('created_at', { ascending: false }),
         supabase.from('deals').select('*').order('created_at', { ascending: false }),
@@ -178,6 +184,7 @@ export default function App() {
         supabase.from('agents').select('*').order('created_at', { ascending: true }),
         supabase.from('templates').select('*').order('created_at', { ascending: false }),
         supabase.from('commissions').select('*'),
+        supabase.from('activities').select('*').order('created_at', { ascending: false }),
       ])
       const agentsData = agents.data || []
       setDb({
@@ -189,6 +196,8 @@ export default function App() {
         templates: templates.data || [],
         commissions: commissionsRes.data || [],
         commissionsReady: !commissionsRes.error,
+        activities: activitiesRes.data || [],
+        activitiesReady: !activitiesRes.error,
       })
 
       const loggedInEmail = session?.user?.email?.toLowerCase()
@@ -205,7 +214,7 @@ export default function App() {
 
   const signOut = async () => {
     await supabase.auth.signOut()
-    setDb({ contacts: [], properties: [], deals: [], tasks: [], agents: [], templates: [], commissions: [], commissionsReady: true })
+    setDb({ contacts: [], properties: [], deals: [], tasks: [], agents: [], templates: [], commissions: [], commissionsReady: true, activities: [], activitiesReady: true })
     setNeedsOnboarding(false)
     setLoading(true)
   }
@@ -312,6 +321,8 @@ export default function App() {
         {route === 'tasks'      && <TasksPage {...props} />}
         {route === 'team'       && <TeamPage {...props} onSwitchAgent={id => setActiveAgentId(id)} />}
         {route === 'templates'  && <TemplatesPage {...props} />}
+        {route === 'sequences'  && <SequencesPage {...props} />}
+        {route === 'reports'    && <ReportsPage {...props} />}
         {route === 'om'         && <OmPage />}
         {route === 'social'     && <SocialPage />}
         {route === 'leads'      && <LeadsPage {...props} />}

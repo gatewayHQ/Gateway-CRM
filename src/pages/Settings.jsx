@@ -58,6 +58,16 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
   const [clearing, setClearing] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const [copied, setCopied] = useState(null)
+  const [aiKey, setAiKey] = useState(() => localStorage.getItem('gw_anthropic_key') || '')
+  const [aiKeySaved, setAiKeySaved] = useState(false)
+  const [showKey, setShowKey] = useState(false)
+
+  const saveAiKey = () => {
+    localStorage.setItem('gw_anthropic_key', aiKey.trim())
+    setAiKeySaved(true)
+    setTimeout(() => setAiKeySaved(false), 2000)
+    pushToast('AI key saved')
+  }
 
   const copy = (text, key) => {
     navigator.clipboard.writeText(text)
@@ -240,6 +250,41 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
 
           </div>
         )}
+      </div>
+
+      {/* ── AI Configuration ── */}
+      <div className="settings-section">
+        <div className="settings-section__title">AI Configuration</div>
+        <div className="settings-section__sub">Used for AI-generated email templates in the Templates page</div>
+        <div style={{ maxWidth: 480 }}>
+          <div className="form-group">
+            <label className="form-label">Anthropic API Key</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                className="form-control"
+                type={showKey ? 'text' : 'password'}
+                value={aiKey}
+                onChange={e => setAiKey(e.target.value)}
+                placeholder="sk-ant-..."
+                style={{ flex: 1, fontFamily: aiKey && !showKey ? 'var(--font-mono)' : undefined }}
+              />
+              <button className="btn btn--ghost btn--icon" onClick={() => setShowKey(v => !v)} title={showKey ? 'Hide' : 'Show'}>
+                <Icon name="eye" size={15} />
+              </button>
+            </div>
+            <div className="form-hint">
+              Get your key at <strong>console.anthropic.com</strong> → API Keys. Stored locally in your browser only.
+            </div>
+          </div>
+          <button className="btn btn--primary btn--sm" onClick={saveAiKey} disabled={!aiKey.trim()}>
+            {aiKeySaved ? '✓ Saved' : 'Save Key'}
+          </button>
+          {aiKey && (
+            <button className="btn btn--ghost btn--sm" style={{ marginLeft: 8 }} onClick={() => { setAiKey(''); localStorage.removeItem('gw_anthropic_key'); pushToast('Key removed') }}>
+              Remove
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="settings-section">

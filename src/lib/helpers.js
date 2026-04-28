@@ -48,3 +48,28 @@ export const isThisWeek = (dateStr) => {
   const weekEnd = new Date(n); weekEnd.setDate(n.getDate() + 7)
   return d >= n && d <= weekEnd
 }
+
+export const calcHeatScore = (contact, activities, deals) => {
+  const acts = (activities || []).filter(a => a.contact_id === contact.id)
+  const contactDeals = (deals || []).filter(d => d.contact_id === contact.id)
+  const now = new Date()
+  const d7  = new Date(now - 7  * 86400000)
+  const d30 = new Date(now - 30 * 86400000)
+  let score = 0
+  if (acts.some(a => new Date(a.created_at) > d7))       score += 3
+  else if (acts.some(a => new Date(a.created_at) > d30)) score += 1
+  const activeDeal = contactDeals.find(d => !['closed','lost'].includes(d.stage))
+  if (activeDeal) {
+    if      (['offer','under-contract'].includes(activeDeal.stage)) score += 4
+    else if (['showing','qualified'].includes(activeDeal.stage))    score += 2
+    else                                                             score += 1
+  }
+  if (contact.last_contacted_at) {
+    const lc = new Date(contact.last_contacted_at)
+    if (lc > d7)       score += 2
+    else if (lc > d30) score += 1
+  }
+  if (score >= 5) return 'hot'
+  if (score >= 2) return 'warm'
+  return 'cold'
+}
