@@ -490,8 +490,10 @@ function PowerDialer({ leads, startIndex, agents, activeAgent, onClose, onUpdate
           {/* Phones */}
           <div style={{marginBottom:14}}>
             {phones.length === 0 ? <div style={{fontSize:12,color:'var(--gw-mist)'}}>No phone numbers on file</div> : phones.map((p,i) => (
-              <div key={i} style={{display:'flex',alignItems:'center',gap:8,marginBottom:7}}>
+              <div key={i} style={{display:'flex',alignItems:'center',gap:8,marginBottom:7,padding:'6px 8px',borderRadius:'var(--radius)',background:i===0?'#fffbe6':'transparent',border:i===0?'1px solid #ffe58f':'1px solid transparent'}}>
+                <span style={{fontSize:13}}>{i===0?'⭐':'📞'}</span>
                 <div style={{fontSize:15,fontWeight:700,fontFamily:'var(--font-mono)',flex:1,letterSpacing:'0.02em'}}>{p}</div>
+                {i===0 && <span style={{fontSize:10,color:'#a67c00',fontWeight:600,background:'#fff1a8',padding:'1px 6px',borderRadius:8}}>Best</span>}
                 <button className="btn btn--ghost btn--sm" onClick={()=>copyText(p)} style={{fontSize:11}}><Icon name="copy" size={11}/></button>
                 <a href={`tel:${p.replace(/\D/g,'')}`} className="btn btn--primary btn--sm" style={{fontSize:11,textDecoration:'none'}}><Icon name="phone" size={11}/> Call</a>
               </div>
@@ -758,7 +760,7 @@ export default function ColdCallsPage({ db, activeAgent }) {
                                 {lead.prop_type||'—'}{lead.unit_count&&<div style={{fontSize:11}}>{lead.unit_count}u</div>}
                               </td>
                               <td style={{padding:'9px 12px'}}>
-                                {(lead.phones||[]).slice(0,2).map((p,i)=><div key={i} style={{fontFamily:'var(--font-mono)',fontSize:11,marginBottom:1}}>{p}</div>)}
+                                {(lead.phones||[]).slice(0,2).map((p,i)=><div key={i} style={{fontFamily:'var(--font-mono)',fontSize:11,marginBottom:1}}>{i===0&&lead.phones.length>0?'⭐ ':''}{p}</div>)}
                               </td>
                               <td style={{padding:'9px 12px'}}>
                                 <StatusBadge status={lead.status}/>
