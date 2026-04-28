@@ -322,7 +322,7 @@ function ConvertModal({ lead, agents, activeAgent, onClose, onConverted }) {
         address: [lead.property_address, lead.town, lead.state].filter(Boolean).join(', '),
         type: lead.prop_type || 'residential',
         details: { category: lead.prop_type || 'residential', unit_count: lead.unit_count || null },
-        contact_id: data.id, status: 'active',
+        linked_contact_id: data.id, status: 'active',
       }])
     }
 
