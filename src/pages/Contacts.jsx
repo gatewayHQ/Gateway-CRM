@@ -258,7 +258,7 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
               <div className="form-group">
                 <label className="form-label">Source</label>
                 <select className="form-control" value={form.source||'other'} onChange={e=>set('source',e.target.value)}>
-                  {['referral','website','open house','social','other'].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1)}</option>)}
+                  {['referral','website','open house','social','cold call','other'].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1)}</option>)}
                 </select>
               </div>
               <div className="form-group">
@@ -353,7 +353,7 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
   const doImport = async () => {
     setStep(4); setProgress(0); setErrors([])
     const validTypes   = ['buyer','seller','landlord','tenant','investor']
-    const validSources = ['referral','website','open house','social','other']
+    const validSources = ['referral','website','open house','social','cold call','other']
     const validStatus  = ['active','cold','closed']
     const CHUNK = 50
     let done = 0, errs = []
