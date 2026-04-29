@@ -284,8 +284,10 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
     setErrors(e)
     if (Object.keys(e).length > 0) return
     setSaving(true)
+    const resolvedId = property?.id || crypto.randomUUID()
     const payload = {
       ...form,
+      id:                resolvedId,
       list_price:        form.list_price ? Number(form.list_price) : null,
       sqft:              form.sqft  ? Number(form.sqft)  : null,
       beds:              form.beds  ? Number(form.beds)  : null,
@@ -303,7 +305,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast(property?.id ? 'Property updated' : 'Property added')
-    onSave(data || { ...payload, id: property?.id })
+    onSave(data || payload)
     onClose()
   }
 
