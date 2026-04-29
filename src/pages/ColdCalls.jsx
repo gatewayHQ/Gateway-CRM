@@ -139,8 +139,9 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
 
   const runImport = async () => {
     if (!listName.trim()) { pushToast('Enter a list name', 'error'); return }
+    const assignedAgent = listAgent || activeAgent?.id
+    if (!assignedAgent) { pushToast('No active agent — please refresh and sign in again', 'error'); return }
     setImporting(true); setStep(4)
-    const assignedAgent = listAgent || activeAgent?.id || null
     const { data: list, error: le } = await supabase
       .from('cold_call_lists').insert([{ name: listName.trim(), agent_id: assignedAgent }]).select().single()
     if (le) { pushToast('Failed: ' + le.message, 'error'); setImporting(false); return }

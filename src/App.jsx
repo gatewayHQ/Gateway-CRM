@@ -203,13 +203,33 @@ export default function App() {
         activitiesReady: !activitiesRes.error,
       })
 
+      const userId        = session?.user?.id
       const loggedInEmail = session?.user?.email?.toLowerCase()
-      const matched = agentsData.find(a => a.email?.toLowerCase() === loggedInEmail)
-      if (matched) {
-        // Backfill auth_id for existing agents who pre-date this column
-        if (!matched.auth_id && session?.user?.id) {
-          await supabase.from('agents').update({ auth_id: session.user.id }).eq('id', matched.id)
+
+      // Priority 1: match by auth_id (the bulletproof way)
+      let matched = userId ? agentsData.find(a => a.auth_id === userId) : null
+
+      // Priority 2: claim an unclaimed agent record with matching email
+      if (!matched && userId) {
+        const orphan = agentsData.find(a =>
+          !a.auth_id && a.email?.toLowerCase() === loggedInEmail
+        )
+        if (orphan) {
+          const { error } = await supabase
+            .from('agents').update({ auth_id: userId }).eq('id', orphan.id)
+          if (!error) {
+            matched = { ...orphan, auth_id: userId }
+          } else {
+            // Unique constraint failed → someone else already claimed this auth_id.
+            // Reload agents to find the one that actually has it.
+            const { data: fresh } = await supabase.from('agents').select('*')
+            matched = (fresh || []).find(a => a.auth_id === userId) || null
+            if (fresh) setDb(p => ({ ...p, agents: fresh }))
+          }
         }
+      }
+
+      if (matched) {
         setActiveAgentId(matched.id)
       } else {
         setNeedsOnboarding(true)

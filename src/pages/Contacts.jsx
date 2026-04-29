@@ -175,12 +175,12 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
   const [propForm, setPropForm] = useState(blankProp)
 
   React.useEffect(() => {
-    setForm(contact || blank)
+    setForm(contact || { ...blank, assigned_agent_id: activeAgent?.id || '' })
     setErrors({})
     setTab('details')
     setAddProp(false)
     setPropForm(blankProp)
-  }, [contact, open])
+  }, [contact, open, activeAgent?.id])
 
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
   const setP = (k, v) => setPropForm(p => ({...p, [k]: v}))
@@ -200,8 +200,13 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
 
   const save = async () => {
     if (!validate()) return
+    if (!activeAgent?.id) { pushToast('No active agent — please refresh and sign in again', 'error'); return }
     setSaving(true)
-    const payload = { ...form, tags: typeof form.tags === 'string' ? form.tags.split(',').map(t=>t.trim()).filter(Boolean) : form.tags }
+    const payload = {
+      ...form,
+      assigned_agent_id: form.assigned_agent_id || activeAgent.id,
+      tags: typeof form.tags === 'string' ? form.tags.split(',').map(t=>t.trim()).filter(Boolean) : form.tags,
+    }
     let error, contactId
     if (contact?.id) {
       ;({ error } = await supabase.from('contacts').update(payload).eq('id', contact.id))
@@ -509,10 +514,11 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
           source:     validSources.includes(r.source?.toLowerCase()) ? r.source.toLowerCase() : 'other',
           status:     validStatus.includes(r.status?.toLowerCase())  ? r.status.toLowerCase() : 'active',
           notes:      r.notes  || null,
-          assigned_agent_id: activeAgent?.id || null,
+          assigned_agent_id: activeAgent?.id,
           tags: [],
         }
       })
+      if (!activeAgent?.id) { errs.push('No active agent — refresh and try again'); break }
       const { error } = await supabase.from('contacts').insert(chunk)
       if (error) errs.push(`Rows ${i+1}–${i+CHUNK}: ${error.message}`)
       done += chunk.length
