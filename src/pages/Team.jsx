@@ -205,10 +205,10 @@ export default function TeamPage({ db, setDb, activeAgent, onSwitchAgent }) {
 }
 
 function AgentCard({ agent, contacts, deals, tasks, activeAgent, onSwitchAgent, onEdit, onDelete }) {
-  const agentContacts = contacts.filter(c => c.assigned_agent_id === agent.id).length
-  const agentDeals    = deals.filter(d => d.agent_id === agent.id && d.stage !== 'closed' && d.stage !== 'lost').length
-  const agentTasks    = tasks.filter(t => t.agent_id === agent.id && !t.completed).length
   const isActive      = agent.id === activeAgent?.id
+  const agentContacts = isActive ? contacts.filter(c => c.assigned_agent_id === agent.id).length : null
+  const agentDeals    = isActive ? deals.filter(d => d.agent_id === agent.id && d.stage !== 'closed' && d.stage !== 'lost').length : null
+  const agentTasks    = isActive ? tasks.filter(t => t.agent_id === agent.id && !t.completed).length : null
   return (
     <div className="agent-card" style={{ border: isActive ? '2px solid var(--gw-azure)' : undefined }}>
       {isActive && <div style={{ fontSize:10, fontWeight:600, color:'var(--gw-azure)', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:8 }}>● Active</div>}
@@ -219,7 +219,7 @@ function AgentCard({ agent, contacts, deals, tasks, activeAgent, onSwitchAgent, 
       <div className="agent-card__stats">
         {[{val:agentContacts,label:'Contacts'},{val:agentDeals,label:'Deals'},{val:agentTasks,label:'Tasks'}].map(s => (
           <div key={s.label} className="agent-card__stat">
-            <div className="agent-card__stat-val">{s.val}</div>
+            <div className="agent-card__stat-val">{s.val ?? '—'}</div>
             <div className="agent-card__stat-label">{s.label}</div>
           </div>
         ))}
