@@ -552,6 +552,7 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
   const [activeTool,    setActiveTool]  = React.useState('signature')
   const [activeSignerI, setActiveSignerI] = React.useState(0)
   const [agentSigns,    setAgentSigns]  = React.useState(false)
+  const [agentTabs,     setAgentTabs]   = React.useState([])
   const [sending,       setSending]     = React.useState(false)
   const [dragOver,      setDragOver]    = React.useState(false)
   const fileRef = React.useRef()
@@ -566,30 +567,33 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
   const updateSigner = (id, k, v) => setSigners(p => p.map(s => s.id===id ? {...s,[k]:v} : s))
 
   // All signers including optional agent (always last, routingOrder 2)
+  // agentTabs is kept in its own state so placeField can update it independently
   const allSigners = React.useMemo(() => {
     const clients = signers.map(s => ({ ...s, routingOrder: 1 }))
     if (agentSigns && activeAgent) {
-      clients.push({ id:'agent', name: activeAgent.name, email: activeAgent.email, routingOrder: 2, tabs:[] })
+      clients.push({ id:'agent', name: activeAgent.name, email: activeAgent.email, routingOrder: 2, tabs: agentTabs })
     }
     return clients
-  }, [signers, agentSigns, activeAgent])
+  }, [signers, agentSigns, activeAgent, agentTabs])
 
   // Flat list of all tabs across all signers (for PDFPlacer)
   const allFields = allSigners.flatMap((s, i) => (s.tabs || []).map(t => ({ ...t, signerIndex: i })))
 
   const placeField = (field) => {
-    setSigners(p => p.map((s, i) => {
-      if (i !== activeSignerI) return s
-      return { ...s, tabs: [...(s.tabs || []), field] }
-    }))
-    if (agentSigns && activeSignerI === signers.length) {
-      // placing for agent signer — handled via allSigners but agent is not in signers array
-      // no-op here since agent tabs are managed separately
+    const isAgent = agentSigns && activeSignerI === signers.length
+    if (isAgent) {
+      setAgentTabs(p => [...p, field])
+    } else {
+      setSigners(p => p.map((s, i) => {
+        if (i !== activeSignerI) return s
+        return { ...s, tabs: [...(s.tabs || []), field] }
+      }))
     }
   }
 
   const removeField = (fieldId) => {
     setSigners(p => p.map(s => ({ ...s, tabs: (s.tabs || []).filter(t => t.id !== fieldId) })))
+    setAgentTabs(p => p.filter(t => t.id !== fieldId))
   }
 
   const toBase64 = f => new Promise((res, rej) => {
@@ -615,9 +619,9 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
     if (file) { base64 = await toBase64(file); docName = file.name }
     else { const blob = await fetch(fileUrl).then(r => r.blob()); base64 = await toBase64(blob); docName = pickedFile.replace(/^\d+-/, '') }
 
-    const signerPayload = allSigners.map((s, i) => ({
+    const signerPayload = allSigners.map(s => ({
       name: s.name, email: s.email, routingOrder: s.routingOrder,
-      tabs: (s.tabs || []).filter(t => t.signerIndex === i || allSigners[i] === s),
+      tabs: s.tabs || [],
     }))
 
     const resp = await fetch('/api/docusign', {

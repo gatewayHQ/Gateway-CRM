@@ -45,10 +45,12 @@ create table properties (
   sqft numeric,
   beds integer,
   baths numeric,
+  garage integer default 0,
   mls_number text,
   linked_contact_id uuid references contacts(id),
   assigned_agent_id uuid references agents(id),
   notes text,
+  details jsonb default '{}',
   created_at timestamptz default now()
 );
 
