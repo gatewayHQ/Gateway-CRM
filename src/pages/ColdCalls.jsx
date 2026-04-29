@@ -320,9 +320,12 @@ function ConvertModal({ lead, agents, activeAgent, onClose, onConverted }) {
 
     // Create linked property
     if (lead?.property_address) {
+      const VALID_PROP_TYPES = ['residential','rental','multifamily','office','land','retail','industrial','mixed-use','commercial']
+      const rawType = (lead.prop_type || '').toLowerCase().trim()
+      const safeType = VALID_PROP_TYPES.includes(rawType) ? rawType : 'residential'
       await supabase.from('properties').insert([{
         address: [lead.property_address, lead.town, lead.state].filter(Boolean).join(', '),
-        type: lead.prop_type || 'residential',
+        type: safeType,
         details: { category: lead.prop_type || 'residential', unit_count: lead.unit_count || null },
         linked_contact_id: data.id, status: 'active',
       }])
