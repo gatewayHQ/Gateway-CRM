@@ -56,8 +56,22 @@ export default async function handler(req, res) {
     const headers = { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' }
 
     if (action === 'send') {
-      const { signerName, signerEmail, documentBase64, documentName, emailSubject } = req.body
+      const { signerName, signerEmail, documentBase64, documentName, emailSubject, tabs = [] } = req.body
       const ext = (documentName || 'document.pdf').split('.').pop().toLowerCase()
+
+      const signHereTabs    = []
+      const initialHereTabs = []
+      const dateSignedTabs  = []
+      for (const t of tabs) {
+        const base = { documentId: '1', pageNumber: String(t.page), xPosition: t.xPosition, yPosition: t.yPosition }
+        if (t.type === 'signature') signHereTabs.push(base)
+        else if (t.type === 'initials') initialHereTabs.push(base)
+        else if (t.type === 'date') dateSignedTabs.push(base)
+      }
+      const builtTabs = {}
+      if (signHereTabs.length)    builtTabs.signHereTabs    = signHereTabs
+      if (initialHereTabs.length) builtTabs.initialHereTabs = initialHereTabs
+      if (dateSignedTabs.length)  builtTabs.dateSignedTabs  = dateSignedTabs
 
       const envelope = {
         emailSubject: emailSubject || 'Please sign this document',
@@ -72,28 +86,7 @@ export default async function handler(req, res) {
             email: signerEmail,
             name: signerName,
             recipientId: '1',
-            tabs: {
-              signHereTabs: [{
-                // anchor tag — place /sig1/ in the PDF for exact positioning
-                anchorString: '/sig1/',
-                anchorIgnoreIfNotPresent: 'true',
-                anchorXOffset: '0',
-                anchorYOffset: '0',
-                // fallback coords (bottom of page 1) if anchor not found
-                documentId: '1',
-                pageNumber: '1',
-                xPosition: '100',
-                yPosition: '650',
-              }],
-              dateSignedTabs: [{
-                anchorString: '/date1/',
-                anchorIgnoreIfNotPresent: 'true',
-                documentId: '1',
-                pageNumber: '1',
-                xPosition: '320',
-                yPosition: '650',
-              }],
-            },
+            tabs: builtTabs,
           }],
         },
         status: 'sent',
