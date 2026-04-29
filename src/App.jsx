@@ -78,6 +78,7 @@ function AgentOnboardingModal({ session, onComplete }) {
     if (!name.trim()) { setError('Please enter your full name.'); return }
     setSaving(true)
     const { data, error: err } = await supabase.from('agents').insert([{
+      auth_id: session?.user?.id,
       name: name.trim(),
       initials: autoInitials(name),
       role: role.trim() || 'Agent',
@@ -205,6 +206,10 @@ export default function App() {
       const loggedInEmail = session?.user?.email?.toLowerCase()
       const matched = agentsData.find(a => a.email?.toLowerCase() === loggedInEmail)
       if (matched) {
+        // Backfill auth_id for existing agents who pre-date this column
+        if (!matched.auth_id && session?.user?.id) {
+          await supabase.from('agents').update({ auth_id: session.user.id }).eq('id', matched.id)
+        }
         setActiveAgentId(matched.id)
       } else {
         setNeedsOnboarding(true)
