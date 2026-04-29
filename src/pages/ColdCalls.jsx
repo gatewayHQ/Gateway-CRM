@@ -117,6 +117,7 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
 
   useEffect(() => {
     if (!open) { setStep(1); setRows([]); setHeaders([]); setMapping({}); setListName(''); setProgress(0); setFileName('') }
+    if (open) setListAgent(activeAgent?.id || '')
   }, [open])
 
   const loadFile = (f) => {
@@ -139,8 +140,9 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
   const runImport = async () => {
     if (!listName.trim()) { pushToast('Enter a list name', 'error'); return }
     setImporting(true); setStep(4)
+    const assignedAgent = listAgent || activeAgent?.id || null
     const { data: list, error: le } = await supabase
-      .from('cold_call_lists').insert([{ name: listName.trim(), agent_id: listAgent || null }]).select().single()
+      .from('cold_call_lists').insert([{ name: listName.trim(), agent_id: assignedAgent }]).select().single()
     if (le) { pushToast('Failed: ' + le.message, 'error'); setImporting(false); return }
 
     const getVal = (row, field) => {
@@ -162,7 +164,7 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
       age: getVal(row,'age') ? parseInt(getVal(row,'age')) || null : null,
       phones: [getVal(row,'phone1'), getVal(row,'phone2'), getVal(row,'phone3')].filter(Boolean),
       emails: [getVal(row,'email1'), getVal(row,'email2')].filter(Boolean),
-      remarks: getVal(row,'remarks'), status: 'new', agent_id: listAgent || null,
+      remarks: getVal(row,'remarks'), status: 'new', agent_id: assignedAgent,
     }))
 
     // Duplicate detection — flag leads whose phone matches an existing contact
@@ -234,7 +236,6 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
               <input className="form-control" value={listName} onChange={e=>setListName(e.target.value)} placeholder="e.g. Carroll IA Multifamily Q1" /></div>
             <div className="form-group"><label className="form-label">Assign To Agent</label>
               <select className="form-control" value={listAgent} onChange={e=>setListAgent(e.target.value)}>
-                <option value="">Unassigned</option>
                 {agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
               </select></div>
           </div>
