@@ -13,6 +13,9 @@ const COMMISSION_SQL = `create table if not exists commissions (
   gross_pct numeric not null default 3.0,
   broker_pct numeric not null default 30.0,
   agent_pct numeric not null default 70.0,
+  referral_pct numeric not null default 0,
+  co_agent_pct numeric not null default 0,
+  transaction_fee numeric not null default 0,
   notes text,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
@@ -46,30 +49,56 @@ function CapCelebration({ agentName, onClose }) {
 // ── Commission Drawer ──────────────────────────────────────────────────────────
 function CommissionDrawer({ open, onClose, deal, commission, onSave }) {
   const init = {
-    gross_pct: commission?.gross_pct ?? D_GROSS,
-    broker_pct: commission?.broker_pct ?? D_BROKER,
-    agent_pct: commission?.agent_pct ?? D_AGENT,
+    gross_pct:       commission?.gross_pct       ?? D_GROSS,
+    broker_pct:      commission?.broker_pct      ?? D_BROKER,
+    agent_pct:       commission?.agent_pct       ?? D_AGENT,
+    referral_pct:    commission?.referral_pct    ?? 0,
+    co_agent_pct:    commission?.co_agent_pct    ?? 0,
+    transaction_fee: commission?.transaction_fee ?? 0,
     notes: commission?.notes ?? '',
   }
   const [form, setForm] = useState(init)
   const [saving, setSaving] = useState(false)
 
   React.useEffect(() => {
-    setForm({ gross_pct: commission?.gross_pct ?? D_GROSS, broker_pct: commission?.broker_pct ?? D_BROKER, agent_pct: commission?.agent_pct ?? D_AGENT, notes: commission?.notes ?? '' })
+    setForm({
+      gross_pct:       commission?.gross_pct       ?? D_GROSS,
+      broker_pct:      commission?.broker_pct      ?? D_BROKER,
+      agent_pct:       commission?.agent_pct       ?? D_AGENT,
+      referral_pct:    commission?.referral_pct    ?? 0,
+      co_agent_pct:    commission?.co_agent_pct    ?? 0,
+      transaction_fee: commission?.transaction_fee ?? 0,
+      notes: commission?.notes ?? '',
+    })
   }, [commission, open])
 
   const setBroker = (v) => { const b = Math.min(100,Math.max(0,Number(v)||0)); setForm(p=>({...p,broker_pct:b,agent_pct:Math.round((100-b)*10)/10})) }
   const setAgent  = (v) => { const a = Math.min(100,Math.max(0,Number(v)||0)); setForm(p=>({...p,agent_pct:a,broker_pct:Math.round((100-a)*10)/10})) }
 
-  const sp = deal?.value || 0
-  const gross     = sp * (Number(form.gross_pct)  || 0) / 100
-  const agentAmt  = gross * (Number(form.agent_pct)  || 0) / 100
-  const brokerAmt = gross * (Number(form.broker_pct) || 0) / 100
+  const sp          = deal?.value || 0
+  const gross       = sp * (Number(form.gross_pct) || 0) / 100
+  const referralAmt = gross * (Number(form.referral_pct) || 0) / 100
+  const netGross    = gross - referralAmt
+  const brokerAmt   = netGross * (Number(form.broker_pct) || 0) / 100
+  const agentGross  = netGross * (Number(form.agent_pct) || 0) / 100
+  const txFee       = Number(form.transaction_fee) || 0
+  const coAgentAmt  = (agentGross - txFee) * (Number(form.co_agent_pct) || 0) / 100
+  const agentNet    = agentGross - txFee - coAgentAmt
   const splitWarning = Math.abs(Number(form.broker_pct)+Number(form.agent_pct)-100) > 0.5
 
   const save = async () => {
     setSaving(true)
-    const payload = { deal_id:deal.id, gross_pct:Number(form.gross_pct), broker_pct:Number(form.broker_pct), agent_pct:Number(form.agent_pct), notes:form.notes.trim(), updated_at:new Date().toISOString() }
+    const payload = {
+      deal_id: deal.id,
+      gross_pct:       Number(form.gross_pct),
+      broker_pct:      Number(form.broker_pct),
+      agent_pct:       Number(form.agent_pct),
+      referral_pct:    Number(form.referral_pct),
+      co_agent_pct:    Number(form.co_agent_pct),
+      transaction_fee: Number(form.transaction_fee),
+      notes: form.notes.trim(),
+      updated_at: new Date().toISOString(),
+    }
     let error
     if (commission?.id) { ;({error}=await supabase.from('commissions').update(payload).eq('id',commission.id)) }
     else               { ;({error}=await supabase.from('commissions').insert([payload])) }
@@ -89,21 +118,64 @@ function CommissionDrawer({ open, onClose, deal, commission, onSave }) {
         <div className="form-group">
           <label className="form-label">Gross Commission Rate (%)</label>
           <input className="form-control" type="number" min="0" max="100" step="0.1" value={form.gross_pct} onChange={e=>setForm(p=>({...p,gross_pct:e.target.value}))} />
-          <div className="form-hint">Gross: {formatCurrency(gross)}</div>
+          <div className="form-hint">Gross commission: {formatCurrency(gross)}</div>
         </div>
+
+        <div className="form-group">
+          <label className="form-label">Referral Fee (%)</label>
+          <input className="form-control" type="number" min="0" max="100" step="1" value={form.referral_pct} onChange={e=>setForm(p=>({...p,referral_pct:e.target.value}))} />
+          <div className="form-hint">Paid off gross before split — {formatCurrency(referralAmt)}{referralAmt>0?` → net to split: ${formatCurrency(netGross)}`:''}</div>
+        </div>
+
         <div className="form-row">
           <div className="form-group">
-            <label className="form-label">Broker / House Split (%)</label>
+            <label className="form-label">Brokerage Split (%)</label>
             <input className="form-control" type="number" min="0" max="100" step="1" value={form.broker_pct} onChange={e=>setBroker(e.target.value)} />
-            <div className="form-hint">{formatCurrency(brokerAmt)}</div>
+            <div className="form-hint">House gets {formatCurrency(brokerAmt)}</div>
           </div>
           <div className="form-group">
             <label className="form-label">Agent Split (%)</label>
             <input className="form-control" type="number" min="0" max="100" step="1" value={form.agent_pct} onChange={e=>setAgent(e.target.value)} />
-            <div className="form-hint" style={{ color:'var(--gw-green)' }}>{formatCurrency(agentAmt)}</div>
+            <div className="form-hint">Agent gross {formatCurrency(agentGross)}</div>
           </div>
         </div>
-        {splitWarning && <div style={{ background:'#fff3cd', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:'8px 12px', fontSize:12, color:'#856404', marginBottom:12 }}>Splits should add up to 100%</div>}
+        {splitWarning && <div style={{ background:'#fff3cd', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:'8px 12px', fontSize:12, color:'#856404', marginBottom:12 }}>Brokerage + agent splits should add up to 100%</div>}
+
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">Transaction Fee ($)</label>
+            <input className="form-control" type="number" min="0" step="50" value={form.transaction_fee} onChange={e=>setForm(p=>({...p,transaction_fee:e.target.value}))} placeholder="0" />
+            <div className="form-hint">Flat fee off agent gross</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Co-Agent Split (%)</label>
+            <input className="form-control" type="number" min="0" max="100" step="1" value={form.co_agent_pct} onChange={e=>setForm(p=>({...p,co_agent_pct:e.target.value}))} placeholder="0" />
+            <div className="form-hint">Co-agent gets {formatCurrency(coAgentAmt)}</div>
+          </div>
+        </div>
+
+        {/* Step-by-step breakdown */}
+        {sp > 0 && (
+          <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'12px 14px', marginBottom:16, fontSize:12 }}>
+            <div style={{ fontWeight:700, marginBottom:8, fontSize:11, textTransform:'uppercase', letterSpacing:'0.06em', color:'var(--gw-mist)' }}>Commission Breakdown</div>
+            {[
+              { label:'Sale Price',          val: sp,          color:'var(--gw-ink)' },
+              { label:`Gross Commission (${form.gross_pct}%)`, val: gross,       color:'var(--gw-ink)' },
+              referralAmt > 0 && { label:`Referral Fee (${form.referral_pct}%)`, val: -referralAmt, color:'var(--gw-red)' },
+              referralAmt > 0 && { label:'Net to Split',        val: netGross,    color:'var(--gw-ink)' },
+              { label:`Brokerage (${form.broker_pct}%)`,        val: -brokerAmt,  color:'var(--gw-red)' },
+              txFee > 0 && { label:'Transaction Fee',           val: -txFee,      color:'var(--gw-red)' },
+              coAgentAmt > 0 && { label:`Co-Agent (${form.co_agent_pct}%)`,      val: -coAgentAmt, color:'var(--gw-red)' },
+              { label:'Your Net',            val: agentNet,    color:'var(--gw-green)', bold:true },
+            ].filter(Boolean).map((row, i) => (
+              <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'3px 0', borderTop: row.bold ? '1px solid var(--gw-border)' : 'none', marginTop: row.bold ? 6 : 0, paddingTop: row.bold ? 8 : 3, fontWeight: row.bold ? 700 : 400 }}>
+                <span style={{ color:'var(--gw-mist)' }}>{row.label}</span>
+                <span style={{ color: row.color, fontWeight: row.bold ? 700 : 500 }}>{row.val < 0 ? `(${formatCurrency(Math.abs(row.val))})` : formatCurrency(row.val)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div className="form-group">
           <label className="form-label">Notes</label>
           <textarea className="form-control form-control--textarea" value={form.notes} onChange={e=>setForm(p=>({...p,notes:e.target.value}))} placeholder="Any commission notes…" />
@@ -142,14 +214,21 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
   const getComm = (dealId) => commissions.find(c => c.deal_id === dealId)
 
   const calc = (deal) => {
-    const c = getComm(deal.id)
-    const gross_pct  = c?.gross_pct  ?? D_GROSS
-    const broker_pct = c?.broker_pct ?? D_BROKER
-    const agent_pct  = c?.agent_pct  ?? D_AGENT
-    const sp         = deal.value || 0
-    const gross      = sp * gross_pct  / 100
-    const agentAmt   = gross * agent_pct  / 100
-    const brokerAmt  = gross * broker_pct / 100
+    const c            = getComm(deal.id)
+    const gross_pct    = c?.gross_pct    ?? D_GROSS
+    const broker_pct   = c?.broker_pct   ?? D_BROKER
+    const agent_pct    = c?.agent_pct    ?? D_AGENT
+    const referral_pct = c?.referral_pct ?? 0
+    const co_agent_pct = c?.co_agent_pct ?? 0
+    const tx_fee       = c?.transaction_fee ?? 0
+    const sp           = deal.value || 0
+    const gross        = sp * gross_pct / 100
+    const referralAmt  = gross * referral_pct / 100
+    const netGross     = gross - referralAmt
+    const brokerAmt    = netGross * broker_pct / 100
+    const agentGross   = netGross * agent_pct  / 100
+    const coAgentAmt   = (agentGross - tx_fee) * co_agent_pct / 100
+    const agentAmt     = agentGross - tx_fee - coAgentAmt
     return { gross_pct, broker_pct, agent_pct, sp, gross, agentAmt, brokerAmt }
   }
 
