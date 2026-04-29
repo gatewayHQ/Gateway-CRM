@@ -704,10 +704,6 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
           <option value="">All Statuses</option>
           {['active','cold','closed'].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1)}</option>)}
         </select>
-        <select className="filter-select" value={filterAgent} onChange={e=>setFilterAgent(e.target.value)}>
-          <option value="">All Agents</option>
-          {agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
-        </select>
         <select className="filter-select" value={filterHeat} onChange={e=>setFilterHeat(e.target.value)}>
           <option value="">All Heat</option>
           <option value="hot">🔥 Hot</option>

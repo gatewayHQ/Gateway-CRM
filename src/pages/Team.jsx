@@ -225,7 +225,6 @@ function AgentCard({ agent, contacts, deals, tasks, activeAgent, onSwitchAgent, 
         ))}
       </div>
       <div style={{ display:'flex', gap:6 }}>
-        {!isActive && <button className="btn btn--secondary" style={{ flex:1, justifyContent:'center', fontSize:12 }} onClick={() => { onSwitchAgent(agent.id); pushToast(`Now active as ${agent.name}`) }}>Switch to Agent</button>}
         <button className="btn btn--ghost btn--icon" onClick={onEdit}><Icon name="edit" size={14} /></button>
         <button className="btn btn--ghost btn--icon" onClick={onDelete}><Icon name="trash" size={14} /></button>
       </div>

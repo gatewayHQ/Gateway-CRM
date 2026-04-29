@@ -152,7 +152,6 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false)
   const [activeAgentId, setActiveAgentId] = useState(null)
   const [compose, setCompose] = useState(null)
-  const [agentSwitcher, setAgentSwitcher] = useState(false)
   const [globalSearch, setGlobalSearch] = useState('')
   const [mobileMore, setMobileMore] = useState(false)
   const [needsOnboarding, setNeedsOnboarding] = useState(false)
@@ -279,7 +278,7 @@ export default function App() {
           ))}
         </nav>
 
-        <div className="sidebar__agent" onClick={() => setAgentSwitcher(true)}>
+        <div className="sidebar__agent">
           {activeAgent && <Avatar agent={activeAgent} size={32} />}
           {!activeAgent && <div style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon name="contacts" size={14} style={{ color: 'rgba(255,255,255,0.4)' }} /></div>}
           {!collapsed && (
@@ -288,7 +287,6 @@ export default function App() {
               <div className="agent-role">{activeAgent?.role || 'Set up your profile'}</div>
             </div>
           )}
-          {!collapsed && <Icon name="chevronDown" size={14} style={{ color: 'rgba(255,255,255,0.4)', flexShrink: 0 }} />}
         </div>
       </aside>
 
@@ -303,7 +301,7 @@ export default function App() {
             <input placeholder="Search contacts, properties, deals…" value={globalSearch} onChange={e => setGlobalSearch(e.target.value)} />
           </div>
           {activeAgent && (
-            <div className="topbar__agent-badge" onClick={() => setAgentSwitcher(true)}>
+            <div className="topbar__agent-badge">
               <Avatar agent={activeAgent} size={30} />
               <div>
                 <div className="label">Active Agent</div>
@@ -335,34 +333,6 @@ export default function App() {
 
       {compose && <ComposeModal ctx={compose} db={db} activeAgent={activeAgent} onClose={() => setCompose(null)} />}
 
-      {agentSwitcher && (
-        <Modal open={true} onClose={() => setAgentSwitcher(false)}>
-          <div className="modal__head">
-            <div>
-              <div className="eyebrow-label">Switch Active Agent</div>
-              <h3 style={{ margin: 0, fontFamily: 'var(--font-display)', fontSize: 22 }}>Act as a different teammate</h3>
-            </div>
-            <button className="drawer__close" onClick={() => setAgentSwitcher(false)}><Icon name="x" size={18} /></button>
-          </div>
-          <div className="modal__body">
-            <p style={{ fontSize: 13, color: 'var(--gw-mist)', marginTop: 0, marginBottom: 16 }}>Records and activity will be attributed to the selected agent.</p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {db.agents.map(a => (
-                <div key={a.id}
-                  onClick={() => { setActiveAgentId(a.id); setAgentSwitcher(false); pushToast(`Now active as ${a.name}`) }}
-                  style={{ display: 'flex', alignItems: 'center', gap: 12, padding: 12, border: '1px solid var(--gw-border)', cursor: 'pointer', background: a.id === activeAgentId ? 'var(--gw-bone)' : '#fff', borderRadius: 'var(--radius)', transition: 'background 150ms' }}>
-                  <Avatar agent={a} size={36} />
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: 14 }}>{a.name}</div>
-                    <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>{a.role} · {a.email}</div>
-                  </div>
-                  {a.id === activeAgentId && <Badge variant="active">Active</Badge>}
-                </div>
-              ))}
-            </div>
-          </div>
-        </Modal>
-      )}
 
       {/* ── Mobile bottom nav ── */}
       <nav className="mobile-nav">
