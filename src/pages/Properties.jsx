@@ -284,11 +284,13 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, onSave }) {
     setSaving(true)
     const payload = {
       ...form,
-      list_price: form.list_price ? Number(form.list_price) : null,
-      sqft:       form.sqft  ? Number(form.sqft)  : null,
-      beds:       form.beds  ? Number(form.beds)  : null,
-      baths:      form.baths ? Number(form.baths) : null,
-      garage:     form.garage != null ? Number(form.garage) : 0,
+      list_price:         form.list_price ? Number(form.list_price) : null,
+      sqft:               form.sqft       ? Number(form.sqft)       : null,
+      beds:               form.beds       ? Number(form.beds)       : null,
+      baths:              form.baths      ? Number(form.baths)      : null,
+      garage:             form.garage != null ? Number(form.garage) : 0,
+      linked_contact_id:  form.linked_contact_id  || null,
+      assigned_agent_id:  form.assigned_agent_id  || null,
     }
     let error
     if (property?.id) {
