@@ -263,16 +263,18 @@ function CommercialFields({ form, set }) {
   return null
 }
 
-function PropertyDrawer({ open, onClose, property, agents, contacts, onSave }) {
+function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave }) {
   const blank = { address:'', city:'', state:'', zip:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{} }
   const [form, setForm]     = useState(property || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
 
   React.useEffect(() => {
-    setForm(property ? { ...blank, ...property, details: property.details || {} } : blank)
+    setForm(property
+      ? { ...blank, ...property, details: property.details || {} }
+      : { ...blank, assigned_agent_id: activeAgent?.id || '' })
     setErrors({})
-  }, [property, open])
+  }, [property, open, activeAgent?.id])
 
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
 
@@ -284,22 +286,25 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, onSave }) {
     setSaving(true)
     const payload = {
       ...form,
-      list_price: form.list_price ? Number(form.list_price) : null,
-      sqft:       form.sqft  ? Number(form.sqft)  : null,
-      beds:       form.beds  ? Number(form.beds)  : null,
-      baths:      form.baths ? Number(form.baths) : null,
-      garage:     form.garage != null ? Number(form.garage) : 0,
+      list_price:        form.list_price ? Number(form.list_price) : null,
+      sqft:              form.sqft  ? Number(form.sqft)  : null,
+      beds:              form.beds  ? Number(form.beds)  : null,
+      baths:             form.baths ? Number(form.baths) : null,
+      garage:            form.garage != null ? Number(form.garage) : 0,
+      linked_contact_id: form.linked_contact_id || null,
+      assigned_agent_id: form.assigned_agent_id || activeAgent?.id || null,
     }
-    let error
+    let error, data
     if (property?.id) {
-      ({ error } = await supabase.from('properties').update(payload).eq('id', property.id))
+      ({ error, data } = await supabase.from('properties').update(payload).eq('id', property.id).select().single())
     } else {
-      ({ error } = await supabase.from('properties').insert([payload]))
+      ({ error, data } = await supabase.from('properties').insert([payload]).select().single())
     }
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast(property?.id ? 'Property updated' : 'Property added')
-    onSave(); onClose()
+    onSave(data || { ...payload, id: property?.id })
+    onClose()
   }
 
   const commercial = isCommercial(form.type)
@@ -404,8 +409,23 @@ export default function PropertiesPage({ db, setDb, activeAgent }) {
   })
 
   const reload = async () => {
-    const { data } = await supabase.from('properties').select('*').order('created_at', { ascending: false })
-    setDb(p => ({ ...p, properties: data || [] }))
+    const { data, error } = await supabase.from('properties').select('*').order('created_at', { ascending: false })
+    if (!error && data) setDb(p => ({ ...p, properties: data }))
+  }
+
+  const handleSave = (savedProp) => {
+    if (savedProp) {
+      setDb(p => {
+        const exists = p.properties.some(x => x.id === savedProp.id)
+        return {
+          ...p,
+          properties: exists
+            ? p.properties.map(x => x.id === savedProp.id ? { ...x, ...savedProp } : x)
+            : [savedProp, ...p.properties],
+        }
+      })
+    }
+    reload()
   }
 
   const del = async (id) => {
@@ -502,7 +522,7 @@ export default function PropertiesPage({ db, setDb, activeAgent }) {
         </div>
       )}
 
-      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} onSave={reload} />
+      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={handleSave} />
       {confirm && <ConfirmDialog message="This will permanently delete this property." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
     </div>
   )
