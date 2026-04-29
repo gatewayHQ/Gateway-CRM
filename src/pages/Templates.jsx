@@ -157,9 +157,12 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
   const [subject, setSubject] = useState(ctx?.subject || '')
   const [body, setBody]       = useState('')
   const [sending, setSending] = useState(false)
-  const [resendReady, setResendReady] = useState(null) // null=loading, true/false
+  const [resendReady, setResendReady] = useState(null)
   const [resendKey, setResendKey]   = useState('')
   const [resendFrom, setResendFrom] = useState('')
+  const [aiPrompt, setAiPrompt]   = useState('')
+  const [aiOpen, setAiOpen]       = useState(false)
+  const [aiLoading, setAiLoading] = useState(false)
 
   // Resolve merge tags using real contact data from ctx
   const contact = ctx?.contactId ? (db?.contacts || []).find(c => c.id === ctx.contactId) : null
@@ -171,6 +174,41 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
     .replace(/{{agentName}}/g,       agent.name || '')
     .replace(/{{propertyAddress}}/g, ctx?.propertyAddress || '')
     .replace(/{{dealValue}}/g,       ctx?.dealValue || '')
+
+  const writeWithAI = async () => {
+    setAiLoading(true)
+    const activities = (db?.activities || []).filter(a => a.contact_id === contact?.id).slice(0, 5)
+    const system = `You are an expert real estate email writer. Write personalized, warm, professional emails. Return ONLY a JSON object with "subject" and "body" string fields — no markdown, no explanation.`
+    const userMsg = [
+      `Agent: ${activeAgent?.name || 'Agent'}, ${activeAgent?.role || 'Real Estate Agent'}`,
+      contact ? `Contact: ${contact.first_name} ${contact.last_name} | Type: ${contact.type} | Source: ${contact.source}` : '',
+      contact?.notes ? `Contact Notes: ${contact.notes}` : '',
+      activities.length ? `Recent activity: ${activities.map(a => `[${a.type}] ${a.body || a.notes || ''}`).join(' | ')}` : '',
+      ctx?.propertyAddress ? `Property: ${ctx.propertyAddress}` : '',
+      ctx?.dealValue ? `Deal value: ${ctx.dealValue}` : '',
+      body ? `Existing draft to improve:\n${body}` : '',
+      `Email purpose: ${aiPrompt || 'Follow up with this contact'}`,
+    ].filter(Boolean).join('\n')
+
+    try {
+      const res = await fetch('/api/claude', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ system, messages: [{ role: 'user', content: userMsg }], max_tokens: 1024 }),
+      })
+      const data = await res.json()
+      if (!res.ok) { pushToast(data.error || 'AI failed', 'error'); setAiLoading(false); return }
+      const text = data.content?.[0]?.text || ''
+      const parsed = JSON.parse(text)
+      if (parsed.subject) setSubject(parsed.subject)
+      if (parsed.body) setBody(parsed.body)
+      setAiOpen(false); setAiPrompt('')
+      pushToast('Email written by AI — review before sending')
+    } catch (e) {
+      pushToast('AI error: ' + e.message, 'error')
+    }
+    setAiLoading(false)
+  }
 
   // Pre-fill resolved body and load Resend key on mount
   useEffect(() => {
@@ -264,8 +302,29 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
           <textarea className="compose-body" value={body} onChange={e=>setBody(e.target.value)} placeholder="Write your message here…" />
         </div>
       </div>
+      {aiOpen && (
+        <div style={{ padding:'12px 24px', borderTop:'1px solid var(--gw-border)', background:'var(--gw-sky)' }}>
+          <div style={{ fontSize:12, fontWeight:600, marginBottom:6 }}>✦ Write with AI</div>
+          <div style={{ display:'flex', gap:8 }}>
+            <input className="form-control" style={{ flex:1, fontSize:12 }} value={aiPrompt}
+              onChange={e=>setAiPrompt(e.target.value)}
+              placeholder="e.g. Follow up after our call, introduce myself, share market update…"
+              onKeyDown={e=>e.key==='Enter'&&writeWithAI()} />
+            <button className="btn btn--primary btn--sm" onClick={writeWithAI} disabled={aiLoading}>
+              {aiLoading ? 'Writing…' : 'Generate'}
+            </button>
+            <button className="btn btn--ghost btn--icon btn--sm" onClick={()=>setAiOpen(false)}><Icon name="x" size={14}/></button>
+          </div>
+          <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:5 }}>
+            AI will use contact notes, activity history, and property info to personalize the email.
+          </div>
+        </div>
+      )}
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Discard</button>
+        <button className="btn btn--ghost" onClick={()=>setAiOpen(o=>!o)} style={{ marginRight:'auto' }}>
+          ✦ Write with AI
+        </button>
         <button className="btn btn--primary" onClick={send} disabled={sending || !to}>
           <Icon name="send" size={13} />{sending ? 'Sending…' : resendKey ? 'Send Email' : 'Open in Mail App'}
         </button>
