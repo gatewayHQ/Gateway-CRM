@@ -263,16 +263,18 @@ function CommercialFields({ form, set }) {
   return null
 }
 
-function PropertyDrawer({ open, onClose, property, agents, contacts, onSave }) {
+function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave }) {
   const blank = { address:'', city:'', state:'', zip:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{} }
   const [form, setForm]     = useState(property || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
 
   React.useEffect(() => {
-    setForm(property ? { ...blank, ...property, details: property.details || {} } : blank)
+    setForm(property
+      ? { ...blank, ...property, details: property.details || {} }
+      : { ...blank, assigned_agent_id: activeAgent?.id || '' })
     setErrors({})
-  }, [property, open])
+  }, [property, open, activeAgent?.id])
 
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
 
@@ -290,7 +292,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, onSave }) {
       baths:              form.baths      ? Number(form.baths)      : null,
       garage:             form.garage != null ? Number(form.garage) : 0,
       linked_contact_id:  form.linked_contact_id  || null,
-      assigned_agent_id:  form.assigned_agent_id  || null,
+      assigned_agent_id:  form.assigned_agent_id  || activeAgent?.id || null,
     }
     let error
     if (property?.id) {
@@ -504,7 +506,7 @@ export default function PropertiesPage({ db, setDb, activeAgent }) {
         </div>
       )}
 
-      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} onSave={reload} />
+      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={reload} />
       {confirm && <ConfirmDialog message="This will permanently delete this property." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
     </div>
   )
