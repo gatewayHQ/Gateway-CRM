@@ -3,7 +3,8 @@ import { createSign } from 'crypto'
 const INTEGRATION_KEY = process.env.DOCUSIGN_INTEGRATION_KEY
 const ACCOUNT_ID      = process.env.DOCUSIGN_ACCOUNT_ID
 const USER_ID         = process.env.DOCUSIGN_USER_ID
-const BASE_URI        = process.env.DOCUSIGN_BASE_URI || 'https://na4.docusign.net'
+const BASE_URI        = process.env.DOCUSIGN_BASE_URI    || 'https://demo.docusign.net'
+const AUTH_SERVER     = process.env.DOCUSIGN_AUTH_SERVER || 'account-d.docusign.com'
 
 function buildJWT() {
   const privateKey = (process.env.DOCUSIGN_PRIVATE_KEY || '').replace(/\\n/g, '\n')
@@ -12,7 +13,7 @@ function buildJWT() {
   const payload = Buffer.from(JSON.stringify({
     iss: INTEGRATION_KEY,
     sub: USER_ID,
-    aud: 'account.docusign.com',
+    aud: AUTH_SERVER,
     iat: now,
     exp: now + 3600,
     scope: 'signature impersonation',
@@ -24,7 +25,7 @@ function buildJWT() {
 }
 
 async function getAccessToken() {
-  const res = await fetch('https://account.docusign.com/oauth/token', {
+  const res = await fetch(`https://${AUTH_SERVER}/oauth/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
