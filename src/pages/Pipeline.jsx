@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER } from '../lib/helpers.js'
-import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
   'Title Search Ordered',
@@ -412,6 +412,238 @@ with check (bucket_id = 'deal-documents');`}
   )
 }
 
+const DS_STATUS = {
+  sent:      { bg: '#e8f4fd', color: 'var(--gw-azure)' },
+  delivered: { bg: '#fff3cd', color: '#856404' },
+  completed: { bg: 'var(--gw-green-light)', color: 'var(--gw-green)' },
+  declined:  { bg: 'var(--gw-red-light)',   color: 'var(--gw-red)' },
+  voided:    { bg: 'var(--gw-bone)',         color: 'var(--gw-mist)' },
+}
+
+function SendSignatureModal({ deal, contacts, dealFiles, onClose, onSent }) {
+  const contact = contacts?.find(c => c.id === deal?.contact_id)
+  const [signerName,  setSignerName]  = React.useState(`${contact?.first_name || ''} ${contact?.last_name || ''}`.trim())
+  const [signerEmail, setSignerEmail] = React.useState((contact?.emails || [])[0] || '')
+  const [subject,     setSubject]     = React.useState(`Please sign: ${deal?.title || 'Document'}`)
+  const [file,        setFile]        = React.useState(null)
+  const [pickedFile,  setPickedFile]  = React.useState('')
+  const [sending,     setSending]     = React.useState(false)
+  const [dragOver,    setDragOver]    = React.useState(false)
+  const fileRef = React.useRef()
+
+  const toBase64 = f => new Promise((res, rej) => {
+    const r = new FileReader()
+    r.onload = e => res(e.target.result.split(',')[1])
+    r.onerror = rej
+    r.readAsDataURL(f)
+  })
+
+  const send = async () => {
+    if (!signerName.trim() || !signerEmail.trim()) { pushToast('Signer name and email required', 'error'); return }
+    if (!file && !pickedFile) { pushToast('Select or upload a document', 'error'); return }
+    setSending(true)
+
+    let base64, docName
+    if (file) {
+      base64  = await toBase64(file)
+      docName = file.name
+    } else {
+      const { data: urlData, error } = await supabase.storage.from(BUCKET).createSignedUrl(`deal-${deal.id}/${pickedFile}`, 60)
+      if (error) { pushToast('Could not load document', 'error'); setSending(false); return }
+      const blob = await fetch(urlData.signedUrl).then(r => r.blob())
+      base64  = await toBase64(blob)
+      docName = pickedFile.replace(/^\d+-/, '')
+    }
+
+    const resp = await fetch('/api/docusign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'send', signerName, signerEmail, documentBase64: base64, documentName: docName, emailSubject: subject }),
+    })
+    const data = await resp.json()
+    setSending(false)
+    if (data.error) { pushToast(data.error, 'error'); return }
+
+    await supabase.from('docusign_envelopes').insert([{
+      deal_id: deal.id, envelope_id: data.envelopeId,
+      signer_name: signerName, signer_email: signerEmail,
+      document_name: docName, subject, status: data.status || 'sent',
+    }])
+    pushToast(`Sent to ${signerName} for signature`)
+    onSent()
+  }
+
+  return (
+    <Modal open={true} onClose={onClose} width={480}>
+      <div className="modal__head">
+        <div><div className="eyebrow-label">DocuSign</div><h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Send for Signature</h3></div>
+        <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
+      </div>
+      <div className="modal__body">
+        <div className="form-group">
+          <label className="form-label required">Signer Name</label>
+          <input className="form-control" value={signerName} onChange={e=>setSignerName(e.target.value)} placeholder="Full name"/>
+        </div>
+        <div className="form-group">
+          <label className="form-label required">Signer Email</label>
+          <input className="form-control" type="email" value={signerEmail} onChange={e=>setSignerEmail(e.target.value)} placeholder="email@example.com"/>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Email Subject</label>
+          <input className="form-control" value={subject} onChange={e=>setSubject(e.target.value)}/>
+        </div>
+        <div className="form-group">
+          <label className="form-label required">Document (PDF)</label>
+          {dealFiles.length > 0 && (
+            <div style={{ marginBottom:10 }}>
+              <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:6 }}>Pick from deal documents:</div>
+              {dealFiles.map(f => {
+                const name = f.name.replace(/^\d+-/, '')
+                const picked = pickedFile === f.name
+                return (
+                  <div key={f.name} onClick={() => { setPickedFile(picked ? '' : f.name); if (!picked) setFile(null) }}
+                    style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', border:`1px solid ${picked?'var(--gw-azure)':'var(--gw-border)'}`, borderRadius:'var(--radius)', marginBottom:4, cursor:'pointer', background:picked?'var(--gw-sky)':'#fff' }}>
+                    <Icon name="file" size={13} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
+                    <span style={{ fontSize:12, flex:1, fontWeight:picked?700:400 }}>{name}</span>
+                    {picked && <Icon name="check" size={13} style={{ color:'var(--gw-azure)' }}/>}
+                  </div>
+                )
+              })}
+              <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'8px 0 4px' }}>— or upload a different file —</div>
+            </div>
+          )}
+          <div
+            style={{ border:`2px dashed ${dragOver?'var(--gw-azure)':file?'var(--gw-green)':'var(--gw-border)'}`, borderRadius:'var(--radius)', padding:'14px 16px', textAlign:'center', cursor:'pointer', background:dragOver?'var(--gw-sky)':file?'var(--gw-green-light)':'transparent', transition:'all 150ms' }}
+            onClick={() => fileRef.current.click()}
+            onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={e => { e.preventDefault(); setDragOver(false); setFile(e.dataTransfer.files[0]); setPickedFile('') }}>
+            <input ref={fileRef} type="file" accept=".pdf" style={{ display:'none' }} onChange={e => { setFile(e.target.files[0]); setPickedFile('') }}/>
+            {file
+              ? <div style={{ fontSize:12, fontWeight:600, color:'var(--gw-green)' }}>{file.name}</div>
+              : <><Icon name="upload" size={18} style={{ color:'var(--gw-border)', marginBottom:4 }}/><div style={{ fontSize:12 }}>Drop PDF or click to browse</div></>}
+          </div>
+        </div>
+        <div style={{ padding:'10px 12px', background:'var(--gw-sky)', borderRadius:'var(--radius)', fontSize:11, color:'var(--gw-azure)', lineHeight:1.6 }}>
+          <strong>Tip:</strong> Add <code style={{ background:'rgba(0,0,0,0.06)', padding:'1px 4px', borderRadius:3 }}>/sig1/</code> anywhere in your PDF to anchor the signature field exactly where you want it. Otherwise it defaults to the bottom of page 1.
+        </div>
+      </div>
+      <div className="modal__foot">
+        <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
+        <button className="btn btn--primary" onClick={send} disabled={sending}>{sending ? 'Sending…' : 'Send for Signature'}</button>
+      </div>
+    </Modal>
+  )
+}
+
+function SignaturesTab({ deal, contacts }) {
+  const [envelopes,   setEnvelopes]   = React.useState([])
+  const [loading,     setLoading]     = React.useState(true)
+  const [tableReady,  setTableReady]  = React.useState(true)
+  const [sendOpen,    setSendOpen]    = React.useState(false)
+  const [dealFiles,   setDealFiles]   = React.useState([])
+
+  React.useEffect(() => { if (deal?.id) { loadEnvelopes(); loadDealFiles() } }, [deal?.id])
+
+  const loadEnvelopes = async () => {
+    setLoading(true)
+    const { data, error } = await supabase.from('docusign_envelopes').select('*').eq('deal_id', deal.id).order('created_at', { ascending: false })
+    if (error?.code === '42P01') { setTableReady(false); setLoading(false); return }
+    setEnvelopes(data || [])
+    setLoading(false)
+  }
+
+  const loadDealFiles = async () => {
+    const { data } = await supabase.storage.from(BUCKET).list(`deal-${deal.id}`, { sortBy: { column: 'created_at', order: 'desc' } })
+    setDealFiles((data || []).filter(f => f.name !== '.emptyFolderPlaceholder'))
+  }
+
+  const refreshStatus = async (env) => {
+    const res = await fetch('/api/docusign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'status', envelopeId: env.envelope_id }),
+    })
+    const data = await res.json()
+    if (data.error) { pushToast(data.error, 'error'); return }
+    await supabase.from('docusign_envelopes').update({ status: data.status, completed_at: data.completedDateTime || null }).eq('id', env.id)
+    loadEnvelopes()
+    pushToast(`Status: ${data.status}`, 'info')
+  }
+
+  if (!tableReady) return (
+    <div style={{ padding:20 }}>
+      <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:16, fontSize:13, lineHeight:1.7 }}>
+        <strong>Run this SQL in your Supabase dashboard:</strong>
+        <pre style={{ background:'var(--gw-slate)', color:'#e2e8f0', padding:10, borderRadius:6, fontSize:11, marginTop:8, overflowX:'auto' }}>
+{`create table if not exists docusign_envelopes (
+  id            uuid primary key default gen_random_uuid(),
+  deal_id       uuid references deals(id) on delete cascade,
+  envelope_id   text not null,
+  signer_name   text,
+  signer_email  text,
+  document_name text,
+  subject       text,
+  status        text default 'sent',
+  sent_at       timestamptz default now(),
+  completed_at  timestamptz,
+  created_at    timestamptz default now()
+);
+alter table docusign_envelopes enable row level security;
+create policy "agents_envelopes" on docusign_envelopes
+  for all to authenticated using (true) with check (true);`}
+        </pre>
+        <button className="btn btn--secondary btn--sm" style={{ marginTop:8 }} onClick={() => { setTableReady(true); loadEnvelopes() }}>
+          <Icon name="refresh" size={12}/> Retry
+        </button>
+      </div>
+    </div>
+  )
+
+  return (
+    <div style={{ padding:16, overflowY:'auto', flex:1 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
+        <div style={{ fontSize:13, color:'var(--gw-mist)' }}>{envelopes.length} document{envelopes.length !== 1 ? 's' : ''} sent</div>
+        <button className="btn btn--primary btn--sm" onClick={() => setSendOpen(true)}>
+          <Icon name="send" size={13}/> Send for Signature
+        </button>
+      </div>
+
+      {loading
+        ? <div style={{ fontSize:13, color:'var(--gw-mist)' }}>Loading…</div>
+        : envelopes.length === 0
+          ? <div style={{ textAlign:'center', color:'var(--gw-mist)', fontSize:13, padding:'32px 0' }}>No documents sent yet.<br/>Click "Send for Signature" to get started.</div>
+          : envelopes.map(env => {
+              const sc = DS_STATUS[env.status] || DS_STATUS.sent
+              return (
+                <div key={env.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:8, background:'#fff' }}>
+                  <Icon name="file" size={18} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:13, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{env.document_name || 'Document'}</div>
+                    <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>
+                      To: {env.signer_name} · {new Date(env.sent_at || env.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}
+                    </div>
+                  </div>
+                  <span style={{ padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:700, background:sc.bg, color:sc.color, flexShrink:0, textTransform:'capitalize' }}>{env.status}</span>
+                  <button className="btn btn--ghost btn--icon btn--sm" title="Refresh status" onClick={() => refreshStatus(env)}>
+                    <Icon name="refresh" size={12}/>
+                  </button>
+                </div>
+              )
+            })
+      }
+
+      {sendOpen && (
+        <SendSignatureModal
+          deal={deal} contacts={contacts} dealFiles={dealFiles}
+          onClose={() => setSendOpen(false)}
+          onSent={() => { setSendOpen(false); loadEnvelopes() }}
+        />
+      )}
+    </div>
+  )
+}
+
 function DealDrawer({ open, onClose, deal, agents, contacts, properties, onSave }) {
   const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
   const [form, setForm]     = useState(deal || blank)
@@ -457,7 +689,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, onSave 
       {/* Tab bar — only for existing deals */}
       {isExisting && (
         <div className="drawer-tabs">
-          {[['details','Details'],['dates','Key Dates'],['checklist','Checklist'],['documents','Documents']].map(([id, label]) => (
+          {[['details','Details'],['dates','Key Dates'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures']].map(([id, label]) => (
             <button key={id} className={`drawer-tab${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}>
               {label}
             </button>
@@ -629,6 +861,11 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, onSave 
       {/* Documents tab */}
       {tab === 'documents' && isExisting && (
         <DocumentsTab deal={deal} />
+      )}
+
+      {/* Signatures tab */}
+      {tab === 'signatures' && isExisting && (
+        <SignaturesTab deal={deal} contacts={contacts} />
       )}
     </Drawer>
   )
