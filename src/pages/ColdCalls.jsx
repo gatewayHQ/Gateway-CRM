@@ -638,7 +638,6 @@ export default function ColdCallsPage({ db, activeAgent }) {
   const [dialer, setDialer]           = useState(false)
   const [dialerStart, setDialerStart] = useState(0)
   const [convertLead, setConvertLead] = useState(null)
-  const [filterAgent, setFilterAgent] = useState('all')
   const [ready, setReady]             = useState(true)
 
   const agents = db?.agents || []
@@ -672,9 +671,7 @@ export default function ColdCallsPage({ db, activeAgent }) {
     pushToast('List deleted', 'info')
   }
 
-  const filtered = leads
-    .filter(l => filterStatus === 'all' || l.status === filterStatus)
-    .filter(l => filterAgent === 'all' || l.agent_id === filterAgent)
+  const filtered = filterStatus === 'all' ? leads : leads.filter(l => l.status === filterStatus)
 
   const stats = {
     total:     leads.length,
@@ -754,12 +751,6 @@ export default function ColdCallsPage({ db, activeAgent }) {
                   <span style={{background:'#fff3cd',color:'#856404',padding:'2px 7px',borderRadius:8}}>{stats.callback} callback</span>
                   <span style={{background:'var(--gw-green-light)',color:'var(--gw-green)',padding:'2px 7px',borderRadius:8}}>{stats.converted} converted</span>
                 </div>
-                {agents.length > 1 && (
-                  <select className="form-control" style={{width:'auto',fontSize:11,padding:'3px 8px',height:28}} value={filterAgent} onChange={e=>setFilterAgent(e.target.value)}>
-                    <option value="all">All Agents</option>
-                    {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                  </select>
-                )}
                 <button className="btn btn--primary btn--sm"
                   onClick={()=>{ const i=leads.findIndex(l=>l.status==='new'); setDialerStart(i>=0?i:0); setDialer(true) }}
                   disabled={leads.filter(l=>l.status==='new').length===0}>
