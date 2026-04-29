@@ -49,6 +49,20 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'DocuSign environment variables not configured' })
   }
 
+  if (req.body?.action === 'debug') {
+    const pk = (process.env.DOCUSIGN_PRIVATE_KEY || '').replace(/\\n/g, '\n')
+    return res.json({
+      authServer:       AUTH_SERVER,
+      baseUri:          BASE_URI,
+      integrationKey:   INTEGRATION_KEY,
+      accountId:        ACCOUNT_ID,
+      userId:           USER_ID,
+      privateKeyStart:  pk.slice(0, 40),
+      privateKeyEnd:    pk.slice(-30),
+      privateKeyLength: pk.length,
+    })
+  }
+
   try {
     const accessToken = await getAccessToken()
     const { action } = req.body
