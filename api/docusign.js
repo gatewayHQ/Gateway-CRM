@@ -4,7 +4,6 @@ const INTEGRATION_KEY = process.env.DOCUSIGN_INTEGRATION_KEY
 const ACCOUNT_ID      = process.env.DOCUSIGN_ACCOUNT_ID
 const USER_ID         = process.env.DOCUSIGN_USER_ID
 
-// Try both servers automatically — handles demo and production accounts
 const AUTH_SERVERS = [
   process.env.DOCUSIGN_AUTH_SERVER,
   'account-d.docusign.com',
@@ -12,7 +11,11 @@ const AUTH_SERVERS = [
 ].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i)
 
 function buildJWT(authServer) {
-  const privateKey = (process.env.DOCUSIGN_PRIVATE_KEY || '').replace(/\\n/g, '\n')
+  const raw = process.env.DOCUSIGN_PRIVATE_KEY || ''
+  const privateKey = raw.replace(/\\n/g, '\n')
+  if (!privateKey.includes('PRIVATE KEY')) {
+    throw new Error('DOCUSIGN_PRIVATE_KEY is missing or malformed — must include BEGIN/END PRIVATE KEY headers')
+  }
   const now = Math.floor(Date.now() / 1000)
   const header  = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url')
   const payload = Buffer.from(JSON.stringify({
@@ -29,10 +32,9 @@ function buildJWT(authServer) {
   return `${sigInput}.${signer.sign(privateKey, 'base64url')}`
 }
 
-// Returns { accessToken, baseUri } — auto-discovers the right server and base URI
+// Auto-discovers the right auth server and account base URI
 async function getAuthConfig() {
-  let lastError = 'No auth server succeeded'
-
+  const errors = []
   for (const server of AUTH_SERVERS) {
     const tokenRes = await fetch(`https://${server}/oauth/token`, {
       method: 'POST',
@@ -43,14 +45,12 @@ async function getAuthConfig() {
       }),
     })
     const tokenData = await tokenRes.json()
-
     if (!tokenRes.ok) {
-      lastError = `[${server}] ${tokenData.error}: ${tokenData.error_description || ''}`
-      if (tokenData.error === 'issuer_not_found') continue // try next server
-      throw new Error(lastError) // non-recoverable error, stop immediately
+      errors.push(`[${server}] ${tokenData.error}: ${tokenData.error_description || ''}`)
+      if (tokenData.error === 'issuer_not_found' || tokenData.error === 'invalid_grant') continue
+      throw new Error(errors.join(' | '))
     }
-
-    // Token obtained — discover the correct base URI for this account
+    // Discover correct base URI from userinfo
     const userRes  = await fetch(`https://${server}/oauth/userinfo`, {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
     })
@@ -58,13 +58,30 @@ async function getAuthConfig() {
     const account  = (userData.accounts || []).find(a => a.account_id === ACCOUNT_ID)
                   || (userData.accounts || [])[0]
     const baseUri  = account?.base_uri
-                  || process.env.DOCUSIGN_BASE_URI
                   || (server.includes('-d.') ? 'https://demo.docusign.net' : 'https://na4.docusign.net')
-
     return { accessToken: tokenData.access_token, baseUri }
   }
+  throw new Error(
+    `DocuSign auth failed on all servers. ${errors.join(' | ')} — ` +
+    `Check: (1) DOCUSIGN_INTEGRATION_KEY matches Apps & Keys page, ` +
+    `(2) DOCUSIGN_USER_ID is the User ID (not Account ID), ` +
+    `(3) RSA keypair in Vercel matches the one in DocuSign — if unsure, regenerate the keypair in DocuSign and update DOCUSIGN_PRIVATE_KEY.`
+  )
+}
 
-  throw new Error(`DocuSign auth failed. ${lastError}`)
+function buildTabs(tabs, recipientId) {
+  const signHereTabs = [], initialHereTabs = [], dateSignedTabs = []
+  for (const t of (tabs || [])) {
+    const base = { documentId: '1', recipientId, pageNumber: String(t.page), xPosition: t.xPosition, yPosition: t.yPosition }
+    if (t.type === 'signature')      signHereTabs.push(base)
+    else if (t.type === 'initials')  initialHereTabs.push(base)
+    else if (t.type === 'date')      dateSignedTabs.push(base)
+  }
+  const result = {}
+  if (signHereTabs.length)    result.signHereTabs    = signHereTabs
+  if (initialHereTabs.length) result.initialHereTabs = initialHereTabs
+  if (dateSignedTabs.length)  result.dateSignedTabs  = dateSignedTabs
+  return result
 }
 
 export default async function handler(req, res) {
@@ -75,7 +92,10 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
   if (!INTEGRATION_KEY || !ACCOUNT_ID || !USER_ID || !process.env.DOCUSIGN_PRIVATE_KEY) {
-    return res.status(500).json({ error: 'DocuSign environment variables not configured', missing: { INTEGRATION_KEY: !INTEGRATION_KEY, ACCOUNT_ID: !ACCOUNT_ID, USER_ID: !USER_ID, PRIVATE_KEY: !process.env.DOCUSIGN_PRIVATE_KEY } })
+    return res.status(500).json({
+      error: 'DocuSign environment variables not configured',
+      missing: { INTEGRATION_KEY: !INTEGRATION_KEY, ACCOUNT_ID: !ACCOUNT_ID, USER_ID: !USER_ID, PRIVATE_KEY: !process.env.DOCUSIGN_PRIVATE_KEY },
+    })
   }
 
   if (req.body?.action === 'debug') {
@@ -85,10 +105,10 @@ export default async function handler(req, res) {
       integrationKey:   INTEGRATION_KEY,
       accountId:        ACCOUNT_ID,
       userId:           USER_ID,
-      privateKeyStart:  pk.slice(0, 40),
-      privateKeyEnd:    pk.slice(-30),
+      privateKeyStart:  pk.slice(0, 50),
+      privateKeyEnd:    pk.slice(-40),
       privateKeyLength: pk.length,
-      privateKeyValid:  pk.includes('-----BEGIN RSA PRIVATE KEY-----') || pk.includes('-----BEGIN PRIVATE KEY-----'),
+      privateKeyValid:  pk.includes('PRIVATE KEY'),
     })
   }
 
@@ -99,27 +119,21 @@ export default async function handler(req, res) {
     const headers = { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' }
 
     if (action === 'send') {
-      const { signerName, signerEmail, documentBase64, documentName, emailSubject, tabs = [] } = req.body
+      const { signers, documentBase64, documentName, emailSubject } = req.body
       const ext = (documentName || 'document.pdf').split('.').pop().toLowerCase()
 
-      const signHereTabs = [], initialHereTabs = [], dateSignedTabs = []
-      for (const t of tabs) {
-        const base = { documentId: '1', pageNumber: String(t.page), xPosition: t.xPosition, yPosition: t.yPosition }
-        if (t.type === 'signature')  signHereTabs.push(base)
-        else if (t.type === 'initials') initialHereTabs.push(base)
-        else if (t.type === 'date')     dateSignedTabs.push(base)
-      }
-      const builtTabs = {}
-      if (signHereTabs.length)    builtTabs.signHereTabs    = signHereTabs
-      if (initialHereTabs.length) builtTabs.initialHereTabs = initialHereTabs
-      if (dateSignedTabs.length)  builtTabs.dateSignedTabs  = dateSignedTabs
+      const recipients = (signers || []).map((s, i) => ({
+        email:        s.email,
+        name:         s.name,
+        recipientId:  String(i + 1),
+        routingOrder: String(s.routingOrder || 1),
+        tabs:         buildTabs(s.tabs, String(i + 1)),
+      }))
 
       const envelope = {
         emailSubject: emailSubject || 'Please sign this document',
         documents: [{ documentBase64, name: documentName || 'Document', fileExtension: ext, documentId: '1' }],
-        recipients: {
-          signers: [{ email: signerEmail, name: signerName, recipientId: '1', tabs: builtTabs }],
-        },
+        recipients: { signers: recipients },
         status: 'sent',
       }
 

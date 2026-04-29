@@ -426,9 +426,14 @@ const FIELD_TYPES = {
   date:      { label: 'Date',      color: '#059669', bg: '#d1fae5' },
 }
 
+// Per-signer accent colors for multi-signer field placement
+const SIGNER_COLORS = ['#2563eb','#d97706','#dc2626','#0891b2']
+const SIGNER_BGS    = ['#dbeafe','#fef3c7','#fee2e2','#cffafe']
+
 const PDF_SCALE = 1.3
 
-function PDFPlacer({ file, fileUrl, fields, setFields, activeTool, setActiveTool }) {
+// allFields = flat array of all signers' tabs, each with signerIndex for color-coding
+function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, setActiveTool, activeSignerIndex }) {
   const [pages,   setPages]   = React.useState([])
   const [loading, setLoading] = React.useState(true)
   const canvasRefs = React.useRef({})
@@ -475,16 +480,17 @@ function PDFPlacer({ file, fileUrl, fields, setFields, activeTool, setActiveTool
 
   const handleClick = (e, pageIndex) => {
     if (!activeTool) return
-    const rect   = e.currentTarget.getBoundingClientRect()
+    const rect    = e.currentTarget.getBoundingClientRect()
     const xCanvas = e.clientX - rect.left
     const yCanvas = e.clientY - rect.top
-    setFields(prev => [...prev, {
+    onPlace({
       id: Date.now(), type: activeTool,
       page: pageIndex + 1,
       xPosition: String(Math.round(xCanvas / PDF_SCALE)),
       yPosition: String(Math.round(yCanvas / PDF_SCALE)),
       xCanvas, yCanvas, pageIndex,
-    }])
+      signerIndex: activeSignerIndex,
+    })
   }
 
   if (loading) return <div style={{ padding:'40px 0', textAlign:'center', color:'var(--gw-mist)', fontSize:13 }}>Loading PDF…</div>
@@ -492,33 +498,37 @@ function PDFPlacer({ file, fileUrl, fields, setFields, activeTool, setActiveTool
   return (
     <div>
       <div style={{ display:'flex', gap:6, marginBottom:10, alignItems:'center', flexWrap:'wrap' }}>
-        {Object.entries(FIELD_TYPES).map(([key, { label, color, bg }]) => (
-          <button key={key} onClick={() => setActiveTool(activeTool === key ? null : key)}
-            style={{ padding:'5px 12px', borderRadius:'var(--radius)', fontSize:12, fontWeight:700, cursor:'pointer', border:`2px solid ${activeTool===key?color:'var(--gw-border)'}`, background:activeTool===key?bg:'#fff', color:activeTool===key?color:'var(--gw-mist)' }}>
-            + {label}
-          </button>
-        ))}
+        {Object.entries(FIELD_TYPES).map(([key, { label }]) => {
+          const color = SIGNER_COLORS[activeSignerIndex] || SIGNER_COLORS[0]
+          const bg    = SIGNER_BGS[activeSignerIndex]    || SIGNER_BGS[0]
+          const active = activeTool === key
+          return (
+            <button key={key} onClick={() => setActiveTool(active ? null : key)}
+              style={{ padding:'5px 12px', borderRadius:'var(--radius)', fontSize:12, fontWeight:700, cursor:'pointer', border:`2px solid ${active?color:'var(--gw-border)'}`, background:active?bg:'#fff', color:active?color:'var(--gw-mist)' }}>
+              + {label}
+            </button>
+          )
+        })}
         <span style={{ fontSize:11, color:'var(--gw-mist)', marginLeft:4 }}>
-          {activeTool ? 'Click the PDF to place a field' : 'Select a field type above'}
+          {activeTool ? 'Click PDF to place' : 'Select a field type above'}
         </span>
-        {fields.length > 0 && (
-          <span style={{ marginLeft:'auto', fontSize:11, fontWeight:700, color:'var(--gw-ink)' }}>
-            {fields.length} field{fields.length !== 1 ? 's' : ''} placed
-          </span>
-        )}
+        {allFields.length > 0 && <span style={{ marginLeft:'auto', fontSize:11, fontWeight:700 }}>{allFields.length} field{allFields.length !== 1 ? 's' : ''} total</span>}
       </div>
-      <div style={{ maxHeight:460, overflowY:'auto', background:'#e5e7eb', borderRadius:'var(--radius)', padding:12, display:'flex', flexDirection:'column', alignItems:'center', gap:12 }}>
+      <div style={{ maxHeight:420, overflowY:'auto', background:'#e5e7eb', borderRadius:'var(--radius)', padding:12, display:'flex', flexDirection:'column', alignItems:'center', gap:12 }}>
         {pages.map((_, i) => (
           <div key={i} style={{ position:'relative' }}>
             <div style={{ fontSize:10, color:'#6b7280', marginBottom:4, textAlign:'center' }}>Page {i + 1}</div>
             <canvas ref={el => { if (el) canvasRefs.current[i] = el }} style={{ display:'block', boxShadow:'0 2px 8px rgba(0,0,0,0.2)' }}/>
             <div style={{ position:'absolute', inset:0, cursor:activeTool?'crosshair':'default', marginTop:18 }} onClick={e => handleClick(e, i)}/>
-            {fields.filter(f => f.pageIndex === i).map(f => {
-              const ft = FIELD_TYPES[f.type]
+            {allFields.filter(f => f.pageIndex === i).map(f => {
+              const color = SIGNER_COLORS[f.signerIndex] || SIGNER_COLORS[0]
+              const bg    = SIGNER_BGS[f.signerIndex]    || SIGNER_BGS[0]
+              const ft    = FIELD_TYPES[f.type]
+              const dim   = f.signerIndex !== activeSignerIndex
               return (
-                <div key={f.id} style={{ position:'absolute', left:f.xCanvas - 42, top:f.yCanvas - 10 + 18, display:'flex', alignItems:'center', gap:3, background:ft.bg, border:`1.5px solid ${ft.color}`, borderRadius:3, padding:'2px 6px', fontSize:10, fontWeight:700, color:ft.color, whiteSpace:'nowrap', zIndex:10, pointerEvents:'auto' }}>
-                  {ft.label}
-                  <span onClick={e => { e.stopPropagation(); setFields(p => p.filter(x => x.id !== f.id)) }} style={{ cursor:'pointer', fontSize:12, lineHeight:1, opacity:0.6, marginLeft:1 }}>×</span>
+                <div key={f.id} style={{ position:'absolute', left:f.xCanvas - 42, top:f.yCanvas - 10 + 18, display:'flex', alignItems:'center', gap:3, background:bg, border:`1.5px solid ${color}`, borderRadius:3, padding:'2px 6px', fontSize:10, fontWeight:700, color, whiteSpace:'nowrap', zIndex:10, pointerEvents:'auto', opacity: dim ? 0.4 : 1 }}>
+                  {ft?.label}
+                  <span onClick={e => { e.stopPropagation(); onRemove(f.id) }} style={{ cursor:'pointer', fontSize:12, lineHeight:1, opacity:0.6, marginLeft:1 }}>×</span>
                 </div>
               )
             })}
@@ -529,27 +539,66 @@ function PDFPlacer({ file, fileUrl, fields, setFields, activeTool, setActiveTool
   )
 }
 
-function SendSignatureModal({ deal, contacts, dealFiles, onClose, onSent }) {
-  const contact = contacts?.find(c => c.id === deal?.contact_id)
-  const [step,        setStep]        = React.useState(1)
-  const [signerName,  setSignerName]  = React.useState(`${contact?.first_name || ''} ${contact?.last_name || ''}`.trim())
-  const [signerEmail, setSignerEmail] = React.useState((contact?.emails || [])[0] || '')
-  const [subject,     setSubject]     = React.useState(`Please sign: ${deal?.title || 'Document'}`)
-  const [file,        setFile]        = React.useState(null)
-  const [pickedFile,  setPickedFile]  = React.useState('')
-  const [fileUrl,     setFileUrl]     = React.useState(null)
-  const [fields,      setFields]      = React.useState([])
-  const [activeTool,  setActiveTool]  = React.useState('signature')
-  const [sending,     setSending]     = React.useState(false)
-  const [dragOver,    setDragOver]    = React.useState(false)
+function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, onSent }) {
+  const contact     = contacts?.find(c => c.id === deal?.contact_id)
+  const defaultName = `${contact?.first_name || ''} ${contact?.last_name || ''}`.trim()
+  const defaultEmail= (contact?.emails || [])[0] || ''
+
+  const [step,          setStep]        = React.useState(1)
+  const [subject,       setSubject]     = React.useState(`Please sign: ${deal?.title || 'Document'}`)
+  const [file,          setFile]        = React.useState(null)
+  const [pickedFile,    setPickedFile]  = React.useState('')
+  const [fileUrl,       setFileUrl]     = React.useState(null)
+  const [activeTool,    setActiveTool]  = React.useState('signature')
+  const [activeSignerI, setActiveSignerI] = React.useState(0)
+  const [agentSigns,    setAgentSigns]  = React.useState(false)
+  const [sending,       setSending]     = React.useState(false)
+  const [dragOver,      setDragOver]    = React.useState(false)
   const fileRef = React.useRef()
+
+  // Each signer has name, email, tabs[]
+  const [signers, setSigners] = React.useState([
+    { id: 1, name: defaultName, email: defaultEmail, tabs: [] }
+  ])
+
+  const addSigner    = () => setSigners(p => [...p, { id: Date.now(), name:'', email:'', tabs:[] }])
+  const removeSigner = (id) => setSigners(p => p.filter(s => s.id !== id))
+  const updateSigner = (id, k, v) => setSigners(p => p.map(s => s.id===id ? {...s,[k]:v} : s))
+
+  // All signers including optional agent (always last, routingOrder 2)
+  const allSigners = React.useMemo(() => {
+    const clients = signers.map(s => ({ ...s, routingOrder: 1 }))
+    if (agentSigns && activeAgent) {
+      clients.push({ id:'agent', name: activeAgent.name, email: activeAgent.email, routingOrder: 2, tabs:[] })
+    }
+    return clients
+  }, [signers, agentSigns, activeAgent])
+
+  // Flat list of all tabs across all signers (for PDFPlacer)
+  const allFields = allSigners.flatMap((s, i) => (s.tabs || []).map(t => ({ ...t, signerIndex: i })))
+
+  const placeField = (field) => {
+    setSigners(p => p.map((s, i) => {
+      if (i !== activeSignerI) return s
+      return { ...s, tabs: [...(s.tabs || []), field] }
+    }))
+    if (agentSigns && activeSignerI === signers.length) {
+      // placing for agent signer — handled via allSigners but agent is not in signers array
+      // no-op here since agent tabs are managed separately
+    }
+  }
+
+  const removeField = (fieldId) => {
+    setSigners(p => p.map(s => ({ ...s, tabs: (s.tabs || []).filter(t => t.id !== fieldId) })))
+  }
 
   const toBase64 = f => new Promise((res, rej) => {
     const r = new FileReader(); r.onload = e => res(e.target.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(f)
   })
 
   const goToStep2 = async () => {
-    if (!signerName.trim() || !signerEmail.trim()) { pushToast('Signer name and email required', 'error'); return }
+    const invalid = signers.find(s => !s.name.trim() || !s.email.trim())
+    if (invalid) { pushToast('All signers need a name and email', 'error'); return }
     if (!file && !pickedFile) { pushToast('Select or upload a document', 'error'); return }
     if (pickedFile && !fileUrl) {
       const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(`deal-${deal.id}/${pickedFile}`, 300)
@@ -560,98 +609,144 @@ function SendSignatureModal({ deal, contacts, dealFiles, onClose, onSent }) {
   }
 
   const send = async () => {
-    if (fields.length === 0) { pushToast('Place at least one field on the PDF', 'error'); return }
+    if (allFields.length === 0) { pushToast('Place at least one field on the PDF', 'error'); return }
     setSending(true)
     let base64, docName
     if (file) { base64 = await toBase64(file); docName = file.name }
     else { const blob = await fetch(fileUrl).then(r => r.blob()); base64 = await toBase64(blob); docName = pickedFile.replace(/^\d+-/, '') }
 
+    const signerPayload = allSigners.map((s, i) => ({
+      name: s.name, email: s.email, routingOrder: s.routingOrder,
+      tabs: (s.tabs || []).filter(t => t.signerIndex === i || allSigners[i] === s),
+    }))
+
     const resp = await fetch('/api/docusign', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'send', signerName, signerEmail, documentBase64: base64, documentName: docName, emailSubject: subject, tabs: fields }),
+      body: JSON.stringify({ action:'send', emailSubject:subject, documentBase64:base64, documentName:docName, signers: signerPayload }),
     })
     const data = await resp.json()
     setSending(false)
     if (data.error) { pushToast(data.error, 'error'); return }
+
     await supabase.from('docusign_envelopes').insert([{
       deal_id: deal.id, envelope_id: data.envelopeId,
-      signer_name: signerName, signer_email: signerEmail,
+      signer_name:  allSigners.map(s=>s.name).join(', '),
+      signer_email: allSigners.map(s=>s.email).join(', '),
       document_name: docName, subject, status: data.status || 'sent',
     }])
-    pushToast(`Sent to ${signerName} for signature`)
+    pushToast(`Sent to ${allSigners.length} signer${allSigners.length>1?'s':''} for signature`)
     onSent()
   }
 
   return (
-    <Modal open={true} onClose={onClose} width={step === 2 ? 720 : 480}>
+    <Modal open={true} onClose={onClose} width={step === 2 ? 740 : 500}>
       <div className="modal__head">
         <div>
           <div className="eyebrow-label">DocuSign · Step {step} of 2</div>
-          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>{step === 1 ? 'Send for Signature' : 'Place Fields'}</h3>
+          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>{step===1 ? 'Set Up Signers' : 'Place Signature Fields'}</h3>
         </div>
         <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
       </div>
       <div className="modal__body">
-        {step === 1 && (
-          <>
-            <div className="form-group">
-              <label className="form-label required">Signer Name</label>
-              <input className="form-control" value={signerName} onChange={e=>setSignerName(e.target.value)} placeholder="Full name"/>
-            </div>
-            <div className="form-group">
-              <label className="form-label required">Signer Email</label>
-              <input className="form-control" type="email" value={signerEmail} onChange={e=>setSignerEmail(e.target.value)} placeholder="email@example.com"/>
-            </div>
-            <div className="form-group">
-              <label className="form-label">Email Subject</label>
-              <input className="form-control" value={subject} onChange={e=>setSubject(e.target.value)}/>
-            </div>
-            <div className="form-group">
-              <label className="form-label required">Document (PDF)</label>
-              {dealFiles.length > 0 && (
-                <div style={{ marginBottom:10 }}>
-                  <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:6 }}>Pick from deal documents:</div>
-                  {dealFiles.map(f => {
-                    const name = f.name.replace(/^\d+-/, '')
-                    const picked = pickedFile === f.name
-                    return (
-                      <div key={f.name} onClick={() => { setPickedFile(picked ? '' : f.name); if (!picked) { setFile(null); setFileUrl(null) } }}
-                        style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', border:`1px solid ${picked?'var(--gw-azure)':'var(--gw-border)'}`, borderRadius:'var(--radius)', marginBottom:4, cursor:'pointer', background:picked?'var(--gw-sky)':'#fff' }}>
-                        <Icon name="file" size={13} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
-                        <span style={{ fontSize:12, flex:1, fontWeight:picked?700:400 }}>{name}</span>
-                        {picked && <Icon name="check" size={13} style={{ color:'var(--gw-azure)' }}/>}
-                      </div>
-                    )
-                  })}
-                  <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'8px 0 4px' }}>— or upload a different file —</div>
-                </div>
-              )}
-              <div
-                style={{ border:`2px dashed ${dragOver?'var(--gw-azure)':file?'var(--gw-green)':'var(--gw-border)'}`, borderRadius:'var(--radius)', padding:'14px 16px', textAlign:'center', cursor:'pointer', background:dragOver?'var(--gw-sky)':file?'var(--gw-green-light)':'transparent', transition:'all 150ms' }}
-                onClick={() => fileRef.current.click()}
-                onDragOver={e => { e.preventDefault(); setDragOver(true) }}
-                onDragLeave={() => setDragOver(false)}
-                onDrop={e => { e.preventDefault(); setDragOver(false); setFile(e.dataTransfer.files[0]); setPickedFile(''); setFileUrl(null) }}>
-                <input ref={fileRef} type="file" accept=".pdf" style={{ display:'none' }} onChange={e => { setFile(e.target.files[0]); setPickedFile(''); setFileUrl(null) }}/>
-                {file ? <div style={{ fontSize:12, fontWeight:600, color:'var(--gw-green)' }}>{file.name}</div>
-                  : <><Icon name="upload" size={18} style={{ color:'var(--gw-border)', marginBottom:4 }}/><div style={{ fontSize:12 }}>Drop PDF or click to browse</div></>}
+
+        {step === 1 && <>
+          {/* Email subject */}
+          <div className="form-group">
+            <label className="form-label">Email Subject</label>
+            <input className="form-control" value={subject} onChange={e=>setSubject(e.target.value)}/>
+          </div>
+
+          {/* Signers */}
+          <div className="form-group">
+            <label className="form-label required">Signers <span style={{fontSize:11,fontWeight:400,color:'var(--gw-mist)'}}>— sign in parallel (same step)</span></label>
+            {signers.map((s, i) => (
+              <div key={s.id} style={{ display:'flex', gap:8, alignItems:'center', marginBottom:8 }}>
+                <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[i]||SIGNER_COLORS[0], display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700, flexShrink:0 }}>{i+1}</div>
+                <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={s.name} onChange={e=>updateSigner(s.id,'name',e.target.value)}/>
+                <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={s.email} onChange={e=>updateSigner(s.id,'email',e.target.value)}/>
+                {signers.length > 1 && <button className="btn btn--ghost btn--icon btn--sm" onClick={()=>removeSigner(s.id)}><Icon name="x" size={13}/></button>}
               </div>
+            ))}
+            <button className="btn btn--secondary btn--sm" onClick={addSigner} style={{marginTop:2}}>+ Add another signer</button>
+          </div>
+
+          {/* Agent signs last */}
+          {activeAgent && (
+            <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:16, background:'var(--gw-bone)' }}>
+              <input type="checkbox" id="agentSigns" checked={agentSigns} onChange={e=>setAgentSigns(e.target.checked)} style={{width:15,height:15,cursor:'pointer'}}/>
+              <label htmlFor="agentSigns" style={{ fontSize:13, cursor:'pointer', flex:1 }}>
+                <strong>I need to sign as well</strong> — {activeAgent.name} signs <em>after</em> the client{signers.length>1?'s':''}
+              </label>
+              {agentSigns && <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[signers.length]||'#6b7280', display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700 }}>{signers.length+1}</div>}
             </div>
-          </>
-        )}
-        {step === 2 && (
-          <PDFPlacer file={file} fileUrl={fileUrl} fields={fields} setFields={setFields} activeTool={activeTool} setActiveTool={setActiveTool}/>
-        )}
+          )}
+
+          {/* Document */}
+          <div className="form-group">
+            <label className="form-label required">Document (PDF)</label>
+            {dealFiles.length > 0 && (
+              <div style={{ marginBottom:10 }}>
+                <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:6 }}>Pick from deal documents:</div>
+                {dealFiles.map(f => {
+                  const name = f.name.replace(/^\d+-/,'')
+                  const picked = pickedFile === f.name
+                  return (
+                    <div key={f.name} onClick={()=>{ setPickedFile(picked?'':f.name); if(!picked){setFile(null);setFileUrl(null)} }}
+                      style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', border:`1px solid ${picked?'var(--gw-azure)':'var(--gw-border)'}`, borderRadius:'var(--radius)', marginBottom:4, cursor:'pointer', background:picked?'var(--gw-sky)':'#fff' }}>
+                      <Icon name="file" size={13} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
+                      <span style={{ fontSize:12, flex:1, fontWeight:picked?700:400 }}>{name}</span>
+                      {picked && <Icon name="check" size={13} style={{ color:'var(--gw-azure)' }}/>}
+                    </div>
+                  )
+                })}
+                <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'8px 0 4px' }}>— or upload a different file —</div>
+              </div>
+            )}
+            <div style={{ border:`2px dashed ${dragOver?'var(--gw-azure)':file?'var(--gw-green)':'var(--gw-border)'}`, borderRadius:'var(--radius)', padding:'14px 16px', textAlign:'center', cursor:'pointer', background:dragOver?'var(--gw-sky)':file?'var(--gw-green-light)':'transparent', transition:'all 150ms' }}
+              onClick={()=>fileRef.current.click()}
+              onDragOver={e=>{e.preventDefault();setDragOver(true)}}
+              onDragLeave={()=>setDragOver(false)}
+              onDrop={e=>{e.preventDefault();setDragOver(false);setFile(e.dataTransfer.files[0]);setPickedFile('');setFileUrl(null)}}>
+              <input ref={fileRef} type="file" accept=".pdf" style={{display:'none'}} onChange={e=>{setFile(e.target.files[0]);setPickedFile('');setFileUrl(null)}}/>
+              {file ? <div style={{fontSize:12,fontWeight:600,color:'var(--gw-green)'}}>{file.name}</div>
+                : <><Icon name="upload" size={18} style={{color:'var(--gw-border)',marginBottom:4}}/><div style={{fontSize:12}}>Drop PDF or click to browse</div></>}
+            </div>
+          </div>
+        </>}
+
+        {step === 2 && <>
+          {/* Signer tabs — switch to place fields for each */}
+          <div style={{ display:'flex', gap:6, marginBottom:12, flexWrap:'wrap' }}>
+            {allSigners.map((s, i) => (
+              <button key={s.id || i} onClick={()=>{ setActiveSignerI(i); setActiveTool('signature') }}
+                style={{ display:'flex', alignItems:'center', gap:6, padding:'5px 12px', border:`2px solid ${activeSignerI===i?SIGNER_COLORS[i]||SIGNER_COLORS[0]:'var(--gw-border)'}`, borderRadius:'var(--radius)', fontSize:12, fontWeight:700, cursor:'pointer', background:activeSignerI===i?(SIGNER_BGS[i]||SIGNER_BGS[0]):'#fff', color:activeSignerI===i?(SIGNER_COLORS[i]||SIGNER_COLORS[0]):'var(--gw-mist)' }}>
+                <span style={{ width:16, height:16, borderRadius:'50%', background:SIGNER_COLORS[i]||'#6b7280', display:'inline-flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:10 }}>{i+1}</span>
+                {s.name || `Signer ${i+1}`}
+                {s.routingOrder === 2 && <span style={{fontSize:10,opacity:0.7}}>(signs last)</span>}
+                {(s.tabs||[]).length > 0 && <span style={{fontSize:10,background:SIGNER_COLORS[i]||'#6b7280',color:'#fff',borderRadius:8,padding:'0 5px'}}>{s.tabs.length}</span>}
+              </button>
+            ))}
+          </div>
+          <PDFPlacer
+            file={file} fileUrl={fileUrl}
+            allFields={allFields}
+            onPlace={placeField}
+            onRemove={removeField}
+            activeTool={activeTool}
+            setActiveTool={setActiveTool}
+            activeSignerIndex={activeSignerI}
+          />
+        </>}
       </div>
       <div className="modal__foot">
-        {step === 1 && <>
+        {step===1 && <>
           <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
           <button className="btn btn--primary" onClick={goToStep2}>Next: Place Fields</button>
         </>}
-        {step === 2 && <>
-          <button className="btn btn--secondary" onClick={() => setStep(1)}>Back</button>
-          <button className="btn btn--primary" onClick={send} disabled={sending || fields.length === 0}>
-            {sending ? 'Sending…' : `Send for Signature${fields.length > 0 ? ` (${fields.length} field${fields.length !== 1 ? 's' : ''})` : ''}`}
+        {step===2 && <>
+          <button className="btn btn--secondary" onClick={()=>setStep(1)}>Back</button>
+          <button className="btn btn--primary" onClick={send} disabled={sending||allFields.length===0}>
+            {sending ? 'Sending…' : `Send to ${allSigners.length} Signer${allSigners.length>1?'s':''}${allFields.length>0?` · ${allFields.length} fields`:''}`}
           </button>
         </>}
       </div>
@@ -659,7 +754,7 @@ function SendSignatureModal({ deal, contacts, dealFiles, onClose, onSent }) {
   )
 }
 
-function SignaturesTab({ deal, contacts }) {
+function SignaturesTab({ deal, contacts, activeAgent }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
@@ -758,7 +853,7 @@ create policy "agents_envelopes" on docusign_envelopes
 
       {sendOpen && (
         <SendSignatureModal
-          deal={deal} contacts={contacts} dealFiles={dealFiles}
+          deal={deal} contacts={contacts} dealFiles={dealFiles} activeAgent={activeAgent}
           onClose={() => setSendOpen(false)}
           onSent={() => { setSendOpen(false); loadEnvelopes() }}
         />
@@ -767,7 +862,7 @@ create policy "agents_envelopes" on docusign_envelopes
   )
 }
 
-function DealDrawer({ open, onClose, deal, agents, contacts, properties, onSave }) {
+function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave }) {
   const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
@@ -988,7 +1083,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, onSave 
 
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
-        <SignaturesTab deal={deal} contacts={contacts} />
+        <SignaturesTab deal={deal} contacts={contacts} activeAgent={activeAgent} />
       )}
     </Drawer>
   )
@@ -1120,7 +1215,7 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
         </div>
       )}
 
-      <DealDrawer open={drawer} onClose={() => setDrawer(false)} deal={editing ? editing : { stage: defaultStage }} agents={agents} contacts={contacts} properties={properties} onSave={reload} />
+      <DealDrawer open={drawer} onClose={() => setDrawer(false)} deal={editing ? editing : { stage: defaultStage }} agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} onSave={reload} />
       {confirm && <ConfirmDialog message="This will permanently delete this deal." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
     </div>
   )
