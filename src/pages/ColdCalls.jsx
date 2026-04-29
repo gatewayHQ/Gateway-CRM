@@ -390,6 +390,9 @@ function PowerDialer({ leads, startIndex, agents, activeAgent, onClose, onUpdate
   const [showConvert, setShowConvert] = useState(false)
   const [showCallback, setShowCallback] = useState(false)
   const [callbackDate, setCallbackDate] = useState('')
+  const [script, setScript]       = useState('')
+  const [scriptLoading, setScriptLoading] = useState(false)
+  const [showScript, setShowScript] = useState(false)
 
   const lead = leads[idx]
 
@@ -398,7 +401,41 @@ function PowerDialer({ leads, startIndex, agents, activeAgent, onClose, onUpdate
     setCallbackDate(lead?.callback_date || '')
     setShowCallback(false)
     setShowConvert(false)
+    setScript('')
+    setShowScript(false)
   }, [lead?.id])
+
+  const generateScript = async () => {
+    setScriptLoading(true); setShowScript(true)
+    const ctx = [
+      `Property: ${[lead.property_address, lead.town, lead.state].filter(Boolean).join(', ')}`,
+      lead.prop_type ? `Type: ${lead.prop_type}${lead.unit_count ? `, ${lead.unit_count} units` : ''}` : '',
+      lead.owner_name ? `Owner/Entity: ${lead.owner_name}` : '',
+      lead.contact_name ? `Contact name: ${lead.contact_name}` : '',
+      lead.age ? `Age: ${lead.age}` : '',
+      lead.remarks ? `List notes: ${lead.remarks}` : '',
+      lead.call_count > 0 ? `Prior call attempts: ${lead.call_count}` : 'First call attempt',
+      notes ? `Previous call notes: ${notes}` : '',
+      `Agent name: ${activeAgent?.name || 'your agent'}`,
+    ].filter(Boolean).join('\n')
+
+    try {
+      const res = await fetch('/api/claude', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          system: `You are a real estate cold calling coach specializing in investment properties. Write natural, conversational scripts that don't sound robotic. Keep it concise and practical.`,
+          messages: [{ role: 'user', content: `Generate a cold call script for this lead:\n\n${ctx}\n\nInclude: opening, reason for calling, 2-3 key questions, one common objection + response, and a closing to schedule follow-up. Use plain text with clear section labels.` }],
+          max_tokens: 800,
+        }),
+      })
+      const data = await res.json()
+      setScript(data.content?.[0]?.text || 'Could not generate script.')
+    } catch (e) {
+      setScript('Error generating script: ' + e.message)
+    }
+    setScriptLoading(false)
+  }
 
   const copyText = (t) => { navigator.clipboard.writeText(t); pushToast('Copied') }
 
@@ -517,6 +554,18 @@ function PowerDialer({ leads, startIndex, agents, activeAgent, onClose, onUpdate
           {lead.remarks && (
             <div style={{fontSize:12,color:'var(--gw-mist)',marginBottom:14,padding:'8px 10px',background:'var(--gw-bone)',borderRadius:'var(--radius)',lineHeight:1.5}}>{lead.remarks}</div>
           )}
+
+          {/* AI Script */}
+          <div style={{marginBottom:12}}>
+            <button className="btn btn--ghost btn--sm" style={{fontSize:11,width:'100%',justifyContent:'center'}} onClick={generateScript} disabled={scriptLoading}>
+              {scriptLoading ? '✦ Generating script…' : showScript ? '✦ Regenerate Script' : '✦ Generate Call Script'}
+            </button>
+            {showScript && script && (
+              <div style={{marginTop:8,background:'#f8f9ff',border:'1px solid #c5cff5',borderRadius:'var(--radius)',padding:'10px 12px',fontSize:12,lineHeight:1.7,whiteSpace:'pre-wrap',maxHeight:220,overflowY:'auto',color:'var(--gw-ink)'}}>
+                {scriptLoading ? 'Writing script…' : script}
+              </div>
+            )}
+          </div>
 
           {/* Notes */}
           <div className="form-group" style={{marginBottom:8}}>
