@@ -151,6 +151,20 @@ export default async function handler(req, res) {
       return res.json({ status: data.status, sentDateTime: data.sentDateTime, completedDateTime: data.completedDateTime })
     }
 
+    if (action === 'download') {
+      const { envelopeId } = req.body
+      const r = await fetch(`${baseUrl}/envelopes/${envelopeId}/documents/combined`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+      if (!r.ok) {
+        const data = await r.json()
+        return res.status(400).json({ error: data.message || 'Failed to download signed document' })
+      }
+      const buffer = await r.arrayBuffer()
+      const base64 = Buffer.from(buffer).toString('base64')
+      return res.json({ base64, contentType: 'application/pdf' })
+    }
+
     return res.status(400).json({ error: 'Unknown action' })
   } catch (err) {
     return res.status(500).json({ error: err.message })
