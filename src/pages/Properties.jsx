@@ -263,11 +263,12 @@ function CommercialFields({ form, set }) {
   return null
 }
 
-function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave }) {
+function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave, go, setDb }) {
   const blank = { address:'', city:'', state:'', zip:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{} }
-  const [form, setForm]     = useState(property || blank)
-  const [errors, setErrors] = useState({})
-  const [saving, setSaving] = useState(false)
+  const [form, setForm]         = useState(property || blank)
+  const [errors, setErrors]     = useState({})
+  const [saving, setSaving]     = useState(false)
+  const [startingDeal, setStartingDeal] = useState(false)
 
   React.useEffect(() => {
     setForm(property
@@ -277,6 +278,26 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
   }, [property, open, activeAgent?.id])
 
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
+
+  const startDeal = async () => {
+    setStartingDeal(true)
+    const dealPayload = {
+      title: form.address,
+      property_id: property.id,
+      contact_id:  form.linked_contact_id  || null,
+      agent_id:    form.assigned_agent_id  || activeAgent?.id || null,
+      stage:       'lead',
+      value:       form.list_price ? Number(form.list_price) : null,
+      prop_category: isCommercial(form.type) ? 'commercial' : 'residential',
+    }
+    const { data, error } = await supabase.from('deals').insert([dealPayload]).select().single()
+    setStartingDeal(false)
+    if (error) { pushToast(error.message, 'error'); return }
+    if (setDb) setDb(p => ({ ...p, deals: [data, ...(p.deals || [])] }))
+    pushToast('Deal created — opening Pipeline')
+    onClose()
+    if (go) go('pipeline')
+  }
 
   const save = async () => {
     const e = {}
@@ -367,6 +388,18 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
         <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} /></div>
       </div>
       <div className="drawer__foot">
+        {property?.id && (
+          <button
+            className="btn btn--secondary"
+            onClick={startDeal}
+            disabled={startingDeal}
+            title="Create a deal in the Pipeline linked to this property"
+            style={{ marginRight:'auto' }}
+          >
+            <Icon name="pipeline" size={13} />
+            {startingDeal ? 'Creating…' : 'Start Deal'}
+          </button>
+        )}
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
         <button className="btn btn--primary" onClick={save} disabled={saving}>{saving?'Saving…':'Save Property'}</button>
       </div>
@@ -386,7 +419,7 @@ function PropertySpecs({ p }) {
   return <>{p.beds && <span>{p.beds} bd</span>}{p.baths && <span> · {p.baths} ba</span>}{p.sqft && <span> · {p.sqft?.toLocaleString()} sqft</span>}{p.garage > 0 && <span> · {p.garage}-car garage</span>}</>
 }
 
-export default function PropertiesPage({ db, setDb, activeAgent }) {
+export default function PropertiesPage({ db, setDb, activeAgent, go }) {
   const [view, setView]           = useState('grid')
   const [search, setSearch]       = useState('')
   const [filterType, setFilterType] = useState('')
@@ -506,7 +539,7 @@ export default function PropertiesPage({ db, setDb, activeAgent }) {
         </div>
       )}
 
-      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={reload} />
+      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={reload} go={go} setDb={setDb} />
       {confirm && <ConfirmDialog message="This will permanently delete this property." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
     </div>
   )
