@@ -284,7 +284,7 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
 }
 
 // ── Convert Lead → Contact ────────────────────────────────────────────────
-function ConvertModal({ lead, agents, activeAgent, onClose, onConverted }) {
+function ConvertModal({ lead, agents, activeAgent, setDb, onClose, onConverted }) {
   const parts = (lead?.contact_name || '').trim().split(/\s+/)
   const [form, setForm] = useState({
     first_name: parts[0] || '',
@@ -317,18 +317,22 @@ function ConvertModal({ lead, agents, activeAgent, onClose, onConverted }) {
     }
     const { data, error } = await supabase.from('contacts').insert([contactPayload]).select().single()
     if (error) { setSaving(false); pushToast(error.message, 'error'); return }
+    if (setDb) setDb(p => ({ ...p, contacts: [data, ...(p.contacts || [])] }))
 
-    // Create linked property
+    // Create linked property and sync into in-memory db
     if (lead?.property_address) {
       const VALID_PROP_TYPES = ['residential','rental','multifamily','office','land','retail','industrial','mixed-use','commercial']
       const rawType = (lead.prop_type || '').toLowerCase().trim()
       const safeType = VALID_PROP_TYPES.includes(rawType) ? rawType : 'residential'
-      await supabase.from('properties').insert([{
+      const { data: propData } = await supabase.from('properties').insert([{
         address: [lead.property_address, lead.town, lead.state].filter(Boolean).join(', '),
         type: safeType,
         details: { category: lead.prop_type || 'residential', unit_count: lead.unit_count || null },
         linked_contact_id: data.id, status: 'active',
-      }])
+      }]).select().single()
+      if (propData && setDb) {
+        setDb(p => ({ ...p, properties: [propData, ...(p.properties || [])] }))
+      }
     }
 
     // Log call notes as activity on contact timeline
@@ -631,7 +635,7 @@ const OVERLAY = { position:'fixed', inset:0, background:'rgba(0,0,0,0.65)', zInd
 const CARD    = { background:'#fff', borderRadius:12, width:'100%', maxWidth:480, maxHeight:'90vh', display:'flex', flexDirection:'column', boxShadow:'0 20px 60px rgba(0,0,0,0.3)' }
 
 // ── Main Page ─────────────────────────────────────────────────────────────
-export default function ColdCallsPage({ db, activeAgent }) {
+export default function ColdCallsPage({ db, setDb, activeAgent }) {
   const [lists, setLists]             = useState([])
   const [selected, setSelected]       = useState(null)
   const [leads, setLeads]             = useState([])
@@ -845,7 +849,7 @@ export default function ColdCallsPage({ db, activeAgent }) {
           onClose={()=>setDialer(false)} onUpdate={updateLead} />
       )}
       {convertLead && (
-        <ConvertModal lead={convertLead} agents={agents} activeAgent={activeAgent}
+        <ConvertModal lead={convertLead} agents={agents} activeAgent={activeAgent} setDb={setDb}
           onClose={()=>setConvertLead(null)}
           onConverted={(c)=>{ updateLead(convertLead.id,{status:'converted',contact_id:c.id}); setConvertLead(null) }} />
       )}

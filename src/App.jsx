@@ -457,7 +457,7 @@ export default function App() {
         {route === 'contacts'   && <ContactsPage {...props} />}
         {route === 'properties' && <PropertiesPage {...props} />}
         {route === 'pipeline'   && <PipelinePage {...props} />}
-        {route === 'coldcalls'  && <ColdCallsPage  db={db} activeAgent={activeAgent} />}
+        {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
         {route === 'commission' && <CommissionPage {...props} />}
         {route === 'tasks'      && <TasksPage {...props} />}
         {route === 'team'       && <TeamPage {...props} onSwitchAgent={id => setActiveAgentId(id)} />}
