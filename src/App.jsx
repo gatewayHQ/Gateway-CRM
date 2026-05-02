@@ -18,6 +18,7 @@ import ReportsPage from './pages/Reports.jsx'
 import SequencesPage from './pages/Sequences.jsx'
 import ColdCallsPage from './pages/ColdCalls.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
+import IntegrationsPage from './pages/Integrations.jsx'
 
 const BASE_NAV = [
   { id: 'dashboard',  label: 'Dashboard',      icon: 'dashboard' },
@@ -34,7 +35,8 @@ const BASE_NAV = [
   { id: 'om',         label: 'OM Generator',    icon: 'om' },
   { id: 'social',     label: 'Social Media',    icon: 'social' },
   { id: 'leads',      label: 'Website Leads',   icon: 'leads' },
-  { id: 'settings',   label: 'Settings',        icon: 'settings' },
+  { id: 'integrations', label: 'Integrations',    icon: 'pipeline' },
+  { id: 'settings',    label: 'Settings',        icon: 'settings' },
 ]
 
 const TITLES = {
@@ -52,7 +54,8 @@ const TITLES = {
   om:         { title: 'OM Generator',     crumb: 'Tools · Documents' },
   social:     { title: 'Social Media',     crumb: 'Tools · Content' },
   leads:      { title: 'Website Leads',    crumb: 'Marketing · Captures' },
-  settings:   { title: 'Settings',         crumb: 'Workspace' },
+  integrations: { title: 'Integrations',    crumb: 'Tools · Connections' },
+  settings:     { title: 'Settings',        crumb: 'Workspace' },
 }
 
 const COLORS = ['#2d3561','#4a6fa5','#2e7d5e','#c9a84c','#6b4fa5','#c0392b','#d4820a','#1a1a2e']
@@ -466,7 +469,8 @@ export default function App() {
         {route === 'om'         && <OmPage />}
         {route === 'social'     && <SocialPage />}
         {route === 'leads'      && <LeadsPage {...props} />}
-        {route === 'settings'   && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
+        {route === 'integrations' && <IntegrationsPage />}
+        {route === 'settings'     && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
       </div>
 
       {compose && <ComposeModal ctx={compose} db={db} activeAgent={activeAgent} onClose={() => setCompose(null)} />}

@@ -1,7 +1,8 @@
-import React, { useState } from 'react'
+import React, { useState, useMemo } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { formatCurrency } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import { fireWebhooks } from '../lib/webhooks.js'
 
 // Types where commercial fields apply
 const COMMERCIAL_TYPES = ['multifamily','office','land','retail','industrial','mixed-use']
@@ -305,26 +306,55 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
     setErrors(e)
     if (Object.keys(e).length > 0) return
     setSaving(true)
-    const payload = {
-      ...form,
-      list_price:         form.list_price ? Number(form.list_price) : null,
-      sqft:               form.sqft       ? Number(form.sqft)       : null,
-      beds:               form.beds       ? Number(form.beds)       : null,
-      baths:              form.baths      ? Number(form.baths)      : null,
-      garage:             form.garage != null ? Number(form.garage) : 0,
-      linked_contact_id:  form.linked_contact_id  || null,
-      assigned_agent_id:  form.assigned_agent_id  || activeAgent?.id || null,
+    try {
+      const payload = {
+        ...form,
+        list_price:         form.list_price ? Number(form.list_price) : null,
+        sqft:               form.sqft       ? Number(form.sqft)       : null,
+        beds:               form.beds       ? Number(form.beds)       : null,
+        baths:              form.baths      ? Number(form.baths)      : null,
+        garage:             form.garage != null ? Number(form.garage) : 0,
+        linked_contact_id:  form.linked_contact_id  || null,
+        assigned_agent_id:  form.assigned_agent_id  || activeAgent?.id || null,
+      }
+      let error, savedId
+      if (property?.id) {
+        ;({ error } = await supabase.from('properties').update(payload).eq('id', property.id))
+        savedId = property.id
+      } else {
+        const res = await supabase.from('properties').insert([payload]).select('id').single()
+        error = res.error; savedId = res.data?.id
+      }
+      if (error) { pushToast(error.message, 'error'); return }
+
+      // Geocode on save if address changed or not yet geocoded
+      const addressChanged = !property?.id || form.address !== property?.address || form.city !== property?.city
+      if (savedId && addressChanged && (!form.lat || !form.lng)) {
+        const fullAddr = [form.address, form.city, form.state, form.zip].filter(Boolean).join(', ')
+        try {
+          const geoRes = await fetch(
+            `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(fullAddr)}`,
+            { headers: { 'User-Agent': 'GatewayCRM/1.0' } }
+          )
+          const geoData = await geoRes.json()
+          if (geoData[0]) {
+            await supabase.from('properties').update({
+              lat: parseFloat(geoData[0].lat),
+              lng: parseFloat(geoData[0].lon),
+            }).eq('id', savedId)
+          }
+        } catch { /* geocoding failure is non-fatal */ }
+      }
+
+      // Fire webhook for new properties
+      if (!property?.id) fireWebhooks('property.added', { id: savedId, address: form.address, city: form.city, type: form.type, status: form.status })
+
+      pushToast(property?.id ? 'Property updated' : 'Property added')
+      await onSave()
+      onClose()
+    } finally {
+      setSaving(false)
     }
-    let error
-    if (property?.id) {
-      ({ error } = await supabase.from('properties').update(payload).eq('id', property.id))
-    } else {
-      ({ error } = await supabase.from('properties').insert([payload]))
-    }
-    setSaving(false)
-    if (error) { pushToast(error.message, 'error'); return }
-    pushToast(property?.id ? 'Property updated' : 'Property added')
-    onSave(); onClose()
   }
 
   const commercial = isCommercial(form.type)
@@ -419,6 +449,283 @@ function PropertySpecs({ p }) {
   return <>{p.beds && <span>{p.beds} bd</span>}{p.baths && <span> · {p.baths} ba</span>}{p.sqft && <span> · {p.sqft?.toLocaleString()} sqft</span>}{p.garage > 0 && <span> · {p.garage}-car garage</span>}</>
 }
 
+// ─── Radius Mailing helpers ───────────────────────────────────────────────────
+
+const CAMPAIGN_TYPES = ['Just Sold','Just Listed','Exclusively Offered','Price Reduced','Open House','Investment Opportunity','Custom']
+
+async function geocodeAddress(address) {
+  try {
+    const r = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(address)}`,
+      { headers: { 'User-Agent': 'GatewayCRM/1.0' } }
+    )
+    const d = await r.json()
+    return d[0] ? { lat: parseFloat(d[0].lat), lng: parseFloat(d[0].lon) } : null
+  } catch { return null }
+}
+
+function haversineMiles(lat1, lng1, lat2, lng2) {
+  const R = 3958.8
+  const dLat = (lat2 - lat1) * Math.PI / 180
+  const dLng = (lng2 - lng1) * Math.PI / 180
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2
+  return R * 2 * Math.asin(Math.sqrt(a))
+}
+
+// ─── Radius Mailing Modal ─────────────────────────────────────────────────────
+
+function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
+  const [campaignType, setCampaignType]         = useState('Just Sold')
+  const [customName, setCustomName]             = useState('')
+  const [radius, setRadius]                     = useState(1)
+  const [searching, setSearching]               = useState(false)
+  const [geoProgress, setGeoProgress]           = useState(null) // { done, total }
+  const [results, setResults]                   = useState(null) // null = not run yet
+  const [selected, setSelected]                 = useState(new Set())
+  const [syncing, setSyncing]                   = useState(false)
+  const [syncDone, setSyncDone]                 = useState(false)
+  const [mcConfig, setMcConfig]                 = useState(null)
+
+  const contactMap = useMemo(() => Object.fromEntries(contacts.map(c => [c.id, c])), [contacts])
+
+  // Load saved Mailchimp config
+  React.useEffect(() => {
+    supabase.from('integrations').select('config').eq('type', 'mailchimp').single()
+      .then(({ data }) => { if (data?.config?.api_key) setMcConfig(data.config) })
+  }, [])
+
+  const search = async () => {
+    setSearching(true); setResults(null); setSyncDone(false)
+
+    // 1. Geocode source property (use stored coords if available)
+    let src = property.lat && property.lng ? { lat: property.lat, lng: property.lng } : null
+    if (!src) {
+      const addr = [property.address, property.city, property.state, property.zip].filter(Boolean).join(', ')
+      src = await geocodeAddress(addr)
+      if (src) await supabase.from('properties').update({ lat: src.lat, lng: src.lng }).eq('id', property.id)
+    }
+    if (!src) {
+      pushToast('Could not geocode this property — ensure address, city, state are filled in', 'error')
+      setSearching(false); return
+    }
+
+    // 2. Geocode any nearby properties that don't have coords yet
+    const others = allProperties.filter(p => p.id !== property.id)
+    const needsGeo = others.filter(p => !p.lat || !p.lng)
+    if (needsGeo.length) {
+      setGeoProgress({ done: 0, total: needsGeo.length })
+      for (let i = 0; i < needsGeo.length; i++) {
+        const p = needsGeo[i]
+        const addr = [p.address, p.city, p.state, p.zip].filter(Boolean).join(', ')
+        const coords = await geocodeAddress(addr)
+        if (coords) {
+          await supabase.from('properties').update({ lat: coords.lat, lng: coords.lng }).eq('id', p.id)
+          p.lat = coords.lat; p.lng = coords.lng
+        }
+        setGeoProgress({ done: i + 1, total: needsGeo.length })
+        if (i < needsGeo.length - 1) await new Promise(r => setTimeout(r, 1100)) // Nominatim rate limit
+      }
+      setGeoProgress(null)
+    }
+
+    // 3. Find properties within radius and collect their linked contacts
+    const found = []
+    const seen = new Set()
+    for (const p of others) {
+      if (!p.lat || !p.lng) continue
+      const dist = haversineMiles(src.lat, src.lng, p.lat, p.lng)
+      if (dist > radius) continue
+      if (p.linked_contact_id && !seen.has(p.linked_contact_id)) {
+        const contact = contactMap[p.linked_contact_id]
+        if (contact?.email) {
+          seen.add(p.linked_contact_id)
+          found.push({ contact, property: p, distance: dist })
+        }
+      }
+    }
+    found.sort((a, b) => a.distance - b.distance)
+
+    setResults(found)
+    setSelected(new Set(found.map(r => r.contact.id)))
+    setSearching(false)
+  }
+
+  const toggleContact = id => setSelected(prev => {
+    const next = new Set(prev)
+    next.has(id) ? next.delete(id) : next.add(id)
+    return next
+  })
+
+  const syncToMailchimp = async () => {
+    if (!mcConfig?.api_key)  { pushToast('Mailchimp not connected — go to Integrations', 'error'); return }
+    if (!mcConfig?.list_id)  { pushToast('No default audience set — go to Integrations → Mailchimp', 'error'); return }
+    if (!selected.size)      { pushToast('Select at least one contact', 'error'); return }
+    setSyncing(true)
+    try {
+      const toSync = results.filter(r => selected.has(r.contact.id))
+      const label  = campaignType === 'Custom' ? customName : campaignType
+      const tag    = `${label} — ${property.address}`
+
+      const res = await fetch('/api/mailchimp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'syncMembers',
+          apiKey: mcConfig.api_key,
+          listId: mcConfig.list_id,
+          tag,
+          members: toSync.map(r => ({ email: r.contact.email, first_name: r.contact.first_name, last_name: r.contact.last_name })),
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) { pushToast(data.error || 'Mailchimp sync failed', 'error'); return }
+
+      await fireWebhooks('radius_sync', {
+        property: property.address, campaign: label,
+        radius_miles: radius, contacts_synced: toSync.length, tag,
+      })
+
+      setSyncDone(true)
+      pushToast(`${toSync.length} contact${toSync.length !== 1 ? 's' : ''} synced → Mailchimp tag "${tag}"`)
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const campaignLabel = campaignType === 'Custom' ? (customName || 'Custom') : campaignType
+  const tag = `${campaignLabel} — ${property.address}`
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.48)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+      <div style={{ background: '#fff', borderRadius: 'var(--radius-lg,10px)', width: '100%', maxWidth: 560, maxHeight: '90vh', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
+
+        {/* Header */}
+        <div style={{ padding: '20px 24px 16px', borderBottom: '1px solid var(--gw-border)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 18 }}>Radius Mailing</div>
+              <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 3 }}>
+                {property.address}{property.city ? `, ${property.city}` : ''}
+              </div>
+            </div>
+            <button className="drawer__close" onClick={onClose}><Icon name="x" size={18} /></button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
+          <div className="form-row">
+            <div className="form-group">
+              <label className="form-label">Campaign Type</label>
+              <select className="form-control" value={campaignType} onChange={e => { setCampaignType(e.target.value); setResults(null) }}>
+                {CAMPAIGN_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Search Radius</label>
+              <select className="form-control" value={radius} onChange={e => { setRadius(Number(e.target.value)); setResults(null) }}>
+                {[0.25, 0.5, 1, 2, 5].map(r => <option key={r} value={r}>{r} mi</option>)}
+              </select>
+            </div>
+          </div>
+
+          {campaignType === 'Custom' && (
+            <div className="form-group">
+              <label className="form-label">Custom Campaign Name</label>
+              <input className="form-control" value={customName} onChange={e => setCustomName(e.target.value)} placeholder="e.g. New Office Listing Available" />
+            </div>
+          )}
+
+          {/* Geocoding progress */}
+          {geoProgress && (
+            <div style={{ marginBottom: 16, padding: 14, background: 'var(--gw-sky)', borderRadius: 'var(--radius)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+                <span>Geocoding properties for first-time search…</span>
+                <span>{geoProgress.done} / {geoProgress.total}</span>
+              </div>
+              <div style={{ height: 5, background: 'rgba(0,0,0,0.08)', borderRadius: 3, overflow: 'hidden' }}>
+                <div style={{ height: '100%', background: 'var(--gw-azure)', borderRadius: 3, width: `${Math.round(geoProgress.done / geoProgress.total * 100)}%`, transition: 'width 400ms' }} />
+              </div>
+            </div>
+          )}
+
+          <button className="btn btn--primary" onClick={search} disabled={searching} style={{ marginBottom: 20 }}>
+            {searching ? (geoProgress ? 'Geocoding…' : 'Searching…') : 'Find Contacts Within Radius'}
+          </button>
+
+          {/* Results */}
+          {results !== null && (
+            results.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--gw-mist)', fontSize: 13 }}>
+                No contacts with email addresses found within {radius} mi of this property.<br />
+                <span style={{ fontSize: 11, marginTop: 6, display: 'block' }}>
+                  Tip: Link contacts to nearby properties in the Properties page to appear here.
+                </span>
+              </div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>
+                    {results.length} contact{results.length !== 1 ? 's' : ''} found &nbsp;·&nbsp; {selected.size} selected
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="btn btn--ghost btn--sm" style={{ fontSize: 11 }} onClick={() => setSelected(new Set(results.map(r => r.contact.id)))}>All</button>
+                    <button className="btn btn--ghost btn--sm" style={{ fontSize: 11 }} onClick={() => setSelected(new Set())}>None</button>
+                  </div>
+                </div>
+                <div style={{ border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', overflow: 'hidden', marginBottom: 12 }}>
+                  {results.map(({ contact, property: p, distance }) => (
+                    <label key={contact.id}
+                      style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', borderBottom: '1px solid var(--gw-border)', cursor: 'pointer', background: selected.has(contact.id) ? 'var(--gw-sky)' : '#fff', transition: 'background 100ms' }}
+                      onClick={() => toggleContact(contact.id)}>
+                      <input type="checkbox" checked={selected.has(contact.id)} readOnly style={{ flexShrink: 0 }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: 13 }}>{contact.first_name} {contact.last_name}</div>
+                        <div style={{ fontSize: 11, color: 'var(--gw-mist)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{contact.email} · {p.address}</div>
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--gw-mist)', flexShrink: 0 }}>{distance.toFixed(2)} mi</div>
+                    </label>
+                  ))}
+                </div>
+              </>
+            )
+          )}
+        </div>
+
+        {/* Footer */}
+        {results !== null && results.length > 0 && (
+          <div style={{ padding: '14px 24px', borderTop: '1px solid var(--gw-border)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            {mcConfig ? (
+              <div style={{ flex: 1, fontSize: 11, color: 'var(--gw-mist)', minWidth: 0 }}>
+                Mailchimp tag: <strong style={{ color: 'var(--gw-ink)' }}>"{tag}"</strong>
+              </div>
+            ) : (
+              <div style={{ flex: 1, fontSize: 12, color: 'var(--gw-red)' }}>⚠ Mailchimp not connected — go to Integrations</div>
+            )}
+            <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
+            {!syncDone ? (
+              <button className="btn btn--primary" onClick={syncToMailchimp} disabled={syncing || !selected.size || !mcConfig}>
+                {syncing ? 'Syncing…' : `Sync ${selected.size} to Mailchimp`}
+              </button>
+            ) : (
+              <button className="btn btn--primary" style={{ background: 'var(--gw-green, #16a34a)' }} onClick={onClose}>✓ Done</button>
+            )}
+          </div>
+        )}
+        {results !== null && results.length === 0 && (
+          <div style={{ padding: '14px 24px', borderTop: '1px solid var(--gw-border)', display: 'flex', justifyContent: 'flex-end' }}>
+            <button className="btn btn--secondary" onClick={onClose}>Close</button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─── Properties page ──────────────────────────────────────────────────────────
+
 export default function PropertiesPage({ db, setDb, activeAgent, go }) {
   const [view, setView]           = useState('grid')
   const [search, setSearch]       = useState('')
@@ -427,6 +734,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go }) {
   const [drawer, setDrawer]       = useState(false)
   const [editing, setEditing]     = useState(null)
   const [confirm, setConfirm]     = useState(null)
+  const [radiusProp, setRadiusProp] = useState(null) // property to run radius mailing on
 
   const properties = db.properties || []
   const agents     = db.agents     || []
@@ -505,7 +813,15 @@ export default function PropertiesPage({ db, setDb, activeAgent, go }) {
                   </div>
                   <div className="property-card__foot">
                     {agent ? <Avatar agent={agent} size={24} /> : null}
-                    <div onClick={e=>{e.stopPropagation(); setConfirm(p.id)}} style={{ cursor:'pointer', color:'var(--gw-mist)', marginLeft:'auto' }}><Icon name="trash" size={13} /></div>
+                    <button
+                      className="btn btn--ghost btn--icon"
+                      title="Radius Mailing — sync nearby contacts to Mailchimp"
+                      onClick={e => { e.stopPropagation(); setRadiusProp(p) }}
+                      style={{ marginLeft:'auto', color:'var(--gw-azure)' }}
+                    >
+                      <Icon name="mail" size={13} />
+                    </button>
+                    <div onClick={e=>{e.stopPropagation(); setConfirm(p.id)}} style={{ cursor:'pointer', color:'var(--gw-mist)' }}><Icon name="trash" size={13} /></div>
                   </div>
                 </div>
               </div>
@@ -529,7 +845,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go }) {
                       <td style={{ fontSize:12, color:'var(--gw-mist)' }}><PropertySpecs p={p} /></td>
                       <td style={{ fontFamily:'var(--font-mono)', fontSize:12 }}>{p.mls_number||'—'}</td>
                       <td>{agent ? <div style={{ display:'flex', alignItems:'center', gap:6 }}><Avatar agent={agent} size={24} /><span style={{ fontSize:12 }}>{agent.name}</span></div> : '—'}</td>
-                      <td onClick={e=>e.stopPropagation()}><div style={{ display:'flex', gap:4 }}><button className="btn btn--ghost btn--icon" onClick={()=>{setEditing(p);setDrawer(true)}}><Icon name="edit" size={13}/></button><button className="btn btn--ghost btn--icon" onClick={()=>setConfirm(p.id)}><Icon name="trash" size={13}/></button></div></td>
+                      <td onClick={e=>e.stopPropagation()}><div style={{ display:'flex', gap:4 }}><button className="btn btn--ghost btn--icon" title="Radius Mailing" onClick={()=>setRadiusProp(p)} style={{ color:'var(--gw-azure)' }}><Icon name="mail" size={13}/></button><button className="btn btn--ghost btn--icon" onClick={()=>{setEditing(p);setDrawer(true)}}><Icon name="edit" size={13}/></button><button className="btn btn--ghost btn--icon" onClick={()=>setConfirm(p.id)}><Icon name="trash" size={13}/></button></div></td>
                     </tr>
                   )
                 })}
@@ -541,6 +857,14 @@ export default function PropertiesPage({ db, setDb, activeAgent, go }) {
 
       <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={reload} go={go} setDb={setDb} />
       {confirm && <ConfirmDialog message="This will permanently delete this property." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
+      {radiusProp && (
+        <RadiusMailingModal
+          property={radiusProp}
+          contacts={contacts}
+          allProperties={properties}
+          onClose={() => setRadiusProp(null)}
+        />
+      )}
     </div>
   )
 }
