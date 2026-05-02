@@ -153,7 +153,6 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false)
   const [activeAgentId, setActiveAgentId] = useState(null)
   const [compose, setCompose] = useState(null)
-  const [globalSearch, setGlobalSearch] = useState('')
   const [mobileMore, setMobileMore] = useState(false)
   const [needsOnboarding, setNeedsOnboarding] = useState(false)
   const [notifications,   setNotifications]   = useState([])
@@ -366,7 +365,7 @@ export default function App() {
           </div>
           <div className="topbar__search">
             <Icon name="search" size={14} style={{ color: 'var(--gw-mist)' }} />
-            <input placeholder="Search contacts, properties, deals…" value={globalSearch} onChange={e => setGlobalSearch(e.target.value)} />
+            <input placeholder="Search contacts, properties, deals…" defaultValue="" />
           </div>
           {activeAgent && (
             <div className="topbar__agent-badge">

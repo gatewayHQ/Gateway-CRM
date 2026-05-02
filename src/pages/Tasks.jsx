@@ -1,11 +1,11 @@
-import React, { useState } from 'react'
+import React, { useState, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { formatDate, isOverdue, isToday, isThisWeek } from '../lib/helpers.js'
+import { formatDate } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
 function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave }) {
   const blank = { title:'', type:'follow-up', priority:'medium', due_date:'', contact_id:'', deal_id:'', agent_id:'', notes:'', completed:false }
-  const [form, setForm] = useState(task || blank)
+  const [form, setForm] = useState(blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
 
@@ -21,16 +21,35 @@ function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave }) {
     setErrors(e)
     if (Object.keys(e).length > 0) return
     setSaving(true)
-    let error
-    if (task?.id) {
-      ({ error } = await supabase.from('tasks').update(form).eq('id', task.id))
-    } else {
-      ({ error } = await supabase.from('tasks').insert([form]))
+    try {
+      // Explicit whitelist — never spread full task object
+      const payload = {
+        title:      form.title.trim(),
+        type:       form.type,
+        priority:   form.priority,
+        due_date:   form.due_date   || null,
+        contact_id: form.contact_id || null,
+        deal_id:    form.deal_id    || null,
+        agent_id:   form.agent_id   || null,
+        notes:      form.notes      || null,
+        completed:  form.completed,
+      }
+      let error
+      if (task?.id) {
+        ;({ error } = await supabase.from('tasks').update(payload).eq('id', task.id))
+      } else {
+        ;({ error } = await supabase.from('tasks').insert([payload]))
+      }
+      if (error) { pushToast(error.message, 'error'); return }
+      pushToast(task?.id ? 'Task updated' : 'Task added')
+      await onSave()
+      onClose()
+    } catch(err) {
+      console.error('[TaskDrawer] save error:', err)
+      pushToast('Something went wrong.', 'error')
+    } finally {
+      setSaving(false)
     }
-    setSaving(false)
-    if (error) { pushToast(error.message, 'error'); return }
-    pushToast(task?.id ? 'Task updated' : 'Task added')
-    onSave(); onClose()
   }
 
   return (
@@ -55,88 +74,123 @@ function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave }) {
   )
 }
 
-export default function TasksPage({ db, setDb, activeAgent }) {
-  const [drawer, setDrawer] = useState(false)
-  const [editing, setEditing] = useState(null)
-  const [confirm, setConfirm] = useState(null)
+// ─── Defined OUTSIDE TasksPage ────────────────────────────────────────────────
+// Defining components inside a parent causes React to treat them as new types
+// every render → full unmount/remount of every row. Moving outside prevents this.
+
+const TaskRow = React.memo(function TaskRow({ task, contact, agent, onToggle, onEdit, onDelete }) {
+  const od = !task.completed && task.due_date && new Date(task.due_date) < new Date()
+  return (
+    <div className={`task-row${task.completed?' completed':''}`}>
+      <div className={`task-checkbox${task.completed?' checked':''}`} onClick={() => onToggle(task)}>
+        {task.completed && <Icon name="check" size={10} style={{ color:'#fff' }} />}
+      </div>
+      <Icon name={task.type==='call'?'phone':task.type==='email'?'mail':task.type==='showing'?'building':'tasks'} size={14} style={{ color:'var(--gw-mist)', flexShrink:0 }} />
+      <div style={{ flex:1 }}>
+        <div className="task-title">{task.title}</div>
+        {contact && <div style={{ fontSize:11, color:'var(--gw-mist)' }}>{contact.first_name} {contact.last_name}</div>}
+      </div>
+      <div className="task-meta">
+        <Badge variant={task.priority}>{task.priority}</Badge>
+        {task.due_date && <span style={{ fontSize:11, color: od?'var(--gw-red)':'var(--gw-mist)', fontWeight: od?600:400 }}>{formatDate(task.due_date)}</span>}
+        {agent && <Avatar agent={agent} size={22} />}
+        <button className="btn btn--ghost btn--icon" onClick={() => onEdit(task)}><Icon name="edit" size={12} /></button>
+        <button className="btn btn--ghost btn--icon" onClick={() => onDelete(task.id)}><Icon name="trash" size={12} /></button>
+      </div>
+    </div>
+  )
+})
+
+const TaskGroup = React.memo(function TaskGroup({ label, items, color, contactMap, agentMap, onToggle, onEdit, onDelete }) {
+  if (items.length === 0) return null
+  return (
+    <div className="task-group">
+      <div className="task-group__label" style={{ color: color || undefined }}>{label} ({items.length})</div>
+      {items.map(t => (
+        <TaskRow
+          key={t.id}
+          task={t}
+          contact={contactMap[t.contact_id]}
+          agent={agentMap[t.agent_id]}
+          onToggle={onToggle}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
+      ))}
+    </div>
+  )
+})
+
+export default function TasksPage({ db, setDb }) {
+  const [drawer, setDrawer]           = useState(false)
+  const [editing, setEditing]         = useState(null)
+  const [confirm, setConfirm]         = useState(null)
   const [filterPriority, setFilterPriority] = useState('')
-  const [filterType, setFilterType] = useState('')
+  const [filterType, setFilterType]   = useState('')
   const [showCompleted, setShowCompleted] = useState(false)
 
-  const tasks = db.tasks || []
-  const agents = db.agents || []
+  const tasks    = db.tasks    || []
+  const agents   = db.agents   || []
   const contacts = db.contacts || []
-  const deals = db.deals || []
+  const deals    = db.deals    || []
 
-  const reload = async () => {
+  // O(1) lookups — built once per contacts/agents change, not per-row
+  const contactMap = useMemo(() => Object.fromEntries(contacts.map(c => [c.id, c])), [contacts])
+  const agentMap   = useMemo(() => Object.fromEntries(agents.map(a => [a.id, a])),   [agents])
+
+  // Memoized filter — only recomputes when tasks or active filters change
+  const filtered = useMemo(() => tasks.filter(t => {
+    if (!showCompleted && t.completed) return false
+    if (filterPriority && t.priority !== filterPriority) return false
+    if (filterType     && t.type     !== filterType)     return false
+    return true
+  }), [tasks, showCompleted, filterPriority, filterType])
+
+  // Single-pass O(n) grouping — replaces the previous 4× O(n²) filter+find passes
+  const { overdue, todayTasks, upcoming, other, completedTasks } = useMemo(() => {
+    const now     = new Date()
+    const todayStr = now.toDateString()
+    const weekEnd  = new Date(now); weekEnd.setDate(now.getDate() + 7)
+    const g = { overdue: [], todayTasks: [], upcoming: [], other: [], completedTasks: [] }
+    filtered.forEach(t => {
+      if (t.completed)  { g.completedTasks.push(t); return }
+      if (!t.due_date)  { g.other.push(t);          return }
+      const due = new Date(t.due_date)
+      if (due < now)                       { g.overdue.push(t);    return }
+      if (due.toDateString() === todayStr) { g.todayTasks.push(t); return }
+      if (due <= weekEnd)                  { g.upcoming.push(t);   return }
+      g.other.push(t)
+    })
+    return g
+  }, [filtered])
+
+  const openCount = useMemo(() => tasks.filter(t => !t.completed).length, [tasks])
+
+  const reload = useCallback(async () => {
     const { data } = await supabase.from('tasks').select('*').order('due_date', { ascending: true })
     setDb(p => ({ ...p, tasks: data || [] }))
-  }
+  }, [setDb])
 
-  const toggle = async (task) => {
-    const updated = { ...task, completed: !task.completed }
-    await supabase.from('tasks').update({ completed: updated.completed }).eq('id', task.id)
-    setDb(p => ({ ...p, tasks: p.tasks.map(t => t.id === task.id ? updated : t) }))
-    pushToast(updated.completed ? 'Task completed! ✓' : 'Task reopened')
-  }
+  const toggle = useCallback(async (task) => {
+    const completed = !task.completed
+    await supabase.from('tasks').update({ completed }).eq('id', task.id)
+    setDb(p => ({ ...p, tasks: p.tasks.map(t => t.id === task.id ? { ...t, completed } : t) }))
+    pushToast(completed ? 'Task completed! ✓' : 'Task reopened')
+  }, [setDb])
 
-  const del = async (id) => {
+  const del = useCallback(async (id) => {
     await supabase.from('tasks').delete().eq('id', id)
     pushToast('Task deleted', 'info')
     setConfirm(null); reload()
-  }
+  }, [reload])
 
-  const filtered = tasks.filter(t => {
-    if (!showCompleted && t.completed) return false
-    if (filterPriority && t.priority !== filterPriority) return false
-    if (filterType && t.type !== filterType) return false
-    return true
-  })
-
-  const overdue = filtered.filter(t => !t.completed && t.due_date && new Date(t.due_date) < new Date())
-  const todayTasks = filtered.filter(t => !t.completed && t.due_date && isToday(t.due_date) && !overdue.find(o=>o.id===t.id))
-  const upcoming = filtered.filter(t => !t.completed && t.due_date && isThisWeek(t.due_date) && !todayTasks.find(x=>x.id===t.id) && !overdue.find(o=>o.id===t.id))
-  const other = filtered.filter(t => !overdue.find(o=>o.id===t.id) && !todayTasks.find(x=>x.id===t.id) && !upcoming.find(x=>x.id===t.id))
-
-  const TaskRow = ({ task }) => {
-    const contact = contacts.find(c => c.id === task.contact_id)
-    const agent = agents.find(a => a.id === task.agent_id)
-    const od = !task.completed && task.due_date && new Date(task.due_date) < new Date()
-    return (
-      <div className={`task-row${task.completed?' completed':''}`}>
-        <div className={`task-checkbox${task.completed?' checked':''}`} onClick={() => toggle(task)}>
-          {task.completed && <Icon name="check" size={10} style={{ color:'#fff' }} />}
-        </div>
-        <Icon name={task.type==='call'?'phone':task.type==='email'?'mail':task.type==='showing'?'building':'tasks'} size={14} style={{ color:'var(--gw-mist)', flexShrink:0 }} />
-        <div style={{ flex:1 }}>
-          <div className="task-title">{task.title}</div>
-          {contact && <div style={{ fontSize:11, color:'var(--gw-mist)' }}>{contact.first_name} {contact.last_name}</div>}
-        </div>
-        <div className="task-meta">
-          <Badge variant={task.priority}>{task.priority}</Badge>
-          {task.due_date && <span style={{ fontSize:11, color: od?'var(--gw-red)':'var(--gw-mist)', fontWeight: od?600:400 }}>{formatDate(task.due_date)}</span>}
-          {agent && <Avatar agent={agent} size={22} />}
-          <button className="btn btn--ghost btn--icon" onClick={() => { setEditing(task); setDrawer(true) }}><Icon name="edit" size={12} /></button>
-          <button className="btn btn--ghost btn--icon" onClick={() => setConfirm(task.id)}><Icon name="trash" size={12} /></button>
-        </div>
-      </div>
-    )
-  }
-
-  const Group = ({ label, items, color }) => {
-    if (items.length === 0) return null
-    return (
-      <div className="task-group">
-        <div className="task-group__label" style={{ color: color || undefined }}>{label} ({items.length})</div>
-        {items.map(t => <TaskRow key={t.id} task={t} />)}
-      </div>
-    )
-  }
+  const handleEdit   = useCallback((task) => { setEditing(task); setDrawer(true) }, [])
+  const handleDelete = useCallback((id)   => setConfirm(id), [])
 
   return (
     <div className="page-content">
       <div className="page-header">
-        <div><div className="page-title">Tasks</div><div className="page-sub">{tasks.filter(t=>!t.completed).length} open · {tasks.filter(t=>t.completed).length} completed</div></div>
+        <div><div className="page-title">Tasks</div><div className="page-sub">{openCount} open · {tasks.length - openCount} completed</div></div>
         <button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Task</button>
       </div>
 
@@ -153,11 +207,11 @@ export default function TasksPage({ db, setDb, activeAgent }) {
         <EmptyState icon="tasks" title="No tasks" message="Add tasks to track follow-ups, showings, and reminders." action={<button className="btn btn--primary" onClick={() => setDrawer(true)}><Icon name="plus" size={14} /> Add Task</button>} />
       ) : (
         <>
-          <Group label="Overdue" items={overdue} color="var(--gw-red)" />
-          <Group label="Today" items={todayTasks} color="var(--gw-azure)" />
-          <Group label="This Week" items={upcoming} />
-          <Group label="Upcoming & Other" items={other} />
-          {showCompleted && <Group label="Completed" items={filtered.filter(t=>t.completed)} color="var(--gw-mist)" />}
+          <TaskGroup label="Overdue"          items={overdue}        color="var(--gw-red)"   contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} />
+          <TaskGroup label="Today"            items={todayTasks}     color="var(--gw-azure)" contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} />
+          <TaskGroup label="This Week"        items={upcoming}                                contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} />
+          <TaskGroup label="Upcoming & Other" items={other}                                   contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} />
+          {showCompleted && <TaskGroup label="Completed" items={completedTasks} color="var(--gw-mist)" contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} />}
         </>
       )}
 
