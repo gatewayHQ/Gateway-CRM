@@ -264,20 +264,12 @@ function CommercialFields({ form, set }) {
   return null
 }
 
-<<<<<<< HEAD
-function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave }) {
-  const blank = { address:'', city:'', state:'', zip:'', county:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{} }
-  const [form, setForm]     = useState(property || blank)
-  const [errors, setErrors] = useState({})
-  const [saving, setSaving] = useState(false)
-=======
 function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave, go, setDb }) {
-  const blank = { address:'', city:'', state:'', zip:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{} }
-  const [form, setForm]         = useState(property || blank)
-  const [errors, setErrors]     = useState({})
-  const [saving, setSaving]     = useState(false)
+  const blank = { address:'', city:'', state:'', zip:'', county:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{} }
+  const [form, setForm]             = useState(property || blank)
+  const [errors, setErrors]         = useState({})
+  const [saving, setSaving]         = useState(false)
   const [startingDeal, setStartingDeal] = useState(false)
->>>>>>> 40f2c4d5ca5c823cfe98c8df39044898ead9bcd6
 
   React.useEffect(() => {
     setForm(property
@@ -314,15 +306,14 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
     setErrors(e)
     if (Object.keys(e).length > 0) return
     setSaving(true)
-<<<<<<< HEAD
     const resolvedId = property?.id || crypto.randomUUID()
     const payload = {
       ...form,
       id:                resolvedId,
       list_price:        form.list_price ? Number(form.list_price) : null,
-      sqft:              form.sqft  ? Number(form.sqft)  : null,
-      beds:              form.beds  ? Number(form.beds)  : null,
-      baths:             form.baths ? Number(form.baths) : null,
+      sqft:              form.sqft       ? Number(form.sqft)       : null,
+      beds:              form.beds       ? Number(form.beds)       : null,
+      baths:             form.baths      ? Number(form.baths)      : null,
       garage:            form.garage != null ? Number(form.garage) : 0,
       linked_contact_id: form.linked_contact_id || null,
       assigned_agent_id: form.assigned_agent_id || activeAgent?.id || null,
@@ -335,60 +326,29 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
     }
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
+
+    // Geocode on save if address changed or not yet geocoded
+    const savedId = data?.id || resolvedId
+    const addressChanged = !property?.id || form.address !== property?.address || form.city !== property?.city
+    if (savedId && addressChanged && (!form.lat || !form.lng)) {
+      const fullAddr = [form.address, form.city, form.state, form.zip].filter(Boolean).join(', ')
+      try {
+        const geoRes = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(fullAddr)}`,
+          { headers: { 'User-Agent': 'GatewayCRM/1.0' } }
+        )
+        const geoData = await geoRes.json()
+        if (geoData[0]) {
+          await supabase.from('properties').update({ lat: parseFloat(geoData[0].lat), lng: parseFloat(geoData[0].lon) }).eq('id', savedId)
+        }
+      } catch { /* geocoding failure is non-fatal */ }
+    }
+
+    if (!property?.id) fireWebhooks('property.added', { id: savedId, address: form.address, city: form.city, type: form.type, status: form.status })
+
     pushToast(property?.id ? 'Property updated' : 'Property added')
     onSave(data || payload)
     onClose()
-=======
-    try {
-      const payload = {
-        ...form,
-        list_price:         form.list_price ? Number(form.list_price) : null,
-        sqft:               form.sqft       ? Number(form.sqft)       : null,
-        beds:               form.beds       ? Number(form.beds)       : null,
-        baths:              form.baths      ? Number(form.baths)      : null,
-        garage:             form.garage != null ? Number(form.garage) : 0,
-        linked_contact_id:  form.linked_contact_id  || null,
-        assigned_agent_id:  form.assigned_agent_id  || activeAgent?.id || null,
-      }
-      let error, savedId
-      if (property?.id) {
-        ;({ error } = await supabase.from('properties').update(payload).eq('id', property.id))
-        savedId = property.id
-      } else {
-        const res = await supabase.from('properties').insert([payload]).select('id').single()
-        error = res.error; savedId = res.data?.id
-      }
-      if (error) { pushToast(error.message, 'error'); return }
-
-      // Geocode on save if address changed or not yet geocoded
-      const addressChanged = !property?.id || form.address !== property?.address || form.city !== property?.city
-      if (savedId && addressChanged && (!form.lat || !form.lng)) {
-        const fullAddr = [form.address, form.city, form.state, form.zip].filter(Boolean).join(', ')
-        try {
-          const geoRes = await fetch(
-            `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(fullAddr)}`,
-            { headers: { 'User-Agent': 'GatewayCRM/1.0' } }
-          )
-          const geoData = await geoRes.json()
-          if (geoData[0]) {
-            await supabase.from('properties').update({
-              lat: parseFloat(geoData[0].lat),
-              lng: parseFloat(geoData[0].lon),
-            }).eq('id', savedId)
-          }
-        } catch { /* geocoding failure is non-fatal */ }
-      }
-
-      // Fire webhook for new properties
-      if (!property?.id) fireWebhooks('property.added', { id: savedId, address: form.address, city: form.city, type: form.type, status: form.status })
-
-      pushToast(property?.id ? 'Property updated' : 'Property added')
-      await onSave()
-      onClose()
-    } finally {
-      setSaving(false)
-    }
->>>>>>> 40f2c4d5ca5c823cfe98c8df39044898ead9bcd6
   }
 
   const commercial = isCommercial(form.type)
@@ -486,17 +446,6 @@ function PropertySpecs({ p }) {
   return <>{p.beds && <span>{p.beds} bd</span>}{p.baths && <span> · {p.baths} ba</span>}{p.sqft && <span> · {p.sqft?.toLocaleString()} sqft</span>}{p.garage > 0 && <span> · {p.garage}-car garage</span>}</>
 }
 
-<<<<<<< HEAD
-export default function PropertiesPage({ db, setDb, activeAgent }) {
-  const [view, setView]               = useState('grid')
-  const [search, setSearch]           = useState('')
-  const [filterType, setFilterType]   = useState('')
-  const [filterStatus, setFilterStatus] = useState('')
-  const [filterCounty, setFilterCounty] = useState('')
-  const [drawer, setDrawer]           = useState(false)
-  const [editing, setEditing]         = useState(null)
-  const [confirm, setConfirm]         = useState(null)
-=======
 // ─── Radius Mailing helpers ───────────────────────────────────────────────────
 
 const CAMPAIGN_TYPES = ['Just Sold','Just Listed','Exclusively Offered','Price Reduced','Open House','Investment Opportunity','Custom']
@@ -775,15 +724,15 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
 // ─── Properties page ──────────────────────────────────────────────────────────
 
 export default function PropertiesPage({ db, setDb, activeAgent, go }) {
-  const [view, setView]           = useState('grid')
-  const [search, setSearch]       = useState('')
-  const [filterType, setFilterType] = useState('')
+  const [view, setView]               = useState('grid')
+  const [search, setSearch]           = useState('')
+  const [filterType, setFilterType]   = useState('')
   const [filterStatus, setFilterStatus] = useState('')
-  const [drawer, setDrawer]       = useState(false)
-  const [editing, setEditing]     = useState(null)
-  const [confirm, setConfirm]     = useState(null)
-  const [radiusProp, setRadiusProp] = useState(null) // property to run radius mailing on
->>>>>>> 40f2c4d5ca5c823cfe98c8df39044898ead9bcd6
+  const [filterCounty, setFilterCounty] = useState('')
+  const [drawer, setDrawer]           = useState(false)
+  const [editing, setEditing]         = useState(null)
+  const [confirm, setConfirm]         = useState(null)
+  const [radiusProp, setRadiusProp]   = useState(null)
 
   const properties = db.properties || []
   const agents     = db.agents     || []
@@ -929,11 +878,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go }) {
         </div>
       )}
 
-<<<<<<< HEAD
-      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={handleSave} />
-=======
-      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={reload} go={go} setDb={setDb} />
->>>>>>> 40f2c4d5ca5c823cfe98c8df39044898ead9bcd6
+      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={handleSave} go={go} setDb={setDb} />
       {confirm && <ConfirmDialog message="This will permanently delete this property." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {radiusProp && (
         <RadiusMailingModal
