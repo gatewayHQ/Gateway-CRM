@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER } from '../lib/helpers.js'
+import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER, upcomingReminders } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Loading, pushToast } from '../components/UI.jsx'
 
-export default function Dashboard({ db, go, openCompose }) {
+export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
   const today = new Date().toDateString()
   const contacts = db.contacts || []
   const deals = db.deals || []
@@ -26,6 +26,29 @@ export default function Dashboard({ db, go, openCompose }) {
     count: deals.filter(d => d.stage === s).length,
     value: deals.filter(d => d.stage === s).reduce((sum, d) => sum + (d.value || 0), 0)
   }))
+
+  const reminders = upcomingReminders(contacts, 30)
+
+  const createReminderTask = async (reminder) => {
+    const { contact, type, days } = reminder
+    const dueDate = new Date()
+    dueDate.setDate(dueDate.getDate() + Math.max(0, days - 2))  // remind 2 days early
+    dueDate.setHours(9, 0, 0, 0)
+    const title = type === 'birthday'
+      ? `Send birthday message to ${contact.first_name} ${contact.last_name}`
+      : `Send closing anniversary message to ${contact.first_name} ${contact.last_name}`
+    const payload = {
+      title, type: 'call', priority: 'medium',
+      due_date: dueDate.toISOString(),
+      contact_id: contact.id,
+      agent_id: activeAgent?.id || null,
+      completed: false,
+    }
+    const { data, error } = await supabase.from('tasks').insert([payload]).select().single()
+    if (error) { pushToast(error.message, 'error'); return }
+    setDb(p => ({ ...p, tasks: [data, ...p.tasks] }))
+    pushToast(`Task created for ${contact.first_name}'s ${type}`)
+  }
 
   return (
     <div className="page-content">
@@ -102,6 +125,63 @@ export default function Dashboard({ db, go, openCompose }) {
                       {contact && <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>{contact.first_name} {contact.last_name}</div>}
                     </div>
                     <div style={{ fontSize: 11, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)', fontWeight: overdue ? 600 : 400 }}>{formatDate(task.due_date)}</div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* ── Upcoming Reminders ── */}
+        <div className="card" style={{ gridColumn: '1 / -1' }}>
+          <div className="section-head">
+            <div className="section-title">
+              Upcoming Birthdays &amp; Anniversaries
+              {reminders.length > 0 && (
+                <span style={{ marginLeft: 8, background: 'var(--gw-amber)', color: '#fff', borderRadius: 10, fontSize: 10, padding: '2px 7px', fontWeight: 700, verticalAlign: 'middle' }}>
+                  {reminders.length}
+                </span>
+              )}
+            </div>
+            <button className="btn btn--ghost btn--sm" onClick={() => go('contacts')}>All contacts</button>
+          </div>
+          {reminders.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--gw-mist)', fontSize: 13 }}>
+              No birthdays or anniversaries in the next 30 days — add them in Contact details
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 10 }}>
+              {reminders.map((r, i) => {
+                const isBday  = r.type === 'birthday'
+                const isToday = r.days === 0
+                const label   = isToday ? 'Today!' : r.days === 1 ? 'Tomorrow' : `In ${r.days} days`
+                const alreadyHasTask = tasks.some(t =>
+                  !t.completed && t.contact_id === r.contact.id &&
+                  t.title.toLowerCase().includes(r.type === 'birthday' ? 'birthday' : 'anniversary')
+                )
+                return (
+                  <div key={`${r.contact.id}-${r.type}`} style={{
+                    display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px',
+                    borderRadius: 'var(--radius)', border: `1px solid ${isToday ? 'var(--gw-amber)' : 'var(--gw-border)'}`,
+                    background: isToday ? '#fef9ec' : '#fff',
+                  }}>
+                    <div style={{ fontSize: 22, lineHeight: 1 }}>{isBday ? '🎂' : '🏡'}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {r.contact.first_name} {r.contact.last_name}
+                      </div>
+                      <div style={{ fontSize: 11, color: isToday ? 'var(--gw-amber)' : 'var(--gw-mist)', fontWeight: isToday ? 700 : 400 }}>
+                        {isBday ? 'Birthday' : 'Closing Anniversary'} · {label}
+                      </div>
+                    </div>
+                    {alreadyHasTask ? (
+                      <span style={{ fontSize: 11, color: 'var(--gw-green)', fontWeight: 600 }}>✓ Task set</span>
+                    ) : (
+                      <button className="btn btn--ghost btn--sm" onClick={() => createReminderTask(r)}
+                        title="Create a reminder task">
+                        + Task
+                      </button>
+                    )}
                   </div>
                 )
               })}

@@ -40,6 +40,9 @@ create table if not exists contacts (
   owner_city        text,
   owner_state       text,
   owner_zip         text,
+  -- Annual reminders
+  birthday          date,
+  anniversary_date  date,
   created_at        timestamptz default now()
 );
 
@@ -246,10 +249,12 @@ end $$;
 -- ─────────────────────────────────────────────────────────────────────────────
 -- alter table agents      add column if not exists auth_id uuid unique;
 -- alter table agents      add column if not exists team_id uuid;
--- alter table contacts    add column if not exists owner_address text;
--- alter table contacts    add column if not exists owner_city    text;
--- alter table contacts    add column if not exists owner_state   text;
--- alter table contacts    add column if not exists owner_zip     text;
+-- alter table contacts    add column if not exists owner_address    text;
+-- alter table contacts    add column if not exists owner_city       text;
+-- alter table contacts    add column if not exists owner_state      text;
+-- alter table contacts    add column if not exists owner_zip        text;
+-- alter table contacts    add column if not exists birthday         date;
+-- alter table contacts    add column if not exists anniversary_date date;
 -- alter table properties  add column if not exists county  text;
 -- alter table properties  add column if not exists garage  integer default 0;
 -- alter table properties  add column if not exists details jsonb   default '{}';

@@ -73,3 +73,28 @@ export const calcHeatScore = (contact, activities, deals) => {
   if (score >= 2) return 'warm'
   return 'cold'
 }
+
+// Days until the next annual occurrence of a date (0 = today, -1 = no date set)
+export const daysUntilAnnual = (dateStr) => {
+  if (!dateStr) return -1
+  const src   = new Date(dateStr)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const next  = new Date(today.getFullYear(), src.getMonth(), src.getDate())
+  if (next < today) next.setFullYear(today.getFullYear() + 1)
+  return Math.round((next - today) / 86400000)
+}
+
+// Returns contacts with birthdays or anniversaries within windowDays, sorted by soonest
+export const upcomingReminders = (contacts, windowDays = 30) => {
+  const results = []
+  for (const c of contacts) {
+    const bd = daysUntilAnnual(c.birthday)
+    const ad = daysUntilAnnual(c.anniversary_date)
+    if (bd >= 0 && bd <= windowDays)
+      results.push({ contact: c, type: 'birthday',    days: bd, date: c.birthday })
+    if (ad >= 0 && ad <= windowDays)
+      results.push({ contact: c, type: 'anniversary', days: ad, date: c.anniversary_date })
+  }
+  return results.sort((a, b) => a.days - b.days)
+}

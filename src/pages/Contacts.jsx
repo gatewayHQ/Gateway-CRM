@@ -165,7 +165,7 @@ function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivit
 }
 
 function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activities, activeAgent, onSave, onActivityAdded }) {
-  const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'' }
+  const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'', birthday:'', anniversary_date:'' }
   const blankProp = { address:'', list_price:'', type:'residential', subtype:'', beds:'', baths:'', sqft:'', garage:'', details:{} }
   const [form, setForm] = useState(contact || blank)
   const [errors, setErrors] = useState({})
@@ -319,6 +319,19 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
               </div>
             </div>
             <div className="form-group"><label className="form-label">Tags</label><input className="form-control" value={Array.isArray(form.tags)?form.tags.join(', '):(form.tags||'')} onChange={e=>set('tags',e.target.value)} placeholder="vip, referral, hot-lead" /><div className="form-hint">Comma separated</div></div>
+
+            {/* ── Reminders ── */}
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Birthday</label>
+                <input className="form-control" type="date" value={form.birthday||''} onChange={e=>set('birthday',e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Closing Anniversary</label>
+                <input className="form-control" type="date" value={form.anniversary_date||''} onChange={e=>set('anniversary_date',e.target.value)} />
+              </div>
+            </div>
+
             <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} placeholder="Add notes…" /></div>
 
             {/* ── Inline Add Property ────────────────────────────────── */}
