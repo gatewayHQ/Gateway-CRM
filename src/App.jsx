@@ -19,6 +19,7 @@ import SequencesPage from './pages/Sequences.jsx'
 import ColdCallsPage from './pages/ColdCalls.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
 import IntegrationsPage from './pages/Integrations.jsx'
+import { Analytics } from '@vercel/analytics/react'
 
 const BASE_NAV = [
   { id: 'dashboard',  label: 'Dashboard',      icon: 'dashboard' },
@@ -520,6 +521,7 @@ export default function App() {
 
       <QuickAdd db={db} setDb={setDb} activeAgent={activeAgent} />
       <ToastHost />
+      <Analytics />
     </div>
   )
 }
