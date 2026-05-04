@@ -264,7 +264,7 @@ function CommercialFields({ form, set }) {
 }
 
 function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave }) {
-  const blank = { address:'', city:'', state:'', zip:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{} }
+  const blank = { address:'', city:'', state:'', zip:'', county:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{} }
   const [form, setForm]     = useState(property || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
@@ -284,26 +284,29 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
     setErrors(e)
     if (Object.keys(e).length > 0) return
     setSaving(true)
+    const resolvedId = property?.id || crypto.randomUUID()
     const payload = {
       ...form,
-      list_price:         form.list_price ? Number(form.list_price) : null,
-      sqft:               form.sqft       ? Number(form.sqft)       : null,
-      beds:               form.beds       ? Number(form.beds)       : null,
-      baths:              form.baths      ? Number(form.baths)      : null,
-      garage:             form.garage != null ? Number(form.garage) : 0,
-      linked_contact_id:  form.linked_contact_id  || null,
-      assigned_agent_id:  form.assigned_agent_id  || activeAgent?.id || null,
+      id:                resolvedId,
+      list_price:        form.list_price ? Number(form.list_price) : null,
+      sqft:              form.sqft  ? Number(form.sqft)  : null,
+      beds:              form.beds  ? Number(form.beds)  : null,
+      baths:             form.baths ? Number(form.baths) : null,
+      garage:            form.garage != null ? Number(form.garage) : 0,
+      linked_contact_id: form.linked_contact_id || null,
+      assigned_agent_id: form.assigned_agent_id || activeAgent?.id || null,
     }
-    let error
+    let error, data
     if (property?.id) {
-      ({ error } = await supabase.from('properties').update(payload).eq('id', property.id))
+      ({ error, data } = await supabase.from('properties').update(payload).eq('id', property.id).select().single())
     } else {
-      ({ error } = await supabase.from('properties').insert([payload]))
+      ({ error, data } = await supabase.from('properties').insert([payload]).select().single())
     }
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast(property?.id ? 'Property updated' : 'Property added')
-    onSave(); onClose()
+    onSave(data || payload)
+    onClose()
   }
 
   const commercial = isCommercial(form.type)
@@ -319,6 +322,9 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
         </div>
         <div className="form-row">
           <div className="form-group"><label className="form-label">ZIP</label><input className="form-control" value={form.zip||''} onChange={e=>set('zip',e.target.value)} /></div>
+          <div className="form-group"><label className="form-label">County</label><input className="form-control" value={form.county||''} onChange={e=>set('county',e.target.value)} placeholder="e.g. Travis County" /></div>
+        </div>
+        <div className="form-row">
           <div className="form-group"><label className="form-label">MLS #</label><input className="form-control" value={form.mls_number||''} onChange={e=>set('mls_number',e.target.value)} /></div>
         </div>
 
@@ -387,29 +393,48 @@ function PropertySpecs({ p }) {
 }
 
 export default function PropertiesPage({ db, setDb, activeAgent }) {
-  const [view, setView]           = useState('grid')
-  const [search, setSearch]       = useState('')
-  const [filterType, setFilterType] = useState('')
+  const [view, setView]               = useState('grid')
+  const [search, setSearch]           = useState('')
+  const [filterType, setFilterType]   = useState('')
   const [filterStatus, setFilterStatus] = useState('')
-  const [drawer, setDrawer]       = useState(false)
-  const [editing, setEditing]     = useState(null)
-  const [confirm, setConfirm]     = useState(null)
+  const [filterCounty, setFilterCounty] = useState('')
+  const [drawer, setDrawer]           = useState(false)
+  const [editing, setEditing]         = useState(null)
+  const [confirm, setConfirm]         = useState(null)
 
   const properties = db.properties || []
   const agents     = db.agents     || []
   const contacts   = db.contacts   || []
 
+  const counties = [...new Set(properties.map(p => p.county).filter(Boolean))].sort()
+
   const filtered = properties.filter(p => {
     const q = search.toLowerCase()
-    if (q && !(p.address||'').toLowerCase().includes(q) && !(p.city||'').toLowerCase().includes(q) && !(p.mls_number||'').toLowerCase().includes(q)) return false
+    if (q && !(p.address||'').toLowerCase().includes(q) && !(p.city||'').toLowerCase().includes(q) && !(p.county||'').toLowerCase().includes(q) && !(p.mls_number||'').toLowerCase().includes(q)) return false
     if (filterType   && p.type   !== filterType)   return false
     if (filterStatus && p.status !== filterStatus) return false
+    if (filterCounty && p.county !== filterCounty) return false
     return true
   })
 
   const reload = async () => {
-    const { data } = await supabase.from('properties').select('*').order('created_at', { ascending: false })
-    setDb(p => ({ ...p, properties: data || [] }))
+    const { data, error } = await supabase.from('properties').select('*').order('created_at', { ascending: false })
+    if (!error && data) setDb(p => ({ ...p, properties: data }))
+  }
+
+  const handleSave = (savedProp) => {
+    if (savedProp) {
+      setDb(p => {
+        const exists = p.properties.some(x => x.id === savedProp.id)
+        return {
+          ...p,
+          properties: exists
+            ? p.properties.map(x => x.id === savedProp.id ? { ...x, ...savedProp } : x)
+            : [savedProp, ...p.properties],
+        }
+      })
+    }
+    reload()
   }
 
   const del = async (id) => {
@@ -444,6 +469,12 @@ export default function PropertiesPage({ db, setDb, activeAgent }) {
           <option value="">All Statuses</option>
           {['active','pending','sold','off-market','leased'].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1).replace('-',' ')}</option>)}
         </select>
+        {counties.length > 0 && (
+          <select className="filter-select" value={filterCounty} onChange={e=>setFilterCounty(e.target.value)}>
+            <option value="">All Counties</option>
+            {counties.map(c=><option key={c} value={c}>{c}</option>)}
+          </select>
+        )}
       </div>
 
       {filtered.length === 0 ? (
@@ -483,13 +514,14 @@ export default function PropertiesPage({ db, setDb, activeAgent }) {
         <div className="card" style={{ padding:0, overflow:'hidden' }}>
           <div className="data-table-wrap">
             <table className="data-table">
-              <thead><tr><th>Address</th><th>Type</th><th>Status</th><th>Price</th><th>Details</th><th>MLS #</th><th>Agent</th><th></th></tr></thead>
+              <thead><tr><th>Address</th><th>County</th><th>Type</th><th>Status</th><th>Price</th><th>Details</th><th>MLS #</th><th>Agent</th><th></th></tr></thead>
               <tbody>
                 {filtered.map(p => {
                   const agent = agents.find(a => a.id === p.assigned_agent_id)
                   return (
                     <tr key={p.id} onClick={() => { setEditing(p); setDrawer(true) }}>
                       <td><div style={{ fontWeight:600 }}>{p.address}</div><div style={{ fontSize:11, color:'var(--gw-mist)' }}>{[p.city,p.state].filter(Boolean).join(', ')}</div></td>
+                      <td style={{ fontSize:12, color:'var(--gw-mist)' }}>{p.county||'—'}</td>
                       <td><span style={{ fontSize:11, fontWeight:700, textTransform:'capitalize', padding:'2px 7px', borderRadius:10, background: isCommercial(p.type)?'#f0ebff':'var(--gw-sky)', color: isCommercial(p.type)?'var(--gw-purple)':'var(--gw-azure)' }}>{TYPE_LABELS[p.type]||p.type}</span></td>
                       <td><Badge variant={p.status}>{p.status}</Badge></td>
                       <td style={{ fontWeight:600 }}>{formatCurrency(p.list_price)}</td>
@@ -506,7 +538,7 @@ export default function PropertiesPage({ db, setDb, activeAgent }) {
         </div>
       )}
 
-      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={reload} />
+      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={handleSave} />
       {confirm && <ConfirmDialog message="This will permanently delete this property." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
     </div>
   )

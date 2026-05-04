@@ -165,7 +165,7 @@ function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivit
 }
 
 function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activities, activeAgent, onSave, onActivityAdded }) {
-  const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id: activeAgent?.id || '', notes:'', tags:[] }
+  const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'', birthday:'', anniversary_date:'' }
   const blankProp = { address:'', list_price:'', type:'residential', subtype:'', beds:'', baths:'', sqft:'', garage:'', details:{} }
   const [form, setForm] = useState(contact || blank)
   const [errors, setErrors] = useState({})
@@ -175,12 +175,12 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
   const [propForm, setPropForm] = useState(blankProp)
 
   React.useEffect(() => {
-    setForm(contact || { ...blank, assigned_agent_id: activeAgent?.id || '' })
+    setForm(contact || blank)
     setErrors({})
     setTab('details')
     setAddProp(false)
     setPropForm(blankProp)
-  }, [contact, open, activeAgent?.id])
+  }, [contact, open])
 
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
   const setP = (k, v) => setPropForm(p => ({...p, [k]: v}))
@@ -200,13 +200,8 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
 
   const save = async () => {
     if (!validate()) return
-    if (!activeAgent?.id) { pushToast('No active agent — please refresh and sign in again', 'error'); return }
     setSaving(true)
-    const payload = {
-      ...form,
-      assigned_agent_id: form.assigned_agent_id || activeAgent.id,
-      tags: typeof form.tags === 'string' ? form.tags.split(',').map(t=>t.trim()).filter(Boolean) : form.tags,
-    }
+    const payload = { ...form, tags: typeof form.tags === 'string' ? form.tags.split(',').map(t=>t.trim()).filter(Boolean) : form.tags }
     let error, contactId
     if (contact?.id) {
       ;({ error } = await supabase.from('contacts').update(payload).eq('id', contact.id))
@@ -282,6 +277,18 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
             </div>
             <div className="form-group"><label className="form-label">Email</label><input className="form-control" type="email" value={form.email||''} onChange={e=>set('email',e.target.value)} placeholder="jane@email.com" /></div>
             <div className="form-group"><label className="form-label">Phone</label><input className="form-control" value={form.phone||''} onChange={e=>set('phone',e.target.value)} placeholder="(555) 000-0000" /></div>
+
+            {/* ── Owner / Home Address ── */}
+            <div style={{ borderTop:'1px solid var(--gw-border)', marginTop:4, paddingTop:14 }}>
+              <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:10 }}>Owner Address</div>
+              <div className="form-group"><label className="form-label">Street</label><input className="form-control" value={form.owner_address||''} onChange={e=>set('owner_address',e.target.value)} placeholder="123 Oak Lane" /></div>
+              <div className="form-row">
+                <div className="form-group"><label className="form-label">City</label><input className="form-control" value={form.owner_city||''} onChange={e=>set('owner_city',e.target.value)} /></div>
+                <div className="form-group"><label className="form-label">State</label><input className="form-control" value={form.owner_state||''} onChange={e=>set('owner_state',e.target.value)} placeholder="TX" style={{ maxWidth:80 }} /></div>
+                <div className="form-group"><label className="form-label">ZIP</label><input className="form-control" value={form.owner_zip||''} onChange={e=>set('owner_zip',e.target.value)} placeholder="78701" /></div>
+              </div>
+            </div>
+
             <div className="form-row">
               <div className="form-group">
                 <label className="form-label">Type</label>
@@ -312,6 +319,19 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
               </div>
             </div>
             <div className="form-group"><label className="form-label">Tags</label><input className="form-control" value={Array.isArray(form.tags)?form.tags.join(', '):(form.tags||'')} onChange={e=>set('tags',e.target.value)} placeholder="vip, referral, hot-lead" /><div className="form-hint">Comma separated</div></div>
+
+            {/* ── Reminders ── */}
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Birthday</label>
+                <input className="form-control" type="date" value={form.birthday||''} onChange={e=>set('birthday',e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Closing Anniversary</label>
+                <input className="form-control" type="date" value={form.anniversary_date||''} onChange={e=>set('anniversary_date',e.target.value)} />
+              </div>
+            </div>
+
             <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} placeholder="Add notes…" /></div>
 
             {/* ── Inline Add Property ────────────────────────────────── */}
@@ -514,11 +534,10 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
           source:     validSources.includes(r.source?.toLowerCase()) ? r.source.toLowerCase() : 'other',
           status:     validStatus.includes(r.status?.toLowerCase())  ? r.status.toLowerCase() : 'active',
           notes:      r.notes  || null,
-          assigned_agent_id: activeAgent?.id,
+          assigned_agent_id: activeAgent?.id || null,
           tags: [],
         }
       })
-      if (!activeAgent?.id) { errs.push('No active agent — refresh and try again'); break }
       const { error } = await supabase.from('contacts').insert(chunk)
       if (error) errs.push(`Rows ${i+1}–${i+CHUNK}: ${error.message}`)
       done += chunk.length
@@ -709,6 +728,10 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
         <select className="filter-select" value={filterStatus} onChange={e=>setFilterStatus(e.target.value)}>
           <option value="">All Statuses</option>
           {['active','cold','closed'].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1)}</option>)}
+        </select>
+        <select className="filter-select" value={filterAgent} onChange={e=>setFilterAgent(e.target.value)}>
+          <option value="">All Agents</option>
+          {agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
         <select className="filter-select" value={filterHeat} onChange={e=>setFilterHeat(e.target.value)}>
           <option value="">All Heat</option>
