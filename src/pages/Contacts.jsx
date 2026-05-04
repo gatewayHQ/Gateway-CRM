@@ -165,7 +165,7 @@ function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivit
 }
 
 function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activities, activeAgent, onSave, onActivityAdded }) {
-  const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[] }
+  const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'' }
   const blankProp = { address:'', list_price:'', type:'residential', subtype:'', beds:'', baths:'', sqft:'', garage:'', details:{} }
   const [form, setForm] = useState(contact || blank)
   const [errors, setErrors] = useState({})
@@ -277,6 +277,18 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
             </div>
             <div className="form-group"><label className="form-label">Email</label><input className="form-control" type="email" value={form.email||''} onChange={e=>set('email',e.target.value)} placeholder="jane@email.com" /></div>
             <div className="form-group"><label className="form-label">Phone</label><input className="form-control" value={form.phone||''} onChange={e=>set('phone',e.target.value)} placeholder="(555) 000-0000" /></div>
+
+            {/* ── Owner / Home Address ── */}
+            <div style={{ borderTop:'1px solid var(--gw-border)', marginTop:4, paddingTop:14 }}>
+              <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:10 }}>Owner Address</div>
+              <div className="form-group"><label className="form-label">Street</label><input className="form-control" value={form.owner_address||''} onChange={e=>set('owner_address',e.target.value)} placeholder="123 Oak Lane" /></div>
+              <div className="form-row">
+                <div className="form-group"><label className="form-label">City</label><input className="form-control" value={form.owner_city||''} onChange={e=>set('owner_city',e.target.value)} /></div>
+                <div className="form-group"><label className="form-label">State</label><input className="form-control" value={form.owner_state||''} onChange={e=>set('owner_state',e.target.value)} placeholder="TX" style={{ maxWidth:80 }} /></div>
+                <div className="form-group"><label className="form-label">ZIP</label><input className="form-control" value={form.owner_zip||''} onChange={e=>set('owner_zip',e.target.value)} placeholder="78701" /></div>
+              </div>
+            </div>
+
             <div className="form-row">
               <div className="form-group">
                 <label className="form-label">Type</label>
