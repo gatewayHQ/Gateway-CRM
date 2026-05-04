@@ -20,6 +20,7 @@ function TemplateDrawer({ open, onClose, template, agents, onSave }) {
   const [aiOpen, setAiOpen] = useState(false)
   const [aiPrompt, setAiPrompt] = useState('')
   const [generating, setGenerating] = useState(false)
+  const [tipsOpen, setTipsOpen] = useState(false)
 
   React.useEffect(() => { setForm(template || blank); setErrors({}); setAiOpen(false); setAiPrompt('') }, [template, open])
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
@@ -94,24 +95,35 @@ Rules:
         <div className="form-group"><label className="form-label required">Subject Line</label><input className={`form-control${errors.subject?' error':''}`} value={form.subject} onChange={e=>set('subject',e.target.value)} placeholder="e.g. Welcome to Gateway — Next Steps" /></div>
         <div className="form-group">
           <div style={{ marginBottom: 12, border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
-            <button
-              type="button"
-              onClick={() => setAiOpen(o => !o)}
-              style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', background: aiOpen ? 'var(--gw-slate)' : 'var(--gw-bone)', border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600, color: aiOpen ? '#fff' : 'var(--gw-slate)', transition: 'all 150ms', fontFamily: 'var(--font-body)' }}>
-              <Icon name="sparkles" size={14} />
-              AI Generate
-              <span style={{ marginLeft: 'auto', fontSize: 10, opacity: 0.6 }}>{aiOpen ? '▲' : '▼'}</span>
-            </button>
+            <div style={{ display: 'flex', alignItems: 'stretch' }}>
+              <button
+                type="button"
+                onClick={() => { setAiOpen(o => !o); setTipsOpen(false) }}
+                style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', background: aiOpen ? 'var(--gw-slate)' : 'var(--gw-bone)', border: 'none', borderRight: '1px solid var(--gw-border)', cursor: 'pointer', fontSize: 12, fontWeight: 600, color: aiOpen ? '#fff' : 'var(--gw-slate)', transition: 'all 150ms', fontFamily: 'var(--font-body)' }}>
+                <Icon name="sparkles" size={14} />
+                AI Generate
+                <span style={{ marginLeft: 'auto', fontSize: 10, opacity: 0.6 }}>{aiOpen ? '▲' : '▼'}</span>
+              </button>
+              <button
+                type="button"
+                title="Prompt tips — get the best results from AI"
+                onClick={() => { setTipsOpen(o => !o); setAiOpen(false) }}
+                style={{ padding: '9px 13px', background: tipsOpen ? '#2d3561' : 'var(--gw-bone)', border: 'none', cursor: 'pointer', color: tipsOpen ? '#fff' : 'var(--gw-mist)', fontWeight: 700, fontSize: 13, fontFamily: 'var(--font-body)', transition: 'all 150ms', display: 'flex', alignItems: 'center', gap: 5 }}>
+                <span style={{ width: 17, height: 17, borderRadius: '50%', border: `2px solid ${tipsOpen ? '#fff' : 'var(--gw-mist)'}`, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 900, lineHeight: 1 }}>i</span>
+                Tips
+              </button>
+            </div>
+
             {aiOpen && (
               <div style={{ padding: 12, background: 'var(--gw-sky)', borderTop: '1px solid var(--gw-border)' }}>
                 <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 8 }}>
-                  Describe the email you need and Claude will write it for you.
+                  Describe the email you need and Claude will write it for you. Hit the <strong>Tips</strong> button for prompt ideas.
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <input
                     className="form-control"
                     style={{ flex: 1, fontSize: 13 }}
-                    placeholder="e.g. Follow-up after a showing with next steps"
+                    placeholder="e.g. Follow-up after a showing with next steps for a buyer"
                     value={aiPrompt}
                     onChange={e => setAiPrompt(e.target.value)}
                     onKeyDown={e => e.key === 'Enter' && generateWithAI()}
@@ -120,6 +132,64 @@ Rules:
                   <button className="btn btn--primary btn--sm" onClick={generateWithAI} disabled={generating || !aiPrompt.trim()} style={{ whiteSpace: 'nowrap' }}>
                     {generating ? <><Icon name="refresh" size={12} /> Writing…</> : <><Icon name="sparkles" size={12} /> Generate</>}
                   </button>
+                </div>
+              </div>
+            )}
+
+            {tipsOpen && (
+              <div style={{ padding: 14, background: '#f8f7ff', borderTop: '1px solid var(--gw-border)', fontSize: 12, lineHeight: 1.6 }}>
+                <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10, color: '#2d3561' }}>Prompt Tips — Get the Best Results from Claude</div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {[
+                    {
+                      label: '1. Specify who you\'re emailing',
+                      tip: 'Mention the contact type — buyer, seller, investor, landlord, or tenant.',
+                      example: '"A cold follow-up to a potential seller who owns a multifamily building"',
+                    },
+                    {
+                      label: '2. Name the scenario',
+                      tip: 'Be specific about what happened or what you want to happen.',
+                      example: '"After a showing — buyer seemed interested but went quiet for a week"',
+                    },
+                    {
+                      label: '3. Set the tone',
+                      tip: 'Tell Claude exactly how the email should feel.',
+                      example: '"Keep it warm and low-pressure, not salesy"',
+                    },
+                    {
+                      label: '4. Include a clear call-to-action',
+                      tip: 'What should the reader do next? Book a call, reply, schedule a tour?',
+                      example: '"End with asking them to schedule a 15-minute call this week"',
+                    },
+                    {
+                      label: '5. Mention any key details',
+                      tip: 'Add property type, price range, timeline, or anything important.',
+                      example: '"Mention the property is in the $800K range and move-in ready"',
+                    },
+                    {
+                      label: '6. Control the length',
+                      tip: 'Short and punchy vs. detailed and thorough — tell Claude.',
+                      example: '"Keep it under 100 words" or "Write a full nurture email"',
+                    },
+                  ].map(({ label, tip, example }) => (
+                    <div key={label} style={{ background: '#fff', border: '1px solid var(--gw-border)', borderRadius: 6, padding: '8px 10px' }}>
+                      <div style={{ fontWeight: 700, color: '#2d3561', marginBottom: 2 }}>{label}</div>
+                      <div style={{ color: 'var(--gw-mist)', marginBottom: 4 }}>{tip}</div>
+                      <div
+                        style={{ fontStyle: 'italic', color: 'var(--gw-azure)', cursor: 'pointer', fontSize: 11 }}
+                        title="Click to use this prompt"
+                        onClick={() => { setAiPrompt(example.replace(/^"|"$/g, '')); setAiOpen(true); setTipsOpen(false) }}
+                      >
+                        → {example}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ marginTop: 10, padding: '8px 10px', background: '#e8f4fd', borderRadius: 6, color: 'var(--gw-azure)', fontSize: 11 }}>
+                  <strong>Pro tip:</strong> Combine multiple tips in one prompt for best results.<br />
+                  Example: <em style={{ cursor: 'pointer' }} onClick={() => { setAiPrompt('Warm re-engagement email to a buyer who went quiet after two showings. Mention we have a new listing that fits their criteria. Keep it under 120 words and end with asking if they\'re still in the market.'); setAiOpen(true); setTipsOpen(false) }}>"Warm re-engagement email to a buyer who went quiet after two showings. Mention we have a new listing that fits their criteria. Keep it under 120 words and end with asking if they're still in the market."</em>
                 </div>
               </div>
             )}

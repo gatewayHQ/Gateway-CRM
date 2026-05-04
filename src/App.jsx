@@ -18,6 +18,8 @@ import ReportsPage from './pages/Reports.jsx'
 import SequencesPage from './pages/Sequences.jsx'
 import ColdCallsPage from './pages/ColdCalls.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
+import IntegrationsPage from './pages/Integrations.jsx'
+import { Analytics } from '@vercel/analytics/react'
 
 const BASE_NAV = [
   { id: 'dashboard',  label: 'Dashboard',      icon: 'dashboard' },
@@ -34,7 +36,8 @@ const BASE_NAV = [
   { id: 'om',         label: 'OM Generator',    icon: 'om' },
   { id: 'social',     label: 'Social Media',    icon: 'social' },
   { id: 'leads',      label: 'Website Leads',   icon: 'leads' },
-  { id: 'settings',   label: 'Settings',        icon: 'settings' },
+  { id: 'integrations', label: 'Integrations',    icon: 'pipeline' },
+  { id: 'settings',    label: 'Settings',        icon: 'settings' },
 ]
 
 const TITLES = {
@@ -52,7 +55,8 @@ const TITLES = {
   om:         { title: 'OM Generator',     crumb: 'Tools · Documents' },
   social:     { title: 'Social Media',     crumb: 'Tools · Content' },
   leads:      { title: 'Website Leads',    crumb: 'Marketing · Captures' },
-  settings:   { title: 'Settings',         crumb: 'Workspace' },
+  integrations: { title: 'Integrations',    crumb: 'Tools · Connections' },
+  settings:     { title: 'Settings',        crumb: 'Workspace' },
 }
 
 const COLORS = ['#2d3561','#4a6fa5','#2e7d5e','#c9a84c','#6b4fa5','#c0392b','#d4820a','#1a1a2e']
@@ -153,9 +157,10 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false)
   const [activeAgentId, setActiveAgentId] = useState(null)
   const [compose, setCompose] = useState(null)
-  const [globalSearch, setGlobalSearch] = useState('')
   const [mobileMore, setMobileMore] = useState(false)
   const [needsOnboarding, setNeedsOnboarding] = useState(false)
+  const [notifications,   setNotifications]   = useState([])
+  const [notifOpen,       setNotifOpen]       = useState(false)
   const [websiteEnabled, setWebsiteEnabled] = useState(
     () => localStorage.getItem('gw_website_enabled') === 'true'
   )
@@ -239,9 +244,50 @@ export default function App() {
     load()
   }, [session])
 
+  // Realtime: listen for new agent_notifications for the active agent
+  useEffect(() => {
+    if (!activeAgentId) return
+    // Load existing unread notifications
+    supabase
+      .from('agent_notifications')
+      .select('*')
+      .eq('agent_id', activeAgentId)
+      .eq('read', false)
+      .order('created_at', { ascending: false })
+      .then(({ data }) => { if (data) setNotifications(data) })
+      .catch(() => {}) // table may not exist yet — fail silently
+
+    const channel = supabase.channel(`notif-agent-${activeAgentId}`)
+      .on('postgres_changes', {
+        event: 'INSERT', schema: 'public', table: 'agent_notifications',
+        filter: `agent_id=eq.${activeAgentId}`,
+      }, payload => {
+        setNotifications(prev => [payload.new, ...prev])
+        pushToast(payload.new.title
+          ? `${payload.new.title}: ${payload.new.message}`
+          : payload.new.message || 'New notification', 'success')
+      })
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [activeAgentId])
+
+  const markNotifRead = async (id) => {
+    await supabase.from('agent_notifications').update({ read: true }).eq('id', id)
+    setNotifications(prev => prev.filter(n => n.id !== id))
+  }
+
+  const markAllRead = async () => {
+    const ids = notifications.map(n => n.id)
+    if (ids.length === 0) return
+    await supabase.from('agent_notifications').update({ read: true }).in('id', ids)
+    setNotifications([])
+  }
+
   const signOut = async () => {
     await supabase.auth.signOut()
     setDb({ contacts: [], properties: [], deals: [], tasks: [], agents: [], templates: [], commissions: [], commissionsReady: true, activities: [], activitiesReady: true })
+    setNotifications([])
     setNeedsOnboarding(false)
     setLoading(true)
   }
@@ -259,7 +305,7 @@ export default function App() {
   )
 
   return (
-    <div className="app">
+    <div className="app" onClick={() => notifOpen && setNotifOpen(false)}>
       {needsOnboarding && (
         <AgentOnboardingModal
           session={session}
@@ -323,7 +369,7 @@ export default function App() {
           </div>
           <div className="topbar__search">
             <Icon name="search" size={14} style={{ color: 'var(--gw-mist)' }} />
-            <input placeholder="Search contacts, properties, deals…" value={globalSearch} onChange={e => setGlobalSearch(e.target.value)} />
+            <input placeholder="Search contacts, properties, deals…" defaultValue="" />
           </div>
           {activeAgent && (
             <div className="topbar__agent-badge">
@@ -334,6 +380,77 @@ export default function App() {
               </div>
             </div>
           )}
+          {/* Notification bell */}
+          <div style={{ position: 'relative' }}>
+            <button
+              className="btn btn--ghost btn--icon"
+              title="Notifications"
+              onClick={() => setNotifOpen(o => !o)}
+              style={{ position: 'relative' }}
+            >
+              <Icon name="alert" size={16} />
+              {notifications.length > 0 && (
+                <span style={{
+                  position: 'absolute', top: 2, right: 2,
+                  width: 16, height: 16, borderRadius: '50%',
+                  background: 'var(--gw-red, #dc2626)', color: '#fff',
+                  fontSize: 9, fontWeight: 700,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  pointerEvents: 'none',
+                }}>
+                  {notifications.length > 9 ? '9+' : notifications.length}
+                </span>
+              )}
+            </button>
+            {notifOpen && (
+              <div style={{
+                position: 'absolute', right: 0, top: 'calc(100% + 8px)', zIndex: 200,
+                width: 340, background: '#fff', border: '1px solid var(--gw-border)',
+                borderRadius: 'var(--radius)', boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
+              }} onClick={e => e.stopPropagation()}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderBottom: '1px solid var(--gw-border)' }}>
+                  <span style={{ fontWeight: 700, fontSize: 13 }}>Notifications</span>
+                  {notifications.length > 0 && (
+                    <button className="btn btn--ghost btn--sm" style={{ fontSize: 11 }} onClick={markAllRead}>
+                      Mark all read
+                    </button>
+                  )}
+                </div>
+                {notifications.length === 0 ? (
+                  <div style={{ padding: '24px 14px', textAlign: 'center', fontSize: 13, color: 'var(--gw-mist)' }}>
+                    No new notifications
+                  </div>
+                ) : (
+                  <div style={{ maxHeight: 360, overflowY: 'auto' }}>
+                    {notifications.map(n => (
+                      <div key={n.id} style={{
+                        display: 'flex', gap: 10, padding: '10px 14px',
+                        borderBottom: '1px solid var(--gw-border)',
+                        background: '#f0fdf4',
+                      }}>
+                        <Icon name="check" size={14} style={{ color: 'var(--gw-green)', flexShrink: 0, marginTop: 2 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--gw-ink)' }}>{n.title}</div>
+                          <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2, lineHeight: 1.5 }}>{n.message}</div>
+                          <div style={{ fontSize: 10, color: 'var(--gw-mist)', marginTop: 4 }}>
+                            {new Date(n.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                          </div>
+                        </div>
+                        <button
+                          className="btn btn--ghost btn--icon btn--sm"
+                          title="Dismiss"
+                          onClick={() => markNotifRead(n.id)}
+                          style={{ flexShrink: 0, alignSelf: 'flex-start' }}
+                        >
+                          <Icon name="x" size={11} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
           <button className="btn btn--ghost btn--icon" onClick={signOut} title="Sign out" style={{ marginLeft: 4 }}>
             <Icon name="logout" size={16} />
           </button>
@@ -343,7 +460,7 @@ export default function App() {
         {route === 'contacts'   && <ContactsPage {...props} />}
         {route === 'properties' && <PropertiesPage {...props} />}
         {route === 'pipeline'   && <PipelinePage {...props} />}
-        {route === 'coldcalls'  && <ColdCallsPage  db={db} activeAgent={activeAgent} />}
+        {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
         {route === 'commission' && <CommissionPage {...props} />}
         {route === 'tasks'      && <TasksPage {...props} />}
         {route === 'team'       && <TeamPage {...props} onSwitchAgent={id => setActiveAgentId(id)} />}
@@ -353,7 +470,8 @@ export default function App() {
         {route === 'om'         && <OmPage />}
         {route === 'social'     && <SocialPage />}
         {route === 'leads'      && <LeadsPage {...props} />}
-        {route === 'settings'   && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
+        {route === 'integrations' && <IntegrationsPage />}
+        {route === 'settings'     && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
       </div>
 
       {compose && <ComposeModal ctx={compose} db={db} activeAgent={activeAgent} onClose={() => setCompose(null)} />}
@@ -403,6 +521,7 @@ export default function App() {
 
       <QuickAdd db={db} setDb={setDb} activeAgent={activeAgent} />
       <ToastHost />
+      <Analytics />
     </div>
   )
 }

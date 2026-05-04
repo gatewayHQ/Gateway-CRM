@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -762,10 +762,32 @@ function SignaturesTab({ deal, contacts, activeAgent }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
+  const [notifReady,  setNotifReady]  = React.useState(true)
   const [sendOpen,    setSendOpen]    = React.useState(false)
   const [dealFiles,   setDealFiles]   = React.useState([])
+  const [downloading, setDownloading] = React.useState({})
 
-  React.useEffect(() => { if (deal?.id) { loadEnvelopes(); loadDealFiles() } }, [deal?.id])
+  React.useEffect(() => {
+    if (!deal?.id) return
+    loadEnvelopes()
+    loadDealFiles()
+
+    // Realtime subscription — auto-update status when webhook fires
+    const channel = supabase.channel(`sig-envelopes-${deal.id}`)
+      .on('postgres_changes', {
+        event: 'UPDATE', schema: 'public', table: 'docusign_envelopes',
+        filter: `deal_id=eq.${deal.id}`,
+      }, payload => {
+        setEnvelopes(prev => prev.map(e => e.id === payload.new.id ? { ...e, ...payload.new } : e))
+        if (payload.new.status === 'completed' && payload.old?.status !== 'completed') {
+          loadDealFiles() // signed copy should now be in storage
+          pushToast('Document fully signed — signed copy saved to Documents tab', 'success')
+        }
+      })
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [deal?.id])
 
   const loadEnvelopes = async () => {
     setLoading(true)
@@ -788,9 +810,42 @@ function SignaturesTab({ deal, contacts, activeAgent }) {
     })
     const data = await res.json()
     if (data.error) { pushToast(data.error, 'error'); return }
-    await supabase.from('docusign_envelopes').update({ status: data.status, completed_at: data.completedDateTime || null }).eq('id', env.id)
-    loadEnvelopes()
+    const patch = { status: data.status, completed_at: data.completedDateTime || null }
+    await supabase.from('docusign_envelopes').update(patch).eq('id', env.id)
+    setEnvelopes(prev => prev.map(e => e.id === env.id ? { ...e, ...patch } : e))
     pushToast(`Status: ${data.status}`, 'info')
+  }
+
+  const downloadSigned = async (env) => {
+    setDownloading(p => ({ ...p, [env.id]: true }))
+
+    // First check if the signed copy was saved to storage by the webhook
+    const signedFile = dealFiles.find(f => f.name.includes('signed-') && f.name.includes(env.envelope_id?.slice(0, 8) || ''))
+      || dealFiles.find(f => f.name.includes('signed-'))
+
+    if (signedFile) {
+      const { data } = await supabase.storage.from(BUCKET).createSignedUrl(`deal-${deal.id}/${signedFile.name}`, 120)
+      if (data?.signedUrl) {
+        window.open(data.signedUrl, '_blank')
+        setDownloading(p => ({ ...p, [env.id]: false }))
+        return
+      }
+    }
+
+    // Fall back: download directly from DocuSign API
+    const res = await fetch('/api/docusign', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'download', envelopeId: env.envelope_id }),
+    })
+    const data = await res.json()
+    setDownloading(p => ({ ...p, [env.id]: false }))
+    if (data.error) { pushToast(data.error, 'error'); return }
+
+    // Trigger browser download
+    const link = document.createElement('a')
+    link.href = `data:application/pdf;base64,${data.base64}`
+    link.download = `signed-${env.document_name || 'document.pdf'}`
+    link.click()
   }
 
   if (!tableReady) return (
@@ -813,6 +868,22 @@ function SignaturesTab({ deal, contacts, activeAgent }) {
 );
 alter table docusign_envelopes enable row level security;
 create policy "agents_envelopes" on docusign_envelopes
+  for all to authenticated using (true) with check (true);
+
+-- Also run this for agent notifications:
+create table if not exists agent_notifications (
+  id           uuid primary key default gen_random_uuid(),
+  agent_id     uuid references agents(id) on delete cascade,
+  deal_id      uuid references deals(id) on delete set null,
+  envelope_id  text,
+  title        text,
+  message      text,
+  type         text default 'document_signed',
+  read         boolean default false,
+  created_at   timestamptz default now()
+);
+alter table agent_notifications enable row level security;
+create policy "agent_notifications_policy" on agent_notifications
   for all to authenticated using (true) with check (true);`}
         </pre>
         <button className="btn btn--secondary btn--sm" style={{ marginTop:8 }} onClick={() => { setTableReady(true); loadEnvelopes() }}>
@@ -836,20 +907,40 @@ create policy "agents_envelopes" on docusign_envelopes
         : envelopes.length === 0
           ? <div style={{ textAlign:'center', color:'var(--gw-mist)', fontSize:13, padding:'32px 0' }}>No documents sent yet.<br/>Click "Send for Signature" to get started.</div>
           : envelopes.map(env => {
-              const sc = DS_STATUS[env.status] || DS_STATUS.sent
+              const sc        = DS_STATUS[env.status] || DS_STATUS.sent
+              const completed = env.status === 'completed'
               return (
-                <div key={env.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:8, background:'#fff' }}>
-                  <Icon name="file" size={18} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
-                  <div style={{ flex:1, minWidth:0 }}>
-                    <div style={{ fontSize:13, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{env.document_name || 'Document'}</div>
-                    <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>
-                      To: {env.signer_name} · {new Date(env.sent_at || env.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}
+                <div key={env.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:8, background:'#fff', overflow:'hidden' }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px' }}>
+                    <Icon name="file" size={18} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:13, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{env.document_name || 'Document'}</div>
+                      <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>
+                        To: {env.signer_name} · {new Date(env.sent_at || env.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}
+                        {completed && env.completed_at && (
+                          <span> · Signed {new Date(env.completed_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}</span>
+                        )}
+                      </div>
                     </div>
+                    <span style={{ padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:700, background:sc.bg, color:sc.color, flexShrink:0, textTransform:'capitalize' }}>{env.status}</span>
+                    <button className="btn btn--ghost btn--icon btn--sm" title="Refresh status" onClick={() => refreshStatus(env)}>
+                      <Icon name="refresh" size={12}/>
+                    </button>
                   </div>
-                  <span style={{ padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:700, background:sc.bg, color:sc.color, flexShrink:0, textTransform:'capitalize' }}>{env.status}</span>
-                  <button className="btn btn--ghost btn--icon btn--sm" title="Refresh status" onClick={() => refreshStatus(env)}>
-                    <Icon name="refresh" size={12}/>
-                  </button>
+                  {completed && (
+                    <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'var(--gw-green-light)', display:'flex', alignItems:'center', gap:8 }}>
+                      <Icon name="check" size={13} style={{ color:'var(--gw-green)', flexShrink:0 }}/>
+                      <span style={{ fontSize:12, color:'var(--gw-green)', flex:1, fontWeight:600 }}>Fully signed — copy saved to Documents tab</span>
+                      <button
+                        className="btn btn--sm"
+                        style={{ background:'var(--gw-green)', color:'#fff', border:'none', fontSize:11 }}
+                        onClick={() => downloadSigned(env)}
+                        disabled={downloading[env.id]}
+                      >
+                        {downloading[env.id] ? 'Downloading…' : 'Download Signed PDF'}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )
             })
@@ -891,17 +982,38 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
     setErrors(e)
     if (Object.keys(e).length > 0) return
     setSaving(true)
-    const payload = { ...form, value: form.value ? Number(form.value) : null, probability: Number(form.probability) || 0, updated_at: new Date().toISOString() }
-    let error
-    if (deal?.id) {
-      ({ error } = await supabase.from('deals').update(payload).eq('id', deal.id))
-    } else {
-      ({ error } = await supabase.from('deals').insert([payload]))
+    try {
+      // Explicit whitelist — never spread full form object (prevents unknown-column schema errors)
+      const payload = {
+        title:               form.title.trim(),
+        stage:               form.stage,
+        value:               form.value !== '' && form.value !== null ? Number(form.value) : null,
+        probability:         Number(form.probability) || 0,
+        expected_close_date: form.expected_close_date || null,
+        contact_id:          form.contact_id   || null,
+        property_id:         form.property_id  || null,
+        agent_id:            form.agent_id     || null,
+        notes:               form.notes        || null,
+        prop_category:       form.prop_category || null,
+        prop_subtype:        form.prop_subtype  || null,
+        comp_data:           form.comp_data     || null,
+      }
+      let error
+      if (deal?.id) {
+        ;({ error } = await supabase.from('deals').update(payload).eq('id', deal.id))
+      } else {
+        ;({ error } = await supabase.from('deals').insert([payload]))
+      }
+      if (error) { pushToast(error.message, 'error'); return }
+      pushToast(deal?.id ? 'Deal updated' : 'Deal added')
+      await onSave()
+      onClose()
+    } catch(err) {
+      console.error('[DealDrawer] save error:', err)
+      pushToast('Something went wrong.', 'error')
+    } finally {
+      setSaving(false)
     }
-    setSaving(false)
-    if (error) { pushToast(error.message, 'error'); return }
-    pushToast(deal?.id ? 'Deal updated' : 'Deal added')
-    onSave(); onClose()
   }
 
   const isExisting = !!deal?.id
@@ -1109,24 +1221,44 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
   const [dragging, setDragging] = useState(null)
   const [dragOver, setDragOver] = useState(null)
 
-  const deals = db.deals || []
-  const agents = db.agents || []
-  const contacts = db.contacts || []
+  const deals      = db.deals      || []
+  const agents     = db.agents     || []
+  const contacts   = db.contacts   || []
   const properties = db.properties || []
 
-  const reload = async () => {
+  // O(1) lookups — built once per data change, not per-card in render loop
+  const contactMap = useMemo(() => Object.fromEntries(contacts.map(c => [c.id, c])), [contacts])
+  const agentMap   = useMemo(() => Object.fromEntries(agents.map(a => [a.id, a])),   [agents])
+
+  // Single-pass O(n) grouping — replaces repeated stageDeals()/stageValue() calls per render
+  const { stageGroups, stageTotals, totalValue } = useMemo(() => {
+    const groups = Object.fromEntries(STAGE_ORDER.map(s => [s, []]))
+    const totals = Object.fromEntries(STAGE_ORDER.map(s => [s, 0]))
+    let total = 0
+    deals.forEach(d => {
+      if (groups[d.stage]) {
+        groups[d.stage].push(d)
+        totals[d.stage] += d.value || 0
+        total += d.value || 0
+      }
+    })
+    return { stageGroups: groups, stageTotals: totals, totalValue: total }
+  }, [deals])
+
+  const reload = useCallback(async () => {
     const { data } = await supabase.from('deals').select('*').order('created_at', { ascending: false })
     setDb(p => ({ ...p, deals: data || [] }))
-  }
+  }, [setDb])
 
-  const del = async (id) => {
+  const del = useCallback(async (id) => {
     await supabase.from('deals').delete().eq('id', id)
     pushToast('Deal deleted', 'info')
     setConfirm(null); reload()
-  }
+  }, [reload])
 
-  const moveStage = async (dealId, newStage) => {
-    await supabase.from('deals').update({ stage: newStage, updated_at: new Date().toISOString() }).eq('id', dealId)
+  // updated_at omitted — handled by DB trigger
+  const moveStage = useCallback(async (dealId, newStage) => {
+    await supabase.from('deals').update({ stage: newStage }).eq('id', dealId)
     setDb(p => ({ ...p, deals: p.deals.map(d => d.id === dealId ? { ...d, stage: newStage } : d) }))
     pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
 
@@ -1151,15 +1283,12 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
       setDb(p => ({ ...p, tasks: [newTask, ...(p.tasks || [])] }))
       pushToast(`Task auto-created: ${newTask.title}`, 'info')
     }
-  }
-
-  const stageDeals = (stage) => deals.filter(d => d.stage === stage)
-  const stageValue = (stage) => stageDeals(stage).reduce((s, d) => s + (d.value || 0), 0)
+  }, [setDb, deals])
 
   return (
     <div className="page-content" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
       <div className="page-header">
-        <div><div className="page-title">Pipeline</div><div className="page-sub">{deals.length} total deals · {formatCurrency(deals.reduce((s,d)=>s+(d.value||0),0))} total value</div></div>
+        <div><div className="page-title">Pipeline</div><div className="page-sub">{deals.length} total deals · {formatCurrency(totalValue)} total value</div></div>
         <button className="btn btn--primary" onClick={() => { setEditing(null); setDefaultStage('lead'); setDrawer(true) }}><Icon name="plus" size={14} /> Add Deal</button>
       </div>
 
@@ -1172,9 +1301,9 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
               <div className="kanban-col__head">
                 <div>
                   <div className="kanban-col__label">{STAGE_LABELS[stage]}</div>
-                  {stageValue(stage) > 0 && <div style={{ fontSize:10, color:'var(--gw-mist)', marginTop:1 }}>{formatCurrency(stageValue(stage))}</div>}
+                  {stageTotals[stage] > 0 && <div style={{ fontSize:10, color:'var(--gw-mist)', marginTop:1 }}>{formatCurrency(stageTotals[stage])}</div>}
                 </div>
-                <span className="kanban-col__count">{stageDeals(stage).length}</span>
+                <span className="kanban-col__count">{stageGroups[stage].length}</span>
               </div>
               <div
                 className={`kanban-col__body${dragOver === stage ? ' drag-over' : ''}`}
@@ -1182,9 +1311,9 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
                 onDragLeave={() => setDragOver(null)}
                 onDrop={e => { e.preventDefault(); if (dragging && dragging !== stage) moveStage(dragging, stage); setDragOver(null); setDragging(null) }}
               >
-                {stageDeals(stage).map(deal => {
-                  const contact = contacts.find(c => c.id === deal.contact_id)
-                  const agent = agents.find(a => a.id === deal.agent_id)
+                {stageGroups[stage].map(deal => {
+                  const contact = contactMap[deal.contact_id]
+                  const agent   = agentMap[deal.agent_id]
                   const overdue = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
                   return (
                     <div key={deal.id} className={`deal-card${dragging === deal.id ? ' dragging' : ''}`}
