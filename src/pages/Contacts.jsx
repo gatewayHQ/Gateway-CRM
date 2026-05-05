@@ -201,7 +201,19 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
   const save = async () => {
     if (!validate()) return
     setSaving(true)
-    const payload = { ...form, tags: typeof form.tags === 'string' ? form.tags.split(',').map(t=>t.trim()).filter(Boolean) : form.tags }
+    const payload = {
+      ...form,
+      // Coerce empty strings → null for typed DB columns
+      // Postgres rejects '' for date and uuid columns
+      birthday:          form.birthday          || null,
+      anniversary_date:  form.anniversary_date  || null,
+      assigned_agent_id: form.assigned_agent_id || null,
+      email:             form.email?.trim()      || null,
+      phone:             form.phone?.trim()      || null,
+      tags: typeof form.tags === 'string'
+        ? form.tags.split(',').map(t => t.trim()).filter(Boolean)
+        : (form.tags || []),
+    }
     let error, contactId
     if (contact?.id) {
       ;({ error } = await supabase.from('contacts').update(payload).eq('id', contact.id))
