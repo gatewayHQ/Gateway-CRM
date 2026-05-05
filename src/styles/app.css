@@ -1367,4 +1367,78 @@ select.form-control { cursor: pointer; }
   color: var(--gw-slate);
   margin-bottom: 10px;
 }
+
+/* ── Photo uploader ──────────────────────────────────────────────────────── */
+.photo-uploader { margin-bottom: 4px; }
+.photo-uploader__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.photo-uploader__thumb {
+  position: relative;
+  aspect-ratio: 4/3;
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--gw-border);
+}
+.photo-uploader__thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-uploader__del {
+  position: absolute; top: 3px; right: 3px;
+  width: 18px; height: 18px;
+  background: rgba(0,0,0,0.6); color: #fff;
+  border: none; border-radius: 50%; font-size: 9px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  line-height: 1; opacity: 0; transition: opacity 150ms;
+}
+.photo-uploader__thumb:hover .photo-uploader__del { opacity: 1; }
+.photo-uploader__drop {
+  border: 2px dashed var(--gw-border);
+  border-radius: var(--radius);
+  padding: 16px 12px;
+  text-align: center;
+  cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  color: var(--gw-mist);
+  transition: border-color 150ms, background 150ms;
+}
+.photo-uploader__drop:hover,
+.photo-uploader__drop.drag-over {
+  border-color: var(--gw-azure);
+  background: var(--gw-sky);
+  color: var(--gw-azure);
+}
+
+/* ── Co-agent selector ───────────────────────────────────────────────────── */
+.coagent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--gw-border);
+  border-radius: var(--radius);
+  padding: 8px;
+  background: var(--gw-bone);
+  max-height: 180px;
+  overflow-y: auto;
+}
+.coagent-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: #fff;
+  font-size: 13px;
+  transition: border-color 150ms, background 150ms;
+}
+.coagent-item input[type="checkbox"] { width: 14px; height: 14px; cursor: pointer; flex-shrink: 0; }
+.coagent-item.checked {
+  border-color: var(--gw-azure);
+  background: var(--gw-sky);
+  font-weight: 600;
+}
+.coagent-item span:first-of-type { flex: 1; }
 .lp__404-sub { font-size: 15px; color: var(--gw-mist); margin-bottom: 28px; }
