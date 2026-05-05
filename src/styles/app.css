@@ -665,6 +665,147 @@ select.form-control { cursor: pointer; }
 }
 .activity-entry__time { font-size: 11px; color: var(--gw-mist); white-space: nowrap; margin-top: 2px; }
 
+/* ══ MESSAGES (Twilio SMS Inbox) ══════════════════════════════════════════════ */
+
+/* Two-panel layout */
+.msg-layout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  flex: 1;
+  overflow: hidden;
+  height: 100%;
+}
+
+/* ── Left panel: conversation list ── */
+.msg-list {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--gw-border);
+  background: var(--gw-bone);
+  overflow: hidden;
+}
+.msg-list__head {
+  padding: 10px 10px 4px;
+  border-bottom: 1px solid var(--gw-border);
+  background: var(--gw-chalk);
+}
+.msg-list__search-wrap {
+  display: flex; align-items: center; gap: 7px;
+  background: var(--gw-bone); border: 1px solid var(--gw-border);
+  border-radius: var(--radius); padding: 0 10px; height: 32px;
+  margin-bottom: 4px;
+}
+.msg-list__search {
+  border: none; background: none; outline: none;
+  font-size: 12px; font-family: var(--font-body); flex: 1;
+  color: var(--gw-ink);
+}
+.msg-list__items { flex: 1; overflow-y: auto; }
+
+/* Conversation item */
+.msg-conv-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 12px; cursor: pointer;
+  border-bottom: 1px solid var(--gw-border);
+  transition: background 120ms;
+}
+.msg-conv-item:hover  { background: rgba(74,111,165,0.05); }
+.msg-conv-item.active { background: var(--gw-sky); border-left: 3px solid var(--gw-azure); }
+
+.msg-conv-item__avatar-wrap { position: relative; flex-shrink: 0; }
+.msg-conv-item__avatar {
+  width: 40px; height: 40px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+}
+.msg-unread-dot {
+  position: absolute; top: -3px; right: -3px;
+  min-width: 17px; height: 17px; border-radius: 9px;
+  background: var(--gw-red); color: #fff;
+  font-size: 9px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 3px; border: 2px solid var(--gw-bone);
+}
+.msg-conv-item__body { flex: 1; min-width: 0; }
+
+/* ── Right panel: message thread ── */
+.msg-thread {
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--gw-chalk);
+}
+.msg-thread--empty {
+  align-items: center; justify-content: center;
+}
+.msg-thread__head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 18px; border-bottom: 1px solid var(--gw-border);
+  background: var(--gw-chalk); flex-shrink: 0;
+}
+.msg-thread__body {
+  flex: 1; overflow-y: auto;
+  padding: 16px 20px; display: flex; flex-direction: column; gap: 2px;
+}
+
+/* Message rows + bubbles */
+.msg-row { display: flex; flex-direction: column; margin-bottom: 4px; }
+.msg-row.out { align-items: flex-end; }
+.msg-row.in  { align-items: flex-start; }
+
+.msg-bubble {
+  max-width: 68%;
+  padding: 9px 13px;
+  border-radius: 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.msg-bubble.out {
+  background: var(--gw-azure);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.msg-bubble.in  {
+  background: var(--gw-bone);
+  color: var(--gw-ink);
+  border: 1px solid var(--gw-border);
+  border-bottom-left-radius: 4px;
+}
+
+.msg-meta {
+  font-size: 10px; color: var(--gw-mist);
+  margin-top: 2px; padding: 0 4px;
+}
+
+.msg-date-sep {
+  text-align: center;
+  font-size: 11px; color: var(--gw-mist);
+  padding: 12px 0 8px;
+  font-weight: 600;
+}
+
+/* Compose bar */
+.msg-compose {
+  display: flex; align-items: flex-end; gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--gw-border);
+  background: var(--gw-chalk);
+  flex-shrink: 0;
+}
+.msg-compose__input {
+  flex: 1; padding: 9px 12px; border: 1px solid var(--gw-border);
+  border-radius: var(--radius); font-size: 13px;
+  font-family: var(--font-body); color: var(--gw-ink);
+  background: var(--gw-bone); outline: none; resize: none;
+  line-height: 1.5; max-height: 120px; overflow-y: auto;
+  transition: border-color 200ms;
+}
+.msg-compose__input:focus { border-color: var(--gw-azure); background: var(--gw-chalk); }
+
+@media (max-width: 768px) {
+  .msg-layout { grid-template-columns: 1fr; }
+  .msg-thread { display: none; }
+  .msg-thread.active { display: flex; }
+}
+
 /* ── Transaction Checklist ── */
 .checklist-wrap { padding: 16px; }
 .checklist-progress {

@@ -431,22 +431,307 @@ function WebhooksSection() {
   )
 }
 
+// ─── Twilio section ───────────────────────────────────────────────────────────
+
+const TWILIO_SQL = `-- Run in Supabase → SQL Editor
+
+alter table agents add column if not exists twilio_number text;
+alter table agents add column if not exists twilio_sid    text;
+
+create table if not exists conversations (
+  id                uuid primary key default uuid_generate_v4(),
+  contact_id        uuid references contacts(id)  on delete set null,
+  agent_id          uuid references agents(id)    on delete set null,
+  twilio_number     text not null,
+  contact_number    text not null,
+  contact_name      text,
+  last_message_body text,
+  last_message_at   timestamptz default now(),
+  unread_count      integer default 0,
+  created_at        timestamptz default now(),
+  unique (twilio_number, contact_number)
+);
+alter table conversations enable row level security;
+create policy "agents_convs" on conversations for all to authenticated using (true) with check (true);
+create policy "service_convs" on conversations for all to service_role using (true) with check (true);
+
+create table if not exists messages (
+  id              uuid primary key default uuid_generate_v4(),
+  conversation_id uuid references conversations(id) on delete cascade not null,
+  direction       text check (direction in ('inbound','outbound')) not null,
+  body            text not null,
+  status          text default 'sent',
+  twilio_sid      text,
+  agent_id        uuid references agents(id) on delete set null,
+  error_message   text,
+  created_at      timestamptz default now()
+);
+alter table messages enable row level security;
+create policy "agents_msgs"  on messages for all to authenticated using (true) with check (true);
+create policy "service_msgs" on messages for all to service_role using (true) with check (true);`
+
+function TwilioSection({ db }) {
+  const [status,      setStatus]      = useState('idle')   // idle | testing | ok | error
+  const [errMsg,      setErrMsg]      = useState('')
+  const [areaCode,    setAreaCode]    = useState('')
+  const [available,   setAvailable]   = useState([])
+  const [searching,   setSearching]   = useState(false)
+  const [buying,      setBuying]      = useState(null)   // phoneNumber being purchased
+  const [owned,       setOwned]       = useState([])
+  const [sqlCopied,   setSqlCopied]   = useState(false)
+  const [agentAssign, setAgentAssign] = useState({})    // agentId → twilio number
+  const [savingAgent, setSavingAgent] = useState(null)
+
+  const agents = db.agents || []
+
+  // Load numbers already in Twilio account
+  const loadOwned = useCallback(async () => {
+    const r = await fetch('/api/twilio-provision', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'list' }),
+    })
+    const d = await r.json()
+    if (!d.error) setOwned(d.numbers || [])
+  }, [])
+
+  // Test connection on mount
+  useEffect(() => {
+    fetch('/api/twilio-provision', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'test' }),
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) { setStatus('ok'); loadOwned() }
+        else { setStatus('error'); setErrMsg(d.error || 'Check TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN in Vercel') }
+      })
+      .catch(e => { setStatus('error'); setErrMsg(e.message) })
+  }, [loadOwned])
+
+  // Pre-fill assignment map from agents
+  useEffect(() => {
+    const map = {}
+    agents.forEach(a => { if (a.twilio_number) map[a.id] = a.twilio_number })
+    setAgentAssign(map)
+  }, [agents])
+
+  const search = async () => {
+    setSearching(true); setAvailable([])
+    const r = await fetch('/api/twilio-provision', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'search', areaCode }),
+    })
+    const d = await r.json()
+    setSearching(false)
+    if (d.error) { pushToast(d.error, 'error'); return }
+    setAvailable(d.numbers || [])
+  }
+
+  const buy = async (number) => {
+    setBuying(number)
+    const r = await fetch('/api/twilio-provision', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'buy', phoneNumber: number, friendlyName: 'Gateway CRM' }),
+    })
+    const d = await r.json()
+    setBuying(null)
+    if (d.error) { pushToast(d.error, 'error'); return }
+    pushToast(`${d.number} purchased and configured!`)
+    setAvailable([])
+    loadOwned()
+  }
+
+  const assignToAgent = async (agentId) => {
+    const number = agentAssign[agentId] || null
+    setSavingAgent(agentId)
+    const { error } = await supabase
+      .from('agents')
+      .update({ twilio_number: number || null, twilio_sid: null })
+      .eq('id', agentId)
+    setSavingAgent(null)
+    if (error) { pushToast(error.message, 'error'); return }
+    pushToast(number ? `${number} assigned to agent` : 'Number removed from agent')
+  }
+
+  return (
+    <div style={{ maxWidth: 680 }}>
+      {/* Connection status */}
+      <div className="settings-section" style={{ marginBottom: 20 }}>
+        <div className="settings-section__title">Connection</div>
+        <div className="settings-section__sub">Credentials are read from Vercel environment variables — never stored in the database.</div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+          <div style={{
+            width: 10, height: 10, borderRadius: '50%', flexShrink: 0,
+            background: status === 'ok' ? 'var(--gw-green)' : status === 'error' ? 'var(--gw-red)' : 'var(--gw-mist)',
+          }} />
+          <span style={{ fontSize: 13, fontWeight: 600 }}>
+            {status === 'idle'    && 'Checking…'}
+            {status === 'testing' && 'Testing connection…'}
+            {status === 'ok'      && 'Connected to Twilio'}
+            {status === 'error'   && 'Not connected'}
+          </span>
+        </div>
+        {status === 'error' && (
+          <div style={{ background: 'var(--gw-red-light)', border: '1px solid var(--gw-red)', borderRadius: 'var(--radius)', padding: '10px 14px', fontSize: 13, color: 'var(--gw-red)', marginBottom: 16 }}>
+            {errMsg}
+          </div>
+        )}
+
+        {/* Required env vars */}
+        <div style={{ background: 'var(--gw-bone)', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', padding: '12px 16px', fontSize: 13 }}>
+          <div style={{ fontWeight: 700, marginBottom: 10 }}>Required Vercel Environment Variables</div>
+          {[
+            ['TWILIO_ACCOUNT_SID',    'Your Account SID from console.twilio.com'],
+            ['TWILIO_AUTH_TOKEN',     'Your Auth Token from console.twilio.com'],
+            ['SUPABASE_URL',          'Your Supabase project URL (Settings → API)'],
+            ['SUPABASE_SERVICE_KEY',  'Service role key (Settings → API → service_role)'],
+          ].map(([key, hint]) => (
+            <div key={key} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 8 }}>
+              <code style={{ background: 'var(--gw-ink)', color: 'var(--gw-gold)', padding: '2px 7px', borderRadius: 3, fontFamily: 'var(--font-mono)', fontSize: 11, flexShrink: 0, marginTop: 1 }}>{key}</code>
+              <span style={{ color: 'var(--gw-mist)', fontSize: 12 }}>{hint}</span>
+            </div>
+          ))}
+          <div style={{ marginTop: 10, fontSize: 12, color: 'var(--gw-mist)' }}>
+            Add these in <strong>Vercel → Project → Settings → Environment Variables</strong>, then redeploy.
+          </div>
+        </div>
+      </div>
+
+      {/* Database schema */}
+      <div className="settings-section" style={{ marginBottom: 20 }}>
+        <div className="settings-section__title">Database Setup</div>
+        <div className="settings-section__sub">Run this SQL once in Supabase → SQL Editor to create the messaging tables.</div>
+        <pre style={{ background: 'var(--gw-slate)', color: '#c9a84c', fontFamily: 'var(--font-mono)', fontSize: 11, padding: 14, borderRadius: 'var(--radius)', whiteSpace: 'pre', overflowX: 'auto', marginBottom: 10 }}>{TWILIO_SQL}</pre>
+        <button className="btn btn--secondary btn--sm" onClick={() => { navigator.clipboard.writeText(TWILIO_SQL); setSqlCopied(true); setTimeout(() => setSqlCopied(false), 2000) }}>
+          <Icon name="copy" size={12} /> {sqlCopied ? 'Copied!' : 'Copy SQL'}
+        </button>
+      </div>
+
+      {status === 'ok' && <>
+        {/* Number provisioning */}
+        <div className="settings-section" style={{ marginBottom: 20 }}>
+          <div className="settings-section__title">Phone Numbers</div>
+          <div className="settings-section__sub">Search for available US numbers by area code, then purchase and assign to agents.</div>
+
+          {/* Owned numbers */}
+          {owned.length > 0 && (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--gw-mist)', marginBottom: 8 }}>Your Numbers</div>
+              {owned.map(n => (
+                <div key={n.sid} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', marginBottom: 6, background: '#fff' }}>
+                  <Icon name="phone" size={13} style={{ color: 'var(--gw-green)', flexShrink: 0 }} />
+                  <span style={{ fontWeight: 700, fontSize: 13, fontFamily: 'var(--font-mono)' }}>{n.phoneNumber}</span>
+                  <span style={{ fontSize: 11, color: 'var(--gw-mist)', flex: 1 }}>{n.friendlyName}</span>
+                  <span style={{ fontSize: 10, color: n.smsUrl?.includes('twilio-webhook') ? 'var(--gw-green)' : 'var(--gw-amber)', fontWeight: 600 }}>
+                    {n.smsUrl?.includes('twilio-webhook') ? '✓ Webhook set' : '⚠ Webhook not set'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Search */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+            <input
+              className="form-control"
+              style={{ maxWidth: 140 }}
+              placeholder="Area code (e.g. 512)"
+              value={areaCode}
+              onChange={e => setAreaCode(e.target.value.replace(/\D/g, '').slice(0, 3))}
+              onKeyDown={e => e.key === 'Enter' && search()}
+              maxLength={3}
+            />
+            <button className="btn btn--secondary" onClick={search} disabled={searching}>
+              {searching ? 'Searching…' : 'Search Available Numbers'}
+            </button>
+          </div>
+
+          {available.length > 0 && (
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--gw-mist)', marginBottom: 8 }}>Available Numbers</div>
+              {available.map(n => (
+                <div key={n.phone_number} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', marginBottom: 6, background: '#fff' }}>
+                  <span style={{ fontWeight: 700, fontSize: 13, fontFamily: 'var(--font-mono)', flex: 1 }}>{n.phone_number}</span>
+                  <span style={{ fontSize: 11, color: 'var(--gw-mist)' }}>{n.locality}, {n.region}</span>
+                  <button
+                    className="btn btn--primary btn--sm"
+                    onClick={() => buy(n.phone_number)}
+                    disabled={buying === n.phone_number}
+                    style={{ fontSize: 11 }}
+                  >
+                    {buying === n.phone_number ? 'Purchasing…' : 'Buy ~$1.15/mo'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Agent assignment */}
+        {agents.length > 0 && owned.length > 0 && (
+          <div className="settings-section">
+            <div className="settings-section__title">Assign Numbers to Agents</div>
+            <div className="settings-section__sub">Each agent can have one dedicated Twilio number. Texts they send and receive will use this number.</div>
+            {agents.map(a => (
+              <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+                <div style={{ width: 32, height: 32, borderRadius: 8, background: a.color || 'var(--gw-azure)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 12, flexShrink: 0 }}>
+                  {a.initials}
+                </div>
+                <div style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{a.name}</div>
+                <select
+                  className="form-control"
+                  style={{ maxWidth: 200, fontSize: 12 }}
+                  value={agentAssign[a.id] || ''}
+                  onChange={e => setAgentAssign(p => ({ ...p, [a.id]: e.target.value }))}
+                >
+                  <option value="">— No number —</option>
+                  {owned.map(n => <option key={n.sid} value={n.phoneNumber}>{n.phoneNumber}</option>)}
+                </select>
+                <button
+                  className="btn btn--secondary btn--sm"
+                  onClick={() => assignToAgent(a.id)}
+                  disabled={savingAgent === a.id}
+                >
+                  {savingAgent === a.id ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </>}
+
+      {/* Webhook info */}
+      <div className="settings-section" style={{ marginTop: 20 }}>
+        <div className="settings-section__title">Inbound SMS Webhook</div>
+        <div className="settings-section__sub">
+          Twilio automatically calls this URL when contacts text your number. It is configured automatically when you purchase a number above.
+        </div>
+        <code style={{ display: 'block', background: 'var(--gw-bone)', padding: '10px 14px', borderRadius: 'var(--radius)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+          https://your-vercel-domain.vercel.app/api/twilio-webhook
+        </code>
+      </div>
+    </div>
+  )
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 
-export default function IntegrationsPage() {
-  const [tab, setTab] = useState('mailchimp')
+export default function IntegrationsPage({ db }) {
+  const [tab, setTab] = useState('twilio')
 
   return (
     <div className="page-content">
       <div className="page-header">
         <div>
           <div className="page-title">Integrations</div>
-          <div className="page-sub">Connect Mailchimp, Zapier, and external automation tools</div>
+          <div className="page-sub">Connect Twilio, Mailchimp, Zapier, and external tools</div>
         </div>
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 24, flexWrap: 'wrap' }}>
         {[
+          ['twilio',    'Twilio SMS'],
           ['mailchimp', 'Mailchimp'],
           ['webhooks',  'Zapier / Webhooks'],
         ].map(([id, label]) => (
@@ -456,6 +741,7 @@ export default function IntegrationsPage() {
         ))}
       </div>
 
+      {tab === 'twilio'    && <TwilioSection db={db} />}
       {tab === 'mailchimp' && <MailchimpSection />}
       {tab === 'webhooks'  && <WebhooksSection />}
     </div>
