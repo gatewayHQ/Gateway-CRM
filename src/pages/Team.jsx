@@ -5,14 +5,14 @@ import { Icon, Avatar, Drawer, EmptyState, ConfirmDialog, Modal, pushToast } fro
 const TEAM_TYPES = {
   collaboration: {
     label: 'Collaboration Team',
-    desc: 'Members share contacts, properties, and deals. Best for agents who co-list and co-represent together regularly (e.g. Nic & Daniel).',
+    desc: 'Members co-list, co-represent, and share deals freely. Best for agents who work most deals together (e.g. Nic & Daniel on commercial). Either agent can be added as co-agent on any deal.',
     color: '#2e7d5e',
     bg: '#f0fdf4',
     border: '#86efac',
   },
   split: {
-    label: 'Split Team',
-    desc: 'A lead agent automatically receives a share of every deal closed by other team members (e.g. Nic & Steph where Nic mentors Steph).',
+    label: 'Mentorship / Override Team',
+    desc: 'A lead agent gets visibility into every deal the junior agent works, and is added as co-agent manually when applicable (e.g. Nic & Steph). Configure the default commission split so it\'s always at hand when editing a deal.',
     color: '#4a6fa5',
     bg: '#eff6ff',
     border: '#93c5fd',

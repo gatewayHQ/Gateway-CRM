@@ -191,7 +191,8 @@ function CommissionDrawer({ open, onClose, deal, commission, onSave }) {
 
 // ── Monthly Bar Chart ─────────────────────────────────────────────────────────
 function MonthlyBarChart({ deals, calcFn }) {
-  const [tooltip, setTooltip] = React.useState(null) // { x, y, label, agent, broker }
+  const [tooltip,  setTooltip]  = React.useState(null)
+  const [category, setCategory] = React.useState('all') // 'all' | 'residential' | 'commercial'
 
   // Build last 12 months of data
   const months = React.useMemo(() => {
@@ -205,6 +206,8 @@ function MonthlyBarChart({ deals, calcFn }) {
       const shortLabel = d.toLocaleString('en-US', { month: 'short' })
       const monthDeals = deals.filter(deal => {
         if (deal.stage !== 'closed') return false
+        if (category === 'residential' && deal.prop_category === 'commercial') return false
+        if (category === 'commercial'  && deal.prop_category !== 'commercial')  return false
         const closed = new Date(deal.updated_at || deal.created_at)
         return closed.getFullYear() === year && closed.getMonth() === month
       })
@@ -217,7 +220,7 @@ function MonthlyBarChart({ deals, calcFn }) {
       out.push({ label, shortLabel, agentTotal, brokerTotal, count: monthDeals.length })
     }
     return out
-  }, [deals, calcFn])
+  }, [deals, calcFn, category])
 
   const maxVal = Math.max(...months.map(m => m.agentTotal + m.brokerTotal), 1)
 
@@ -256,21 +259,32 @@ function MonthlyBarChart({ deals, calcFn }) {
       aria-label="Monthly commissions bar chart"
     >
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
         <div>
           <div style={{ fontWeight: 700, fontSize: 14 }}>Monthly Commissions</div>
           <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>Last 12 months · closed deals only</div>
         </div>
-        {/* Legend */}
-        <div style={{ display: 'flex', gap: 16, fontSize: 12 }}>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <span style={{ width: 10, height: 10, borderRadius: 2, background: 'var(--gw-green)', display: 'inline-block' }} aria-hidden="true" />
-            Agent
-          </span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <span style={{ width: 10, height: 10, borderRadius: 2, background: 'var(--gw-azure)', display: 'inline-block' }} aria-hidden="true" />
-            Brokerage
-          </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {/* Category toggle */}
+          <div style={{ display: 'flex', gap: 4, background: 'var(--gw-bone)', borderRadius: 8, padding: 3 }}>
+            {[['all','All'],['residential','🏠 Res'],['commercial','🏢 Comm']].map(([val, lbl]) => (
+              <button key={val} onClick={() => setCategory(val)}
+                style={{ padding: '3px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: 'pointer', border: 'none', background: category === val ? '#fff' : 'transparent', color: category === val ? 'var(--gw-ink)' : 'var(--gw-mist)', boxShadow: category === val ? '0 1px 3px rgba(0,0,0,0.1)' : 'none', transition: 'all 150ms' }}>
+                {lbl}
+              </button>
+            ))}
+          </div>
+          {/* Legend */}
+          <div style={{ display: 'flex', gap: 12, fontSize: 12 }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ width: 10, height: 10, borderRadius: 2, background: 'var(--gw-green)', display: 'inline-block' }} aria-hidden="true" />
+              Agent
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ width: 10, height: 10, borderRadius: 2, background: 'var(--gw-azure)', display: 'inline-block' }} aria-hidden="true" />
+              Brokerage
+            </span>
+          </div>
         </div>
       </div>
 
@@ -429,12 +443,75 @@ function MonthlyBarChart({ deals, calcFn }) {
   )
 }
 
+// ── Res/Commercial breakdown card ────────────────────────────────────────────
+function CategoryBreakdown({ closedDeals, calcFn }) {
+  const res  = closedDeals.filter(d => !d.prop_category || d.prop_category === 'residential')
+  const comm = closedDeals.filter(d => d.prop_category === 'commercial')
+
+  const sum = (arr) => arr.reduce((acc, d) => {
+    const { gross, agentAmt, brokerAmt } = calcFn(d)
+    acc.gross += gross; acc.agent += agentAmt; acc.broker += brokerAmt; acc.deals++
+    return acc
+  }, { gross: 0, agent: 0, broker: 0, deals: 0 })
+
+  const rTotals = sum(res)
+  const cTotals = sum(comm)
+  const maxAgent = Math.max(rTotals.agent, cTotals.agent, 1)
+
+  const col = (label, totals, color, iconChar) => (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+        <span style={{ fontSize: 18 }}>{iconChar}</span>
+        <span style={{ fontWeight: 700, fontSize: 13 }}>{label}</span>
+        <span style={{ fontSize: 11, color: 'var(--gw-mist)', background: 'var(--gw-bone)', padding: '1px 7px', borderRadius: 8, marginLeft: 2 }}>
+          {totals.deals} deal{totals.deals !== 1 ? 's' : ''}
+        </span>
+      </div>
+      <div style={{ marginBottom: 6 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--gw-mist)', marginBottom: 3 }}>
+          <span>Agent earnings</span>
+          <span style={{ fontWeight: 700, color }}>{formatCurrency(totals.agent)}</span>
+        </div>
+        <div style={{ height: 6, background: 'var(--gw-border)', borderRadius: 3, overflow: 'hidden' }}>
+          <div style={{ width: `${Math.round(totals.agent / maxAgent * 100)}%`, height: '100%', background: color, borderRadius: 3, transition: 'width 400ms ease' }} />
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 16, fontSize: 11, color: 'var(--gw-mist)' }}>
+        <span>Gross: <strong style={{ color: 'var(--gw-ink)' }}>{formatCurrency(totals.gross)}</strong></span>
+        <span>House: <strong style={{ color: 'var(--gw-ink)' }}>{formatCurrency(totals.broker)}</strong></span>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="card" style={{ marginBottom: 20, padding: '16px 20px' }}>
+      <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 14 }}>Residential vs. Commercial</div>
+      <div style={{ display: 'flex', gap: 24 }}>
+        {col('Residential', rTotals, 'var(--gw-green)', '🏠')}
+        <div style={{ width: 1, background: 'var(--gw-border)', flexShrink: 0 }} />
+        {col('Commercial', cTotals, 'var(--gw-azure)', '🏢')}
+      </div>
+      {(rTotals.deals > 0 && cTotals.deals > 0) && (
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--gw-border)', display: 'flex', gap: 20, fontSize: 12, color: 'var(--gw-mist)' }}>
+          <span>Res share of agent earnings: <strong style={{ color: 'var(--gw-green)' }}>
+            {Math.round(rTotals.agent / (rTotals.agent + cTotals.agent) * 100)}%
+          </strong></span>
+          <span>Comm share: <strong style={{ color: 'var(--gw-azure)' }}>
+            {Math.round(cTotals.agent / (rTotals.agent + cTotals.agent) * 100)}%
+          </strong></span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function CommissionPage({ db, setDb, activeAgent }) {
   const [drawer, setDrawer]           = useState(false)
   const [selectedDeal, setSelectedDeal] = useState(null)
   const [filterStage, setFilterStage] = useState('all')
   const [filterAgent, setFilterAgent] = useState('')
+  const [filterCategory, setFilterCategory] = useState('all')
   const [copied, setCopied]           = useState(false)
   const [celebration, setCelebration] = useState(false)
   const [prevCapHit, setPrevCapHit]   = useState(false)
@@ -483,6 +560,8 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
 
   // ── Compute earnings totals ──────────────────────────────────────────────────
   const closedDeals = deals.filter(d => d.stage === 'closed')
+  const closedRes   = closedDeals.filter(d => !d.prop_category || d.prop_category === 'residential')
+  const closedComm  = closedDeals.filter(d => d.prop_category === 'commercial')
 
   // Brokerage total (all closed deals)
   const brokerageTotals = closedDeals.reduce((acc, d) => {
@@ -524,6 +603,8 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
   if (filterStage === 'closed') filtered = filtered.filter(d => d.stage === 'closed')
   if (filterStage === 'active') filtered = filtered.filter(d => d.stage !== 'closed' && d.stage !== 'lost')
   if (filterAgent) filtered = filtered.filter(d => d.agent_id === filterAgent)
+  if (filterCategory === 'residential') filtered = filtered.filter(d => !d.prop_category || d.prop_category === 'residential')
+  if (filterCategory === 'commercial')  filtered = filtered.filter(d => d.prop_category === 'commercial')
 
   const totals = filtered.reduce((acc, d) => {
     const { sp, gross, agentAmt, brokerAmt } = calc(d)
@@ -556,7 +637,7 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
       </div>
 
       {/* ── Summary stats ── */}
-      <div className="stats-grid" style={{ gridTemplateColumns:'repeat(4,1fr)', marginBottom:20 }}>
+      <div className="stats-grid" style={{ gridTemplateColumns:'repeat(4,1fr)', marginBottom:12 }}>
         <div className="stat-card">
           <div className="stat-card__value">{closedDeals.length}</div>
           <div className="stat-card__label">Closed Deals</div>
@@ -572,6 +653,34 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
         <div className="stat-card" style={{ borderLeft:'3px solid var(--gw-azure)' }}>
           <div className="stat-card__value" style={{ color:'var(--gw-azure)' }}>{formatCurrency(brokerageTotals.broker)}</div>
           <div className="stat-card__label">Brokerage / House</div>
+        </div>
+      </div>
+
+      {/* ── Residential vs Commercial mini-stats ── */}
+      <div className="stats-grid" style={{ gridTemplateColumns:'repeat(4,1fr)', marginBottom:20 }}>
+        <div className="stat-card" style={{ borderTop:'3px solid var(--gw-green)' }}>
+          <div style={{ fontSize:10, fontWeight:700, color:'var(--gw-green)', textTransform:'uppercase', letterSpacing:'0.07em', marginBottom:4 }}>🏠 Residential</div>
+          <div className="stat-card__value">{closedRes.length}</div>
+          <div className="stat-card__label">Closed Deals</div>
+        </div>
+        <div className="stat-card" style={{ borderTop:'3px solid var(--gw-green)' }}>
+          <div style={{ fontSize:10, fontWeight:700, color:'var(--gw-green)', textTransform:'uppercase', letterSpacing:'0.07em', marginBottom:4 }}>🏠 Residential</div>
+          <div className="stat-card__value" style={{ color:'var(--gw-green)' }}>
+            {formatCurrency(closedRes.reduce((s,d)=>s+calc(d).agentAmt,0))}
+          </div>
+          <div className="stat-card__label">Agent Earnings</div>
+        </div>
+        <div className="stat-card" style={{ borderTop:'3px solid var(--gw-azure)' }}>
+          <div style={{ fontSize:10, fontWeight:700, color:'var(--gw-azure)', textTransform:'uppercase', letterSpacing:'0.07em', marginBottom:4 }}>🏢 Commercial</div>
+          <div className="stat-card__value">{closedComm.length}</div>
+          <div className="stat-card__label">Closed Deals</div>
+        </div>
+        <div className="stat-card" style={{ borderTop:'3px solid var(--gw-azure)' }}>
+          <div style={{ fontSize:10, fontWeight:700, color:'var(--gw-azure)', textTransform:'uppercase', letterSpacing:'0.07em', marginBottom:4 }}>🏢 Commercial</div>
+          <div className="stat-card__value" style={{ color:'var(--gw-azure)' }}>
+            {formatCurrency(closedComm.reduce((s,d)=>s+calc(d).agentAmt,0))}
+          </div>
+          <div className="stat-card__label">Agent Earnings</div>
         </div>
       </div>
 
@@ -616,6 +725,9 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
         </div>
       )}
 
+      {/* ── Residential vs Commercial Breakdown ── */}
+      {closedDeals.length > 0 && <CategoryBreakdown closedDeals={closedDeals} calcFn={calc} />}
+
       {/* ── Monthly Bar Chart ── */}
       <MonthlyBarChart deals={deals} calcFn={calc} />
 
@@ -657,6 +769,11 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
           <option value="active">Active Only</option>
           <option value="closed">Closed Only</option>
         </select>
+        <select className="filter-select" value={filterCategory} onChange={e=>setFilterCategory(e.target.value)}>
+          <option value="all">All Types</option>
+          <option value="residential">🏠 Residential</option>
+          <option value="commercial">🏢 Commercial</option>
+        </select>
         <select className="filter-select" value={filterAgent} onChange={e=>setFilterAgent(e.target.value)}>
           <option value="">All Agents</option>
           {agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
@@ -677,6 +794,7 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
                 <tr>
                   <th>Deal</th>
                   <th>Agent</th>
+                  <th>Type</th>
                   <th>Stage</th>
                   <th style={{ textAlign:'right' }}>Sale Price</th>
                   <th style={{ textAlign:'right' }}>GC %</th>
@@ -704,6 +822,12 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
                         {agent ? <div style={{ display:'flex', alignItems:'center', gap:6 }}><Avatar agent={agent} size={22} /><span style={{ fontSize:12 }}>{agent.name}</span></div>
                                : <span style={{ color:'var(--gw-mist)', fontSize:12 }}>—</span>}
                       </td>
+                      <td>
+                        {deal.prop_category === 'commercial'
+                          ? <span style={{ fontSize:11, fontWeight:700, color:'var(--gw-azure)', background:'#eff6ff', padding:'2px 7px', borderRadius:8, whiteSpace:'nowrap' }}>🏢 Commercial</span>
+                          : <span style={{ fontSize:11, fontWeight:700, color:'var(--gw-green)', background:'#f0fdf4', padding:'2px 7px', borderRadius:8, whiteSpace:'nowrap' }}>🏠 Residential</span>
+                        }
+                      </td>
                       <td><Badge variant={deal.stage==='under-contract'?'active':deal.stage}>{deal.stage.replace('-',' ')}</Badge></td>
                       <td style={{ textAlign:'right', fontWeight:600 }}>{sp>0?formatCurrency(sp):'—'}</td>
                       <td style={{ textAlign:'right', color:'var(--gw-mist)', fontSize:12 }}>{gross_pct}%</td>
@@ -722,7 +846,7 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
               </tbody>
               <tfoot>
                 <tr style={{ background:'var(--gw-bone)', borderTop:'2px solid var(--gw-border)' }}>
-                  <td colSpan={3} style={{ padding:'10px 12px', fontSize:12, fontWeight:700, color:'var(--gw-mist)' }}>TOTALS — {filtered.length} deals</td>
+                  <td colSpan={4} style={{ padding:'10px 12px', fontSize:12, fontWeight:700, color:'var(--gw-mist)' }}>TOTALS — {filtered.length} deals</td>
                   <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700 }}>{formatCurrency(totals.sp)}</td>
                   <td></td>
                   <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700 }}>{formatCurrency(totals.gross)}</td>
