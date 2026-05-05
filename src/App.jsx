@@ -21,24 +21,39 @@ import QuickAdd from './pages/QuickAdd.jsx'
 import IntegrationsPage from './pages/Integrations.jsx'
 import { Analytics } from '@vercel/analytics/react'
 
-const BASE_NAV = [
-  { id: 'dashboard',  label: 'Dashboard',      icon: 'dashboard' },
-  { id: 'contacts',   label: 'Contacts',        icon: 'contacts' },
-  { id: 'properties', label: 'Properties',      icon: 'building' },
-  { id: 'pipeline',   label: 'Pipeline',        icon: 'pipeline' },
-  { id: 'coldcalls',  label: 'Cold Call Lists', icon: 'phone' },
-  { id: 'commission', label: 'Commission',      icon: 'commission' },
-  { id: 'tasks',      label: 'Tasks',           icon: 'tasks' },
-  { id: 'team',       label: 'Team',            icon: 'team' },
+// Primary: what every agent uses every day
+const NAV_CORE = [
+  { id: 'dashboard',  label: 'Dashboard',  icon: 'dashboard' },
+  { id: 'contacts',   label: 'Contacts',   icon: 'contacts' },
+  { id: 'properties', label: 'Properties', icon: 'building' },
+  { id: 'pipeline',   label: 'Pipeline',   icon: 'pipeline' },
+  { id: 'tasks',      label: 'Tasks',      icon: 'tasks' },
+]
+
+// Office: business operations, reviewed regularly
+const NAV_OFFICE = [
+  { id: 'commission', label: 'Commission', icon: 'commission' },
+  { id: 'coldcalls',  label: 'Cold Calls', icon: 'phone' },
+  { id: 'reports',    label: 'Reports',    icon: 'reports' },
+  { id: 'team',       label: 'Team',       icon: 'team' },
+]
+
+// Marketing & Tools: power features, collapsed for new users
+const NAV_TOOLS = [
   { id: 'templates',  label: 'Email Templates', icon: 'mail' },
   { id: 'sequences',  label: 'Drip Sequences',  icon: 'sequences' },
-  { id: 'reports',    label: 'Reports',         icon: 'reports' },
   { id: 'om',         label: 'OM Generator',    icon: 'om' },
   { id: 'social',     label: 'Social Media',    icon: 'social' },
   { id: 'leads',      label: 'Website Leads',   icon: 'leads' },
-  { id: 'integrations', label: 'Integrations',    icon: 'pipeline' },
-  { id: 'settings',    label: 'Settings',        icon: 'settings' },
 ]
+
+// Always visible at the bottom — never buried
+const NAV_ADMIN = [
+  { id: 'integrations', label: 'Integrations', icon: 'pipeline' },
+  { id: 'settings',     label: 'Settings',     icon: 'settings' },
+]
+
+const TOOLS_IDS = NAV_TOOLS.map(n => n.id)
 
 const TITLES = {
   dashboard:  { title: 'Dashboard',        crumb: 'Overview' },
@@ -164,8 +179,27 @@ export default function App() {
   const [websiteEnabled, setWebsiteEnabled] = useState(
     () => localStorage.getItem('gw_website_enabled') === 'true'
   )
+  const [toolsOpen, setToolsOpen] = useState(
+    () => localStorage.getItem('gw_tools_open') === 'true'
+  )
 
-  const NAV = websiteEnabled ? BASE_NAV : BASE_NAV.filter(n => n.id !== 'leads')
+  // Auto-expand tools section when navigating to a tools page
+  useEffect(() => {
+    if (TOOLS_IDS.includes(route) && !toolsOpen) {
+      setToolsOpen(true)
+      localStorage.setItem('gw_tools_open', 'true')
+    }
+  }, [route])
+
+  // Flat list for mobile nav (filter leads if website is disabled)
+  const NAV = [
+    ...NAV_CORE,
+    ...NAV_OFFICE,
+    ...(websiteEnabled ? NAV_TOOLS : NAV_TOOLS.filter(n => n.id !== 'leads')),
+    ...NAV_ADMIN,
+  ]
+  // Tools items visible in sidebar (leads gated by websiteEnabled)
+  const visibleTools = websiteEnabled ? NAV_TOOLS : NAV_TOOLS.filter(n => n.id !== 'leads')
 
   useEffect(() => {
     supabase.auth.getSession()
@@ -332,22 +366,65 @@ export default function App() {
           </button>
         </div>
 
-        <nav className="sidebar__nav">
-          {!collapsed && <div className="nav-section-label">Workspace</div>}
-          {NAV.slice(0, 6).map(n => (
-            <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}`} onClick={() => setRoute(n.id)} title={n.label}>
+        <nav className="sidebar__nav" aria-label="Main navigation">
+          {/* ── Core ── */}
+          {NAV_CORE.map(n => (
+            <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}`}
+              onClick={() => setRoute(n.id)} title={n.label}
+              role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
               <Icon name={n.icon} size={16} />
               {!collapsed && <span>{n.label}</span>}
             </div>
           ))}
-          {!collapsed && <div className="nav-section-label">Team &amp; Tools</div>}
-          {NAV.slice(6).map(n => (
-            <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}`} onClick={() => setRoute(n.id)} title={n.label}>
+
+          {/* ── Office ── */}
+          {!collapsed && <div className="nav-section-label" style={{ marginTop: 8 }}>Office</div>}
+          {collapsed && <div className="nav-section-divider" />}
+          {NAV_OFFICE.map(n => (
+            <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}`}
+              onClick={() => setRoute(n.id)} title={n.label}
+              role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
+              <Icon name={n.icon} size={16} />
+              {!collapsed && <span>{n.label}</span>}
+            </div>
+          ))}
+
+          {/* ── Marketing & Tools (collapsible) ── */}
+          {collapsed ? (
+            <div className="nav-section-divider" />
+          ) : (
+            <button
+              className={`nav-group-toggle${TOOLS_IDS.includes(route) ? ' has-active' : ''}${toolsOpen ? ' open' : ''}`}
+              onClick={() => { const next = !toolsOpen; setToolsOpen(next); localStorage.setItem('gw_tools_open', String(next)) }}
+              aria-expanded={toolsOpen}
+              title={toolsOpen ? 'Collapse Marketing & Tools' : 'Expand Marketing & Tools'}
+            >
+              <span>Marketing &amp; Tools</span>
+              <span className="nav-group-toggle__badge">{visibleTools.length}</span>
+              <Icon name={toolsOpen ? 'chevronDown' : 'chevronRight'} size={11} style={{ marginLeft: 'auto', flexShrink: 0 }} />
+            </button>
+          )}
+          {(toolsOpen || collapsed) && visibleTools.map(n => (
+            <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}${!collapsed ? ' nav-item--indented' : ''}`}
+              onClick={() => setRoute(n.id)} title={n.label}
+              role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
               <Icon name={n.icon} size={16} />
               {!collapsed && <span>{n.label}</span>}
             </div>
           ))}
         </nav>
+
+        {/* ── Admin — pinned above agent profile ── */}
+        <div className="sidebar__bottom">
+          {NAV_ADMIN.map(n => (
+            <div key={n.id} className={`nav-item nav-item--admin${route === n.id ? ' active' : ''}`}
+              onClick={() => setRoute(n.id)} title={n.label}
+              role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
+              <Icon name={n.icon} size={16} />
+              {!collapsed && <span>{n.label}</span>}
+            </div>
+          ))}
+        </div>
 
         <div className="sidebar__agent">
           {activeAgent && <Avatar agent={activeAgent} size={32} />}

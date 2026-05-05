@@ -86,6 +86,49 @@ body { font-family: var(--font-body); font-size: 14px; color: var(--gw-ink); bac
 .nav-item.active { color: #fff; background: rgba(255,255,255,0.08); border-left-color: var(--gw-gold); }
 .nav-item svg { min-width: 16px; }
 
+/* Indented items inside collapsible tools section */
+.nav-item--indented { padding-left: 24px; font-size: 12px; }
+.nav-item--indented.active { border-left-color: rgba(201,168,76,0.6); }
+
+/* Admin items at the bottom — slightly de-emphasized */
+.nav-item--admin { font-size: 12px; color: rgba(255,255,255,0.4); }
+.nav-item--admin:hover { color: rgba(255,255,255,0.7); }
+.nav-item--admin.active { color: #fff; border-left-color: var(--gw-gold); }
+
+/* Thin visual divider between sections (collapsed mode only) */
+.nav-section-divider {
+  height: 1px; background: rgba(255,255,255,0.06); margin: 6px 12px;
+}
+
+/* Collapsible group toggle — looks like a section label but is clickable */
+.nav-group-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 10px 16px 4px; background: none; border: none; cursor: pointer;
+  color: rgba(255,255,255,0.28); font-size: 9px; letter-spacing: 0.12em;
+  text-transform: uppercase; font-family: var(--font-body);
+  white-space: nowrap; overflow: hidden;
+  transition: color 150ms ease;
+}
+.nav-group-toggle:hover { color: rgba(255,255,255,0.55); }
+.nav-group-toggle.has-active { color: rgba(255,255,255,0.55); }
+.nav-group-toggle.open { color: rgba(255,255,255,0.45); }
+
+/* Count pill shown next to the group label */
+.nav-group-toggle__badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 14px; padding: 0 4px;
+  background: rgba(255,255,255,0.1); border-radius: 8px;
+  font-size: 9px; font-weight: 700; letter-spacing: 0;
+  color: rgba(255,255,255,0.45);
+}
+.nav-group-toggle.has-active .nav-group-toggle__badge { background: rgba(201,168,76,0.2); color: var(--gw-gold); }
+
+/* Sidebar bottom section — pinned above agent profile */
+.sidebar__bottom {
+  border-top: 1px solid rgba(255,255,255,0.06);
+  padding: 4px 0;
+}
+
 .sidebar__agent {
   display: flex; align-items: center; gap: 10px; padding: 12px;
   border-top: 1px solid rgba(255,255,255,0.06); cursor: pointer;
