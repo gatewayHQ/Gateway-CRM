@@ -535,14 +535,14 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
             </button>
             <button
               className="btn btn--ghost"
-              title="Copy public listing link"
+              title="Copy share link — works on social media, email, and text"
               onClick={() => {
-                const url = `${window.location.origin}/listing/${property.id}`
-                navigator.clipboard.writeText(url).then(() => pushToast('Listing link copied!'))
+                const url = `${window.location.origin}/share/${property.id}`
+                navigator.clipboard.writeText(url).then(() => pushToast('Share link copied! Works on social, email & text.'))
               }}
             >
               <Icon name="link" size={13} />
-              Copy Link
+              Share Link
             </button>
           </div>
         )}

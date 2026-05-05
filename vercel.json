@@ -3,7 +3,10 @@
   "outputDirectory": "dist",
   "installCommand": "npm install",
   "framework": "vite",
-  "rewrites": [{ "source": "/((?!api/).*)", "destination": "/index.html" }],
+  "rewrites": [
+    { "source": "/share/:id", "destination": "/api/share?id=:id" },
+    { "source": "/((?!api/)(?!share/).*)", "destination": "/index.html" }
+  ],
   "functions": {
     "api/docusign-webhook.js": { "maxDuration": 30 }
   },
