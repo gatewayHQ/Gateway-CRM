@@ -1251,7 +1251,10 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
   }, [setDb])
 
   const del = useCallback(async (id) => {
-    await supabase.from('deals').delete().eq('id', id)
+    // Nullify deal_id on tasks before deletion to avoid FK constraint failures
+    await supabase.from('tasks').update({ deal_id: null }).eq('deal_id', id)
+    const { error } = await supabase.from('deals').delete().eq('id', id)
+    if (error) { pushToast(error.message, 'error'); setConfirm(null); return }
     pushToast('Deal deleted', 'info')
     setConfirm(null); reload()
   }, [reload])
