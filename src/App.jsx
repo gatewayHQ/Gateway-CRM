@@ -5,21 +5,22 @@ import Dashboard from './pages/Dashboard.jsx'
 import ContactsPage from './pages/Contacts.jsx'
 import PropertiesPage from './pages/Properties.jsx'
 import PipelinePage from './pages/Pipeline.jsx'
-import CommissionPage from './pages/Commission.jsx'
 import TasksPage from './pages/Tasks.jsx'
-import TemplatesPage, { ComposeModal } from './pages/Templates.jsx'
-import TeamPage from './pages/Team.jsx'
-import SettingsPage from './pages/Settings.jsx'
+import { ComposeModal } from './pages/Templates.jsx'
 import LoginPage from './pages/Login.jsx'
-import LeadsPage from './pages/Leads.jsx'
-import OmPage from './pages/Om.jsx'
-import SocialPage from './pages/Social.jsx'
-import ReportsPage from './pages/Reports.jsx'
-import SequencesPage from './pages/Sequences.jsx'
-import ColdCallsPage from './pages/ColdCalls.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
 import MessagesPage from './pages/Messages.jsx'
-import IntegrationsPage from './pages/Integrations.jsx'
+const CommissionPage   = React.lazy(() => import('./pages/Commission.jsx'))
+const TemplatesPage    = React.lazy(() => import('./pages/Templates.jsx'))
+const TeamPage         = React.lazy(() => import('./pages/Team.jsx'))
+const SettingsPage     = React.lazy(() => import('./pages/Settings.jsx'))
+const LeadsPage        = React.lazy(() => import('./pages/Leads.jsx'))
+const OmPage           = React.lazy(() => import('./pages/Om.jsx'))
+const SocialPage       = React.lazy(() => import('./pages/Social.jsx'))
+const ReportsPage      = React.lazy(() => import('./pages/Reports.jsx'))
+const SequencesPage    = React.lazy(() => import('./pages/Sequences.jsx'))
+const ColdCallsPage    = React.lazy(() => import('./pages/ColdCalls.jsx'))
+const IntegrationsPage = React.lazy(() => import('./pages/Integrations.jsx'))
 import { Analytics } from '@vercel/analytics/react'
 
 // Primary: what every agent uses every day
@@ -536,23 +537,25 @@ export default function App() {
           </button>
         </header>
 
-        {route === 'dashboard'  && <Dashboard {...props} />}
-        {route === 'contacts'   && <ContactsPage {...props} />}
-        {route === 'properties' && <PropertiesPage {...props} />}
-        {route === 'pipeline'   && <PipelinePage {...props} />}
-        {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
-        {route === 'commission' && <CommissionPage {...props} />}
-        {route === 'tasks'      && <TasksPage {...props} />}
-        {route === 'messages'   && <MessagesPage db={db} activeAgent={activeAgent} />}
-        {route === 'team'       && <TeamPage {...props} onSwitchAgent={id => setActiveAgentId(id)} />}
-        {route === 'templates'  && <TemplatesPage {...props} />}
-        {route === 'sequences'  && <SequencesPage {...props} />}
-        {route === 'reports'    && <ReportsPage {...props} />}
-        {route === 'om'         && <OmPage />}
-        {route === 'social'     && <SocialPage />}
-        {route === 'leads'      && <LeadsPage {...props} />}
-        {route === 'integrations' && <IntegrationsPage db={db} />}
-        {route === 'settings'     && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
+        <React.Suspense fallback={<div style={{ display:'flex', alignItems:'center', justifyContent:'center', flex:1 }}><Loading /></div>}>
+          {route === 'dashboard'  && <Dashboard {...props} />}
+          {route === 'contacts'   && <ContactsPage {...props} />}
+          {route === 'properties' && <PropertiesPage {...props} />}
+          {route === 'pipeline'   && <PipelinePage {...props} />}
+          {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
+          {route === 'commission' && <CommissionPage {...props} />}
+          {route === 'tasks'      && <TasksPage {...props} />}
+          {route === 'messages'   && <MessagesPage db={db} activeAgent={activeAgent} />}
+          {route === 'team'       && <TeamPage {...props} onSwitchAgent={id => setActiveAgentId(id)} />}
+          {route === 'templates'  && <TemplatesPage {...props} />}
+          {route === 'sequences'  && <SequencesPage {...props} />}
+          {route === 'reports'    && <ReportsPage {...props} />}
+          {route === 'om'         && <OmPage />}
+          {route === 'social'     && <SocialPage />}
+          {route === 'leads'      && <LeadsPage {...props} />}
+          {route === 'integrations' && <IntegrationsPage db={db} />}
+          {route === 'settings'     && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
+        </React.Suspense>
       </div>
 
       {compose && <ComposeModal ctx={compose} db={db} activeAgent={activeAgent} onClose={() => setCompose(null)} />}

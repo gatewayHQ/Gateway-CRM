@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { formatCurrency } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -264,12 +264,78 @@ function CommercialFields({ form, set }) {
   return null
 }
 
+function PhotoUploader({ photos = [], propertyId, onAdd, onRemove }) {
+  const [uploading, setUploading] = useState(false)
+  const [dragOver, setDragOver]   = useState(false)
+  const inputRef = useRef(null)
+
+  const upload = async (files) => {
+    const valid = [...files].filter(f => f.type.startsWith('image/') && f.size <= 10 * 1024 * 1024)
+    if (valid.length < files.length) pushToast('Images only, max 10 MB each', 'error')
+    if (!valid.length) return
+    setUploading(true)
+    for (const file of valid) {
+      const ext  = file.name.split('.').pop().toLowerCase() || 'jpg'
+      const path = `${propertyId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
+      const { data, error } = await supabase.storage
+        .from('property-photos')
+        .upload(path, file, { contentType: file.type, upsert: false })
+      if (error) { pushToast(`Upload failed: ${error.message}`, 'error'); continue }
+      const { data: { publicUrl } } = supabase.storage.from('property-photos').getPublicUrl(path)
+      onAdd(publicUrl)
+    }
+    setUploading(false)
+    if (inputRef.current) inputRef.current.value = ''
+  }
+
+  const remove = async (url) => {
+    const match = url.match(/property-photos\/(.+?)(\?|$)/)
+    if (match) await supabase.storage.from('property-photos').remove([decodeURIComponent(match[1])])
+    onRemove(url)
+  }
+
+  return (
+    <div className="photo-uploader">
+      <label className="form-label">
+        Photos
+        <span style={{ fontWeight: 400, color: 'var(--gw-mist)', marginLeft: 6, fontSize: 11 }}>
+          shown on public listing page
+        </span>
+      </label>
+      {photos.length > 0 && (
+        <div className="photo-uploader__grid">
+          {photos.map((url, i) => (
+            <div key={url} className="photo-uploader__thumb">
+              <img src={url} alt={`Property photo ${i + 1}`} loading="lazy" />
+              <button type="button" className="photo-uploader__del" onClick={() => remove(url)} title="Remove">✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div
+        className={`photo-uploader__drop${dragOver ? ' drag-over' : ''}`}
+        onClick={() => !uploading && inputRef.current?.click()}
+        onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={e => { e.preventDefault(); setDragOver(false); upload(e.dataTransfer.files) }}
+      >
+        <input ref={inputRef} type="file" accept="image/*" multiple style={{ display: 'none' }}
+          onChange={e => upload(e.target.files)} />
+        <Icon name="upload" size={16} style={{ marginBottom: 4 }} />
+        <span style={{ fontSize: 12 }}>{uploading ? 'Uploading…' : 'Drop photos or click to browse'}</span>
+        {!uploading && <span style={{ fontSize: 11, color: 'var(--gw-mist)' }}>JPEG, PNG, WEBP — up to 10 MB</span>}
+      </div>
+    </div>
+  )
+}
+
 function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave, go, setDb }) {
   const blank = { address:'', city:'', state:'', zip:'', county:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{} }
   const [form, setForm]             = useState(property || blank)
   const [errors, setErrors]         = useState({})
   const [saving, setSaving]         = useState(false)
   const [startingDeal, setStartingDeal] = useState(false)
+  const [tempId] = useState(() => property?.id || crypto.randomUUID())
 
   React.useEffect(() => {
     setForm(property
@@ -279,6 +345,18 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
   }, [property, open, activeAgent?.id])
 
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
+
+  const photos     = form.details?.photos      || []
+  const coAgentIds = form.details?.co_agent_ids || []
+
+  const addPhoto    = (url) => set('details', { ...(form.details || {}), photos: [...photos, url] })
+  const removePhoto = (url) => set('details', { ...(form.details || {}), photos: photos.filter(u => u !== url) })
+  const toggleCoAgent = (agentId) => {
+    const next = coAgentIds.includes(agentId)
+      ? coAgentIds.filter(id => id !== agentId)
+      : [...coAgentIds, agentId]
+    set('details', { ...(form.details || {}), co_agent_ids: next })
+  }
 
   const startDeal = async () => {
     setStartingDeal(true)
@@ -305,7 +383,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
     setErrors(e)
     if (Object.keys(e).length > 0) return
     setSaving(true)
-    const resolvedId = property?.id || crypto.randomUUID()
+    const resolvedId = property?.id || tempId
     const payload = {
       ...form,
       id:                resolvedId,
@@ -355,6 +433,15 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
   return (
     <Drawer open={open} onClose={onClose} title={property?.id ? 'Edit Property' : 'Add Property'} width={520}>
       <div className="drawer__body">
+        {/* Photos */}
+        <div className="form-group">
+          <PhotoUploader
+            photos={photos}
+            propertyId={tempId}
+            onAdd={addPhoto}
+            onRemove={removePhoto}
+          />
+        </div>
         {/* Address */}
         <div className="form-group"><label className="form-label required">Address</label><input className={`form-control${errors.address?' error':''}`} value={form.address} onChange={e=>set('address',e.target.value)} placeholder="123 Main Street" /></div>
         <div className="form-row">
@@ -411,6 +498,27 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
         {/* Always-present fields */}
         <div className="form-group"><label className="form-label">Linked Contact</label><SearchDropdown items={contacts} value={form.linked_contact_id} onSelect={v=>set('linked_contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
         <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.assigned_agent_id||''} onChange={e=>set('assigned_agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+        {/* Co-Agents */}
+        {agents.filter(a => a.id !== form.assigned_agent_id).length > 0 && (
+          <div className="form-group">
+            <label className="form-label">
+              Co-Agents
+              <span style={{ fontWeight: 400, color: 'var(--gw-mist)', marginLeft: 6, fontSize: 11 }}>
+                share commission on this property
+              </span>
+            </label>
+            <div className="coagent-list">
+              {agents.filter(a => a.id !== form.assigned_agent_id).map(a => (
+                <label key={a.id} className={`coagent-item${coAgentIds.includes(a.id) ? ' checked' : ''}`}>
+                  <input type="checkbox" checked={coAgentIds.includes(a.id)} onChange={() => toggleCoAgent(a.id)} />
+                  <Avatar agent={a} size={22} />
+                  <span>{a.name}</span>
+                  {a.role && <span style={{ fontSize: 11, color: 'var(--gw-mist)' }}>{a.role}</span>}
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} /></div>
       </div>
       <div className="drawer__foot">
@@ -845,7 +953,21 @@ export default function PropertiesPage({ db, setDb, activeAgent, go }) {
                     <PropertySpecs p={p} />
                   </div>
                   <div className="property-card__foot">
-                    {agent ? <Avatar agent={agent} size={24} /> : null}
+                    {(() => {
+                      const coIds = p.details?.co_agent_ids || []
+                      const allA = [agent, ...coIds.map(id => agents.find(a => a.id === id)).filter(Boolean)].filter(Boolean)
+                      if (!allA.length) return null
+                      return (
+                        <div style={{ display: 'flex', alignItems: 'center' }}>
+                          {allA.slice(0, 3).map((a, i) => (
+                            <div key={a.id} style={{ marginLeft: i > 0 ? -6 : 0, zIndex: 10 - i, position: 'relative' }}>
+                              <Avatar agent={a} size={22} />
+                            </div>
+                          ))}
+                          {allA.length > 3 && <span style={{ fontSize: 10, color: 'var(--gw-mist)', marginLeft: 4 }}>+{allA.length - 3}</span>}
+                        </div>
+                      )
+                    })()}
                     <button
                       className="btn btn--ghost btn--icon"
                       title="Radius Mailing — sync nearby contacts to Mailchimp"

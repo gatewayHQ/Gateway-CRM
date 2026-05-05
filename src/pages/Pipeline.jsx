@@ -1227,8 +1227,9 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
   const properties = db.properties || []
 
   // O(1) lookups — built once per data change, not per-card in render loop
-  const contactMap = useMemo(() => Object.fromEntries(contacts.map(c => [c.id, c])), [contacts])
-  const agentMap   = useMemo(() => Object.fromEntries(agents.map(a => [a.id, a])),   [agents])
+  const contactMap  = useMemo(() => Object.fromEntries(contacts.map(c => [c.id, c])),   [contacts])
+  const agentMap    = useMemo(() => Object.fromEntries(agents.map(a => [a.id, a])),     [agents])
+  const propertyMap = useMemo(() => Object.fromEntries(properties.map(p => [p.id, p])), [properties])
 
   // Single-pass O(n) grouping — replaces repeated stageDeals()/stageValue() calls per render
   const { stageGroups, stageTotals, totalValue } = useMemo(() => {
@@ -1315,8 +1316,13 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
                 onDrop={e => { e.preventDefault(); if (dragging && dragging !== stage) moveStage(dragging, stage); setDragOver(null); setDragging(null) }}
               >
                 {stageGroups[stage].map(deal => {
-                  const contact = contactMap[deal.contact_id]
-                  const agent   = agentMap[deal.agent_id]
+                  const contact    = contactMap[deal.contact_id]
+                  const agent      = agentMap[deal.agent_id]
+                  const dealProp   = deal.property_id ? propertyMap[deal.property_id] : null
+                  const coAgIds    = dealProp?.details?.co_agent_ids || []
+                  const allAgents  = [deal.agent_id, ...coAgIds].filter(Boolean)
+                    .map(id => agentMap[id]).filter(Boolean)
+                    .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
                   const overdue = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
                   return (
                     <div key={deal.id} className={`deal-card${dragging === deal.id ? ' dragging' : ''}`}
@@ -1334,7 +1340,13 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
                         </div>
                         <div style={{ display:'flex', alignItems:'center', gap:4 }}>
                           {deal.probability > 0 && <span style={{ fontSize:10, color:'var(--gw-mist)' }}>{deal.probability}%</span>}
-                          {agent && <Avatar agent={agent} size={20} />}
+                          <div style={{ display:'flex', alignItems:'center' }}>
+                            {allAgents.slice(0, 3).map((a, i) => (
+                              <div key={a.id} style={{ marginLeft: i > 0 ? -5 : 0, zIndex: 10 - i, position: 'relative' }}>
+                                <Avatar agent={a} size={20} />
+                              </div>
+                            ))}
+                          </div>
                           <button className="btn btn--ghost btn--icon" style={{ padding:2 }} onClick={e=>{e.stopPropagation(); setConfirm(deal.id)}}><Icon name="trash" size={11} /></button>
                         </div>
                       </div>
