@@ -245,6 +245,112 @@ do $$ begin
 end $$;
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- TEAMS  (collaboration and split-commission team types)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists teams (
+  id          uuid primary key default uuid_generate_v4(),
+  name        text not null,
+  type        text check (type in ('collaboration','split')) default 'collaboration',
+  description text,
+  created_at  timestamptz default now()
+);
+
+alter table teams enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='teams' and policyname='allow_all') then
+    create policy "allow_all" on teams for all using (true) with check (true);
+  end if;
+end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- TEAM SPLITS  (per-member split % for split-type teams)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists team_splits (
+  id         uuid primary key default uuid_generate_v4(),
+  team_id    uuid references teams(id) on delete cascade,
+  agent_id   uuid references agents(id) on delete cascade,
+  split_pct  numeric default 0 check (split_pct >= 0 and split_pct <= 100),
+  is_lead    boolean default false,
+  created_at timestamptz default now(),
+  unique(team_id, agent_id)
+);
+
+alter table team_splits enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='team_splits' and policyname='allow_all') then
+    create policy "allow_all" on team_splits for all using (true) with check (true);
+  end if;
+end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- AGENT NOTIFICATIONS
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists agent_notifications (
+  id          uuid primary key default uuid_generate_v4(),
+  agent_id    uuid references agents(id) on delete cascade,
+  deal_id     uuid references deals(id) on delete set null,
+  envelope_id text,
+  title       text,
+  message     text,
+  type        text default 'general',
+  read        boolean default false,
+  created_at  timestamptz default now()
+);
+
+alter table agent_notifications enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='agent_notifications' and policyname='allow_all') then
+    create policy "allow_all" on agent_notifications for all using (true) with check (true);
+  end if;
+end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DOCUSIGN ENVELOPES  (named to match app code)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists docusign_envelopes (
+  id            uuid primary key default uuid_generate_v4(),
+  deal_id       uuid references deals(id) on delete cascade,
+  document_id   uuid references documents(id) on delete set null,
+  agent_id      uuid references agents(id) on delete set null,
+  envelope_id   text not null,
+  status        text default 'sent',
+  subject       text,
+  signer_name   text,
+  signer_email  text,
+  document_name text,
+  signers       jsonb default '[]',
+  sent_at       timestamptz default now(),
+  completed_at  timestamptz
+);
+
+alter table docusign_envelopes enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='docusign_envelopes' and policyname='allow_all') then
+    create policy "allow_all" on docusign_envelopes for all using (true) with check (true);
+  end if;
+end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- TRANSACTION STEPS  (closing checklists per deal)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists transaction_steps (
+  id           uuid primary key default uuid_generate_v4(),
+  deal_id      uuid references deals(id) on delete cascade,
+  title        text not null,
+  completed    boolean default false,
+  completed_at timestamptz,
+  sort_order   integer default 0,
+  created_at   timestamptz default now()
+);
+
+alter table transaction_steps enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='transaction_steps' and policyname='allow_all') then
+    create policy "allow_all" on transaction_steps for all using (true) with check (true);
+  end if;
+end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- MIGRATION  (run this block if upgrading an existing database)
 -- ─────────────────────────────────────────────────────────────────────────────
 -- alter table agents      add column if not exists auth_id uuid unique;
@@ -258,6 +364,11 @@ end $$;
 -- alter table properties  add column if not exists county  text;
 -- alter table properties  add column if not exists garage  integer default 0;
 -- alter table properties  add column if not exists details jsonb   default '{}';
+-- alter table deals       add column if not exists prop_category text;
+-- alter table deals       add column if not exists prop_subtype  text;
+-- alter table deals       add column if not exists comp_data     jsonb default '{}';
+-- alter table teams       add column if not exists type text check (type in ('collaboration','split')) default 'collaboration';
+-- alter table teams       add column if not exists description text;
 -- -- Fix properties type constraint to include full set
 -- alter table properties drop constraint if exists properties_type_check;
 -- alter table properties add  constraint properties_type_check

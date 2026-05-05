@@ -333,7 +333,8 @@ export default function App() {
   if (!session) return <LoginPage />
 
   const activeAgent = db.agents.find(a => a.id === activeAgentId) || null
-  const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose }
+  const isAdmin     = activeAgent?.role?.toLowerCase().includes('admin') ?? false
+  const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin }
 
   if (loading) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', flexDirection: 'column', gap: 16 }}>
@@ -372,12 +373,15 @@ export default function App() {
 
         <nav className="sidebar__nav" aria-label="Main navigation">
           {/* ── Core ── */}
-          {NAV_CORE.map(n => (
+          {NAV_CORE.filter(n => !(isAdmin && n.id === 'contacts')).map(n => (
             <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}`}
               onClick={() => setRoute(n.id)} title={n.label}
               role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
               <Icon name={n.icon} size={16} />
               {!collapsed && <span>{n.label}</span>}
+              {isAdmin && n.id === 'pipeline' && !collapsed && (
+                <span style={{ marginLeft: 'auto', fontSize: 9, fontWeight: 700, background: 'rgba(255,255,255,0.15)', color: '#fff', padding: '1px 5px', borderRadius: 6, letterSpacing: '0.05em' }}>ALL</span>
+              )}
             </div>
           ))}
 
@@ -541,7 +545,7 @@ export default function App() {
           {route === 'dashboard'  && <Dashboard {...props} />}
           {route === 'contacts'   && <ContactsPage {...props} />}
           {route === 'properties' && <PropertiesPage {...props} />}
-          {route === 'pipeline'   && <PipelinePage {...props} />}
+          {route === 'pipeline'   && <PipelinePage {...props} isAdmin={isAdmin} />}
           {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
           {route === 'commission' && <CommissionPage {...props} />}
           {route === 'tasks'      && <TasksPage {...props} />}
@@ -563,7 +567,7 @@ export default function App() {
 
       {/* ── Mobile bottom nav ── */}
       <nav className="mobile-nav">
-        {['dashboard', 'contacts', 'pipeline', 'tasks'].map(id => {
+        {['dashboard', ...(isAdmin ? [] : ['contacts']), 'pipeline', 'tasks'].map(id => {
           const n = NAV.find(x => x.id === id)
           if (!n) return null
           return (

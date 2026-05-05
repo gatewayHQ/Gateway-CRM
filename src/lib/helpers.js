@@ -85,6 +85,39 @@ export const daysUntilAnnual = (dateStr) => {
   return Math.round((next - today) / 86400000)
 }
 
+// Returns 'urgent' (≤3 days), 'warning' (4–7 days), or null based on nearest upcoming key date
+export const getKeyDateUrgency = (deal) => {
+  const keyDates = deal?.comp_data?.key_dates || []
+  if (keyDates.length === 0) return null
+  const today = new Date(); today.setHours(0,0,0,0)
+  let minDays = Infinity
+  for (const kd of keyDates) {
+    if (!kd.date) continue
+    const d = new Date(kd.date); d.setHours(0,0,0,0)
+    const days = Math.round((d - today) / 86400000)
+    if (days >= 0 && days < minDays) minDays = days
+  }
+  if (minDays === Infinity) return null
+  if (minDays <= 3) return 'urgent'
+  if (minDays <= 7) return 'warning'
+  return null
+}
+
+// Returns the nearest upcoming key date object with a `daysUntil` field
+export const getNearestKeyDate = (deal) => {
+  const keyDates = deal?.comp_data?.key_dates || []
+  if (keyDates.length === 0) return null
+  const today = new Date(); today.setHours(0,0,0,0)
+  let nearest = null, minDays = Infinity
+  for (const kd of keyDates) {
+    if (!kd.date) continue
+    const d = new Date(kd.date); d.setHours(0,0,0,0)
+    const days = Math.round((d - today) / 86400000)
+    if (days >= 0 && days < minDays) { minDays = days; nearest = kd }
+  }
+  return nearest ? { ...nearest, daysUntil: minDays } : null
+}
+
 // Returns contacts with birthdays or anniversaries within windowDays, sorted by soonest
 export const upcomingReminders = (contacts, windowDays = 30) => {
   const results = []

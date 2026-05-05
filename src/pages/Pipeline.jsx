@@ -1,6 +1,6 @@
 import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER } from '../lib/helpers.js'
+import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
@@ -426,6 +426,12 @@ const FIELD_TYPES = {
   date:      { label: 'Date',      color: '#059669', bg: '#d1fae5' },
 }
 
+// Document-level annotation tools (not tied to a signer)
+const ANNOTATION_TYPES = {
+  highlight:     { label: 'Highlight',     color: '#d97706', bg: 'rgba(253,224,71,0.45)', w: 160, h: 14 },
+  strikethrough: { label: 'Strike-through', color: '#dc2626', bg: 'rgba(220,38,38,0.7)',  w: 160, h: 3  },
+}
+
 // Per-signer accent colors for multi-signer field placement
 const SIGNER_COLORS = ['#2563eb','#d97706','#dc2626','#0891b2']
 const SIGNER_BGS    = ['#dbeafe','#fef3c7','#fee2e2','#cffafe']
@@ -433,7 +439,8 @@ const SIGNER_BGS    = ['#dbeafe','#fef3c7','#fee2e2','#cffafe']
 const PDF_SCALE = 1.3
 
 // allFields = flat array of all signers' tabs, each with signerIndex for color-coding
-function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, setActiveTool, activeSignerIndex }) {
+// docAnnotations = document-level highlight/strikethrough marks (not per-signer)
+function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, setActiveTool, activeSignerIndex, docAnnotations, onPlaceAnnotation, onRemoveAnnotation }) {
   const [pages,   setPages]   = React.useState([])
   const [loading, setLoading] = React.useState(true)
   const canvasRefs = React.useRef({})
@@ -483,21 +490,36 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
     const rect    = e.currentTarget.getBoundingClientRect()
     const xCanvas = e.clientX - rect.left
     const yCanvas = e.clientY - rect.top
-    onPlace({
-      id: Date.now(), type: activeTool,
-      page: pageIndex + 1,
-      xPosition: String(Math.round(xCanvas / PDF_SCALE)),
-      yPosition: String(Math.round(yCanvas / PDF_SCALE)),
-      xCanvas, yCanvas, pageIndex,
-      signerIndex: activeSignerIndex,
-    })
+    // Annotation tools are document-level, not per-signer
+    if (ANNOTATION_TYPES[activeTool]) {
+      const ann = ANNOTATION_TYPES[activeTool]
+      onPlaceAnnotation({
+        id: Date.now(), type: activeTool,
+        page: pageIndex + 1, pageIndex,
+        xCanvas: xCanvas - ann.w / 2,
+        yCanvas: yCanvas - ann.h / 2,
+        xPosition: String(Math.round((xCanvas - ann.w / 2) / PDF_SCALE)),
+        yPosition: String(Math.round((yCanvas - ann.h / 2) / PDF_SCALE)),
+        width: ann.w, height: ann.h,
+      })
+    } else {
+      onPlace({
+        id: Date.now(), type: activeTool,
+        page: pageIndex + 1,
+        xPosition: String(Math.round(xCanvas / PDF_SCALE)),
+        yPosition: String(Math.round(yCanvas / PDF_SCALE)),
+        xCanvas, yCanvas, pageIndex,
+        signerIndex: activeSignerIndex,
+      })
+    }
   }
 
   if (loading) return <div style={{ padding:'40px 0', textAlign:'center', color:'var(--gw-mist)', fontSize:13 }}>Loading PDF…</div>
 
   return (
     <div>
-      <div style={{ display:'flex', gap:6, marginBottom:10, alignItems:'center', flexWrap:'wrap' }}>
+      <div style={{ display:'flex', gap:6, marginBottom:6, alignItems:'center', flexWrap:'wrap' }}>
+        <span style={{ fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.07em', color:'var(--gw-mist)', flexBasis:'100%' }}>Signature Fields</span>
         {Object.entries(FIELD_TYPES).map(([key, { label }]) => {
           const color = SIGNER_COLORS[activeSignerIndex] || SIGNER_COLORS[0]
           const bg    = SIGNER_BGS[activeSignerIndex]    || SIGNER_BGS[0]
@@ -509,10 +531,27 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
             </button>
           )
         })}
+      </div>
+      <div style={{ display:'flex', gap:6, marginBottom:10, alignItems:'center', flexWrap:'wrap' }}>
+        <span style={{ fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.07em', color:'var(--gw-mist)', flexBasis:'100%' }}>Document Markup</span>
+        {Object.entries(ANNOTATION_TYPES).map(([key, { label, color, bg }]) => {
+          const active = activeTool === key
+          return (
+            <button key={key} onClick={() => setActiveTool(active ? null : key)}
+              style={{ padding:'5px 12px', borderRadius:'var(--radius)', fontSize:12, fontWeight:700, cursor:'pointer', border:`2px solid ${active?color:'var(--gw-border)'}`, background:active?'rgba(253,224,71,0.3)':'#fff', color:active?color:'var(--gw-mist)' }}>
+              {key === 'highlight' ? '🖊 ' : '——  '}{label}
+            </button>
+          )
+        })}
         <span style={{ fontSize:11, color:'var(--gw-mist)', marginLeft:4 }}>
-          {activeTool ? 'Click PDF to place' : 'Select a field type above'}
+          {activeTool ? (ANNOTATION_TYPES[activeTool] ? 'Click to mark area' : 'Click PDF to place') : 'Select a tool above'}
         </span>
-        {allFields.length > 0 && <span style={{ marginLeft:'auto', fontSize:11, fontWeight:700 }}>{allFields.length} field{allFields.length !== 1 ? 's' : ''} total</span>}
+        {(allFields.length + (docAnnotations?.length||0)) > 0 && (
+          <span style={{ marginLeft:'auto', fontSize:11, fontWeight:700 }}>
+            {allFields.length} field{allFields.length !== 1 ? 's' : ''}
+            {(docAnnotations?.length||0) > 0 && ` · ${docAnnotations.length} mark${docAnnotations.length !== 1 ? 's' : ''}`}
+          </span>
+        )}
       </div>
       <div style={{ maxHeight:420, overflowY:'auto', background:'#e5e7eb', borderRadius:'var(--radius)', padding:12, display:'flex', flexDirection:'column', alignItems:'center', gap:12 }}>
         {pages.map((_, i) => (
@@ -529,6 +568,24 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
                 <div key={f.id} style={{ position:'absolute', left:f.xCanvas - 42, top:f.yCanvas - 10 + 18, display:'flex', alignItems:'center', gap:3, background:bg, border:`1.5px solid ${color}`, borderRadius:3, padding:'2px 6px', fontSize:10, fontWeight:700, color, whiteSpace:'nowrap', zIndex:10, pointerEvents:'auto', opacity: dim ? 0.4 : 1 }}>
                   {ft?.label}
                   <span onClick={e => { e.stopPropagation(); onRemove(f.id) }} style={{ cursor:'pointer', fontSize:12, lineHeight:1, opacity:0.6, marginLeft:1 }}>×</span>
+                </div>
+              )
+            })}
+            {/* Document annotations (highlight / strikethrough) */}
+            {(docAnnotations||[]).filter(a => a.pageIndex === i).map(a => {
+              const ann = ANNOTATION_TYPES[a.type]
+              return (
+                <div key={a.id} style={{
+                  position:'absolute',
+                  left: a.xCanvas, top: a.yCanvas + 18,
+                  width: a.width, height: a.height,
+                  background: ann?.bg,
+                  border: `1px solid ${ann?.color}`,
+                  borderRadius: a.type === 'highlight' ? 2 : 0,
+                  zIndex: 9, pointerEvents:'auto', cursor:'default',
+                  display:'flex', alignItems:'center', justifyContent:'flex-end',
+                }}>
+                  <span onClick={e => { e.stopPropagation(); onRemoveAnnotation(a.id) }} style={{ fontSize:10, cursor:'pointer', color: ann?.color, lineHeight:1, padding:'0 2px', opacity:0.8 }}>×</span>
                 </div>
               )
             })}
@@ -553,6 +610,7 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
   const [activeSignerI, setActiveSignerI] = React.useState(0)
   const [agentSigns,    setAgentSigns]  = React.useState(false)
   const [agentTabs,     setAgentTabs]   = React.useState([])
+  const [docAnnotations, setDocAnnotations] = React.useState([])
   const [sending,       setSending]     = React.useState(false)
   const [dragOver,      setDragOver]    = React.useState(false)
   const fileRef = React.useRef()
@@ -612,11 +670,75 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
     setStep(2)
   }
 
+  // Burn highlight/strikethrough annotations into PDF pages using canvas + jsPDF
+  const buildAnnotatedBase64 = async (srcFile, srcUrl, annotations) => {
+    if (!window.jspdf) {
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script')
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'
+        s.onload = resolve; s.onerror = reject
+        document.head.appendChild(s)
+      })
+    }
+    const { jsPDF } = window.jspdf
+    let buf
+    if (srcFile) { buf = await srcFile.arrayBuffer() }
+    else { buf = await fetch(srcUrl).then(r => r.arrayBuffer()) }
+
+    const pdfDoc = await window.pdfjsLib.getDocument({ data: buf }).promise
+    const doc    = new jsPDF({ unit: 'pt', compress: true })
+    let firstPage = true
+
+    for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+      const page     = await pdfDoc.getPage(pageNum)
+      const viewport = page.getViewport({ scale: 2 })
+      const canvas   = document.createElement('canvas')
+      canvas.width   = viewport.width
+      canvas.height  = viewport.height
+      const ctx      = canvas.getContext('2d')
+      await page.render({ canvasContext: ctx, viewport }).promise
+
+      for (const a of annotations.filter(ann => ann.page === pageNum)) {
+        const sx = 2, sy = 2  // scale factor (viewport scale = 2)
+        if (a.type === 'highlight') {
+          ctx.fillStyle = 'rgba(255, 235, 59, 0.42)'
+          ctx.fillRect(a.xCanvas * sx, a.yCanvas * sy, a.width * sx, a.height * sy)
+        } else if (a.type === 'strikethrough') {
+          ctx.strokeStyle = 'rgba(220, 38, 38, 0.85)'
+          ctx.lineWidth   = 3
+          const midY = (a.yCanvas + a.height / 2) * sy
+          ctx.beginPath()
+          ctx.moveTo(a.xCanvas * sx, midY)
+          ctx.lineTo((a.xCanvas + a.width) * sx, midY)
+          ctx.stroke()
+        }
+      }
+
+      const imgData  = canvas.toDataURL('image/jpeg', 0.92)
+      const pdfW     = viewport.width  * 0.75
+      const pdfH     = viewport.height * 0.75
+      if (!firstPage) doc.addPage([pdfW, pdfH])
+      else { doc.internal.pageSize.width = pdfW; doc.internal.pageSize.height = pdfH; firstPage = false }
+      doc.addImage(imgData, 'JPEG', 0, 0, pdfW, pdfH, '', 'FAST')
+    }
+
+    return doc.output('datauristring').split(',')[1]
+  }
+
   const send = async () => {
     if (allFields.length === 0) { pushToast('Place at least one field on the PDF', 'error'); return }
     setSending(true)
     let base64, docName
-    if (file) { base64 = await toBase64(file); docName = file.name }
+    if (docAnnotations.length > 0) {
+      // Burn annotations into PDF before sending
+      try {
+        base64  = await buildAnnotatedBase64(file, fileUrl, docAnnotations)
+        docName = file ? file.name : pickedFile.replace(/^\d+-/, '')
+      } catch (err) {
+        pushToast('Could not process annotations: ' + err.message, 'error')
+        setSending(false); return
+      }
+    } else if (file) { base64 = await toBase64(file); docName = file.name }
     else { const blob = await fetch(fileUrl).then(r => r.blob()); base64 = await toBase64(blob); docName = pickedFile.replace(/^\d+-/, '') }
 
     const signerPayload = allSigners.map(s => ({
@@ -739,6 +861,9 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
             activeTool={activeTool}
             setActiveTool={setActiveTool}
             activeSignerIndex={activeSignerI}
+            docAnnotations={docAnnotations}
+            onPlaceAnnotation={a => setDocAnnotations(p => [...p, a])}
+            onRemoveAnnotation={id => setDocAnnotations(p => p.filter(a => a.id !== id))}
           />
         </>}
       </div>
@@ -1213,13 +1338,14 @@ const AUTO_TASKS = {
   closed:           { title: d => `Request referral — ${d.title}`,            type: 'follow-up', priority: 'low',    daysOut: 7 },
 }
 
-export default function PipelinePage({ db, setDb, activeAgent }) {
+export default function PipelinePage({ db, setDb, activeAgent, isAdmin }) {
   const [drawer, setDrawer] = useState(false)
   const [editing, setEditing] = useState(null)
   const [defaultStage, setDefaultStage] = useState('lead')
   const [confirm, setConfirm] = useState(null)
   const [dragging, setDragging] = useState(null)
   const [dragOver, setDragOver] = useState(null)
+  const [agentFilter, setAgentFilter] = useState('all')
 
   const deals      = db.deals      || []
   const agents     = db.agents     || []
@@ -1231,12 +1357,18 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
   const agentMap    = useMemo(() => Object.fromEntries(agents.map(a => [a.id, a])),     [agents])
   const propertyMap = useMemo(() => Object.fromEntries(properties.map(p => [p.id, p])), [properties])
 
+  // Filter deals for admin view (by agent) or show all
+  const visibleDeals = useMemo(() => {
+    if (!isAdmin || agentFilter === 'all') return deals
+    return deals.filter(d => d.agent_id === agentFilter)
+  }, [deals, isAdmin, agentFilter])
+
   // Single-pass O(n) grouping — replaces repeated stageDeals()/stageValue() calls per render
   const { stageGroups, stageTotals, totalValue } = useMemo(() => {
     const groups = Object.fromEntries(STAGE_ORDER.map(s => [s, []]))
     const totals = Object.fromEntries(STAGE_ORDER.map(s => [s, 0]))
     let total = 0
-    deals.forEach(d => {
+    visibleDeals.forEach(d => {
       if (groups[d.stage]) {
         groups[d.stage].push(d)
         totals[d.stage] += d.value || 0
@@ -1244,7 +1376,7 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
       }
     })
     return { stageGroups: groups, stageTotals: totals, totalValue: total }
-  }, [deals])
+  }, [visibleDeals])
 
   const reload = useCallback(async () => {
     const { data } = await supabase.from('deals').select('*').order('created_at', { ascending: false })
@@ -1292,8 +1424,28 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
   return (
     <div className="page-content" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
       <div className="page-header">
-        <div><div className="page-title">Pipeline</div><div className="page-sub">{deals.length} total deals · {formatCurrency(totalValue)} total value</div></div>
-        <button className="btn btn--primary" onClick={() => { setEditing(null); setDefaultStage('lead'); setDrawer(true) }}><Icon name="plus" size={14} /> Add Deal</button>
+        <div>
+          <div className="page-title">Pipeline{isAdmin ? ' — Admin View' : ''}</div>
+          <div className="page-sub">{visibleDeals.length} deal{visibleDeals.length !== 1 ? 's' : ''} · {formatCurrency(totalValue)} total value</div>
+        </div>
+        <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+          {isAdmin && (
+            <select
+              value={agentFilter}
+              onChange={e => setAgentFilter(e.target.value)}
+              className="form-control"
+              style={{ fontSize:13, minWidth:160 }}
+            >
+              <option value="all">All Agents</option>
+              {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          )}
+          {!isAdmin && (
+            <button className="btn btn--primary" onClick={() => { setEditing(null); setDefaultStage('lead'); setDrawer(true) }}>
+              <Icon name="plus" size={14} /> Add Deal
+            </button>
+          )}
+        </div>
       </div>
 
       {deals.length === 0 ? (
@@ -1323,15 +1475,32 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
                   const allAgents  = [deal.agent_id, ...coAgIds].filter(Boolean)
                     .map(id => agentMap[id]).filter(Boolean)
                     .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
-                  const overdue = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
+                  const overdue    = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
+                  const urgency    = getKeyDateUrgency(deal)
+                  const nearestKD  = urgency ? getNearestKeyDate(deal) : null
+                  const cardBorder = urgency === 'urgent' ? '2px solid #ef4444' : urgency === 'warning' ? '2px solid #f59e0b' : undefined
+                  const cardBg     = urgency === 'urgent' ? '#fef2f2' : urgency === 'warning' ? '#fffbeb' : undefined
                   return (
                     <div key={deal.id} className={`deal-card${dragging === deal.id ? ' dragging' : ''}`}
+                      style={{ border: cardBorder, background: cardBg }}
                       draggable
                       onDragStart={() => setDragging(deal.id)}
                       onDragEnd={() => { setDragging(null); setDragOver(null) }}
                       onClick={() => { setEditing(deal); setDrawer(true) }}
                     >
+                      {urgency && nearestKD && (
+                        <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:5, fontSize:10, fontWeight:700, color: urgency === 'urgent' ? '#dc2626' : '#d97706' }}>
+                          <span style={{ fontSize:11 }}>⚠</span>
+                          <span>{nearestKD.type}: {nearestKD.daysUntil === 0 ? 'Today' : nearestKD.daysUntil === 1 ? 'Tomorrow' : `${nearestKD.daysUntil} days`}</span>
+                        </div>
+                      )}
                       <div className="deal-card__title">{deal.title}</div>
+                      {isAdmin && agent && (
+                        <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:2 }}>
+                          <Avatar agent={agent} size={14} />
+                          <span style={{ fontSize:10, color:'var(--gw-mist)' }}>{agent.name}</span>
+                        </div>
+                      )}
                       {contact && <div className="deal-card__contact">{contact.first_name} {contact.last_name}</div>}
                       {deal.value > 0 && <div className="deal-card__value">{formatCurrency(deal.value)}</div>}
                       <div className="deal-card__meta">
@@ -1347,16 +1516,18 @@ export default function PipelinePage({ db, setDb, activeAgent }) {
                               </div>
                             ))}
                           </div>
-                          <button className="btn btn--ghost btn--icon" style={{ padding:2 }} onClick={e=>{e.stopPropagation(); setConfirm(deal.id)}}><Icon name="trash" size={11} /></button>
+                          {!isAdmin && <button className="btn btn--ghost btn--icon" style={{ padding:2 }} onClick={e=>{e.stopPropagation(); setConfirm(deal.id)}}><Icon name="trash" size={11} /></button>}
                         </div>
                       </div>
                     </div>
                   )
                 })}
-                <button className="btn btn--ghost" style={{ width:'100%', justifyContent:'center', fontSize:12, marginTop:'auto', borderStyle:'dashed', border:'1px dashed var(--gw-border)' }}
-                  onClick={() => { setEditing(null); setDefaultStage(stage); setDrawer(true) }}>
-                  <Icon name="plus" size={13} /> Add deal
-                </button>
+                {!isAdmin && (
+                  <button className="btn btn--ghost" style={{ width:'100%', justifyContent:'center', fontSize:12, marginTop:'auto', borderStyle:'dashed', border:'1px dashed var(--gw-border)' }}
+                    onClick={() => { setEditing(null); setDefaultStage(stage); setDrawer(true) }}>
+                    <Icon name="plus" size={13} /> Add deal
+                  </button>
+                )}
               </div>
             </div>
           ))}
