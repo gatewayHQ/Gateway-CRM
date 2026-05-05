@@ -50,11 +50,19 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
     pushToast(`Task created for ${contact.first_name}'s ${type}`)
   }
 
+  const cstHour = parseInt(
+    new Date().toLocaleString('en-US', { timeZone: 'America/Chicago', hour: 'numeric', hour12: false }),
+    10
+  )
+  const greeting = cstHour < 12 ? 'Good Morning' : cstHour < 17 ? 'Good Afternoon' : 'Good Evening'
+  const greetEmoji = cstHour < 17 ? '👋' : '🌙'
+  const firstName = activeAgent?.name?.split(' ')[0] || ''
+
   return (
     <div className="page-content">
       <div className="page-header">
         <div>
-          <div className="page-title">Good morning 👋</div>
+          <div className="page-title">{greeting}{firstName ? `, ${firstName}` : ''} {greetEmoji}</div>
           <div className="page-sub">{new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>

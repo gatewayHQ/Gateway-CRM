@@ -283,13 +283,12 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
   const startDeal = async () => {
     setStartingDeal(true)
     const dealPayload = {
-      title: form.address,
+      title:       form.address,
       property_id: property.id,
-      contact_id:  form.linked_contact_id  || null,
-      agent_id:    form.assigned_agent_id  || activeAgent?.id || null,
+      contact_id:  form.linked_contact_id || null,
+      agent_id:    activeAgent?.id || form.assigned_agent_id || null,
       stage:       'lead',
       value:       form.list_price ? Number(form.list_price) : null,
-      prop_category: isCommercial(form.type) ? 'commercial' : 'residential',
     }
     const { data, error } = await supabase.from('deals').insert([dealPayload]).select().single()
     setStartingDeal(false)
@@ -416,16 +415,28 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
       </div>
       <div className="drawer__foot">
         {property?.id && (
-          <button
-            className="btn btn--secondary"
-            onClick={startDeal}
-            disabled={startingDeal}
-            title="Create a deal in the Pipeline linked to this property"
-            style={{ marginRight:'auto' }}
-          >
-            <Icon name="pipeline" size={13} />
-            {startingDeal ? 'Creating…' : 'Start Deal'}
-          </button>
+          <div style={{ display:'flex', gap:6, marginRight:'auto' }}>
+            <button
+              className="btn btn--secondary"
+              onClick={startDeal}
+              disabled={startingDeal}
+              title="Create a deal in the Pipeline linked to this property"
+            >
+              <Icon name="pipeline" size={13} />
+              {startingDeal ? 'Creating…' : 'Start Deal'}
+            </button>
+            <button
+              className="btn btn--ghost"
+              title="Copy public listing link"
+              onClick={() => {
+                const url = `${window.location.origin}/listing/${property.id}`
+                navigator.clipboard.writeText(url).then(() => pushToast('Listing link copied!'))
+              }}
+            >
+              <Icon name="link" size={13} />
+              Copy Link
+            </button>
+          </div>
         )}
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
         <button className="btn btn--primary" onClick={save} disabled={saving}>{saving?'Saving…':'Save Property'}</button>
