@@ -18,6 +18,7 @@ import ReportsPage from './pages/Reports.jsx'
 import SequencesPage from './pages/Sequences.jsx'
 import ColdCallsPage from './pages/ColdCalls.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
+import MessagesPage from './pages/Messages.jsx'
 import IntegrationsPage from './pages/Integrations.jsx'
 import { Analytics } from '@vercel/analytics/react'
 
@@ -28,6 +29,7 @@ const NAV_CORE = [
   { id: 'properties', label: 'Properties', icon: 'building' },
   { id: 'pipeline',   label: 'Pipeline',   icon: 'pipeline' },
   { id: 'tasks',      label: 'Tasks',      icon: 'tasks' },
+  { id: 'messages',   label: 'Messages',   icon: 'mail' },
 ]
 
 // Office: business operations, reviewed regularly
@@ -63,6 +65,7 @@ const TITLES = {
   coldcalls:  { title: 'Cold Call Lists',  crumb: 'Prospecting · Dialer' },
   commission: { title: 'Commission',       crumb: 'Deals · Earnings' },
   tasks:      { title: 'Tasks',            crumb: 'Follow-ups · Reminders' },
+  messages:   { title: 'Messages',         crumb: 'SMS · Twilio Inbox' },
   team:       { title: 'Team',             crumb: 'Agents · Roster' },
   templates:  { title: 'Email Templates',  crumb: 'Communications · Library' },
   sequences:  { title: 'Drip Sequences',   crumb: 'Marketing · Automation' },
@@ -540,6 +543,7 @@ export default function App() {
         {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
         {route === 'commission' && <CommissionPage {...props} />}
         {route === 'tasks'      && <TasksPage {...props} />}
+        {route === 'messages'   && <MessagesPage db={db} activeAgent={activeAgent} />}
         {route === 'team'       && <TeamPage {...props} onSwitchAgent={id => setActiveAgentId(id)} />}
         {route === 'templates'  && <TemplatesPage {...props} />}
         {route === 'sequences'  && <SequencesPage {...props} />}
@@ -547,7 +551,7 @@ export default function App() {
         {route === 'om'         && <OmPage />}
         {route === 'social'     && <SocialPage />}
         {route === 'leads'      && <LeadsPage {...props} />}
-        {route === 'integrations' && <IntegrationsPage />}
+        {route === 'integrations' && <IntegrationsPage db={db} />}
         {route === 'settings'     && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
       </div>
 
