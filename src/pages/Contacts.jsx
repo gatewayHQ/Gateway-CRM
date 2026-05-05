@@ -487,16 +487,17 @@ function parseCSV(text) {
   return rows
 }
 
-const IMPORT_FIELDS = ['first_name','last_name','email','phone','type','source','status','notes']
-const IMPORT_LABELS = { first_name:'First Name', last_name:'Last Name', email:'Email', phone:'Phone', type:'Type', source:'Source', status:'Status', notes:'Notes' }
+const IMPORT_FIELDS = ['first_name','last_name','email','phone','type','source','status','notes','assigned_agent']
+const IMPORT_LABELS = { first_name:'First Name', last_name:'Last Name', email:'Email', phone:'Phone', type:'Type', source:'Source', status:'Status', notes:'Notes', assigned_agent:'Agent Name' }
 
 function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
-  const [step, setStep]         = useState(1)   // 1=upload  2=map  3=preview  4=importing
-  const [headers, setHeaders]   = useState([])
-  const [rows, setRows]         = useState([])
-  const [mapping, setMapping]   = useState({})
-  const [progress, setProgress] = useState(0)
-  const [errors, setErrors]     = useState([])
+  const [step, setStep]               = useState(1)   // 1=upload  2=map  3=preview  4=importing
+  const [headers, setHeaders]         = useState([])
+  const [rows, setRows]               = useState([])
+  const [mapping, setMapping]         = useState({})
+  const [progress, setProgress]       = useState(0)
+  const [errors, setErrors]           = useState([])
+  const [defaultAgentId, setDefaultAgentId] = useState(activeAgent?.id || '')
 
   const handleFile = (file) => {
     if (!file) return
@@ -520,7 +521,25 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
     reader.readAsText(file)
   }
 
-  const preview = rows.slice(0, 5).map(row => {
+  const resolveAgentId = (nameStr) => {
+    if (!nameStr) return defaultAgentId || null
+    const norm = nameStr.toLowerCase().trim()
+    const exact = agents.find(a => a.name.toLowerCase() === norm)
+    if (exact) return exact.id
+    const partial = agents.find(a =>
+      a.name.toLowerCase().split(' ')[0] === norm ||
+      a.name.toLowerCase().includes(norm)
+    )
+    return partial ? partial.id : (defaultAgentId || null)
+  }
+
+  const getFirstName = (row) =>
+    mapping.first_name !== undefined ? (row[mapping.first_name] || '').trim() : ''
+
+  const validRows = rows.filter(row => getFirstName(row) !== '')
+  const blankCount = rows.length - validRows.length
+
+  const preview = validRows.slice(0, 5).map(row => {
     const obj = {}
     IMPORT_FIELDS.forEach(f => { if (mapping[f] !== undefined) obj[f] = row[mapping[f]] || '' })
     return obj
@@ -533,8 +552,8 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
     const validStatus  = ['active','cold','closed']
     const CHUNK = 50
     let done = 0, errs = []
-    for (let i = 0; i < rows.length; i += CHUNK) {
-      const chunk = rows.slice(i, i + CHUNK).map(row => {
+    for (let i = 0; i < validRows.length; i += CHUNK) {
+      const chunk = validRows.slice(i, i + CHUNK).map(row => {
         const r = {}
         IMPORT_FIELDS.forEach(f => { if (mapping[f] !== undefined) r[f] = (row[mapping[f]] || '').trim() })
         return {
@@ -546,18 +565,19 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
           source:     validSources.includes(r.source?.toLowerCase()) ? r.source.toLowerCase() : 'other',
           status:     validStatus.includes(r.status?.toLowerCase())  ? r.status.toLowerCase() : 'active',
           notes:      r.notes  || null,
-          assigned_agent_id: activeAgent?.id || null,
+          assigned_agent_id: resolveAgentId(r.assigned_agent),
           tags: [],
         }
       })
       const { error } = await supabase.from('contacts').insert(chunk)
       if (error) errs.push(`Rows ${i+1}–${i+CHUNK}: ${error.message}`)
       done += chunk.length
-      setProgress(Math.round(done / rows.length * 100))
+      setProgress(Math.round(done / validRows.length * 100))
     }
     setErrors(errs)
     if (errs.length === 0) {
-      pushToast(`${rows.length} contacts imported`)
+      const skippedNote = blankCount > 0 ? `, ${blankCount} blank rows skipped` : ''
+      pushToast(`${validRows.length} contacts imported${skippedNote}`)
       onImported()
       onClose()
     }
@@ -604,6 +624,7 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
                 <React.Fragment key={field}>
                   <div style={{ display:'flex', alignItems:'center', fontSize:13, fontWeight:600 }}>
                     {IMPORT_LABELS[field]}{['first_name','last_name'].includes(field) && <span style={{ color:'var(--gw-red)', marginLeft:2 }}>*</span>}
+                    {field === 'assigned_agent' && <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)', marginLeft:4 }}>(optional)</span>}
                   </div>
                   <select className="form-control" style={{ fontSize:12 }} value={mapping[field] ?? ''} onChange={e => setMapping(p => ({ ...p, [field]: e.target.value === '' ? undefined : Number(e.target.value) }))}>
                     <option value="">— Skip —</option>
@@ -612,6 +633,18 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
                 </React.Fragment>
               ))}
             </div>
+
+            {/* Default agent fallback */}
+            <div style={{ background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:'12px 14px', marginBottom:20 }}>
+              <div style={{ fontSize:13, fontWeight:600, marginBottom:4 }}>Default Agent</div>
+              <div style={{ fontSize:12, color:'var(--gw-mist)', marginBottom:8 }}>
+                Contacts with no agent column — or whose name doesn't match — go to this agent.
+              </div>
+              <select className="form-control" style={{ fontSize:12 }} value={defaultAgentId} onChange={e => setDefaultAgentId(e.target.value)}>
+                {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            </div>
+
             <div style={{ display:'flex', gap:8 }}>
               <button className="btn btn--secondary" onClick={() => setStep(1)}>Back</button>
               <button className="btn btn--primary" onClick={() => setStep(3)} disabled={mapping.first_name === undefined}>Preview →</button>
@@ -623,7 +656,8 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
         {step === 3 && (
           <div style={{ padding:24, flex:1, overflowY:'auto' }}>
             <p style={{ fontSize:13, color:'var(--gw-mist)', marginTop:0 }}>
-              Preview of first {Math.min(5, rows.length)} rows (importing <strong>{rows.length} contacts</strong> total):
+              Preview of first {Math.min(5, validRows.length)} rows — importing <strong>{validRows.length} contacts</strong>
+              {blankCount > 0 && <span style={{ color:'var(--gw-amber)', marginLeft:4 }}>({blankCount} blank row{blankCount !== 1 ? 's' : ''} will be skipped)</span>}.
             </p>
             <div style={{ overflowX:'auto', marginBottom:20 }}>
               <table className="import-preview-table">
@@ -639,7 +673,7 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
             </div>
             <div style={{ display:'flex', gap:8 }}>
               <button className="btn btn--secondary" onClick={() => setStep(2)}>Back</button>
-              <button className="btn btn--primary" onClick={doImport}><Icon name="import" size={13} /> Import {rows.length} Contacts</button>
+              <button className="btn btn--primary" onClick={doImport}><Icon name="import" size={13} /> Import {validRows.length} Contacts</button>
             </div>
           </div>
         )}
@@ -676,6 +710,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
   const [sortDir, setSortDir] = useState('desc')
   const [filterHeat, setFilterHeat] = useState('')
   const [importModal, setImportModal] = useState(false)
+  const [selected, setSelected]       = useState(new Set())
 
   const contacts    = db.contacts    || []
   const agents      = db.agents      || []
@@ -706,6 +741,33 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
     pushToast('Contact deleted', 'info')
     setConfirm(null)
     reload()
+  }
+
+  const bulkDelete = async () => {
+    const ids = [...selected]
+    await supabase.from('contacts').delete().in('id', ids)
+    pushToast(`${ids.length} contact${ids.length !== 1 ? 's' : ''} deleted`, 'info')
+    setSelected(new Set())
+    reload()
+  }
+
+  const toggleSelect = (id, e) => {
+    e.stopPropagation()
+    setSelected(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  const allSelected = filtered.length > 0 && filtered.every(c => selected.has(c.id))
+  const toggleAll = (e) => {
+    e.stopPropagation()
+    if (allSelected) {
+      setSelected(prev => { const next = new Set(prev); filtered.forEach(c => next.delete(c.id)); return next })
+    } else {
+      setSelected(prev => { const next = new Set(prev); filtered.forEach(c => next.add(c.id)); return next })
+    }
   }
 
   const sort = (key) => {
@@ -762,6 +824,9 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
           <table className="data-table">
             <thead>
               <tr>
+                <th style={{ width:36, paddingRight:0 }}>
+                  <input type="checkbox" checked={allSelected} onChange={toggleAll} style={{ cursor:'pointer' }} />
+                </th>
                 <th className="sortable" onClick={() => sort('first_name')}>Name <SortIcon k="first_name" /></th>
                 <th>Heat</th>
                 <th>Type</th>
@@ -778,6 +843,9 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
                 const agent = agents.find(a => a.id === c.assigned_agent_id)
                 return (
                   <tr key={c.id} onClick={() => { setEditing(c); setDrawer(true) }}>
+                    <td style={{ paddingRight:0 }} onClick={e => toggleSelect(c.id, e)}>
+                      <input type="checkbox" checked={selected.has(c.id)} onChange={() => {}} style={{ cursor:'pointer' }} />
+                    </td>
                     <td>
                       <div style={{ display:'flex', alignItems:'center', gap:10 }}>
                         <div style={{ width:30, height:30, borderRadius:'var(--radius)', background:'var(--gw-sky)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontWeight:700, color:'var(--gw-azure)', flexShrink:0 }}>
@@ -820,6 +888,18 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
         onActivityAdded={act => setDb(p => ({ ...p, activities: [act, ...(p.activities || [])] }))}
         onSave={reload}
       />
+      {selected.size > 0 && (
+        <div style={{ position:'fixed', bottom:24, left:'50%', transform:'translateX(-50%)', background:'#1a2236', color:'#fff', borderRadius:12, padding:'12px 20px', display:'flex', alignItems:'center', gap:16, zIndex:500, boxShadow:'0 4px 24px rgba(0,0,0,0.35)', whiteSpace:'nowrap' }}>
+          <span style={{ fontSize:13, fontWeight:600 }}>{selected.size} contact{selected.size !== 1 ? 's' : ''} selected</span>
+          <button style={{ padding:'5px 14px', borderRadius:8, background:'#ef4444', color:'#fff', border:'none', cursor:'pointer', fontSize:12, fontWeight:600, display:'flex', alignItems:'center', gap:6 }} onClick={bulkDelete}>
+            <Icon name="trash" size={13} /> Delete Selected
+          </button>
+          <button style={{ padding:'5px 12px', borderRadius:8, background:'transparent', color:'#fff', border:'1px solid rgba(255,255,255,0.25)', cursor:'pointer', fontSize:12 }} onClick={() => setSelected(new Set())}>
+            Cancel
+          </button>
+        </div>
+      )}
+
       {confirm && <ConfirmDialog message="This will permanently delete this contact." onConfirm={() => deleteContact(confirm)} onCancel={() => setConfirm(null)} />}
       {importModal && (
         <CSVImportModal
