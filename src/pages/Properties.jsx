@@ -842,7 +842,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
 
 // ─── Properties page ──────────────────────────────────────────────────────────
 
-export default function PropertiesPage({ db, setDb, activeAgent, go }) {
+export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgentIds }) {
   const [view, setView]               = useState('grid')
   const [search, setSearch]           = useState('')
   const [filterType, setFilterType]   = useState('')
@@ -869,7 +869,10 @@ export default function PropertiesPage({ db, setDb, activeAgent, go }) {
   })
 
   const reload = async () => {
-    const { data, error } = await supabase.from('properties').select('*').order('created_at', { ascending: false })
+    if (!visibleAgentIds?.length) return
+    const { data, error } = await supabase.from('properties').select('*')
+      .in('assigned_agent_id', visibleAgentIds)
+      .order('created_at', { ascending: false })
     if (!error && data) setDb(p => ({ ...p, properties: data }))
   }
 

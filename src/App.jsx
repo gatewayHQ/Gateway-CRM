@@ -175,6 +175,7 @@ export default function App() {
   const [route, setRoute] = useState('dashboard')
   const [collapsed, setCollapsed] = useState(false)
   const [activeAgentId, setActiveAgentId] = useState(null)
+  const [visibleAgentIds, setVisibleAgentIds] = useState([])
   const [compose, setCompose] = useState(null)
   const [mobileMore, setMobileMore] = useState(false)
   const [needsOnboarding, setNeedsOnboarding] = useState(false)
@@ -222,34 +223,21 @@ export default function App() {
   useEffect(() => {
     if (!session) return
     const load = async () => {
-      const [contacts, properties, deals, tasks, agents, templates, commissionsRes, activitiesRes] = await Promise.all([
-        supabase.from('contacts').select('*').order('created_at', { ascending: false }),
-        supabase.from('properties').select('*').order('created_at', { ascending: false }),
-        supabase.from('deals').select('*').order('created_at', { ascending: false }),
-        supabase.from('tasks').select('*').order('due_date', { ascending: true }),
+      // ── Phase 1: identity + team membership ──────────────────────────────
+      // Fetch agents and team_splits first so we know who is logged in and
+      // which peers they share data with before issuing any scoped queries.
+      const [agentsRes, teamSplitsRes] = await Promise.all([
         supabase.from('agents').select('*').order('created_at', { ascending: true }),
-        supabase.from('templates').select('*').order('created_at', { ascending: false }),
-        supabase.from('commissions').select('*'),
-        supabase.from('activities').select('*').order('created_at', { ascending: false }),
+        supabase.from('team_splits').select('agent_id,team_id').then(r => r, () => ({ data: [] })),
       ])
-      const agentsData = agents.data || []
-      setDb({
-        contacts: contacts.data || [],
-        properties: properties.data || [],
-        deals: deals.data || [],
-        tasks: tasks.data || [],
-        agents: agentsData,
-        templates: templates.data || [],
-        commissions: commissionsRes.data || [],
-        commissionsReady: !commissionsRes.error,
-        activities: activitiesRes.data || [],
-        activitiesReady: !activitiesRes.error,
-      })
+
+      let agentsData       = agentsRes.data || []
+      const allTeamSplits  = teamSplitsRes.data || []
 
       const userId        = session?.user?.id
       const loggedInEmail = session?.user?.email?.toLowerCase()
 
-      // Priority 1: match by auth_id (the bulletproof way)
+      // Priority 1: match by auth_id
       let matched = userId ? agentsData.find(a => a.auth_id === userId) : null
 
       // Priority 2: claim an unclaimed agent record with matching email
@@ -263,20 +251,74 @@ export default function App() {
           if (!error) {
             matched = { ...orphan, auth_id: userId }
           } else {
-            // Unique constraint failed → someone else already claimed this auth_id.
-            // Reload agents to find the one that actually has it.
+            // Unique constraint conflict — someone else already claimed this auth_id.
             const { data: fresh } = await supabase.from('agents').select('*')
             matched = (fresh || []).find(a => a.auth_id === userId) || null
-            if (fresh) setDb(p => ({ ...p, agents: fresh }))
+            if (fresh) agentsData = fresh
           }
         }
       }
 
-      if (matched) {
-        setActiveAgentId(matched.id)
-      } else {
+      if (!matched) {
         setNeedsOnboarding(true)
+        setLoading(false)
+        return
       }
+
+      setActiveAgentId(matched.id)
+      const isAdminAgent = matched.role?.toLowerCase().includes('admin') ?? false
+
+      // Compute this agent's visible peers via shared team memberships.
+      // Both collaboration and mentorship teams grant mutual data visibility.
+      const myTeamIds  = allTeamSplits.filter(ts => ts.agent_id === matched.id).map(ts => ts.team_id)
+      const peerIds    = allTeamSplits
+        .filter(ts => myTeamIds.includes(ts.team_id) && ts.agent_id !== matched.id)
+        .map(ts => ts.agent_id)
+      const myVisible  = [matched.id, ...peerIds]   // deduplicated by UUID uniqueness
+      setVisibleAgentIds(myVisible)
+
+      // ── Phase 2: scoped data fetches ─────────────────────────────────────
+      // Admin sees only pipeline deals (all agents); all other tables return
+      // empty so no contacts/properties/tasks bleed through.
+      // Regular agents receive only rows owned by themselves + team peers.
+      const [contacts, properties, deals, tasks, templates, commissionsRes, activitiesRes] = await Promise.all([
+        isAdminAgent
+          ? { data: [] }
+          : supabase.from('contacts').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
+        isAdminAgent
+          ? { data: [] }
+          : supabase.from('properties').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
+        isAdminAgent
+          ? supabase.from('deals').select('*').order('created_at', { ascending: false })
+          : supabase.from('deals').select('*').in('agent_id', myVisible).order('created_at', { ascending: false }),
+        // Tasks are personal — never shared, even within a team
+        isAdminAgent
+          ? { data: [] }
+          : supabase.from('tasks').select('*').eq('agent_id', matched.id).order('due_date', { ascending: true }),
+        isAdminAgent
+          ? { data: [] }
+          : supabase.from('templates').select('*').order('created_at', { ascending: false }),
+        isAdminAgent
+          ? { data: [], error: null }
+          : supabase.from('commissions').select('*'),
+        isAdminAgent
+          ? { data: [], error: null }
+          : supabase.from('activities').select('*').order('created_at', { ascending: false }),
+      ])
+
+      setDb({
+        contacts:         contacts.data     || [],
+        properties:       properties.data   || [],
+        deals:            deals.data         || [],
+        tasks:            tasks.data         || [],
+        agents:           agentsData,              // full roster — needed for dropdowns everywhere
+        templates:        templates.data     || [],
+        commissions:      commissionsRes.data || [],
+        commissionsReady: !commissionsRes.error,
+        activities:       activitiesRes.data || [],
+        activitiesReady:  !activitiesRes.error,
+      })
+
       setLoading(false)
     }
     load()
@@ -334,7 +376,7 @@ export default function App() {
 
   const activeAgent = db.agents.find(a => a.id === activeAgentId) || null
   const isAdmin     = activeAgent?.role?.toLowerCase().includes('admin') ?? false
-  const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin }
+  const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin, visibleAgentIds }
 
   if (loading) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', flexDirection: 'column', gap: 16 }}>

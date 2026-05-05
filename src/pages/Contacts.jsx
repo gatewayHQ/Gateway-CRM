@@ -698,7 +698,7 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
   )
 }
 
-export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }) {
+export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, visibleAgentIds }) {
   const [search, setSearch] = useState('')
   const [filterType, setFilterType] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
@@ -732,7 +732,10 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose }
   })
 
   const reload = async () => {
-    const { data } = await supabase.from('contacts').select('*').order('created_at', { ascending: false })
+    if (!visibleAgentIds?.length) return
+    const { data } = await supabase.from('contacts').select('*')
+      .in('assigned_agent_id', visibleAgentIds)
+      .order('created_at', { ascending: false })
     setDb(p => ({ ...p, contacts: data || [] }))
   }
 

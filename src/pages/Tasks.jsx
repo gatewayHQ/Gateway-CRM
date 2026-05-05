@@ -121,7 +121,7 @@ const TaskGroup = React.memo(function TaskGroup({ label, items, color, contactMa
   )
 })
 
-export default function TasksPage({ db, setDb }) {
+export default function TasksPage({ db, setDb, activeAgent }) {
   const [drawer, setDrawer]           = useState(false)
   const [editing, setEditing]         = useState(null)
   const [confirm, setConfirm]         = useState(null)
@@ -167,9 +167,12 @@ export default function TasksPage({ db, setDb }) {
   const openCount = useMemo(() => tasks.filter(t => !t.completed).length, [tasks])
 
   const reload = useCallback(async () => {
-    const { data } = await supabase.from('tasks').select('*').order('due_date', { ascending: true })
+    if (!activeAgent?.id) return
+    const { data } = await supabase.from('tasks').select('*')
+      .eq('agent_id', activeAgent.id)
+      .order('due_date', { ascending: true })
     setDb(p => ({ ...p, tasks: data || [] }))
-  }, [setDb])
+  }, [setDb, activeAgent?.id])
 
   const toggle = useCallback(async (task) => {
     const completed = !task.completed
