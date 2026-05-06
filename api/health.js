@@ -1,4 +1,6 @@
 // GET /api/health
+// Returns service status — useful for uptime checks and env var validation.
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || 'https://gatewayhq.github.io');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -14,9 +16,9 @@ export default async function handler(req, res) {
   res.status(200).json({
     ok: true,
     services: {
-      claude: !!process.env.ANTHROPIC_API_KEY,
-      buffer: !!process.env.BUFFER_ACCESS_TOKEN,
+      claude: !!process.env.CLAUDE_API_KEY,
+      buffer: !!process.env.BUFFER_ACCESS_TOKEN
     },
-    version: '1.0.0',
+    version: '1.0.0'
   });
 }

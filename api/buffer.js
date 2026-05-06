@@ -24,16 +24,13 @@ export default async function handler(req, res) {
   if (!token) return res.status(500).json({ error: 'Buffer token not configured on server' });
 
   const results = [];
-  const errors  = [];
+  const errors = [];
 
   for (const profileId of profileIds) {
     try {
       const params = new URLSearchParams({ text, 'profile_ids[]': profileId });
       if (scheduledAt) params.append('scheduled_at', scheduledAt);
-
-      // Media — Buffer v1 wants a media[link] parameter for link attachments
       if (mediaUrl) params.append('media[link]', mediaUrl);
-
       const response = await fetch('https://api.buffer.com/1/updates/create.json', {
         method: 'POST',
         headers: {
@@ -42,9 +39,7 @@ export default async function handler(req, res) {
         },
         body: params.toString()
       });
-
       const data = await response.json();
-
       if (!response.ok || data.error) {
         errors.push({ profileId, error: data.error || `HTTP ${response.status}` });
       } else {
