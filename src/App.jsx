@@ -12,7 +12,7 @@ import QuickAdd from './pages/QuickAdd.jsx'
 import MessagesPage from './pages/Messages.jsx'
 const CommissionPage   = React.lazy(() => import('./pages/Commission.jsx'))
 const TemplatesPage    = React.lazy(() => import('./pages/Templates.jsx'))
-const TeamPage         = React.lazy(() => import('./pages/Team.jsx'))
+const TeamPage         = React.lazy(() => import('./pages/Team/index.jsx'))
 const SettingsPage     = React.lazy(() => import('./pages/Settings.jsx'))
 const LeadsPage        = React.lazy(() => import('./pages/Leads.jsx'))
 const OmPage           = React.lazy(() => import('./pages/Om.jsx'))
@@ -225,17 +225,16 @@ export default function App() {
     if (!session) return
     const load = async () => {
       // ── Phase 1: identity + team membership ──────────────────────────────
-      // Fetch agents, teams, and team_splits first so we know who is logged in
-      // and which peers they share data with before issuing any scoped queries.
-      const [agentsRes, teamSplitsRes, teamsRes] = await Promise.all([
+      // Fetch agents and team_splits (with sharing flags) first so we know who
+      // is logged in and what data each team peer has opted to share.
+      const [agentsRes, teamSplitsRes] = await Promise.all([
         supabase.from('agents').select('*').order('created_at', { ascending: true }),
-        supabase.from('team_splits').select('agent_id,team_id,is_lead').then(r => r, () => ({ data: [] })),
-        supabase.from('teams').select('id,type').then(r => r, () => ({ data: [] })),
+        supabase.from('team_splits').select('agent_id,team_id,share_contacts,share_properties,share_deals')
+          .then(r => r, () => ({ data: [] })),
       ])
 
-      let agentsData       = agentsRes.data  || []
-      const allTeamSplits  = teamSplitsRes.data || []
-      const teamTypeMap    = Object.fromEntries((teamsRes.data || []).map(t => [t.id, t.type]))
+      let agentsData      = agentsRes.data      || []
+      const allTeamSplits = teamSplitsRes.data  || []
 
       const userId        = session?.user?.id
       const loggedInEmail = session?.user?.email?.toLowerCase()
@@ -272,31 +271,17 @@ export default function App() {
       const isAdminAgent = matched.role?.toLowerCase().includes('admin') ?? false
 
       // ── Compute scoped agent ID lists ──────────────────────────────────────
-      // Visibility rules by team type:
-      //   collaboration → mutual: contacts, properties, deals shared both ways
-      //   split (mentorship) → asymmetric: lead sees juniors' DEALS only;
-      //                        juniors see only their own data
-      const myMemberships = allTeamSplits.filter(ts => ts.agent_id === matched.id)
-      const myTeamIds     = myMemberships.map(ts => ts.team_id)
+      // Each team member row carries explicit share_* flags (default true).
+      // Visibility is driven purely by those flags — no team-type rules needed.
+      const myTeamIds  = allTeamSplits.filter(ts => ts.agent_id === matched.id).map(ts => ts.team_id)
+      const peerSplits = allTeamSplits.filter(ts => myTeamIds.includes(ts.team_id) && ts.agent_id !== matched.id)
 
-      // Peers in collaboration teams → contacts + properties + deals
-      const collabTeamIds = myTeamIds.filter(id => teamTypeMap[id] === 'collaboration')
-      const collabPeerIds = allTeamSplits
-        .filter(ts => collabTeamIds.includes(ts.team_id) && ts.agent_id !== matched.id)
-        .map(ts => ts.agent_id)
+      // Peer rows where the peer has opted to share contacts/properties (default true when column is absent)
+      const contactPeerIds = [...new Set(peerSplits.filter(ts => ts.share_contacts !== false).map(ts => ts.agent_id))]
+      const dealPeerIds    = [...new Set(peerSplits.filter(ts => ts.share_deals    !== false).map(ts => ts.agent_id))]
 
-      // Juniors in split teams where I am the lead → deals only
-      const myLeadSplitIds = myMemberships
-        .filter(ts => ts.is_lead && teamTypeMap[ts.team_id] === 'split')
-        .map(ts => ts.team_id)
-      const splitJuniorIds = allTeamSplits
-        .filter(ts => myLeadSplitIds.includes(ts.team_id) && ts.agent_id !== matched.id)
-        .map(ts => ts.agent_id)
-
-      // contacts/properties scope: self + collaboration peers only
-      const myVisible    = [matched.id, ...collabPeerIds]
-      // deals scope: self + collaboration peers + split-team juniors (one-way)
-      const myDealVisible = [matched.id, ...collabPeerIds, ...splitJuniorIds]
+      const myVisible     = [matched.id, ...contactPeerIds]
+      const myDealVisible = [matched.id, ...dealPeerIds]
 
       setVisibleAgentIds(myVisible)
       setDealAgentIds(myDealVisible)
