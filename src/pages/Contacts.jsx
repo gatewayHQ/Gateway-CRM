@@ -201,31 +201,49 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
   const save = async () => {
     if (!validate()) return
     setSaving(true)
+
+    // Destructure buyer-criteria fields out of form so ...baseForm never spreads
+    // unmigrated columns to Supabase (causes schema cache error for all contact types)
+    const { submarket, asset_types, size_min, size_max, size_unit, ...baseForm } = form
+    const isBuyer = form.type === 'buyer' || form.type === 'investor'
+
     const payload = {
-      ...form,
+      ...baseForm,
       // Coerce empty strings → null for typed DB columns
-      // Postgres rejects '' for date and uuid columns
       birthday:          form.birthday          || null,
       anniversary_date:  form.anniversary_date  || null,
       assigned_agent_id: form.assigned_agent_id || null,
       email:             form.email?.trim()      || null,
       phone:             form.phone?.trim()      || null,
-      size_min:          form.size_min  ? Number(form.size_min)  : null,
-      size_max:          form.size_max  ? Number(form.size_max)  : null,
-      size_unit:         form.size_unit || 'sqft',
-      asset_types: Array.isArray(form.asset_types) ? form.asset_types : [],
       tags: typeof form.tags === 'string'
         ? form.tags.split(',').map(t => t.trim()).filter(Boolean)
         : (form.tags || []),
+      // Buyer/investor criteria — only included for those contact types
+      ...(isBuyer && {
+        submarket:   submarket   || null,
+        asset_types: Array.isArray(asset_types) ? asset_types : [],
+        size_min:    size_min    ? Number(size_min)  : null,
+        size_max:    size_max    ? Number(size_max)  : null,
+        size_unit:   size_unit   || 'sqft',
+      }),
     }
-    let error, contactId
-    if (contact?.id) {
-      ;({ error } = await supabase.from('contacts').update(payload).eq('id', contact.id))
-      contactId = contact.id
-    } else {
-      const { data, error: e } = await supabase.from('contacts').insert([payload]).select().single()
-      error = e; contactId = data?.id
+
+    const doSave = (p) => contact?.id
+      ? supabase.from('contacts').update(p).eq('id', contact.id).select().single()
+      : supabase.from('contacts').insert([p]).select().single()
+
+    let { data: saved, error } = await doSave(payload)
+
+    // Graceful fallback: if buyer-criteria columns don't exist yet (migration pending),
+    // retry without them so the contact save still succeeds
+    let criteriaDropped = false
+    if (error?.message?.includes('schema cache') && isBuyer) {
+      const { submarket: _s, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u, ...payloadNoCriteria } = payload
+      ;({ data: saved, error } = await doSave(payloadNoCriteria))
+      if (!error) criteriaDropped = true
     }
+
+    const contactId = saved?.id || contact?.id
     if (error) { setSaving(false); pushToast(error.message, 'error'); return }
 
     if (addProp && propForm.address.trim() && contactId) {
@@ -243,9 +261,11 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
       }
       const { error: pe } = await supabase.from('properties').insert([propPayload])
       if (pe) pushToast(`Contact saved but property failed: ${pe.message}`, 'error')
-      else pushToast('Contact & property saved')
+      else pushToast(criteriaDropped ? 'Contact & property saved (run DB migration to store buyer criteria)' : 'Contact & property saved')
     } else {
-      pushToast(contact?.id ? 'Contact updated' : 'Contact added')
+      pushToast(criteriaDropped
+        ? 'Contact saved — run DB migration to store buyer criteria'
+        : (contact?.id ? 'Contact updated' : 'Contact added'))
     }
 
     setSaving(false)
