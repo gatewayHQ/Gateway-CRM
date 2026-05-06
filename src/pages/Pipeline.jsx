@@ -430,6 +430,7 @@ const FIELD_TYPES = {
 const ANNOTATION_TYPES = {
   highlight:     { label: 'Highlight',     color: '#d97706', bg: 'rgba(253,224,71,0.45)', w: 160, h: 14 },
   strikethrough: { label: 'Strike-through', color: '#dc2626', bg: 'rgba(220,38,38,0.7)',  w: 160, h: 3  },
+  checkbox:      { label: 'Checkbox',       color: '#1a2236', bg: 'rgba(26,34,54,0.06)',  w: 18,  h: 18 },
 }
 
 // Per-signer accent colors for multi-signer field placement
@@ -538,8 +539,8 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
           const active = activeTool === key
           return (
             <button key={key} onClick={() => setActiveTool(active ? null : key)}
-              style={{ padding:'5px 12px', borderRadius:'var(--radius)', fontSize:12, fontWeight:700, cursor:'pointer', border:`2px solid ${active?color:'var(--gw-border)'}`, background:active?'rgba(253,224,71,0.3)':'#fff', color:active?color:'var(--gw-mist)' }}>
-              {key === 'highlight' ? '🖊 ' : '——  '}{label}
+              style={{ padding:'5px 12px', borderRadius:'var(--radius)', fontSize:12, fontWeight:700, cursor:'pointer', border:`2px solid ${active?color:'var(--gw-border)'}`, background:active?bg:'#fff', color:active?color:'var(--gw-mist)' }}>
+              {key === 'highlight' ? '🖊 ' : key === 'strikethrough' ? '—— ' : '☐ '}{label}
             </button>
           )
         })}
@@ -553,7 +554,7 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
           </span>
         )}
       </div>
-      <div style={{ maxHeight:420, overflowY:'auto', background:'#e5e7eb', borderRadius:'var(--radius)', padding:12, display:'flex', flexDirection:'column', alignItems:'center', gap:12 }}>
+      <div style={{ maxHeight:420, overflowY:'auto', overflowX:'auto', background:'#e5e7eb', borderRadius:'var(--radius)', padding:12, display:'flex', flexDirection:'column', alignItems:'flex-start', gap:12 }}>
         {pages.map((_, i) => (
           <div key={i} style={{ position:'relative' }}>
             <div style={{ fontSize:10, color:'#6b7280', marginBottom:4, textAlign:'center' }}>Page {i + 1}</div>
@@ -580,12 +581,15 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
                   left: a.xCanvas, top: a.yCanvas + 18,
                   width: a.width, height: a.height,
                   background: ann?.bg,
-                  border: `1px solid ${ann?.color}`,
+                  border: `${a.type === 'checkbox' ? 2 : 1}px solid ${ann?.color}`,
                   borderRadius: a.type === 'highlight' ? 2 : 0,
                   zIndex: 9, pointerEvents:'auto', cursor:'default',
-                  display:'flex', alignItems:'center', justifyContent:'flex-end',
+                  display:'flex', alignItems:'center', justifyContent: a.type === 'checkbox' ? 'center' : 'flex-end',
                 }}>
-                  <span onClick={e => { e.stopPropagation(); onRemoveAnnotation(a.id) }} style={{ fontSize:10, cursor:'pointer', color: ann?.color, lineHeight:1, padding:'0 2px', opacity:0.8 }}>×</span>
+                  {a.type === 'checkbox'
+                    ? <span onClick={e => { e.stopPropagation(); onRemoveAnnotation(a.id) }} style={{ fontSize:9, cursor:'pointer', color: ann?.color, lineHeight:1, opacity:0.7 }}>×</span>
+                    : <span onClick={e => { e.stopPropagation(); onRemoveAnnotation(a.id) }} style={{ fontSize:10, cursor:'pointer', color: ann?.color, lineHeight:1, padding:'0 2px', opacity:0.8 }}>×</span>
+                  }
                 </div>
               )
             })}
@@ -711,6 +715,10 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
           ctx.moveTo(a.xCanvas * sx, midY)
           ctx.lineTo((a.xCanvas + a.width) * sx, midY)
           ctx.stroke()
+        } else if (a.type === 'checkbox') {
+          ctx.strokeStyle = '#1a2236'
+          ctx.lineWidth   = 2
+          ctx.strokeRect(a.xCanvas * sx, a.yCanvas * sy, a.width * sx, a.height * sy)
         }
       }
 

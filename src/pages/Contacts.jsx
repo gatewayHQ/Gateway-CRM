@@ -165,7 +165,7 @@ function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivit
 }
 
 function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activities, activeAgent, onSave, onActivityAdded }) {
-  const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'', birthday:'', anniversary_date:'' }
+  const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'', birthday:'', anniversary_date:'', submarket:'', asset_types:[], size_min:'', size_max:'', size_unit:'sqft' }
   const blankProp = { address:'', list_price:'', type:'residential', subtype:'', beds:'', baths:'', sqft:'', garage:'', details:{} }
   const [form, setForm] = useState(contact || blank)
   const [errors, setErrors] = useState({})
@@ -201,7 +201,21 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
   const save = async () => {
     if (!validate()) return
     setSaving(true)
-    const payload = { ...form, tags: typeof form.tags === 'string' ? form.tags.split(',').map(t=>t.trim()).filter(Boolean) : form.tags }
+    const payload = {
+      ...form,
+      birthday:          form.birthday          || null,
+      anniversary_date:  form.anniversary_date  || null,
+      assigned_agent_id: form.assigned_agent_id || null,
+      email:             form.email?.trim()      || null,
+      phone:             form.phone?.trim()      || null,
+      size_min:          form.size_min  ? Number(form.size_min)  : null,
+      size_max:          form.size_max  ? Number(form.size_max)  : null,
+      size_unit:         form.size_unit || 'sqft',
+      asset_types: Array.isArray(form.asset_types) ? form.asset_types : [],
+      tags: typeof form.tags === 'string'
+        ? form.tags.split(',').map(t => t.trim()).filter(Boolean)
+        : (form.tags || []),
+    }
     let error, contactId
     if (contact?.id) {
       ;({ error } = await supabase.from('contacts').update(payload).eq('id', contact.id))
@@ -333,6 +347,58 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
             </div>
 
             <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} placeholder="Add notes…" /></div>
+
+            {/* ── Investment / Buyer Criteria (buyer + investor only) ── */}
+            {(form.type === 'buyer' || form.type === 'investor') && (
+              <div style={{ borderTop:'1px solid var(--gw-border)', marginTop:4, paddingTop:14 }}>
+                <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:10 }}>
+                  {form.type === 'investor' ? 'Investment Criteria' : 'Buyer Criteria'}
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Target Market / Area</label>
+                  <input className="form-control" value={form.submarket||''} onChange={e=>set('submarket',e.target.value)} placeholder="e.g. Austin, Travis County, Downtown" />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Asset Types</label>
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginTop:4 }}>
+                    {['residential','rental','multifamily','office','land','retail','industrial','mixed-use'].map(t => {
+                      const on = (form.asset_types||[]).includes(t)
+                      return (
+                        <label key={t} style={{ display:'flex', alignItems:'center', gap:4, cursor:'pointer', fontSize:11, fontWeight:600, padding:'3px 10px', borderRadius:20,
+                          color: on ? 'var(--gw-azure)' : 'var(--gw-mist)',
+                          background: on ? 'var(--gw-sky)' : '#fff',
+                          border: `1px solid ${on ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+                          transition:'all 120ms', userSelect:'none' }}>
+                          <input type="checkbox" checked={on} onChange={() => {
+                            const current = form.asset_types||[]
+                            set('asset_types', on ? current.filter(x=>x!==t) : [...current, t])
+                          }} style={{ display:'none' }} />
+                          {t.charAt(0).toUpperCase()+t.slice(1)}
+                        </label>
+                      )
+                    })}
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">Min Size</label>
+                    <input className="form-control" type="number" value={form.size_min||''} onChange={e=>set('size_min',e.target.value)} placeholder="0" />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Max Size</label>
+                    <input className="form-control" type="number" value={form.size_max||''} onChange={e=>set('size_max',e.target.value)} placeholder="Any" />
+                  </div>
+                  <div className="form-group" style={{ maxWidth:90 }}>
+                    <label className="form-label">Unit</label>
+                    <select className="form-control" value={form.size_unit||'sqft'} onChange={e=>set('size_unit',e.target.value)}>
+                      <option value="sqft">sqft</option>
+                      <option value="acres">acres</option>
+                      <option value="units">units</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* ── Inline Add Property ────────────────────────────────── */}
             {!contact?.id && (

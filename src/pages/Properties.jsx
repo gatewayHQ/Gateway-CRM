@@ -456,6 +456,20 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
           <div className="form-group"><label className="form-label">MLS #</label><input className="form-control" value={form.mls_number||''} onChange={e=>set('mls_number',e.target.value)} /></div>
         </div>
 
+        {/* Google Maps embed — shown when address exists */}
+        {form.address && (
+          <div className="form-group">
+            <iframe
+              title="Property Map"
+              src={`https://maps.google.com/maps?q=${encodeURIComponent([form.address, form.city, form.state, form.zip].filter(Boolean).join(', '))}&output=embed`}
+              width="100%" height="200"
+              style={{ border:0, borderRadius:'var(--radius)', display:'block' }}
+              loading="lazy"
+              referrerPolicy="no-referrer-when-downgrade"
+            />
+          </div>
+        )}
+
         {/* Type + Status */}
         <div className="form-row">
           <div className="form-group">
@@ -520,6 +534,54 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
           </div>
         )}
         <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} /></div>
+
+        {/* ── Matching Buyers / Investors ── */}
+        {(() => {
+          const propSize  = form.sqft ? Number(form.sqft) : null
+          const propType  = form.type
+          const propArea  = (form.county || form.city || '').toLowerCase()
+          const buyers = (contacts || []).filter(c => {
+            if (c.type !== 'buyer' && c.type !== 'investor') return false
+            const wantsTypes = c.asset_types && c.asset_types.length > 0
+            if (wantsTypes && !c.asset_types.includes(propType)) return false
+            if (c.submarket) {
+              const sm = c.submarket.toLowerCase()
+              if (propArea && !propArea.includes(sm) && !sm.includes(propArea)) return false
+            }
+            if (propSize !== null) {
+              if (c.size_min && Number(c.size_min) > propSize) return false
+              if (c.size_max && Number(c.size_max) < propSize) return false
+            }
+            return true
+          })
+          if (buyers.length === 0) return null
+          return (
+            <div style={{ borderTop:'1px solid var(--gw-border)', marginTop:4, paddingTop:14 }}>
+              <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:10 }}>
+                Matching Buyers · {buyers.length}
+              </div>
+              <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                {buyers.map(c => (
+                  <div key={c.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'8px 10px', background:'var(--gw-sky)', border:'1px solid var(--gw-azure)', borderRadius:'var(--radius)' }}>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:13, fontWeight:600, color:'var(--gw-ink)' }}>{c.first_name} {c.last_name}</div>
+                      {(c.asset_types?.length > 0 || c.submarket) && (
+                        <div style={{ fontSize:11, color:'var(--gw-azure)', marginTop:1 }}>
+                          {c.asset_types?.join(', ')}{c.submarket ? ` · ${c.submarket}` : ''}
+                        </div>
+                      )}
+                    </div>
+                    {(c.size_min || c.size_max) && (
+                      <div style={{ fontSize:11, color:'var(--gw-mist)', whiteSpace:'nowrap' }}>
+                        {c.size_min ? Number(c.size_min).toLocaleString() : '0'}–{c.size_max ? Number(c.size_max).toLocaleString() : '∞'} {c.size_unit||'sqft'}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )
+        })()}
       </div>
       <div className="drawer__foot">
         {property?.id && (

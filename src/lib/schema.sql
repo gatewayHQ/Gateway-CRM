@@ -43,6 +43,12 @@ create table if not exists contacts (
   -- Annual reminders
   birthday          date,
   anniversary_date  date,
+  -- Buyer / investor search criteria (for matching)
+  submarket         text,          -- target area / county
+  asset_types       text[],        -- e.g. ['multifamily','office']
+  size_min          numeric,
+  size_max          numeric,
+  size_unit         text default 'sqft',  -- sqft | acres | units
   created_at        timestamptz default now()
 );
 
@@ -381,3 +387,9 @@ end $$;
 -- alter table contacts drop constraint if exists contacts_source_check;
 -- alter table contacts add  constraint contacts_source_check
 --   check (source in ('referral','website','open house','social','cold call','other'));
+-- -- Buyer/investor search criteria (for buyer matching feature)
+-- alter table contacts add column if not exists submarket   text;
+-- alter table contacts add column if not exists asset_types text[];
+-- alter table contacts add column if not exists size_min    numeric;
+-- alter table contacts add column if not exists size_max    numeric;
+-- alter table contacts add column if not exists size_unit   text default 'sqft';
