@@ -1,8 +1,8 @@
-// POST /api/buffer
+// POST /api/gw-buffer
 // Proxies Buffer update creation — no CORS issues, token stays server-side.
 // Body: { profileIds: string[], text: string, mediaUrl?: string, scheduledAt?: string }
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || 'https://gatewayhq.github.io');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-gateway-secret');
@@ -24,16 +24,13 @@ export default async function handler(req, res) {
   if (!token) return res.status(500).json({ error: 'Buffer token not configured on server' });
 
   const results = [];
-  const errors  = [];
+  const errors = [];
 
   for (const profileId of profileIds) {
     try {
       const params = new URLSearchParams({ text, 'profile_ids[]': profileId });
       if (scheduledAt) params.append('scheduled_at', scheduledAt);
-
-      // Media — Buffer v1 wants a media[link] parameter for link attachments
       if (mediaUrl) params.append('media[link]', mediaUrl);
-
       const response = await fetch('https://api.buffer.com/1/updates/create.json', {
         method: 'POST',
         headers: {
@@ -42,9 +39,7 @@ export default async function handler(req, res) {
         },
         body: params.toString()
       });
-
       const data = await response.json();
-
       if (!response.ok || data.error) {
         errors.push({ profileId, error: data.error || `HTTP ${response.status}` });
       } else {
@@ -56,4 +51,4 @@ export default async function handler(req, res) {
   }
 
   res.status(200).json({ results, errors, success: errors.length === 0 });
-}
+};
