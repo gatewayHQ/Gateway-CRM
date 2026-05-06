@@ -779,6 +779,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
   const [filterHeat, setFilterHeat] = useState('')
   const [importModal, setImportModal] = useState(false)
   const [selected, setSelected]       = useState(new Set())
+  const [reassignTo, setReassignTo]   = useState('')
 
   const contacts    = db.contacts    || []
   const agents      = db.agents      || []
@@ -826,6 +827,18 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
     await supabase.from('contacts').delete().in('id', ids)
     pushToast(`${ids.length} contact${ids.length !== 1 ? 's' : ''} deleted`, 'info')
     setSelected(new Set())
+    reload()
+  }
+
+  const bulkReassign = async (agentId) => {
+    if (!agentId) return
+    const ids = [...selected]
+    const { error } = await supabase.from('contacts').update({ assigned_agent_id: agentId }).in('id', ids)
+    if (error) { pushToast(error.message, 'error'); return }
+    const agent = agents.find(a => a.id === agentId)
+    pushToast(`${ids.length} contact${ids.length !== 1 ? 's' : ''} reassigned to ${agent?.name || 'agent'}`)
+    setSelected(new Set())
+    setReassignTo('')
     reload()
   }
 
@@ -967,12 +980,33 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
         onSave={reload}
       />
       {selected.size > 0 && (
-        <div style={{ position:'fixed', bottom:24, left:'50%', transform:'translateX(-50%)', background:'#1a2236', color:'#fff', borderRadius:12, padding:'12px 20px', display:'flex', alignItems:'center', gap:16, zIndex:500, boxShadow:'0 4px 24px rgba(0,0,0,0.35)', whiteSpace:'nowrap' }}>
+        <div style={{ position:'fixed', bottom:24, left:'50%', transform:'translateX(-50%)', background:'#1a2236', color:'#fff', borderRadius:12, padding:'12px 20px', display:'flex', alignItems:'center', gap:12, zIndex:500, boxShadow:'0 4px 24px rgba(0,0,0,0.35)', whiteSpace:'nowrap' }}>
           <span style={{ fontSize:13, fontWeight:600 }}>{selected.size} contact{selected.size !== 1 ? 's' : ''} selected</span>
+          <div style={{ width:1, height:20, background:'rgba(255,255,255,0.15)' }} />
+          {/* Reassign to agent */}
+          <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+            <select
+              value={reassignTo}
+              onChange={e => setReassignTo(e.target.value)}
+              style={{ padding:'5px 10px', borderRadius:8, background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.25)', cursor:'pointer', fontSize:12, fontFamily:'var(--font-body)' }}
+            >
+              <option value="">Reassign to…</option>
+              {agents.map(a => <option key={a.id} value={a.id} style={{ color:'#000' }}>{a.name}</option>)}
+            </select>
+            {reassignTo && (
+              <button
+                style={{ padding:'5px 14px', borderRadius:8, background:'var(--gw-azure)', color:'#fff', border:'none', cursor:'pointer', fontSize:12, fontWeight:600 }}
+                onClick={() => bulkReassign(reassignTo)}
+              >
+                Assign
+              </button>
+            )}
+          </div>
+          <div style={{ width:1, height:20, background:'rgba(255,255,255,0.15)' }} />
           <button style={{ padding:'5px 14px', borderRadius:8, background:'#ef4444', color:'#fff', border:'none', cursor:'pointer', fontSize:12, fontWeight:600, display:'flex', alignItems:'center', gap:6 }} onClick={bulkDelete}>
-            <Icon name="trash" size={13} /> Delete Selected
+            <Icon name="trash" size={13} /> Delete
           </button>
-          <button style={{ padding:'5px 12px', borderRadius:8, background:'transparent', color:'#fff', border:'1px solid rgba(255,255,255,0.25)', cursor:'pointer', fontSize:12 }} onClick={() => setSelected(new Set())}>
+          <button style={{ padding:'5px 12px', borderRadius:8, background:'transparent', color:'#fff', border:'1px solid rgba(255,255,255,0.25)', cursor:'pointer', fontSize:12 }} onClick={() => { setSelected(new Set()); setReassignTo('') }}>
             Cancel
           </button>
         </div>
