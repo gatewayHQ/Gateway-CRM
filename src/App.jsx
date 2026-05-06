@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase.js'
-import { Icon, Avatar, Modal, Badge, ToastHost, Loading, pushToast } from './components/UI.jsx'
+import { Icon, Avatar, Modal, Badge, ToastHost, Loading, ErrorBoundary, pushToast } from './components/UI.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import ContactsPage from './pages/Contacts.jsx'
 import PropertiesPage from './pages/Properties.jsx'
@@ -12,7 +12,7 @@ import QuickAdd from './pages/QuickAdd.jsx'
 import MessagesPage from './pages/Messages.jsx'
 const CommissionPage   = React.lazy(() => import('./pages/Commission.jsx'))
 const TemplatesPage    = React.lazy(() => import('./pages/Templates.jsx'))
-const TeamPage         = React.lazy(() => import('./pages/Team.jsx'))
+const TeamPage         = React.lazy(() => import('./pages/Team/index.jsx'))
 const SettingsPage     = React.lazy(() => import('./pages/Settings.jsx'))
 const LeadsPage        = React.lazy(() => import('./pages/Leads.jsx'))
 const OmPage           = React.lazy(() => import('./pages/Om.jsx'))
@@ -79,6 +79,12 @@ const TITLES = {
 }
 
 const COLORS = ['#2d3561','#4a6fa5','#2e7d5e','#c9a84c','#6b4fa5','#c0392b','#d4820a','#1a1a2e']
+
+const EMPTY_DB = {
+  contacts: [], properties: [], deals: [], tasks: [],
+  agents: [], templates: [], commissions: [], commissionsReady: true,
+  activities: [], activitiesReady: true,
+}
 
 const nameFromEmail = (email = '') => {
   const local = (email || '').split('@')[0]
@@ -170,11 +176,13 @@ function AgentOnboardingModal({ session, onComplete }) {
 
 export default function App() {
   const [session, setSession] = useState(null)
-  const [db, setDb] = useState({ contacts: [], properties: [], deals: [], tasks: [], agents: [], templates: [], commissions: [], commissionsReady: true, activities: [], activitiesReady: true })
+  const [db, setDb] = useState(EMPTY_DB)
   const [loading, setLoading] = useState(true)
   const [route, setRoute] = useState('dashboard')
   const [collapsed, setCollapsed] = useState(false)
   const [activeAgentId, setActiveAgentId] = useState(null)
+  const [visibleAgentIds, setVisibleAgentIds] = useState([])
+  const [dealAgentIds, setDealAgentIds]       = useState([])
   const [compose, setCompose] = useState(null)
   const [mobileMore, setMobileMore] = useState(false)
   const [needsOnboarding, setNeedsOnboarding] = useState(false)
@@ -222,34 +230,22 @@ export default function App() {
   useEffect(() => {
     if (!session) return
     const load = async () => {
-      const [contacts, properties, deals, tasks, agents, templates, commissionsRes, activitiesRes] = await Promise.all([
-        supabase.from('contacts').select('*').order('created_at', { ascending: false }),
-        supabase.from('properties').select('*').order('created_at', { ascending: false }),
-        supabase.from('deals').select('*').order('created_at', { ascending: false }),
-        supabase.from('tasks').select('*').order('due_date', { ascending: true }),
+      // ── Phase 1: identity + team membership ──────────────────────────────
+      // Fetch agents and team_splits (with sharing flags) first so we know who
+      // is logged in and what data each team peer has opted to share.
+      const [agentsRes, teamSplitsRes] = await Promise.all([
         supabase.from('agents').select('*').order('created_at', { ascending: true }),
-        supabase.from('templates').select('*').order('created_at', { ascending: false }),
-        supabase.from('commissions').select('*'),
-        supabase.from('activities').select('*').order('created_at', { ascending: false }),
+        supabase.from('team_splits').select('agent_id,team_id,share_contacts,share_properties,share_deals')
+          .then(r => r, () => ({ data: [] })),
       ])
-      const agentsData = agents.data || []
-      setDb({
-        contacts: contacts.data || [],
-        properties: properties.data || [],
-        deals: deals.data || [],
-        tasks: tasks.data || [],
-        agents: agentsData,
-        templates: templates.data || [],
-        commissions: commissionsRes.data || [],
-        commissionsReady: !commissionsRes.error,
-        activities: activitiesRes.data || [],
-        activitiesReady: !activitiesRes.error,
-      })
+
+      let agentsData      = agentsRes.data      || []
+      const allTeamSplits = teamSplitsRes.data  || []
 
       const userId        = session?.user?.id
       const loggedInEmail = session?.user?.email?.toLowerCase()
 
-      // Priority 1: match by auth_id (the bulletproof way)
+      // Priority 1: match by auth_id
       let matched = userId ? agentsData.find(a => a.auth_id === userId) : null
 
       // Priority 2: claim an unclaimed agent record with matching email
@@ -263,20 +259,81 @@ export default function App() {
           if (!error) {
             matched = { ...orphan, auth_id: userId }
           } else {
-            // Unique constraint failed → someone else already claimed this auth_id.
-            // Reload agents to find the one that actually has it.
+            // Unique constraint conflict — someone else already claimed this auth_id.
             const { data: fresh } = await supabase.from('agents').select('*')
             matched = (fresh || []).find(a => a.auth_id === userId) || null
-            if (fresh) setDb(p => ({ ...p, agents: fresh }))
+            if (fresh) agentsData = fresh
           }
         }
       }
 
-      if (matched) {
-        setActiveAgentId(matched.id)
-      } else {
+      if (!matched) {
         setNeedsOnboarding(true)
+        setLoading(false)
+        return
       }
+
+      setActiveAgentId(matched.id)
+      const isAdminAgent = matched.role?.toLowerCase().includes('admin') ?? false
+
+      // ── Compute scoped agent ID lists ──────────────────────────────────────
+      // Each team member row carries explicit share_* flags (default true).
+      // Visibility is driven purely by those flags — no team-type rules needed.
+      const myTeamIds  = allTeamSplits.filter(ts => ts.agent_id === matched.id).map(ts => ts.team_id)
+      const peerSplits = allTeamSplits.filter(ts => myTeamIds.includes(ts.team_id) && ts.agent_id !== matched.id)
+
+      // Peer rows where the peer has opted to share contacts/properties (default true when column is absent)
+      const contactPeerIds = [...new Set(peerSplits.filter(ts => ts.share_contacts !== false).map(ts => ts.agent_id))]
+      const dealPeerIds    = [...new Set(peerSplits.filter(ts => ts.share_deals    !== false).map(ts => ts.agent_id))]
+
+      const myVisible     = [matched.id, ...contactPeerIds]
+      const myDealVisible = [matched.id, ...dealPeerIds]
+
+      setVisibleAgentIds(myVisible)
+      setDealAgentIds(myDealVisible)
+
+      // ── Phase 2: scoped data fetches ─────────────────────────────────────
+      // Admin sees only pipeline deals (all agents); all other tables return
+      // empty so no contacts/properties/tasks bleed through.
+      // Regular agents receive only rows scoped to their computed lists above.
+      const [contacts, properties, deals, tasks, templates, commissionsRes, activitiesRes] = await Promise.all([
+        isAdminAgent
+          ? { data: [] }
+          : supabase.from('contacts').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
+        isAdminAgent
+          ? { data: [] }
+          : supabase.from('properties').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
+        isAdminAgent
+          ? supabase.from('deals').select('*').order('created_at', { ascending: false })
+          : supabase.from('deals').select('*').in('agent_id', myDealVisible).order('created_at', { ascending: false }),
+        // Tasks are personal — never shared, even within a team
+        isAdminAgent
+          ? { data: [] }
+          : supabase.from('tasks').select('*').eq('agent_id', matched.id).order('due_date', { ascending: true }),
+        isAdminAgent
+          ? { data: [] }
+          : supabase.from('templates').select('*').order('created_at', { ascending: false }),
+        isAdminAgent
+          ? { data: [], error: null }
+          : supabase.from('commissions').select('*'),
+        isAdminAgent
+          ? { data: [], error: null }
+          : supabase.from('activities').select('*').order('created_at', { ascending: false }),
+      ])
+
+      setDb({
+        contacts:         contacts.data     || [],
+        properties:       properties.data   || [],
+        deals:            deals.data         || [],
+        tasks:            tasks.data         || [],
+        agents:           agentsData,              // full roster — needed for dropdowns everywhere
+        templates:        templates.data     || [],
+        commissions:      commissionsRes.data || [],
+        commissionsReady: !commissionsRes.error,
+        activities:       activitiesRes.data || [],
+        activitiesReady:  !activitiesRes.error,
+      })
+
       setLoading(false)
     }
     load()
@@ -324,7 +381,7 @@ export default function App() {
 
   const signOut = async () => {
     await supabase.auth.signOut()
-    setDb({ contacts: [], properties: [], deals: [], tasks: [], agents: [], templates: [], commissions: [], commissionsReady: true, activities: [], activitiesReady: true })
+    setDb(EMPTY_DB)
     setNotifications([])
     setNeedsOnboarding(false)
     setLoading(true)
@@ -334,7 +391,7 @@ export default function App() {
 
   const activeAgent = db.agents.find(a => a.id === activeAgentId) || null
   const isAdmin     = activeAgent?.role?.toLowerCase().includes('admin') ?? false
-  const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin }
+  const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin, visibleAgentIds, dealAgentIds }
 
   if (loading) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', flexDirection: 'column', gap: 16 }}>
@@ -542,6 +599,7 @@ export default function App() {
         </header>
 
         <React.Suspense fallback={<div style={{ display:'flex', alignItems:'center', justifyContent:'center', flex:1 }}><Loading /></div>}>
+        <ErrorBoundary>
           {route === 'dashboard'  && <Dashboard {...props} />}
           {route === 'contacts'   && <ContactsPage {...props} />}
           {route === 'properties' && <PropertiesPage {...props} />}
@@ -559,6 +617,7 @@ export default function App() {
           {route === 'leads'      && <LeadsPage {...props} />}
           {route === 'integrations' && <IntegrationsPage db={db} />}
           {route === 'settings'     && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
+        </ErrorBoundary>
         </React.Suspense>
       </div>
 

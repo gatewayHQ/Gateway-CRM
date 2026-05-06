@@ -1,3 +1,10 @@
+export const capitalize = (str) => str ? str.charAt(0).toUpperCase() + str.slice(1) : ''
+
+export const formatShortDate = (val) => {
+  if (!val) return '—'
+  return new Date(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
 export const formatCurrency = (val) => {
   if (!val && val !== 0) return '—'
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(val)

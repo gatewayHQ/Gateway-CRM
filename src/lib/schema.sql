@@ -272,12 +272,15 @@ end $$;
 -- TEAM SPLITS  (per-member split % for split-type teams)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists team_splits (
-  id         uuid primary key default uuid_generate_v4(),
-  team_id    uuid references teams(id) on delete cascade,
-  agent_id   uuid references agents(id) on delete cascade,
-  split_pct  numeric default 0 check (split_pct >= 0 and split_pct <= 100),
-  is_lead    boolean default false,
-  created_at timestamptz default now(),
+  id               uuid primary key default uuid_generate_v4(),
+  team_id          uuid references teams(id) on delete cascade,
+  agent_id         uuid references agents(id) on delete cascade,
+  split_pct        numeric default 0 check (split_pct >= 0 and split_pct <= 100),
+  is_lead          boolean default false,
+  share_contacts   boolean default true,   -- peer can see this member's contacts
+  share_properties boolean default true,   -- peer can see this member's properties
+  share_deals      boolean default true,   -- peer can see this member's pipeline deals
+  created_at       timestamptz default now(),
   unique(team_id, agent_id)
 );
 
@@ -387,6 +390,12 @@ end $$;
 -- alter table contacts drop constraint if exists contacts_source_check;
 -- alter table contacts add  constraint contacts_source_check
 --   check (source in ('referral','website','open house','social','cold call','other'));
+-- -- Team sharing flags: run after deploying Team refactor (2026-05)
+-- alter table team_splits add column if not exists share_contacts   boolean default true;
+-- alter table team_splits add column if not exists share_properties boolean default true;
+-- alter table team_splits add column if not exists share_deals      boolean default true;
+-- -- Remove legacy team column from agents (no longer used for membership)
+-- alter table agents drop column if exists team_id;
 -- -- Buyer/investor search criteria (for buyer matching feature)
 -- alter table contacts add column if not exists submarket   text;
 -- alter table contacts add column if not exists asset_types text[];

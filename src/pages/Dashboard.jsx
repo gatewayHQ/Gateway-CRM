@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER, upcomingReminders } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Loading, pushToast } from '../components/UI.jsx'
@@ -27,7 +27,7 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
     value: deals.filter(d => d.stage === s).reduce((sum, d) => sum + (d.value || 0), 0)
   }))
 
-  const reminders = upcomingReminders(contacts, 30)
+  const reminders = useMemo(() => upcomingReminders(contacts, 30), [contacts])
 
   const createReminderTask = async (reminder) => {
     const { contact, type, days } = reminder
