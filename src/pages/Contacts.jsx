@@ -1,7 +1,7 @@
-import React, { useState } from 'react'
+import React, { useState, useMemo } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { formatDate, formatPhone, calcHeatScore } from '../lib/helpers.js'
-import { Icon, Badge, Avatar, HeatBadge, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import { formatDate, formatPhone, formatCurrency, calcHeatScore } from '../lib/helpers.js'
+import { Icon, Badge, Avatar, HeatBadge, Drawer, EmptyState, ConfirmDialog, SearchDropdown, Tabs, pushToast } from '../components/UI.jsx'
 
 const ACTIVITY_TYPES = ['note','call','email','meeting','showing']
 const ACTIVITY_ICONS = { note:'note', call:'phone', email:'mail', meeting:'calendar', showing:'building' }
@@ -114,7 +114,7 @@ function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivit
                     <div style={{ fontWeight: 600, fontSize: 13 }}>{d.title}</div>
                     <div style={{ fontSize: 11, marginTop: 2, display: 'flex', gap: 8 }}>
                       <span style={{ color: STAGE_COLORS[d.stage] || 'var(--gw-mist)', fontWeight: 600, textTransform: 'capitalize' }}>{d.stage.replace('-', ' ')}</span>
-                      {d.value > 0 && <span style={{ color: 'var(--gw-mist)' }}>{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(d.value)}</span>}
+                      {d.value > 0 && <span style={{ color: 'var(--gw-mist)' }}>{formatCurrency(d.value)}</span>}
                     </div>
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--gw-mist)', whiteSpace: 'nowrap', marginTop: 2 }}>{fmt(entry.date)}</div>
@@ -253,25 +253,17 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
   const contactActivities = (activities || []).filter(a => a.contact_id === contact?.id)
   const activityCount     = contactDeals.length + contactTasks.length + contactActivities.length
 
-  const tabBtn = (id, label, count) => (
-    <button onClick={() => setTab(id)} style={{
-      padding: '8px 16px', border: 'none', cursor: 'pointer', fontFamily: 'var(--font-body)', fontSize: 13, fontWeight: 600,
-      background: tab === id ? '#fff' : 'transparent',
-      color: tab === id ? 'var(--gw-slate)' : 'var(--gw-mist)',
-      borderBottom: tab === id ? '2px solid var(--gw-slate)' : '2px solid transparent',
-      transition: 'all 150ms',
-    }}>
-      {label}{count > 0 && tab !== id ? <span style={{ marginLeft: 5, background: 'var(--gw-azure)', color: '#fff', borderRadius: 10, fontSize: 10, padding: '1px 6px', fontWeight: 700 }}>{count}</span> : ''}
-    </button>
-  )
-
   return (
     <Drawer open={open} onClose={onClose} title={contact?.id ? `${contact.first_name} ${contact.last_name}` : 'Add Contact'} width={500}>
       {contact?.id && (
-        <div style={{ display: 'flex', borderBottom: '1px solid var(--gw-border)', background: 'var(--gw-bone)', paddingLeft: 8 }}>
-          {tabBtn('details', 'Details')}
-          {tabBtn('activity', 'Activity', activityCount)}
-        </div>
+        <Tabs
+          active={tab}
+          onChange={setTab}
+          tabs={[
+            { id: 'details', label: 'Details', count: 0 },
+            { id: 'activity', label: 'Activity', count: activityCount },
+          ]}
+        />
       )}
 
       {tab === 'details' && (
@@ -717,19 +709,26 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
   const activities  = db.activities  || []
   const deals       = db.deals       || []
 
-  const filtered = contacts.filter(c => {
+  // Compute heat scores once per contacts/activities/deals change — O(n×m) so must not run per render
+  const heatScores = useMemo(() => {
+    const map = {}
+    for (const c of contacts) map[c.id] = calcHeatScore(c, activities, deals)
+    return map
+  }, [contacts, activities, deals])
+
+  const filtered = useMemo(() => contacts.filter(c => {
     const name = `${c.first_name} ${c.last_name}`.toLowerCase()
     const q = search.toLowerCase()
     if (q && !name.includes(q) && !(c.email||'').toLowerCase().includes(q) && !(c.phone||'').includes(q)) return false
-    if (filterType   && c.type               !== filterType)   return false
-    if (filterStatus && c.status             !== filterStatus) return false
-    if (filterAgent  && c.assigned_agent_id  !== filterAgent)  return false
-    if (filterHeat   && calcHeatScore(c, activities, deals)    !== filterHeat) return false
+    if (filterType   && c.type              !== filterType)   return false
+    if (filterStatus && c.status            !== filterStatus) return false
+    if (filterAgent  && c.assigned_agent_id !== filterAgent)  return false
+    if (filterHeat   && heatScores[c.id]    !== filterHeat)   return false
     return true
   }).sort((a, b) => {
-    let av = a[sortKey]||'', bv = b[sortKey]||''
+    const av = a[sortKey] || '', bv = b[sortKey] || ''
     return sortDir === 'asc' ? (av > bv ? 1 : -1) : (av < bv ? 1 : -1)
-  })
+  }), [contacts, heatScores, search, filterType, filterStatus, filterAgent, filterHeat, sortKey, sortDir])
 
   const reload = async () => {
     if (!visibleAgentIds?.length) return

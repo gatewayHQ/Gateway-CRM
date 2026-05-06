@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase.js'
-import { Icon, Avatar, Modal, Badge, ToastHost, Loading, pushToast } from './components/UI.jsx'
+import { Icon, Avatar, Modal, Badge, ToastHost, Loading, ErrorBoundary, pushToast } from './components/UI.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import ContactsPage from './pages/Contacts.jsx'
 import PropertiesPage from './pages/Properties.jsx'
@@ -79,6 +79,12 @@ const TITLES = {
 }
 
 const COLORS = ['#2d3561','#4a6fa5','#2e7d5e','#c9a84c','#6b4fa5','#c0392b','#d4820a','#1a1a2e']
+
+const EMPTY_DB = {
+  contacts: [], properties: [], deals: [], tasks: [],
+  agents: [], templates: [], commissions: [], commissionsReady: true,
+  activities: [], activitiesReady: true,
+}
 
 const nameFromEmail = (email = '') => {
   const local = (email || '').split('@')[0]
@@ -170,7 +176,7 @@ function AgentOnboardingModal({ session, onComplete }) {
 
 export default function App() {
   const [session, setSession] = useState(null)
-  const [db, setDb] = useState({ contacts: [], properties: [], deals: [], tasks: [], agents: [], templates: [], commissions: [], commissionsReady: true, activities: [], activitiesReady: true })
+  const [db, setDb] = useState(EMPTY_DB)
   const [loading, setLoading] = useState(true)
   const [route, setRoute] = useState('dashboard')
   const [collapsed, setCollapsed] = useState(false)
@@ -375,7 +381,7 @@ export default function App() {
 
   const signOut = async () => {
     await supabase.auth.signOut()
-    setDb({ contacts: [], properties: [], deals: [], tasks: [], agents: [], templates: [], commissions: [], commissionsReady: true, activities: [], activitiesReady: true })
+    setDb(EMPTY_DB)
     setNotifications([])
     setNeedsOnboarding(false)
     setLoading(true)
@@ -593,6 +599,7 @@ export default function App() {
         </header>
 
         <React.Suspense fallback={<div style={{ display:'flex', alignItems:'center', justifyContent:'center', flex:1 }}><Loading /></div>}>
+        <ErrorBoundary>
           {route === 'dashboard'  && <Dashboard {...props} />}
           {route === 'contacts'   && <ContactsPage {...props} />}
           {route === 'properties' && <PropertiesPage {...props} />}
@@ -610,6 +617,7 @@ export default function App() {
           {route === 'leads'      && <LeadsPage {...props} />}
           {route === 'integrations' && <IntegrationsPage db={db} />}
           {route === 'settings'     && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
+        </ErrorBoundary>
         </React.Suspense>
       </div>
 

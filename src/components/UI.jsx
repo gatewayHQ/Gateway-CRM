@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, Component } from 'react'
 
 // ─── ICONS ───────────────────────────────────────────────────────────────────
 const ICONS = {
@@ -244,4 +244,52 @@ export function HeatBadge({ score }) {
 // ─── LOADING ──────────────────────────────────────────────────────────────────
 export function Loading() {
   return <div className="loading"><div className="spinner" /> Loading…</div>
+}
+
+// ─── TABS ─────────────────────────────────────────────────────────────────────
+export function Tabs({ tabs, active, onChange }) {
+  return (
+    <div style={{ display: 'flex', borderBottom: '1px solid var(--gw-border)', background: 'var(--gw-bone)', paddingLeft: 8 }}>
+      {tabs.map(({ id, label, count }) => (
+        <button key={id} onClick={() => onChange(id)} style={{
+          padding: '8px 16px', border: 'none', cursor: 'pointer',
+          fontFamily: 'var(--font-body)', fontSize: 13, fontWeight: 600,
+          background: active === id ? '#fff' : 'transparent',
+          color: active === id ? 'var(--gw-slate)' : 'var(--gw-mist)',
+          borderBottom: active === id ? '2px solid var(--gw-slate)' : '2px solid transparent',
+          transition: 'all 150ms',
+        }}>
+          {label}
+          {count > 0 && active !== id && (
+            <span style={{ marginLeft: 5, background: 'var(--gw-azure)', color: '#fff', borderRadius: 10, fontSize: 10, padding: '1px 6px', fontWeight: 700 }}>
+              {count}
+            </span>
+          )}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ─── ERROR BOUNDARY ───────────────────────────────────────────────────────────
+export class ErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null } }
+  static getDerivedStateFromError(error) { return { error } }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 40, textAlign: 'center' }}>
+          <div style={{ fontSize: 32, marginBottom: 12 }}>⚠️</div>
+          <div style={{ fontWeight: 600, fontSize: 16, marginBottom: 8 }}>Something went wrong</div>
+          <div style={{ fontSize: 13, color: 'var(--gw-mist)', marginBottom: 20, maxWidth: 400, margin: '0 auto 20px' }}>
+            {this.state.error.message}
+          </div>
+          <button className="btn btn--secondary" onClick={() => this.setState({ error: null })}>
+            Try again
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
 }
