@@ -176,6 +176,7 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false)
   const [activeAgentId, setActiveAgentId] = useState(null)
   const [visibleAgentIds, setVisibleAgentIds] = useState([])
+  const [dealAgentIds, setDealAgentIds]       = useState([])
   const [compose, setCompose] = useState(null)
   const [mobileMore, setMobileMore] = useState(false)
   const [needsOnboarding, setNeedsOnboarding] = useState(false)
@@ -224,15 +225,17 @@ export default function App() {
     if (!session) return
     const load = async () => {
       // ── Phase 1: identity + team membership ──────────────────────────────
-      // Fetch agents and team_splits first so we know who is logged in and
-      // which peers they share data with before issuing any scoped queries.
-      const [agentsRes, teamSplitsRes] = await Promise.all([
+      // Fetch agents, teams, and team_splits first so we know who is logged in
+      // and which peers they share data with before issuing any scoped queries.
+      const [agentsRes, teamSplitsRes, teamsRes] = await Promise.all([
         supabase.from('agents').select('*').order('created_at', { ascending: true }),
-        supabase.from('team_splits').select('agent_id,team_id').then(r => r, () => ({ data: [] })),
+        supabase.from('team_splits').select('agent_id,team_id,is_lead').then(r => r, () => ({ data: [] })),
+        supabase.from('teams').select('id,type').then(r => r, () => ({ data: [] })),
       ])
 
-      let agentsData       = agentsRes.data || []
+      let agentsData       = agentsRes.data  || []
       const allTeamSplits  = teamSplitsRes.data || []
+      const teamTypeMap    = Object.fromEntries((teamsRes.data || []).map(t => [t.id, t.type]))
 
       const userId        = session?.user?.id
       const loggedInEmail = session?.user?.email?.toLowerCase()
@@ -268,19 +271,40 @@ export default function App() {
       setActiveAgentId(matched.id)
       const isAdminAgent = matched.role?.toLowerCase().includes('admin') ?? false
 
-      // Compute this agent's visible peers via shared team memberships.
-      // Both collaboration and mentorship teams grant mutual data visibility.
-      const myTeamIds  = allTeamSplits.filter(ts => ts.agent_id === matched.id).map(ts => ts.team_id)
-      const peerIds    = allTeamSplits
-        .filter(ts => myTeamIds.includes(ts.team_id) && ts.agent_id !== matched.id)
+      // ── Compute scoped agent ID lists ──────────────────────────────────────
+      // Visibility rules by team type:
+      //   collaboration → mutual: contacts, properties, deals shared both ways
+      //   split (mentorship) → asymmetric: lead sees juniors' DEALS only;
+      //                        juniors see only their own data
+      const myMemberships = allTeamSplits.filter(ts => ts.agent_id === matched.id)
+      const myTeamIds     = myMemberships.map(ts => ts.team_id)
+
+      // Peers in collaboration teams → contacts + properties + deals
+      const collabTeamIds = myTeamIds.filter(id => teamTypeMap[id] === 'collaboration')
+      const collabPeerIds = allTeamSplits
+        .filter(ts => collabTeamIds.includes(ts.team_id) && ts.agent_id !== matched.id)
         .map(ts => ts.agent_id)
-      const myVisible  = [matched.id, ...peerIds]   // deduplicated by UUID uniqueness
+
+      // Juniors in split teams where I am the lead → deals only
+      const myLeadSplitIds = myMemberships
+        .filter(ts => ts.is_lead && teamTypeMap[ts.team_id] === 'split')
+        .map(ts => ts.team_id)
+      const splitJuniorIds = allTeamSplits
+        .filter(ts => myLeadSplitIds.includes(ts.team_id) && ts.agent_id !== matched.id)
+        .map(ts => ts.agent_id)
+
+      // contacts/properties scope: self + collaboration peers only
+      const myVisible    = [matched.id, ...collabPeerIds]
+      // deals scope: self + collaboration peers + split-team juniors (one-way)
+      const myDealVisible = [matched.id, ...collabPeerIds, ...splitJuniorIds]
+
       setVisibleAgentIds(myVisible)
+      setDealAgentIds(myDealVisible)
 
       // ── Phase 2: scoped data fetches ─────────────────────────────────────
       // Admin sees only pipeline deals (all agents); all other tables return
       // empty so no contacts/properties/tasks bleed through.
-      // Regular agents receive only rows owned by themselves + team peers.
+      // Regular agents receive only rows scoped to their computed lists above.
       const [contacts, properties, deals, tasks, templates, commissionsRes, activitiesRes] = await Promise.all([
         isAdminAgent
           ? { data: [] }
@@ -290,7 +314,7 @@ export default function App() {
           : supabase.from('properties').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
         isAdminAgent
           ? supabase.from('deals').select('*').order('created_at', { ascending: false })
-          : supabase.from('deals').select('*').in('agent_id', myVisible).order('created_at', { ascending: false }),
+          : supabase.from('deals').select('*').in('agent_id', myDealVisible).order('created_at', { ascending: false }),
         // Tasks are personal — never shared, even within a team
         isAdminAgent
           ? { data: [] }
@@ -376,7 +400,7 @@ export default function App() {
 
   const activeAgent = db.agents.find(a => a.id === activeAgentId) || null
   const isAdmin     = activeAgent?.role?.toLowerCase().includes('admin') ?? false
-  const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin, visibleAgentIds }
+  const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin, visibleAgentIds, dealAgentIds }
 
   if (loading) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', flexDirection: 'column', gap: 16 }}>

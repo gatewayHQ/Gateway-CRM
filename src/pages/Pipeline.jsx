@@ -1338,7 +1338,7 @@ const AUTO_TASKS = {
   closed:           { title: d => `Request referral — ${d.title}`,            type: 'follow-up', priority: 'low',    daysOut: 7 },
 }
 
-export default function PipelinePage({ db, setDb, activeAgent, isAdmin, visibleAgentIds }) {
+export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
   const [drawer, setDrawer] = useState(false)
   const [editing, setEditing] = useState(null)
   const [defaultStage, setDefaultStage] = useState('lead')
@@ -1380,10 +1380,10 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, visibleA
 
   const reload = useCallback(async () => {
     let q = supabase.from('deals').select('*').order('created_at', { ascending: false })
-    if (!isAdmin && visibleAgentIds?.length) q = q.in('agent_id', visibleAgentIds)
+    if (!isAdmin && dealAgentIds?.length) q = q.in('agent_id', dealAgentIds)
     const { data } = await q
     setDb(p => ({ ...p, deals: data || [] }))
-  }, [setDb, isAdmin, visibleAgentIds])
+  }, [setDb, isAdmin, dealAgentIds])
 
   const del = useCallback(async (id) => {
     // Nullify deal_id on tasks before deletion to avoid FK constraint failures
