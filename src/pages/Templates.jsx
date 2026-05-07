@@ -269,7 +269,19 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
       const data = await res.json()
       if (!res.ok) { pushToast(data.error || 'AI failed', 'error'); setAiLoading(false); return }
       const text = data.content?.[0]?.text || ''
-      const parsed = JSON.parse(text)
+      // Claude occasionally wraps JSON in markdown fences — strip them before parsing.
+      let parsed = {}
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        const match = text.match(/\{[\s\S]*\}/)
+        try { parsed = match ? JSON.parse(match[0]) : {} } catch { parsed = {} }
+      }
+      if (!parsed.subject && !parsed.body) {
+        pushToast('AI returned an unexpected format — please try again', 'error')
+        setAiLoading(false)
+        return
+      }
       if (parsed.subject) setSubject(parsed.subject)
       if (parsed.body) setBody(parsed.body)
       setAiOpen(false); setAiPrompt('')
