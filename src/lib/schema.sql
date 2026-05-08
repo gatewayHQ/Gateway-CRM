@@ -43,6 +43,14 @@ create table if not exists contacts (
   -- Annual reminders
   birthday          date,
   anniversary_date  date,
+  -- Extended contact info
+  job_title         text,
+  mobile_phone      text,
+  phone_ext         text,
+  company           text,
+  -- Prospect tracking
+  is_prospect       boolean default false,
+  prospect_type     text,          -- e.g. 'Seller', 'Buyer', 'Cold Call'
   -- Buyer / investor search criteria (for matching)
   submarket         text,          -- target area / county
   asset_types       text[],        -- e.g. ['multifamily','office']
@@ -397,8 +405,14 @@ end $$;
 -- -- Remove legacy team column from agents (no longer used for membership)
 -- alter table agents drop column if exists team_id;
 -- -- Buyer/investor search criteria (for buyer matching feature)
--- alter table contacts add column if not exists submarket   text;
--- alter table contacts add column if not exists asset_types text[];
--- alter table contacts add column if not exists size_min    numeric;
--- alter table contacts add column if not exists size_max    numeric;
--- alter table contacts add column if not exists size_unit   text default 'sqft';
+-- alter table contacts add column if not exists submarket     text;
+-- alter table contacts add column if not exists asset_types   text[];
+-- alter table contacts add column if not exists size_min      numeric;
+-- alter table contacts add column if not exists size_max      numeric;
+-- alter table contacts add column if not exists size_unit     text default 'sqft';
+-- alter table contacts add column if not exists job_title     text;
+-- alter table contacts add column if not exists mobile_phone  text;
+-- alter table contacts add column if not exists phone_ext     text;
+-- alter table contacts add column if not exists company       text;
+-- alter table contacts add column if not exists is_prospect   boolean default false;
+-- alter table contacts add column if not exists prospect_type text;

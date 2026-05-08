@@ -165,7 +165,7 @@ function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivit
 }
 
 function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activities, activeAgent, onSave, onActivityAdded }) {
-  const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'', birthday:'', anniversary_date:'', submarket:'', asset_types:[], size_min:'', size_max:'', size_unit:'sqft' }
+  const blank = { first_name:'', last_name:'', email:'', phone:'', phone_ext:'', mobile_phone:'', job_title:'', company:'', is_prospect:false, prospect_type:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'', birthday:'', anniversary_date:'', submarket:'', asset_types:[], size_min:'', size_max:'', size_unit:'sqft' }
   const blankProp = { address:'', list_price:'', type:'residential', subtype:'', beds:'', baths:'', sqft:'', garage:'', details:{} }
   const [form, setForm] = useState(contact || blank)
   const [errors, setErrors] = useState({})
@@ -215,6 +215,12 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
       assigned_agent_id: form.assigned_agent_id || null,
       email:             form.email?.trim()      || null,
       phone:             form.phone?.trim()      || null,
+      phone_ext:         form.phone_ext?.trim()  || null,
+      mobile_phone:      form.mobile_phone?.trim() || null,
+      job_title:         form.job_title?.trim()  || null,
+      company:           form.company?.trim()    || null,
+      prospect_type:     form.prospect_type?.trim() || null,
+      is_prospect:       form.is_prospect        || false,
       tags: typeof form.tags === 'string'
         ? form.tags.split(',').map(t => t.trim()).filter(Boolean)
         : (form.tags || []),
@@ -304,7 +310,15 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
               </div>
             </div>
             <div className="form-group"><label className="form-label">Email</label><input className="form-control" type="email" value={form.email||''} onChange={e=>set('email',e.target.value)} placeholder="jane@email.com" /></div>
-            <div className="form-group"><label className="form-label">Phone</label><input className="form-control" value={form.phone||''} onChange={e=>set('phone',e.target.value)} placeholder="(555) 000-0000" /></div>
+            <div className="form-row">
+              <div className="form-group"><label className="form-label">Phone</label><input className="form-control" value={form.phone||''} onChange={e=>set('phone',e.target.value)} placeholder="(555) 000-0000" /></div>
+              <div className="form-group" style={{ maxWidth:90 }}><label className="form-label">Ext.</label><input className="form-control" value={form.phone_ext||''} onChange={e=>set('phone_ext',e.target.value)} placeholder="123" /></div>
+            </div>
+            <div className="form-group"><label className="form-label">Mobile Phone</label><input className="form-control" value={form.mobile_phone||''} onChange={e=>set('mobile_phone',e.target.value)} placeholder="(555) 000-0000" /></div>
+            <div className="form-row">
+              <div className="form-group"><label className="form-label">Job Title</label><input className="form-control" value={form.job_title||''} onChange={e=>set('job_title',e.target.value)} placeholder="Owner" /></div>
+              <div className="form-group"><label className="form-label">Company</label><input className="form-control" value={form.company||''} onChange={e=>set('company',e.target.value)} placeholder="Acme Properties LLC" /></div>
+            </div>
 
             {/* ── Owner / Home Address ── */}
             <div style={{ borderTop:'1px solid var(--gw-border)', marginTop:4, paddingTop:14 }}>
@@ -347,6 +361,19 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
               </div>
             </div>
             <div className="form-group"><label className="form-label">Tags</label><input className="form-control" value={Array.isArray(form.tags)?form.tags.join(', '):(form.tags||'')} onChange={e=>set('tags',e.target.value)} placeholder="vip, referral, hot-lead" /><div className="form-hint">Comma separated</div></div>
+            <div className="form-row" style={{ alignItems:'center' }}>
+              <div className="form-group" style={{ flex:'0 0 auto' }}>
+                <label className="form-label">Is Prospect</label>
+                <label style={{ display:'flex', alignItems:'center', gap:8, marginTop:6, cursor:'pointer' }}>
+                  <input type="checkbox" checked={!!form.is_prospect} onChange={e=>set('is_prospect',e.target.checked)} />
+                  <span style={{ fontSize:13 }}>Yes</span>
+                </label>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Prospect Type</label>
+                <input className="form-control" value={form.prospect_type||''} onChange={e=>set('prospect_type',e.target.value)} placeholder="Seller, Buyer, Cold Call…" />
+              </div>
+            </div>
 
             {/* ── Reminders ── */}
             <div className="form-row">
@@ -555,8 +582,41 @@ function parseCSV(text) {
   return rows
 }
 
-const IMPORT_FIELDS = ['first_name','last_name','email','phone','type','source','status','notes','assigned_agent']
-const IMPORT_LABELS = { first_name:'First Name', last_name:'Last Name', email:'Email', phone:'Phone', type:'Type', source:'Source', status:'Status', notes:'Notes', assigned_agent:'Agent Name' }
+const IMPORT_FIELDS = [
+  'first_name','last_name','email','phone','phone_ext','mobile_phone',
+  'job_title','company','type','source','status','is_prospect','prospect_type',
+  'submarket','asset_types','notes','tags','assigned_agent',
+]
+const IMPORT_LABELS = {
+  first_name:'First Name', last_name:'Last Name', email:'Email Address',
+  phone:'Phone', phone_ext:'Phone Ext', mobile_phone:'Mobile Phone',
+  job_title:'Job Title', company:'Company',
+  type:'Contact Type', source:'Source', status:'Status',
+  is_prospect:'Is Prospect', prospect_type:'Prospect Type',
+  submarket:'Submarket', asset_types:'Asset Type',
+  notes:'Notes', tags:'Group(s) / Tags', assigned_agent:'Agent Name',
+}
+
+// Maps common header variations (lowercase, underscored) → IMPORT_FIELDS key
+const IMPORT_AUTO_MAP = {
+  first_name:['firstname','first'], last_name:['lastname','last'],
+  email:['emailaddress','email_address','e-mail'],
+  phone:['phonenumber','phone_number','phone1','mainphone'],
+  phone_ext:['ext','extension','phoneext','phone_extension'],
+  mobile_phone:['mobile','mobilephone','cell','cellphone','cell_phone'],
+  job_title:['jobtitle','title','position'],
+  company:['companyname','company_name','firm','organization'],
+  type:['contacttype','contact_type'],
+  source:['leadsource','lead_source'],
+  status:['contactstatus','contact_status'],
+  is_prospect:['isprospect','prospect'],
+  prospect_type:['prospecttype','prospectcategory'],
+  submarket:['market','area','county','targetmarket'],
+  asset_types:['assettype','asset_type','propertytype','property_type'],
+  notes:['note','comments','comment','remarks'],
+  tags:['groups','group','tags','label','labels'],
+  assigned_agent:['agent','assignedagent','assigned_agent','agentname','agent_name'],
+}
 
 function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
   const [step, setStep]               = useState(1)   // 1=upload  2=map  3=preview  4=importing
@@ -576,12 +636,18 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
       const hdrs = parsed[0]
       setHeaders(hdrs)
       setRows(parsed.slice(1))
-      // Auto-map headers that match field names
+      // Auto-map headers that match field names or known aliases
       const auto = {}
       hdrs.forEach((h, i) => {
-        const norm = h.toLowerCase().replace(/\s+/g,'_')
-        const match = IMPORT_FIELDS.find(f => f === norm || f.replace('_','') === norm.replace('_',''))
-        if (match) auto[match] = i
+        const norm = h.toLowerCase().replace(/[\s\-\/()]+/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'')
+        const normFlat = norm.replace(/_/g,'')
+        // Direct match first
+        const direct = IMPORT_FIELDS.find(f => f === norm || f.replace(/_/g,'') === normFlat)
+        if (direct) { auto[direct] = i; return }
+        // Alias match
+        for (const [field, aliases] of Object.entries(IMPORT_AUTO_MAP)) {
+          if (aliases.includes(norm) || aliases.includes(normFlat)) { auto[field] = i; return }
+        }
       })
       setMapping(auto)
       setStep(2)
@@ -624,17 +690,32 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
       const chunk = validRows.slice(i, i + CHUNK).map(row => {
         const r = {}
         IMPORT_FIELDS.forEach(f => { if (mapping[f] !== undefined) r[f] = (row[mapping[f]] || '').trim() })
+        // Normalize is_prospect: accept "yes", "true", "1", "x"
+        const prospectRaw = r.is_prospect?.toLowerCase() || ''
+        const isProspect = ['yes','true','1','x','y'].includes(prospectRaw)
+        // asset_types: comma-separated string → array
+        const assetTypesRaw = r.asset_types ? r.asset_types.split(/[,;]+/).map(s => s.trim().toLowerCase()).filter(Boolean) : []
+        // tags: Groups column → tags array
+        const tagsRaw = r.tags ? r.tags.split(/[,;]+/).map(s => s.trim()).filter(Boolean) : []
         return {
-          first_name: r.first_name || '(Unknown)',
-          last_name:  r.last_name  || '',
-          email:      r.email  || null,
-          phone:      r.phone  || null,
-          type:       validTypes.includes(r.type?.toLowerCase())     ? r.type.toLowerCase()   : 'buyer',
-          source:     validSources.includes(r.source?.toLowerCase()) ? r.source.toLowerCase() : 'other',
-          status:     validStatus.includes(r.status?.toLowerCase())  ? r.status.toLowerCase() : 'active',
-          notes:      r.notes  || null,
+          first_name:    r.first_name    || '(Unknown)',
+          last_name:     r.last_name     || '',
+          email:         r.email         || null,
+          phone:         r.phone         || null,
+          phone_ext:     r.phone_ext     || null,
+          mobile_phone:  r.mobile_phone  || null,
+          job_title:     r.job_title     || null,
+          company:       r.company       || null,
+          type:          validTypes.includes(r.type?.toLowerCase())     ? r.type.toLowerCase()   : 'buyer',
+          source:        validSources.includes(r.source?.toLowerCase()) ? r.source.toLowerCase() : 'other',
+          status:        validStatus.includes(r.status?.toLowerCase())  ? r.status.toLowerCase() : 'active',
+          is_prospect:   isProspect,
+          prospect_type: r.prospect_type || null,
+          submarket:     r.submarket     || null,
+          asset_types:   assetTypesRaw,
+          notes:         r.notes         || null,
+          tags:          tagsRaw,
           assigned_agent_id: resolveAgentId(r.assigned_agent),
-          tags: [],
         }
       })
       const { error } = await supabase.from('contacts').insert(chunk)
@@ -667,7 +748,7 @@ function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
         {step === 1 && (
           <div style={{ padding:24, flex:1, overflowY:'auto' }}>
             <p style={{ fontSize:13, color:'var(--gw-mist)', lineHeight:1.6, marginTop:0 }}>
-              Upload a CSV with contacts. First row must be headers. Supported columns: <strong>first_name, last_name, email, phone, type, source, status, notes</strong>.
+              Upload a CSV with contacts. First row must be headers. Common column names are auto-detected. Supported columns: <strong>First Name, Last Name, Email Address, Phone, Phone Ext, Mobile Phone, Job Title, Company, Contact Type, Source, Status, Is Prospect, Prospect Type, Submarket, Asset Type, Group(s), Notes, Agent Name</strong>.
             </p>
             <label style={{ display:'block', border:'2px dashed var(--gw-border)', borderRadius:'var(--radius)', padding:'36px 24px', textAlign:'center', cursor:'pointer', transition:'all 150ms' }}
               onDragOver={e => { e.preventDefault(); e.currentTarget.style.borderColor = 'var(--gw-azure)' }}
