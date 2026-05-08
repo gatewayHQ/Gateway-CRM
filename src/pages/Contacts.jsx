@@ -164,8 +164,8 @@ function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivit
   )
 }
 
-function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activities, activeAgent, onSave, onActivityAdded }) {
-  const blank = { first_name:'', last_name:'', email:'', phone:'', phone_ext:'', mobile_phone:'', job_title:'', company:'', is_prospect:false, prospect_type:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'', birthday:'', anniversary_date:'', submarket:'', asset_types:[], size_min:'', size_max:'', size_unit:'sqft' }
+function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activities, activeAgent, submarkets, onSave, onActivityAdded }) {
+  const blank = { first_name:'', last_name:'', email:'', phone:'', phone_ext:'', mobile_phone:'', job_title:'', company:'', is_prospect:false, prospect_type:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'', birthday:'', anniversary_date:'', submarkets:[], asset_types:[], buyer_criteria:{} }
   const blankProp = { address:'', list_price:'', type:'residential', subtype:'', beds:'', baths:'', sqft:'', garage:'', details:{} }
   const [form, setForm] = useState(contact || blank)
   const [errors, setErrors] = useState({})
@@ -204,7 +204,7 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
 
     // Destructure buyer-criteria fields out of form so ...baseForm never spreads
     // unmigrated columns to Supabase (causes schema cache error for all contact types)
-    const { submarket, asset_types, size_min, size_max, size_unit, ...baseForm } = form
+    const { submarket, submarkets, asset_types, size_min, size_max, size_unit, buyer_criteria, ...baseForm } = form
     const isBuyer = form.type === 'buyer' || form.type === 'investor'
 
     const payload = {
@@ -226,11 +226,9 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
         : (form.tags || []),
       // Buyer/investor criteria — only included for those contact types
       ...(isBuyer && {
-        submarket:   submarket   || null,
-        asset_types: Array.isArray(asset_types) ? asset_types : [],
-        size_min:    size_min    ? Number(size_min)  : null,
-        size_max:    size_max    ? Number(size_max)  : null,
-        size_unit:   size_unit   || 'sqft',
+        submarkets:    Array.isArray(submarkets) ? submarkets : [],
+        asset_types:   Array.isArray(asset_types) ? asset_types : [],
+        buyer_criteria: buyer_criteria || {},
       }),
     }
 
@@ -244,7 +242,7 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
     // retry without them so the contact save still succeeds
     let criteriaDropped = false
     if (error?.message?.includes('schema cache') && isBuyer) {
-      const { submarket: _s, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u, ...payloadNoCriteria } = payload
+      const { submarkets: _sm, asset_types: _a, buyer_criteria: _bc, ...payloadNoCriteria } = payload
       ;({ data: saved, error } = await doSave(payloadNoCriteria))
       if (!error) criteriaDropped = true
     }
@@ -395,10 +393,19 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
                 <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:10 }}>
                   {form.type === 'investor' ? 'Investment Criteria' : 'Buyer Criteria'}
                 </div>
+
+                {/* Submarket multi-select */}
                 <div className="form-group">
-                  <label className="form-label">Target Market / Area</label>
-                  <input className="form-control" value={form.submarket||''} onChange={e=>set('submarket',e.target.value)} placeholder="e.g. Austin, Travis County, Downtown" />
+                  <label className="form-label">Target Markets / Counties</label>
+                  <SubmarketPicker
+                    value={form.submarkets || []}
+                    onChange={v => set('submarkets', v)}
+                    options={submarkets || []}
+                  />
+                  <div className="form-hint">Select existing or type a new county and press Enter</div>
                 </div>
+
+                {/* Asset type toggles */}
                 <div className="form-group">
                   <label className="form-label">Asset Types</label>
                   <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginTop:4 }}>
@@ -420,24 +427,34 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
                     })}
                   </div>
                 </div>
-                <div className="form-row">
-                  <div className="form-group">
-                    <label className="form-label">Min Size</label>
-                    <input className="form-control" type="number" value={form.size_min||''} onChange={e=>set('size_min',e.target.value)} placeholder="0" />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">Max Size</label>
-                    <input className="form-control" type="number" value={form.size_max||''} onChange={e=>set('size_max',e.target.value)} placeholder="Any" />
-                  </div>
-                  <div className="form-group" style={{ maxWidth:90 }}>
-                    <label className="form-label">Unit</label>
-                    <select className="form-control" value={form.size_unit||'sqft'} onChange={e=>set('size_unit',e.target.value)}>
-                      <option value="sqft">sqft</option>
-                      <option value="acres">acres</option>
-                      <option value="units">units</option>
-                    </select>
-                  </div>
-                </div>
+
+                {/* Dynamic per-asset-type criteria */}
+                {(form.asset_types||[]).filter(t => ASSET_CRITERIA[t]).map(assetType => {
+                  const fields = ASSET_CRITERIA[assetType]
+                  const criteria = (form.buyer_criteria || {})[assetType] || {}
+                  const setCriteria = (key, val) => set('buyer_criteria', {
+                    ...(form.buyer_criteria || {}),
+                    [assetType]: { ...criteria, [key]: val === '' ? undefined : Number(val) },
+                  })
+                  return (
+                    <div key={assetType} style={{ background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:8 }}>
+                      <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.06em', color:'var(--gw-slate)', marginBottom:8 }}>
+                        {assetType.charAt(0).toUpperCase() + assetType.slice(1).replace('-',' ')} Criteria
+                      </div>
+                      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(90px, 1fr))', gap:8 }}>
+                        {fields.map(f => (
+                          <div key={f.key}>
+                            <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:3 }}>{f.label}</div>
+                            <input className="form-control" type="number" step={f.step||1} style={{ fontSize:12 }}
+                              value={criteria[f.key] ?? ''}
+                              onChange={e => setCriteria(f.key, e.target.value)}
+                              placeholder="—" />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             )}
 
@@ -560,6 +577,112 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
       )}
     </Drawer>
   )
+}
+
+// ── Submarket multi-select tag picker ──────────────────────────────────────
+function SubmarketPicker({ value, onChange, options }) {
+  const [open, setOpen] = useState(false)
+  const [input, setInput] = useState('')
+
+  const selected = Array.isArray(value) ? value : []
+  const q = input.toLowerCase()
+  const filtered = options.filter(o => !selected.includes(o) && o.toLowerCase().includes(q))
+
+  const toggle = (opt) => {
+    onChange(selected.includes(opt) ? selected.filter(s => s !== opt) : [...selected, opt])
+  }
+
+  const addNew = () => {
+    const trimmed = input.trim()
+    if (!trimmed || selected.includes(trimmed)) { setInput(''); return }
+    onChange([...selected, trimmed])
+    setInput('')
+  }
+
+  return (
+    <div style={{ position:'relative' }}>
+      <div className="form-control" style={{ display:'flex', flexWrap:'wrap', gap:4, minHeight:36, height:'auto', cursor:'text', padding:'4px 8px', alignItems:'center' }}
+        onClick={() => setOpen(true)}>
+        {selected.map(s => (
+          <span key={s} style={{ display:'flex', alignItems:'center', gap:3, background:'var(--gw-sky)', color:'var(--gw-azure)', borderRadius:20, padding:'2px 8px 2px 10px', fontSize:11, fontWeight:600, whiteSpace:'nowrap' }}>
+            {s}
+            <button onMouseDown={e => { e.preventDefault(); toggle(s) }}
+              style={{ background:'none', border:'none', cursor:'pointer', color:'var(--gw-azure)', padding:'0 0 0 2px', lineHeight:1, fontSize:15, fontWeight:400 }}>×</button>
+          </span>
+        ))}
+        <input
+          value={input}
+          onChange={e => { setInput(e.target.value); setOpen(true) }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setTimeout(() => setOpen(false), 150)}
+          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addNew() } if (e.key === 'Escape') setOpen(false) }}
+          placeholder={selected.length === 0 ? 'Search or type a county…' : ''}
+          style={{ border:'none', outline:'none', fontSize:13, flex:1, minWidth:100, background:'transparent', padding:'2px 0' }}
+        />
+      </div>
+      {open && (
+        <div style={{ position:'absolute', top:'calc(100% + 2px)', left:0, right:0, background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', boxShadow:'0 4px 16px rgba(0,0,0,0.1)', zIndex:300, maxHeight:200, overflowY:'auto' }}>
+          {filtered.map(opt => (
+            <label key={opt} onMouseDown={e => { e.preventDefault(); toggle(opt) }}
+              style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 12px', cursor:'pointer', fontSize:13, transition:'background 80ms' }}
+              onMouseEnter={e => e.currentTarget.style.background='var(--gw-bone)'}
+              onMouseLeave={e => e.currentTarget.style.background='transparent'}>
+              <input type="checkbox" checked={selected.includes(opt)} onChange={() => {}} style={{ cursor:'pointer' }} />
+              {opt}
+            </label>
+          ))}
+          {input.trim() && !options.includes(input.trim()) && !selected.includes(input.trim()) && (
+            <div onMouseDown={e => { e.preventDefault(); addNew() }}
+              style={{ padding:'8px 12px', fontSize:13, cursor:'pointer', color:'var(--gw-azure)', fontWeight:600, borderTop: filtered.length ? '1px solid var(--gw-border)' : 'none' }}
+              onMouseEnter={e => e.currentTarget.style.background='var(--gw-sky)'}
+              onMouseLeave={e => e.currentTarget.style.background='transparent'}>
+              + Add "{input.trim()}"
+            </div>
+          )}
+          {filtered.length === 0 && !input.trim() && (
+            <div style={{ padding:'10px 12px', fontSize:12, color:'var(--gw-mist)' }}>Type to search or add a new market</div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Per-asset-type buyer criteria fields ────────────────────────────────────
+const PRICE_FIELDS = [
+  { key:'price_min', label:'Min Price', type:'number' },
+  { key:'price_max', label:'Max Price', type:'number' },
+]
+const SQFT_FIELDS = [
+  { key:'sqft_min', label:'Min Sqft', type:'number' },
+  { key:'sqft_max', label:'Max Sqft', type:'number' },
+]
+const ASSET_CRITERIA = {
+  residential: [
+    { key:'beds_min', label:'Min Beds', type:'number' }, { key:'beds_max', label:'Max Beds', type:'number' },
+    { key:'baths_min', label:'Min Baths', type:'number', step:0.5 },
+    ...SQFT_FIELDS, ...PRICE_FIELDS,
+  ],
+  rental: [
+    { key:'beds_min', label:'Min Beds', type:'number' }, { key:'beds_max', label:'Max Beds', type:'number' },
+    { key:'baths_min', label:'Min Baths', type:'number', step:0.5 },
+    ...PRICE_FIELDS,
+  ],
+  multifamily: [
+    { key:'units_min', label:'Min Units', type:'number' }, { key:'units_max', label:'Max Units', type:'number' },
+    ...SQFT_FIELDS, ...PRICE_FIELDS,
+  ],
+  office:     [...SQFT_FIELDS, ...PRICE_FIELDS],
+  retail:     [...SQFT_FIELDS, ...PRICE_FIELDS],
+  industrial: [...SQFT_FIELDS, ...PRICE_FIELDS],
+  'mixed-use': [
+    { key:'units_min', label:'Min Units', type:'number' }, ...SQFT_FIELDS, ...PRICE_FIELDS,
+  ],
+  land: [
+    { key:'acres_min', label:'Min Acres', type:'number', step:0.01 },
+    { key:'acres_max', label:'Max Acres', type:'number', step:0.01 },
+    ...PRICE_FIELDS,
+  ],
 }
 
 // ── Simple RFC-4180 CSV parser ──────────────────────────────────────────────
@@ -867,6 +990,11 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
   const activities  = db.activities  || []
   const deals       = db.deals       || []
 
+  // Derive sorted unique submarket list from all contacts for the picker dropdown
+  const allSubmarkets = useMemo(() =>
+    [...new Set(contacts.flatMap(c => c.submarkets || []))].sort()
+  , [contacts])
+
   // Compute heat scores once per contacts/activities/deals change — O(n×m) so must not run per render
   const heatScores = useMemo(() => {
     const map = {}
@@ -1056,7 +1184,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
         open={drawer} onClose={() => setDrawer(false)}
         contact={editing} agents={agents} deals={deals}
         tasks={db.tasks||[]} activities={activities}
-        activeAgent={activeAgent}
+        activeAgent={activeAgent} submarkets={allSubmarkets}
         onActivityAdded={act => setDb(p => ({ ...p, activities: [act, ...(p.activities || [])] }))}
         onSave={reload}
       />

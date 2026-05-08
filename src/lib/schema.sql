@@ -52,11 +52,13 @@ create table if not exists contacts (
   is_prospect       boolean default false,
   prospect_type     text,          -- e.g. 'Seller', 'Buyer', 'Cold Call'
   -- Buyer / investor search criteria (for matching)
-  submarket         text,          -- target area / county
+  submarket         text,          -- legacy single-value field (kept for import compat)
+  submarkets        text[],        -- multi-select county / market list
   asset_types       text[],        -- e.g. ['multifamily','office']
-  size_min          numeric,
+  buyer_criteria    jsonb default '{}',  -- per-asset-type criteria: {residential:{beds_min,beds_max,...}, ...}
+  size_min          numeric,       -- legacy (kept for existing data)
   size_max          numeric,
-  size_unit         text default 'sqft',  -- sqft | acres | units
+  size_unit         text default 'sqft',
   created_at        timestamptz default now()
 );
 
@@ -405,14 +407,16 @@ end $$;
 -- -- Remove legacy team column from agents (no longer used for membership)
 -- alter table agents drop column if exists team_id;
 -- -- Buyer/investor search criteria (for buyer matching feature)
--- alter table contacts add column if not exists submarket     text;
--- alter table contacts add column if not exists asset_types   text[];
--- alter table contacts add column if not exists size_min      numeric;
--- alter table contacts add column if not exists size_max      numeric;
--- alter table contacts add column if not exists size_unit     text default 'sqft';
--- alter table contacts add column if not exists job_title     text;
--- alter table contacts add column if not exists mobile_phone  text;
--- alter table contacts add column if not exists phone_ext     text;
--- alter table contacts add column if not exists company       text;
--- alter table contacts add column if not exists is_prospect   boolean default false;
--- alter table contacts add column if not exists prospect_type text;
+-- alter table contacts add column if not exists submarket      text;
+-- alter table contacts add column if not exists asset_types    text[];
+-- alter table contacts add column if not exists size_min       numeric;
+-- alter table contacts add column if not exists size_max       numeric;
+-- alter table contacts add column if not exists size_unit      text default 'sqft';
+-- alter table contacts add column if not exists job_title      text;
+-- alter table contacts add column if not exists mobile_phone   text;
+-- alter table contacts add column if not exists phone_ext      text;
+-- alter table contacts add column if not exists company        text;
+-- alter table contacts add column if not exists is_prospect    boolean default false;
+-- alter table contacts add column if not exists prospect_type  text;
+-- alter table contacts add column if not exists submarkets     text[];
+-- alter table contacts add column if not exists buyer_criteria jsonb default '{}';
