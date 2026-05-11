@@ -617,6 +617,9 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
   const [docAnnotations, setDocAnnotations] = React.useState([])
   const [sending,       setSending]     = React.useState(false)
   const [dragOver,      setDragOver]    = React.useState(false)
+  const [autoDetecting, setAutoDetecting] = React.useState(false)
+  const [autoResult,    setAutoResult]  = React.useState(null)   // { docType, label, signerTabs }
+  const [useAnchorTabs, setUseAnchorTabs] = React.useState(false)
   const fileRef = React.useRef()
 
   // Each signer has name, email, tabs[]
@@ -661,6 +664,33 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
   const toBase64 = f => new Promise((res, rej) => {
     const r = new FileReader(); r.onload = e => res(e.target.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(f)
   })
+
+  const docName = file ? file.name : (pickedFile ? pickedFile.replace(/^\d+-/, '') : '')
+
+  const autoDetect = async () => {
+    if (!docName) { pushToast('Select a document first', 'error'); return }
+    const invalid = signers.find(s => !s.name.trim() || !s.email.trim())
+    if (invalid) { pushToast('Fill in all signer names and emails first', 'error'); return }
+    setAutoDetecting(true)
+    try {
+      const signerRoles = allSigners.map((s, i) => ({
+        name: s.name, email: s.email, routingOrder: s.routingOrder,
+        role: i === 0 ? '' : i === allSigners.length - 1 && agentSigns ? 'agent' : '',
+      }))
+      const resp = await fetch('/api/docusign', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'analyze', documentName: docName, signers: signerRoles }),
+      })
+      const data = await resp.json()
+      if (data.error) { pushToast(data.error, 'error'); return }
+      setAutoResult(data)
+      setUseAnchorTabs(true)
+    } catch (err) {
+      pushToast('Auto-detect failed: ' + err.message, 'error')
+    } finally {
+      setAutoDetecting(false)
+    }
+  }
 
   const goToStep2 = async () => {
     const invalid = signers.find(s => !s.name.trim() || !s.email.trim())
@@ -734,29 +764,50 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
   }
 
   const send = async () => {
-    if (allFields.length === 0) { pushToast('Place at least one field on the PDF', 'error'); return }
+    if (!useAnchorTabs && allFields.length === 0) { pushToast('Place at least one field on the PDF', 'error'); return }
     setSending(true)
-    let base64, docName
-    if (docAnnotations.length > 0) {
-      // Burn annotations into PDF before sending
+
+    // When anchor tabs bypass step 2, the signed URL may not have been fetched yet.
+    // Resolve it now before trying to read the file.
+    let resolvedFileUrl = fileUrl
+    if (!file && pickedFile && !resolvedFileUrl) {
+      const { data: urlData, error: urlErr } = await supabase.storage
+        .from(BUCKET)
+        .createSignedUrl(`deal-${deal.id}/${pickedFile}`, 300)
+      if (urlErr) { pushToast('Could not load document', 'error'); setSending(false); return }
+      resolvedFileUrl = urlData.signedUrl
+      setFileUrl(resolvedFileUrl)
+    }
+
+    let base64, finalDocName
+    if (!useAnchorTabs && docAnnotations.length > 0) {
       try {
-        base64  = await buildAnnotatedBase64(file, fileUrl, docAnnotations)
-        docName = file ? file.name : pickedFile.replace(/^\d+-/, '')
+        base64        = await buildAnnotatedBase64(file, resolvedFileUrl, docAnnotations)
+        finalDocName  = file ? file.name : pickedFile.replace(/^\d+-/, '')
       } catch (err) {
         pushToast('Could not process annotations: ' + err.message, 'error')
         setSending(false); return
       }
-    } else if (file) { base64 = await toBase64(file); docName = file.name }
-    else { const blob = await fetch(fileUrl).then(r => r.blob()); base64 = await toBase64(blob); docName = pickedFile.replace(/^\d+-/, '') }
+    } else if (file) { base64 = await toBase64(file); finalDocName = file.name }
+    else { const blob = await fetch(resolvedFileUrl).then(r => r.blob()); base64 = await toBase64(blob); finalDocName = pickedFile.replace(/^\d+-/, '') }
 
-    const signerPayload = allSigners.map(s => ({
-      name: s.name, email: s.email, routingOrder: s.routingOrder,
-      tabs: s.tabs || [],
-    }))
+    // When using anchor tabs, tabs[] is empty — server applies them from doc-type detection
+    const signerPayload = allSigners.map((s, i) => {
+      if (useAnchorTabs && autoResult?.signerTabs) {
+        const st = autoResult.signerTabs.find(t => t.signerIndex === i)
+        return { name: s.name, email: s.email, routingOrder: s.routingOrder, tabs: st?.tabs || [] }
+      }
+      return { name: s.name, email: s.email, routingOrder: s.routingOrder, tabs: s.tabs || [] }
+    })
 
     const resp = await fetch('/api/docusign', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action:'send', emailSubject:subject, documentBase64:base64, documentName:docName, signers: signerPayload }),
+      body: JSON.stringify({
+        action: 'send', emailSubject: subject,
+        documentBase64: base64, documentName: finalDocName,
+        signers: signerPayload,
+        useAnchorTabs,
+      }),
     })
     const data = await resp.json()
     setSending(false)
@@ -766,18 +817,22 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
       deal_id: deal.id, envelope_id: data.envelopeId,
       signer_name:  allSigners.map(s=>s.name).join(', '),
       signer_email: allSigners.map(s=>s.email).join(', '),
-      document_name: docName, subject, status: data.status || 'sent',
+      document_name: finalDocName, subject, status: data.status || 'sent',
     }])
     pushToast(`Sent to ${allSigners.length} signer${allSigners.length>1?'s':''} for signature`)
     onSent()
   }
 
   return (
-    <Modal open={true} onClose={onClose} width={step === 2 ? 740 : 500}>
+    <Modal open={true} onClose={onClose} width={step === 2 && !useAnchorTabs ? 740 : 500}>
       <div className="modal__head">
         <div>
-          <div className="eyebrow-label">DocuSign · Step {step} of 2</div>
-          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>{step===1 ? 'Set Up Signers' : 'Place Signature Fields'}</h3>
+          <div className="eyebrow-label">
+            {useAnchorTabs ? 'DocuSign · Auto-fields' : `DocuSign · Step ${step} of 2`}
+          </div>
+          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>
+            {step===1 ? 'Set Up Signers' : useAnchorTabs ? 'Send for Signature' : 'Place Signature Fields'}
+          </h3>
         </div>
         <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
       </div>
@@ -840,12 +895,60 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
               onClick={()=>fileRef.current.click()}
               onDragOver={e=>{e.preventDefault();setDragOver(true)}}
               onDragLeave={()=>setDragOver(false)}
-              onDrop={e=>{e.preventDefault();setDragOver(false);setFile(e.dataTransfer.files[0]);setPickedFile('');setFileUrl(null)}}>
-              <input ref={fileRef} type="file" accept=".pdf" style={{display:'none'}} onChange={e=>{setFile(e.target.files[0]);setPickedFile('');setFileUrl(null)}}/>
+              onDrop={e=>{e.preventDefault();setDragOver(false);setFile(e.dataTransfer.files[0]);setPickedFile('');setFileUrl(null);setAutoResult(null);setUseAnchorTabs(false)}}>
+              <input ref={fileRef} type="file" accept=".pdf" style={{display:'none'}} onChange={e=>{setFile(e.target.files[0]);setPickedFile('');setFileUrl(null);setAutoResult(null);setUseAnchorTabs(false)}}/>
               {file ? <div style={{fontSize:12,fontWeight:600,color:'var(--gw-green)'}}>{file.name}</div>
                 : <><Icon name="upload" size={18} style={{color:'var(--gw-border)',marginBottom:4}}/><div style={{fontSize:12}}>Drop PDF or click to browse</div></>}
             </div>
           </div>
+
+          {/* ── Auto-detect signature fields ─────────────────────────────── */}
+          {(file || pickedFile) && (
+            <div style={{ marginTop:4 }}>
+              {!autoResult && (
+                <button className="btn btn--secondary btn--sm" style={{ width:'100%', justifyContent:'center' }}
+                  onClick={autoDetect} disabled={autoDetecting}>
+                  {autoDetecting
+                    ? '⟳ Detecting fields…'
+                    : '✦ Auto-detect Signature Fields'}
+                </button>
+              )}
+              {autoResult && (
+                <div style={{ border:'1.5px solid var(--gw-green)', borderRadius:'var(--radius)', padding:'12px 14px', background:'var(--gw-green-light)' }}>
+                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+                    <div>
+                      <span style={{ fontWeight:700, fontSize:13, color:'var(--gw-ink)' }}>✓ Detected: {autoResult.label}</span>
+                      {autoResult.confidence < 1 && <span style={{ fontSize:11, color:'var(--gw-mist)', marginLeft:6 }}>(partial match)</span>}
+                    </div>
+                    <button onClick={() => { setAutoResult(null); setUseAnchorTabs(false) }}
+                      style={{ background:'none', border:'none', cursor:'pointer', fontSize:16, color:'var(--gw-mist)', lineHeight:1 }}>×</button>
+                  </div>
+                  <div style={{ display:'flex', flexDirection:'column', gap:3, marginBottom:10 }}>
+                    {autoResult.signerTabs?.map((st, i) => (
+                      <div key={i} style={{ fontSize:12 }}>
+                        <span style={{ width:16, height:16, borderRadius:'50%', background:SIGNER_COLORS[i]||SIGNER_COLORS[0], display:'inline-flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:10, marginRight:6 }}>{i+1}</span>
+                        <strong>{allSigners[i]?.name || `Signer ${i+1}`}</strong>
+                        <span style={{ color:'var(--gw-mist)', marginLeft:6 }}>({st.role})</span>
+                        <span style={{ marginLeft:8, color:'var(--gw-ink)' }}>
+                          {st.tabs.filter(t=>t.type==='signature').length} sig ·{' '}
+                          {st.tabs.filter(t=>t.type==='initials').length} initials ·{' '}
+                          {st.tabs.filter(t=>t.type==='date').length} date
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                    <div style={{ flex:1, fontSize:11, color:'var(--gw-mist)' }}>
+                      DocuSign will find these fields in your document automatically — no manual placement needed.
+                    </div>
+                    <button className="btn btn--ghost btn--sm" onClick={()=>setUseAnchorTabs(false)} style={{ whiteSpace:'nowrap', fontSize:11 }}>
+                      Place manually instead
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </>}
 
         {step === 2 && <>
@@ -878,7 +981,12 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
       <div className="modal__foot">
         {step===1 && <>
           <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary" onClick={goToStep2}>Next: Place Fields</button>
+          {useAnchorTabs
+            ? <button className="btn btn--primary" onClick={send} disabled={sending}>
+                {sending ? 'Sending…' : `Send for Signature (${autoResult?.totalTabs || 0} auto-fields)`}
+              </button>
+            : <button className="btn btn--primary" onClick={goToStep2}>Next: Place Fields</button>
+          }
         </>}
         {step===2 && <>
           <button className="btn btn--secondary" onClick={()=>setStep(1)}>Back</button>

@@ -21,6 +21,7 @@ const ReportsPage      = React.lazy(() => import('./pages/Reports.jsx'))
 const SequencesPage    = React.lazy(() => import('./pages/Sequences.jsx'))
 const ColdCallsPage    = React.lazy(() => import('./pages/ColdCalls.jsx'))
 const IntegrationsPage = React.lazy(() => import('./pages/Integrations.jsx'))
+const CampaignsPage    = React.lazy(() => import('./pages/Campaigns.jsx'))
 import { Analytics } from '@vercel/analytics/react'
 
 // Primary: what every agent uses every day
@@ -37,6 +38,7 @@ const NAV_CORE = [
 const NAV_OFFICE = [
   { id: 'commission', label: 'Commission', icon: 'commission' },
   { id: 'coldcalls',  label: 'Cold Calls', icon: 'phone' },
+  { id: 'campaigns',  label: 'Campaigns',  icon: 'mail' },
   { id: 'reports',    label: 'Reports',    icon: 'reports' },
   { id: 'team',       label: 'Team',       icon: 'team' },
 ]
@@ -64,6 +66,7 @@ const TITLES = {
   properties: { title: 'Properties',       crumb: 'Database · Listings' },
   pipeline:   { title: 'Pipeline',         crumb: 'Deals · Kanban' },
   coldcalls:  { title: 'Cold Call Lists',  crumb: 'Prospecting · Dialer' },
+  campaigns:  { title: 'Campaigns',        crumb: 'Marketing · Mail · Tracking' },
   commission: { title: 'Commission',       crumb: 'Deals · Earnings' },
   tasks:      { title: 'Tasks',            crumb: 'Follow-ups · Reminders' },
   messages:   { title: 'Messages',         crumb: 'SMS · Twilio Inbox' },
@@ -605,6 +608,7 @@ export default function App() {
           {route === 'properties' && <PropertiesPage {...props} />}
           {route === 'pipeline'   && <PipelinePage {...props} isAdmin={isAdmin} />}
           {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
+          {route === 'campaigns'  && <CampaignsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
           {route === 'commission' && <CommissionPage {...props} />}
           {route === 'tasks'      && <TasksPage {...props} />}
           {route === 'messages'   && <MessagesPage db={db} activeAgent={activeAgent} />}
