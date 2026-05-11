@@ -360,6 +360,115 @@ do $$ begin
 end $$;
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- MAIL CAMPAIGNS  (outreach campaigns — mail flyers, cold call, email blasts)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists mail_campaigns (
+  id              uuid primary key default uuid_generate_v4(),
+  name            text not null,
+  description     text,
+  property_types  text[] default '{}',   -- target property types (multifamily, office…)
+  status          text check (status in ('draft','active','paused','completed')) default 'draft',
+  agent_id        uuid references agents(id) on delete set null,
+  flyer_url       text,                  -- link to flyer asset (Canva, PDF URL, etc.)
+  tracking_url    text,                  -- Bitly short URL for QR tracking
+  qr_code_url     text,                  -- Bitly QR code image URL
+  bitly_id        text,                  -- Bitly link ID for analytics
+  frequency_cap   integer default 0,     -- 0 = no cap; >0 = max sends per contact
+  frequency_days  integer default 30,    -- rolling window for frequency cap
+  total_sends     integer default 0,     -- denormalised counter (updated by trigger/app)
+  total_responses integer default 0,
+  created_at      timestamptz default now()
+);
+
+alter table mail_campaigns enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='mail_campaigns' and policyname='allow_all') then
+    create policy "allow_all" on mail_campaigns for all using (true) with check (true);
+  end if;
+end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- MAIL SENDS  (every individual send / contact event — mail, call, or email)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists mail_sends (
+  id                uuid primary key default uuid_generate_v4(),
+  campaign_id       uuid references mail_campaigns(id) on delete cascade,
+  -- Recipient link (at least one must be set, or use raw fields below)
+  contact_id        uuid references contacts(id) on delete set null,
+  cold_lead_id      uuid references cold_call_leads(id) on delete set null,
+  -- Raw recipient details (used when no contact record exists yet)
+  recipient_name    text,
+  recipient_address text,
+  recipient_city    text,
+  recipient_state   text,
+  recipient_zip     text,
+  -- Event metadata
+  channel           text check (channel in ('mail','cold-call','email')) default 'mail',
+  sent_at           timestamptz default now(),
+  agent_id          uuid references agents(id) on delete set null,
+  -- Response tracking
+  response          text check (response in ('no-response','callback','interested','dnc','converted')) default 'no-response',
+  responded_at      timestamptz,
+  deal_id           uuid references deals(id) on delete set null,  -- deal attributed to this send
+  notes             text,
+  created_at        timestamptz default now()
+);
+
+create index if not exists mail_sends_campaign_id_idx on mail_sends(campaign_id);
+create index if not exists mail_sends_contact_id_idx  on mail_sends(contact_id);
+create index if not exists mail_sends_cold_lead_idx   on mail_sends(cold_lead_id);
+
+alter table mail_sends enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='mail_sends' and policyname='allow_all') then
+    create policy "allow_all" on mail_sends for all using (true) with check (true);
+  end if;
+end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- MAIL SUPPRESSIONS  (global DNC / opt-out list across all campaigns)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists mail_suppressions (
+  id         uuid primary key default uuid_generate_v4(),
+  address    text,
+  email      text,
+  phone      text,
+  full_name  text,
+  reason     text check (reason in ('dnc','opted-out','deceased','returned-mail','other')) default 'dnc',
+  contact_id uuid references contacts(id) on delete set null,
+  agent_id   uuid references agents(id) on delete set null,
+  notes      text,
+  created_at timestamptz default now()
+);
+
+alter table mail_suppressions enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='mail_suppressions' and policyname='allow_all') then
+    create policy "allow_all" on mail_suppressions for all using (true) with check (true);
+  end if;
+end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DOCUSIGN FIELD TEMPLATES  (pre-built anchor tab configs per document type)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists docusign_field_templates (
+  id            uuid primary key default uuid_generate_v4(),
+  name          text not null,             -- e.g. "Purchase Agreement"
+  doc_type      text not null unique,      -- key for lookup (purchase_agreement, listing_agreement…)
+  description   text,
+  anchor_tabs   jsonb not null default '[]',  -- array of anchor tab definitions
+  agent_id      uuid references agents(id) on delete set null,  -- null = system default
+  created_at    timestamptz default now()
+);
+
+alter table docusign_field_templates enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='docusign_field_templates' and policyname='allow_all') then
+    create policy "allow_all" on docusign_field_templates for all using (true) with check (true);
+  end if;
+end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- MIGRATION  (run this block if upgrading an existing database)
 -- ─────────────────────────────────────────────────────────────────────────────
 -- alter table agents      add column if not exists auth_id uuid unique;
