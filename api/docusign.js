@@ -86,7 +86,8 @@ function buildTabs(tabs, recipientId) {
         anchorXOffset:  String(t.anchorXOffset  ?? '5'),
         anchorYOffset:  String(t.anchorYOffset  ?? '0'),
         anchorUnits:    t.anchorUnits            || 'pixels',
-        anchorMatchWholeWord:  false,
+        anchorMatchWholeWord:    false,
+        anchorCaseSensitive:     false,
         anchorIgnoreIfNotPresent: true,  // skip if anchor not found (multi-type docs)
         scaleValue:     t.scaleValue             || '0.8',
       }
@@ -161,97 +162,103 @@ function detectDocumentType(filename) {
 // anchorIgnoreIfNotPresent:true means the tab is silently skipped if text isn't found.
 function getAnchorTabsForDocType(docType) {
   const TEMPLATES = {
+    // Offset conventions:
+    //   Signatures on dedicated label lines  → anchorXOffset:'5',   anchorYOffset:'20'
+    //   Signatures after short colon labels  → anchorXOffset:'60+', anchorYOffset:'-5'
+    //   Initials (inline, label then blank)  → anchorXOffset:'105', anchorYOffset:'-7', scaleValue:'0.7'
+    //   Dates after short colon labels       → anchorXOffset:'40',  anchorYOffset:'-5'
+    //   Dates on dedicated label lines       → anchorXOffset:'5',   anchorYOffset:'20'
     purchase_agreement: {
       buyer: [
-        { type:'signature', anchorString:'Buyer Signature',       anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'signature', anchorString:'Buyer\'s Signature',    anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Buyer Signature',       anchorXOffset:'5',   anchorYOffset:'20' },
+        { type:'signature', anchorString:'Buyer\'s Signature',    anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'BUYER:',                anchorXOffset:'80',  anchorYOffset:'-5' },
-        { type:'signature', anchorString:'Purchaser Signature',   anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'initials',  anchorString:'Buyer\'s Initials',     anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'initials',  anchorString:'Buyer Initials',        anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'date',      anchorString:'Buyer Date',            anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'date',      anchorString:'Date (Buyer)',          anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Purchaser Signature',   anchorXOffset:'5',   anchorYOffset:'20' },
+        { type:'initials',  anchorString:'Buyer\'s Initials',     anchorXOffset:'105', anchorYOffset:'-7', scaleValue:'0.7' },
+        { type:'initials',  anchorString:'Buyer Initials',        anchorXOffset:'105', anchorYOffset:'-7', scaleValue:'0.7' },
+        { type:'date',      anchorString:'Buyer Date',            anchorXOffset:'5',   anchorYOffset:'20' },
+        { type:'date',      anchorString:'Date (Buyer)',          anchorXOffset:'90',  anchorYOffset:'-5' },
       ],
       seller: [
-        { type:'signature', anchorString:'Seller Signature',      anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'signature', anchorString:'Seller\'s Signature',   anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Seller Signature',      anchorXOffset:'5',   anchorYOffset:'20' },
+        { type:'signature', anchorString:'Seller\'s Signature',   anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'SELLER:',               anchorXOffset:'80',  anchorYOffset:'-5' },
-        { type:'initials',  anchorString:'Seller\'s Initials',    anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'initials',  anchorString:'Seller Initials',       anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'date',      anchorString:'Seller Date',           anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'date',      anchorString:'Date (Seller)',         anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'initials',  anchorString:'Seller\'s Initials',    anchorXOffset:'105', anchorYOffset:'-7', scaleValue:'0.7' },
+        { type:'initials',  anchorString:'Seller Initials',       anchorXOffset:'105', anchorYOffset:'-7', scaleValue:'0.7' },
+        { type:'date',      anchorString:'Seller Date',           anchorXOffset:'5',   anchorYOffset:'20' },
+        { type:'date',      anchorString:'Date (Seller)',         anchorXOffset:'90',  anchorYOffset:'-5' },
       ],
       agent: [
-        { type:'signature', anchorString:'Agent Signature',       anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'signature', anchorString:'Buyer\'s Agent',        anchorXOffset:'100', anchorYOffset:'0'  },
-        { type:'signature', anchorString:'Listing Agent',         anchorXOffset:'100', anchorYOffset:'0'  },
-        { type:'date',      anchorString:'Agent Date',            anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Agent Signature',       anchorXOffset:'5',   anchorYOffset:'20' },
+        { type:'signature', anchorString:'Buyer\'s Agent',        anchorXOffset:'100', anchorYOffset:'-5' },
+        { type:'signature', anchorString:'Listing Agent',         anchorXOffset:'100', anchorYOffset:'-5' },
+        { type:'date',      anchorString:'Agent Date',            anchorXOffset:'5',   anchorYOffset:'20' },
       ],
     },
 
     listing_agreement: {
       seller: [
-        { type:'signature', anchorString:'Seller/Owner Signature', anchorXOffset:'5',  anchorYOffset:'0'  },
-        { type:'signature', anchorString:'Owner Signature',        anchorXOffset:'5',  anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Seller/Owner Signature', anchorXOffset:'5',  anchorYOffset:'20' },
+        { type:'signature', anchorString:'Owner Signature',        anchorXOffset:'5',  anchorYOffset:'20' },
         { type:'signature', anchorString:'Seller:',                anchorXOffset:'60', anchorYOffset:'-5' },
         { type:'signature', anchorString:'SELLER:',                anchorXOffset:'60', anchorYOffset:'-5' },
-        { type:'initials',  anchorString:'Seller Initials',        anchorXOffset:'5',  anchorYOffset:'0'  },
-        { type:'date',      anchorString:'Seller Date',            anchorXOffset:'5',  anchorYOffset:'0'  },
+        { type:'initials',  anchorString:'Seller Initials',        anchorXOffset:'105',anchorYOffset:'-7', scaleValue:'0.7' },
+        { type:'date',      anchorString:'Seller Date',            anchorXOffset:'5',  anchorYOffset:'20' },
       ],
       agent: [
-        { type:'signature', anchorString:'Listing Agent Signature', anchorXOffset:'5', anchorYOffset:'0' },
+        { type:'signature', anchorString:'Listing Agent Signature', anchorXOffset:'5', anchorYOffset:'20' },
         { type:'signature', anchorString:'Agent:',                  anchorXOffset:'60',anchorYOffset:'-5' },
-        { type:'date',      anchorString:'Agent Date',              anchorXOffset:'5', anchorYOffset:'0' },
-        { type:'date',      anchorString:'Broker Date',             anchorXOffset:'5', anchorYOffset:'0' },
+        { type:'date',      anchorString:'Agent Date',              anchorXOffset:'5', anchorYOffset:'20' },
+        { type:'date',      anchorString:'Broker Date',             anchorXOffset:'5', anchorYOffset:'20' },
       ],
     },
 
     lease_agreement: {
       tenant: [
-        { type:'signature', anchorString:'Tenant Signature',      anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Tenant Signature',      anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'Tenant:',               anchorXOffset:'60',  anchorYOffset:'-5' },
-        { type:'signature', anchorString:'Lessee Signature',      anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Lessee Signature',      anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'TENANT:',               anchorXOffset:'60',  anchorYOffset:'-5' },
-        { type:'initials',  anchorString:'Tenant Initials',       anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'date',      anchorString:'Tenant Date',           anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'initials',  anchorString:'Tenant Initials',       anchorXOffset:'105', anchorYOffset:'-7', scaleValue:'0.7' },
+        { type:'date',      anchorString:'Tenant Date',           anchorXOffset:'5',   anchorYOffset:'20' },
       ],
       landlord: [
-        { type:'signature', anchorString:'Landlord Signature',    anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Landlord Signature',    anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'Landlord:',             anchorXOffset:'60',  anchorYOffset:'-5' },
-        { type:'signature', anchorString:'Lessor Signature',      anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Lessor Signature',      anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'Owner/Agent:',          anchorXOffset:'60',  anchorYOffset:'-5' },
-        { type:'initials',  anchorString:'Landlord Initials',     anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'date',      anchorString:'Landlord Date',         anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'initials',  anchorString:'Landlord Initials',     anchorXOffset:'105', anchorYOffset:'-7', scaleValue:'0.7' },
+        { type:'date',      anchorString:'Landlord Date',         anchorXOffset:'5',   anchorYOffset:'20' },
       ],
     },
 
     lease_commercial: {
       tenant: [
-        { type:'signature', anchorString:'Tenant Signature',      anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'signature', anchorString:'Authorized Signature',  anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Tenant Signature',      anchorXOffset:'5',   anchorYOffset:'20' },
+        { type:'signature', anchorString:'Authorized Signature',  anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'Lessee:',               anchorXOffset:'60',  anchorYOffset:'-5' },
-        { type:'initials',  anchorString:'Tenant Initials',       anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'date',      anchorString:'Execution Date',        anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'initials',  anchorString:'Tenant Initials',       anchorXOffset:'105', anchorYOffset:'-7', scaleValue:'0.7' },
+        { type:'date',      anchorString:'Execution Date',        anchorXOffset:'5',   anchorYOffset:'20' },
       ],
       landlord: [
-        { type:'signature', anchorString:'Landlord Signature',    anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Landlord Signature',    anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'Lessor:',               anchorXOffset:'60',  anchorYOffset:'-5' },
-        { type:'initials',  anchorString:'Landlord Initials',     anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'date',      anchorString:'Landlord Date',         anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'initials',  anchorString:'Landlord Initials',     anchorXOffset:'105', anchorYOffset:'-7', scaleValue:'0.7' },
+        { type:'date',      anchorString:'Landlord Date',         anchorXOffset:'5',   anchorYOffset:'20' },
       ],
     },
 
     counter_offer: {
       buyer: [
-        { type:'signature', anchorString:'Buyer Signature',       anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Buyer Signature',       anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'Buyer:',                anchorXOffset:'60',  anchorYOffset:'-5' },
         { type:'date',      anchorString:'Date:',                 anchorXOffset:'40',  anchorYOffset:'-5' },
-        { type:'initials',  anchorString:'Buyer Initials',        anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'initials',  anchorString:'Buyer Initials',        anchorXOffset:'105', anchorYOffset:'-7', scaleValue:'0.7' },
       ],
       seller: [
-        { type:'signature', anchorString:'Seller Signature',      anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Seller Signature',      anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'Seller:',               anchorXOffset:'60',  anchorYOffset:'-5' },
-        { type:'initials',  anchorString:'Seller Initials',       anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'initials',  anchorString:'Seller Initials',       anchorXOffset:'105', anchorYOffset:'-7', scaleValue:'0.7' },
       ],
     },
 
@@ -270,54 +277,54 @@ function getAnchorTabsForDocType(docType) {
 
     commission_agreement: {
       agent: [
-        { type:'signature', anchorString:'Agent Signature',       anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Agent Signature',       anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'Associate:',            anchorXOffset:'60',  anchorYOffset:'-5' },
         { type:'date',      anchorString:'Date:',                 anchorXOffset:'40',  anchorYOffset:'-5' },
       ],
       broker: [
-        { type:'signature', anchorString:'Broker Signature',      anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Broker Signature',      anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'Broker:',               anchorXOffset:'60',  anchorYOffset:'-5' },
       ],
     },
 
     disclosure: {
       seller: [
-        { type:'signature', anchorString:'Seller Signature',      anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Seller Signature',      anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'SELLER:',               anchorXOffset:'60',  anchorYOffset:'-5' },
         { type:'date',      anchorString:'Date:',                 anchorXOffset:'40',  anchorYOffset:'-5' },
       ],
       buyer: [
-        { type:'signature', anchorString:'Buyer Signature',       anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Buyer Signature',       anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'Buyer acknowledges',    anchorXOffset:'5',   anchorYOffset:'20' },
-        { type:'date',      anchorString:'Buyer Date',            anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'date',      anchorString:'Buyer Date',            anchorXOffset:'5',   anchorYOffset:'20' },
       ],
     },
 
     addendum: {
       buyer: [
         { type:'signature', anchorString:'Buyer:',                anchorXOffset:'60',  anchorYOffset:'-5' },
-        { type:'signature', anchorString:'Buyer Signature',       anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'initials',  anchorString:'Buyer Initials',        anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Buyer Signature',       anchorXOffset:'5',   anchorYOffset:'20' },
+        { type:'initials',  anchorString:'Buyer Initials',        anchorXOffset:'105', anchorYOffset:'-7', scaleValue:'0.7' },
         { type:'date',      anchorString:'Date:',                 anchorXOffset:'40',  anchorYOffset:'-5' },
       ],
       seller: [
         { type:'signature', anchorString:'Seller:',               anchorXOffset:'60',  anchorYOffset:'-5' },
-        { type:'signature', anchorString:'Seller Signature',      anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'initials',  anchorString:'Seller Initials',       anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Seller Signature',      anchorXOffset:'5',   anchorYOffset:'20' },
+        { type:'initials',  anchorString:'Seller Initials',       anchorXOffset:'105', anchorYOffset:'-7', scaleValue:'0.7' },
       ],
     },
 
     closing_docs: {
       buyer: [
-        { type:'signature', anchorString:'Buyer Signature',       anchorXOffset:'5',   anchorYOffset:'0'  },
-        { type:'signature', anchorString:'Borrower Signature',    anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Buyer Signature',       anchorXOffset:'5',   anchorYOffset:'20' },
+        { type:'signature', anchorString:'Borrower Signature',    anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'BUYER:',                anchorXOffset:'60',  anchorYOffset:'-5' },
         { type:'date',      anchorString:'Date:',                 anchorXOffset:'40',  anchorYOffset:'-5' },
       ],
       seller: [
-        { type:'signature', anchorString:'Seller Signature',      anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'signature', anchorString:'Seller Signature',      anchorXOffset:'5',   anchorYOffset:'20' },
         { type:'signature', anchorString:'SELLER:',               anchorXOffset:'60',  anchorYOffset:'-5' },
-        { type:'date',      anchorString:'Seller Date',           anchorXOffset:'5',   anchorYOffset:'0'  },
+        { type:'date',      anchorString:'Seller Date',           anchorXOffset:'5',   anchorYOffset:'20' },
       ],
     },
 

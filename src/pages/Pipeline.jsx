@@ -600,6 +600,120 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
   )
 }
 
+// ── AutoFieldEditor sub-components ────────────────────────────────────────────
+
+function FieldRow({ tab, onChange, onRemove }) {
+  const [showOffsets, setShowOffsets] = React.useState(false)
+  return (
+    <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'6px 8px', background:'#fff', marginBottom:3 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+        <select value={tab.type} onChange={e => onChange({ type: e.target.value })}
+          style={{ fontSize:11, padding:'2px 4px', border:'1px solid var(--gw-border)', borderRadius:4, background:'#fff', color:'var(--gw-ink)', flexShrink:0, cursor:'pointer' }}>
+          <option value="signature">Sig</option>
+          <option value="initials">Init</option>
+          <option value="date">Date</option>
+          <option value="text">Text</option>
+        </select>
+        <input value={tab.anchorString || ''} onChange={e => onChange({ anchorString: e.target.value })}
+          placeholder="Anchor text in document…"
+          style={{ flex:1, fontSize:11, padding:'2px 6px', border:'1px solid var(--gw-border)', borderRadius:4, background:'#fff', color:'var(--gw-ink)', minWidth:0 }}/>
+        <button onClick={() => setShowOffsets(p => !p)} title="Position offsets"
+          style={{ background: showOffsets ? 'var(--gw-bone)' : 'none', border:'1px solid ' + (showOffsets ? 'var(--gw-border)' : 'transparent'), cursor:'pointer', fontSize:11, color:'var(--gw-mist)', padding:'2px 5px', borderRadius:3, lineHeight:1.4 }}>
+          ⚙
+        </button>
+        <button onClick={onRemove} title="Remove field"
+          style={{ background:'none', border:'none', cursor:'pointer', fontSize:15, color:'var(--gw-mist)', lineHeight:1, padding:'2px 4px' }}>×</button>
+      </div>
+      {showOffsets && (
+        <div style={{ display:'flex', gap:6, marginTop:6, alignItems:'center', flexWrap:'wrap' }}>
+          <label style={{ fontSize:10, color:'var(--gw-mist)', whiteSpace:'nowrap' }}>X px</label>
+          <input type="number" value={tab.anchorXOffset ?? '5'} onChange={e => onChange({ anchorXOffset: e.target.value })}
+            style={{ width:54, fontSize:11, padding:'2px 4px', border:'1px solid var(--gw-border)', borderRadius:4, textAlign:'right' }}/>
+          <label style={{ fontSize:10, color:'var(--gw-mist)', whiteSpace:'nowrap' }}>Y px</label>
+          <input type="number" value={tab.anchorYOffset ?? '0'} onChange={e => onChange({ anchorYOffset: e.target.value })}
+            style={{ width:54, fontSize:11, padding:'2px 4px', border:'1px solid var(--gw-border)', borderRadius:4, textAlign:'right' }}/>
+          <label style={{ fontSize:10, color:'var(--gw-mist)', whiteSpace:'nowrap' }}>Scale</label>
+          <input type="number" step="0.05" min="0.1" max="2" value={tab.scaleValue ?? '0.8'} onChange={e => onChange({ scaleValue: e.target.value })}
+            style={{ width:54, fontSize:11, padding:'2px 4px', border:'1px solid var(--gw-border)', borderRadius:4, textAlign:'right' }}/>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AutoFieldEditor({ signerTabs, allSigners, onChange }) {
+  const [expanded, setExpanded] = React.useState(() => (signerTabs || []).map((_, i) => i === 0))
+
+  const updateField = (si, fi, patch) => {
+    const next = signerTabs.map((st, i) =>
+      i !== si ? st : { ...st, tabs: st.tabs.map((t, j) => j !== fi ? t : { ...t, ...patch }) }
+    )
+    onChange(next)
+  }
+
+  const removeField = (si, fi) => {
+    const next = signerTabs.map((st, i) =>
+      i !== si ? st : { ...st, tabs: st.tabs.filter((_, j) => j !== fi) }
+    )
+    onChange(next)
+  }
+
+  const addField = (si) => {
+    const next = signerTabs.map((st, i) =>
+      i !== si ? st : {
+        ...st,
+        tabs: [...st.tabs, { type:'signature', anchorString:'', anchorXOffset:'5', anchorYOffset:'20', scaleValue:'0.8' }],
+      }
+    )
+    onChange(next)
+  }
+
+  const toggleExpanded = (si) => setExpanded(p => p.map((v, i) => i === si ? !v : v))
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+      {(signerTabs || []).map((st, si) => {
+        const isOpen = expanded[si]
+        const color  = SIGNER_COLORS[si] || SIGNER_COLORS[0]
+        const bg     = SIGNER_BGS[si]    || SIGNER_BGS[0]
+        const name   = allSigners[si]?.name || `Signer ${si + 1}`
+        const sigC   = st.tabs.filter(t => t.type === 'signature').length
+        const initC  = st.tabs.filter(t => t.type === 'initials').length
+        const dateC  = st.tabs.filter(t => t.type === 'date').length
+        return (
+          <div key={si} style={{ border:`1.5px solid ${color}55`, borderRadius:'var(--radius)', overflow:'hidden' }}>
+            <button onClick={() => toggleExpanded(si)} aria-expanded={isOpen}
+              style={{ width:'100%', display:'flex', alignItems:'center', gap:8, padding:'7px 10px', background: isOpen ? bg : 'var(--gw-bone)', border:'none', cursor:'pointer', textAlign:'left' }}>
+              <span style={{ width:18, height:18, borderRadius:'50%', background:color, display:'inline-flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:10, fontWeight:700, flexShrink:0 }}>{si + 1}</span>
+              <span style={{ fontWeight:700, fontSize:12, flex:1, color:'var(--gw-ink)' }}>{name}</span>
+              <span style={{ fontSize:10, color:'var(--gw-mist)' }}>
+                {st.tabs.length} field{st.tabs.length !== 1 ? 's' : ''} · {sigC} sig · {initC} init · {dateC} date
+              </span>
+              <span style={{ fontSize:10, color:'var(--gw-mist)', marginLeft:2 }}>{isOpen ? '▲' : '▼'}</span>
+            </button>
+            {isOpen && (
+              <div style={{ padding:'8px 10px', background:'var(--gw-bone)' }}>
+                {st.tabs.map((tab, fi) => (
+                  <FieldRow key={fi} tab={tab}
+                    onChange={patch => updateField(si, fi, patch)}
+                    onRemove={() => removeField(si, fi)}/>
+                ))}
+                {st.tabs.length === 0 && (
+                  <div style={{ fontSize:11, color:'var(--gw-mist)', textAlign:'center', padding:'8px 0', fontStyle:'italic' }}>No fields — add one below</div>
+                )}
+                <button className="btn btn--ghost btn--sm" onClick={() => addField(si)}
+                  style={{ marginTop:4, fontSize:11 }}>+ Add field</button>
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, onSent }) {
   const contact     = contacts?.find(c => c.id === deal?.contact_id)
   const defaultName = `${contact?.first_name || ''} ${contact?.last_name || ''}`.trim()
@@ -617,9 +731,10 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
   const [docAnnotations, setDocAnnotations] = React.useState([])
   const [sending,       setSending]     = React.useState(false)
   const [dragOver,      setDragOver]    = React.useState(false)
-  const [autoDetecting, setAutoDetecting] = React.useState(false)
-  const [autoResult,    setAutoResult]  = React.useState(null)   // { docType, label, signerTabs }
-  const [useAnchorTabs, setUseAnchorTabs] = React.useState(false)
+  const [autoDetecting,    setAutoDetecting]    = React.useState(false)
+  const [autoResult,       setAutoResult]       = React.useState(null)
+  const [editedSignerTabs, setEditedSignerTabs] = React.useState(null)
+  const [useAnchorTabs,    setUseAnchorTabs]    = React.useState(false)
   const fileRef = React.useRef()
 
   // Each signer has name, email, tabs[]
@@ -684,6 +799,7 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
       const data = await resp.json()
       if (data.error) { pushToast(data.error, 'error'); return }
       setAutoResult(data)
+      setEditedSignerTabs(data.signerTabs)
       setUseAnchorTabs(true)
     } catch (err) {
       pushToast('Auto-detect failed: ' + err.message, 'error')
@@ -791,10 +907,9 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
     } else if (file) { base64 = await toBase64(file); finalDocName = file.name }
     else { const blob = await fetch(resolvedFileUrl).then(r => r.blob()); base64 = await toBase64(blob); finalDocName = pickedFile.replace(/^\d+-/, '') }
 
-    // When using anchor tabs, tabs[] is empty — server applies them from doc-type detection
     const signerPayload = allSigners.map((s, i) => {
-      if (useAnchorTabs && autoResult?.signerTabs) {
-        const st = autoResult.signerTabs.find(t => t.signerIndex === i)
+      if (useAnchorTabs && editedSignerTabs) {
+        const st = editedSignerTabs.find(t => t.signerIndex === i)
         return { name: s.name, email: s.email, routingOrder: s.routingOrder, tabs: st?.tabs || [] }
       }
       return { name: s.name, email: s.email, routingOrder: s.routingOrder, tabs: s.tabs || [] }
@@ -895,8 +1010,8 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
               onClick={()=>fileRef.current.click()}
               onDragOver={e=>{e.preventDefault();setDragOver(true)}}
               onDragLeave={()=>setDragOver(false)}
-              onDrop={e=>{e.preventDefault();setDragOver(false);setFile(e.dataTransfer.files[0]);setPickedFile('');setFileUrl(null);setAutoResult(null);setUseAnchorTabs(false)}}>
-              <input ref={fileRef} type="file" accept=".pdf" style={{display:'none'}} onChange={e=>{setFile(e.target.files[0]);setPickedFile('');setFileUrl(null);setAutoResult(null);setUseAnchorTabs(false)}}/>
+              onDrop={e=>{e.preventDefault();setDragOver(false);setFile(e.dataTransfer.files[0]);setPickedFile('');setFileUrl(null);setAutoResult(null);setEditedSignerTabs(null);setUseAnchorTabs(false)}}>
+              <input ref={fileRef} type="file" accept=".pdf" style={{display:'none'}} onChange={e=>{setFile(e.target.files[0]);setPickedFile('');setFileUrl(null);setAutoResult(null);setEditedSignerTabs(null);setUseAnchorTabs(false)}}/>
               {file ? <div style={{fontSize:12,fontWeight:600,color:'var(--gw-green)'}}>{file.name}</div>
                 : <><Icon name="upload" size={18} style={{color:'var(--gw-border)',marginBottom:4}}/><div style={{fontSize:12}}>Drop PDF or click to browse</div></>}
             </div>
@@ -913,35 +1028,30 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
                     : '✦ Auto-detect Signature Fields'}
                 </button>
               )}
-              {autoResult && (
+              {autoResult && editedSignerTabs && (
                 <div style={{ border:'1.5px solid var(--gw-green)', borderRadius:'var(--radius)', padding:'12px 14px', background:'var(--gw-green-light)' }}>
-                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+                  {/* Header */}
+                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
                     <div>
                       <span style={{ fontWeight:700, fontSize:13, color:'var(--gw-ink)' }}>✓ Detected: {autoResult.label}</span>
                       {autoResult.confidence < 1 && <span style={{ fontSize:11, color:'var(--gw-mist)', marginLeft:6 }}>(partial match)</span>}
                     </div>
-                    <button onClick={() => { setAutoResult(null); setUseAnchorTabs(false) }}
+                    <button onClick={() => { setAutoResult(null); setEditedSignerTabs(null); setUseAnchorTabs(false) }}
                       style={{ background:'none', border:'none', cursor:'pointer', fontSize:16, color:'var(--gw-mist)', lineHeight:1 }}>×</button>
                   </div>
-                  <div style={{ display:'flex', flexDirection:'column', gap:3, marginBottom:10 }}>
-                    {autoResult.signerTabs?.map((st, i) => (
-                      <div key={i} style={{ fontSize:12 }}>
-                        <span style={{ width:16, height:16, borderRadius:'50%', background:SIGNER_COLORS[i]||SIGNER_COLORS[0], display:'inline-flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:10, marginRight:6 }}>{i+1}</span>
-                        <strong>{allSigners[i]?.name || `Signer ${i+1}`}</strong>
-                        <span style={{ color:'var(--gw-mist)', marginLeft:6 }}>({st.role})</span>
-                        <span style={{ marginLeft:8, color:'var(--gw-ink)' }}>
-                          {st.tabs.filter(t=>t.type==='signature').length} sig ·{' '}
-                          {st.tabs.filter(t=>t.type==='initials').length} initials ·{' '}
-                          {st.tabs.filter(t=>t.type==='date').length} date
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+
+                  {/* Editable field list */}
+                  <AutoFieldEditor
+                    signerTabs={editedSignerTabs}
+                    allSigners={allSigners}
+                    onChange={setEditedSignerTabs}/>
+
+                  {/* Footer */}
+                  <div style={{ display:'flex', gap:8, alignItems:'center', marginTop:10 }}>
                     <div style={{ flex:1, fontSize:11, color:'var(--gw-mist)' }}>
-                      DocuSign will find these fields in your document automatically — no manual placement needed.
+                      Edit anchor text, type, or position — then send. DocuSign matches text exactly.
                     </div>
-                    <button className="btn btn--ghost btn--sm" onClick={()=>setUseAnchorTabs(false)} style={{ whiteSpace:'nowrap', fontSize:11 }}>
+                    <button className="btn btn--ghost btn--sm" onClick={() => setUseAnchorTabs(false)} style={{ whiteSpace:'nowrap', fontSize:11 }}>
                       Place manually instead
                     </button>
                   </div>
@@ -983,7 +1093,7 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
           <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
           {useAnchorTabs
             ? <button className="btn btn--primary" onClick={send} disabled={sending}>
-                {sending ? 'Sending…' : `Send for Signature (${autoResult?.totalTabs || 0} auto-fields)`}
+                {sending ? 'Sending…' : `Send for Signature (${editedSignerTabs?.reduce((n,st)=>n+st.tabs.length,0) ?? 0} fields)`}
               </button>
             : <button className="btn btn--primary" onClick={goToStep2}>Next: Place Fields</button>
           }
