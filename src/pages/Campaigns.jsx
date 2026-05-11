@@ -202,12 +202,12 @@ function LogSendModal({ campaign, contacts, agents, activeAgent, coldLeads, onSa
 
   const contactOpts = (contacts || []).map(c => ({
     id: c.id,
-    label: `${c.first_name} ${c.last_name}`,
+    name: `${c.first_name} ${c.last_name}`,
     sub: c.phone || c.email || '',
   }))
   const coldLeadOpts = (coldLeads || []).map(l => ({
     id: l.id,
-    label: l.owner_name || l.contact_name || l.property_address || 'Unknown',
+    name: l.owner_name || l.contact_name || l.property_address || 'Unknown',
     sub: l.property_address || '',
   }))
 
@@ -235,9 +235,9 @@ function LogSendModal({ campaign, contacts, agents, activeAgent, coldLeads, onSa
         {recipientMode === 'contact' && (
           <div className="form-group" style={{ margin:0 }}>
             <SearchDropdown
-              options={contactOpts}
+              items={contactOpts}
               value={form.contact_id}
-              onChange={id => { set('contact_id', id); checkHistory(id) }}
+              onSelect={id => { set('contact_id', id); checkHistory(id) }}
               placeholder="Search contacts…"
             />
             {warning && (
@@ -251,9 +251,9 @@ function LogSendModal({ campaign, contacts, agents, activeAgent, coldLeads, onSa
         {recipientMode === 'cold-lead' && (
           <div className="form-group" style={{ margin:0 }}>
             <SearchDropdown
-              options={coldLeadOpts}
+              items={coldLeadOpts}
               value={form.cold_lead_id}
-              onChange={id => set('cold_lead_id', id)}
+              onSelect={id => set('cold_lead_id', id)}
               placeholder="Search cold call leads…"
             />
           </div>
@@ -483,7 +483,7 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
           loading
             ? <div style={{ textAlign:'center', color:'var(--gw-mist)', padding:32, fontSize:13 }}>Loading…</div>
             : sends.length === 0
-              ? <EmptyState icon="mail" title="No sends yet" body="Click 'Log Send' to record the first outreach for this campaign." action={{ label:'Log Send', onClick:()=>setLogOpen(true) }}/>
+              ? <EmptyState icon="mail" title="No sends yet" message="Click 'Log Send' to record the first outreach for this campaign." action={<button className="btn btn--primary btn--sm" onClick={()=>setLogOpen(true)}>Log Send</button>}/>
               : (
                 <div style={{ display:'flex', flexDirection:'column', gap:0 }}>
                   {sends.map(s => {
@@ -837,7 +837,7 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
           {loading
             ? <div style={{ textAlign:'center', padding:40, color:'var(--gw-mist)', fontSize:13 }}>Loading…</div>
             : filtered.length === 0
-              ? <EmptyState icon="mail" title="No campaigns yet" body="Create your first campaign to start tracking mail flyers and cold call outreach." action={{ label:'New Campaign', onClick:()=>setNewOpen(true) }}/>
+              ? <EmptyState icon="mail" title="No campaigns yet" message="Create your first campaign to start tracking mail flyers and cold call outreach." action={<button className="btn btn--primary btn--sm" onClick={()=>setNewOpen(true)}>New Campaign</button>}/>
               : filtered.map(c => {
                 const responseRate = c.total_sends > 0 ? Math.round(c.total_responses / c.total_sends * 100) : 0
                 const agent = agents.find(a => a.id === c.agent_id)

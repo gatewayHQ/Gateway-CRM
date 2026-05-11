@@ -766,17 +766,30 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
   const send = async () => {
     if (!useAnchorTabs && allFields.length === 0) { pushToast('Place at least one field on the PDF', 'error'); return }
     setSending(true)
+
+    // When anchor tabs bypass step 2, the signed URL may not have been fetched yet.
+    // Resolve it now before trying to read the file.
+    let resolvedFileUrl = fileUrl
+    if (!file && pickedFile && !resolvedFileUrl) {
+      const { data: urlData, error: urlErr } = await supabase.storage
+        .from(BUCKET)
+        .createSignedUrl(`deal-${deal.id}/${pickedFile}`, 300)
+      if (urlErr) { pushToast('Could not load document', 'error'); setSending(false); return }
+      resolvedFileUrl = urlData.signedUrl
+      setFileUrl(resolvedFileUrl)
+    }
+
     let base64, finalDocName
     if (!useAnchorTabs && docAnnotations.length > 0) {
       try {
-        base64        = await buildAnnotatedBase64(file, fileUrl, docAnnotations)
+        base64        = await buildAnnotatedBase64(file, resolvedFileUrl, docAnnotations)
         finalDocName  = file ? file.name : pickedFile.replace(/^\d+-/, '')
       } catch (err) {
         pushToast('Could not process annotations: ' + err.message, 'error')
         setSending(false); return
       }
     } else if (file) { base64 = await toBase64(file); finalDocName = file.name }
-    else { const blob = await fetch(fileUrl).then(r => r.blob()); base64 = await toBase64(blob); finalDocName = pickedFile.replace(/^\d+-/, '') }
+    else { const blob = await fetch(resolvedFileUrl).then(r => r.blob()); base64 = await toBase64(blob); finalDocName = pickedFile.replace(/^\d+-/, '') }
 
     // When using anchor tabs, tabs[] is empty — server applies them from doc-type detection
     const signerPayload = allSigners.map((s, i) => {
