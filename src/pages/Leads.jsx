@@ -47,7 +47,7 @@ export default function LeadsPage({ db }) {
       first_name: capture.first_name,
       last_name: capture.last_name,
       email: capture.email,
-      phone: capture.phone || '',
+      phone: capture.phone || null,
       type: 'buyer',
       status: 'active',
       source: 'website',
@@ -55,7 +55,7 @@ export default function LeadsPage({ db }) {
         capture.property_address ? `Interested in: ${capture.property_address}` : '',
         capture.message ? `Message: ${capture.message}` : '',
       ].filter(Boolean).join('\n'),
-      agent_id: capture.agent_id || null,
+      assigned_agent_id: capture.agent_id || null,
     }]).select().single()
     if (!error && data) {
       await supabase.from('lead_captures').update({ converted_contact_id: data.id }).eq('id', capture.id)
