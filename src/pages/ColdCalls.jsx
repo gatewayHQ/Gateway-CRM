@@ -309,8 +309,8 @@ function ConvertModal({ lead, agents, activeAgent, setDb, onClose, onConverted }
     setSaving(true)
     const contactPayload = {
       first_name: form.first_name, last_name: form.last_name,
-      phones: form.phone ? [form.phone] : [],
-      emails: form.email ? [form.email] : [],
+      phone: form.phone || null,
+      email: form.email || null,
       type: form.type, status: form.status, source: form.source,
       assigned_agent_id: form.assigned_agent_id || null,
       notes: form.notes, tags: form.tags,

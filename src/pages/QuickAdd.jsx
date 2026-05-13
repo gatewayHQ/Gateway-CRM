@@ -14,7 +14,7 @@ function QuickContactDrawer({ open, onClose, agents, activeAgent, onSaved }) {
   const save = async () => {
     if (!form.first_name.trim() || !form.last_name.trim()) { pushToast('First and last name required', 'error'); return }
     setSaving(true)
-    const { error } = await supabase.from('contacts').insert([{ ...form, status: 'active', source: 'other', tags: [] }])
+    const { error } = await supabase.from('contacts').insert([{ ...form, status: 'active', source: 'other', tags: [], assigned_agent_id: form.assigned_agent_id || null }])
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast(`${form.first_name} ${form.last_name} added to Contacts`)
@@ -82,6 +82,7 @@ function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
       value: form.value ? Number(form.value) : null,
       probability: 25,
       updated_at: new Date().toISOString(),
+      agent_id: form.agent_id || null,
     }])
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
@@ -136,7 +137,7 @@ function QuickTaskDrawer({ open, onClose, agents, activeAgent, onSaved }) {
   const save = async () => {
     if (!form.title.trim()) { pushToast('Task title required', 'error'); return }
     setSaving(true)
-    const { error } = await supabase.from('tasks').insert([{ ...form, completed: false }])
+    const { error } = await supabase.from('tasks').insert([{ ...form, completed: false, agent_id: form.agent_id || null }])
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast('Task added')
