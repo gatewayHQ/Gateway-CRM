@@ -585,12 +585,20 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
           const propArea  = (form.county || form.city || '').toLowerCase()
           const buyers = (contacts || []).filter(c => {
             if (c.type !== 'buyer' && c.type !== 'investor') return false
-            const wantsTypes = c.asset_types && c.asset_types.length > 0
-            if (wantsTypes && !c.asset_types.includes(propType)) return false
-            if (c.submarket) {
+            // Require at least one matching criterion — a contact with NO criteria
+            // set would otherwise show up as a "match" on every property
+            const hasAssetTypes = c.asset_types && c.asset_types.length > 0
+            const hasSubmarket  = !!(c.submarket && c.submarket.trim())
+            const hasSizeRange  = !!(c.size_min || c.size_max)
+            if (!hasAssetTypes && !hasSubmarket && !hasSizeRange) return false
+            // Asset type must match when set
+            if (hasAssetTypes && !c.asset_types.includes(propType)) return false
+            // Submarket must overlap when set
+            if (hasSubmarket) {
               const sm = c.submarket.toLowerCase()
               if (propArea && !propArea.includes(sm) && !sm.includes(propArea)) return false
             }
+            // Size range must bracket the property when set
             if (propSize !== null) {
               if (c.size_min && Number(c.size_min) > propSize) return false
               if (c.size_max && Number(c.size_max) < propSize) return false

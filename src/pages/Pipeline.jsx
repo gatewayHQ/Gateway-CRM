@@ -1295,6 +1295,16 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
       } else {
         ;({ error } = await supabase.from('deals').insert([payload]))
       }
+      // Gracefully handle missing is_1031 column (run schema migration to fix permanently)
+      if (error?.message?.includes('is_1031')) {
+        const { is_1031: _drop, ...safePayload } = payload
+        if (deal?.id) {
+          ;({ error } = await supabase.from('deals').update(safePayload).eq('id', deal.id))
+        } else {
+          ;({ error } = await supabase.from('deals').insert([safePayload]))
+        }
+        if (!error) pushToast('Saved (run schema migration to enable 1031 tracking)', 'warn')
+      }
       if (error) { pushToast(error.message, 'error'); return }
       pushToast(deal?.id ? 'Deal updated' : 'Deal added')
       await onSave()

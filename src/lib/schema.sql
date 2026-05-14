@@ -485,6 +485,7 @@ end $$;
 -- alter table deals       add column if not exists prop_category text;
 -- alter table deals       add column if not exists prop_subtype  text;
 -- alter table deals       add column if not exists comp_data     jsonb default '{}';
+-- alter table deals       add column if not exists is_1031       boolean default false;
 -- alter table teams       add column if not exists type text check (type in ('collaboration','split')) default 'collaboration';
 -- alter table teams       add column if not exists description text;
 -- -- Fix properties type constraint to include full set
