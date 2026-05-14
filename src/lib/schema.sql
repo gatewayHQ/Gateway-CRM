@@ -512,3 +512,8 @@ end $$;
 -- alter table contacts add column if not exists size_min    numeric;
 -- alter table contacts add column if not exists size_max    numeric;
 -- alter table contacts add column if not exists size_unit   text default 'sqft';
+-- -- TC Checklist enhancements (2026-05): state-specific checklists
+-- alter table transaction_steps add column if not exists category  text;
+-- alter table transaction_steps add column if not exists due_date  date;
+-- alter table transaction_steps add column if not exists step_note text;
+-- alter table deals             add column if not exists deal_state text;

@@ -4,83 +4,358 @@ import { supabase } from '../lib/supabase.js'
 import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
-const DEFAULT_STEPS_RESIDENTIAL = [
-  'Title Search Ordered',
-  'Earnest Money Deposited',
-  'Home Inspection Scheduled',
-  'Inspection Report Reviewed',
-  'Appraisal Ordered',
-  'Appraisal Report Received',
-  'Financing Conditionally Approved',
-  'Financing Fully Approved',
-  'Final Walkthrough Scheduled',
-  'Closing Disclosure Reviewed',
-  'Closing Documents Signed',
-  'Keys & Possession Transferred',
-]
+// ─── TC Checklist: state-specific closing templates ───────────────────────────
+// Each step: { title, cat (category), offset (days from closing, negative=before), note }
+const _s = (title, cat, offset, note = '') => ({ title, cat, offset, note })
 
-const DEFAULT_STEPS_COMMERCIAL = [
-  'Title Search Ordered',
-  'Earnest Money Deposited',
-  'Environmental Due Diligence (Phase I)',
-  'Property Inspection Ordered',
-  'Inspection Report Reviewed',
-  'Survey Ordered',
-  'Survey Received & Approved',
-  'Zoning & Entitlements Verified',
-  'Financing Commitment Received',
-  'Lease Review (if applicable)',
-  'Closing Disclosure Reviewed',
-  'Closing Documents Signed',
-  'Keys & Possession Transferred',
-]
+const TC_TEMPLATES = {
+  // ══ IOWA ══════════════════════════════════════════════════════════════════
+  'IA-residential': [
+    _s('Purchase agreement executed & filed',                    'Contract & Disclosures', -42),
+    _s('Earnest money deposited (3 business days)',              'Contract & Disclosures', -39),
+    _s('Iowa Seller Disclosure received (§558A)',                'Contract & Disclosures', -39),
+    _s('Lead-based paint disclosure (pre-1978 homes)',           'Contract & Disclosures', -39),
+    _s('Title search ordered — Iowa Land Records',              'Title & Escrow',          -40),
+    _s('Title commitment received',                              'Title & Escrow',          -20),
+    _s('Title exceptions reviewed with buyer',                   'Title & Escrow',          -18),
+    _s('IA Documentary Stamp Tax calculated ($1.60/$1,000)',     'Title & Escrow',           -5),
+    _s('Home inspection scheduled',                              'Inspection Period',        -35),
+    _s('Radon test ordered',                                     'Inspection Period',        -35, 'Iowa Zone 1 counties (Polk, Linn, Johnson, Scott) have elevated radon. Mitigation required if ≥ 4 pCi/L.'),
+    _s('Well & septic inspection (if applicable)',               'Inspection Period',        -34),
+    _s('Inspection report reviewed',                             'Inspection Period',        -28),
+    _s('Inspection amendment / addendum signed',                 'Inspection Period',        -25),
+    _s('Loan application submitted',                             'Financing & Appraisal',   -38),
+    _s('Appraisal ordered by lender',                           'Financing & Appraisal',   -30),
+    _s('Appraisal report received & reviewed',                  'Financing & Appraisal',   -20),
+    _s('Financing contingency removed',                          'Financing & Appraisal',   -18),
+    _s('Final loan approval / Clear to Close',                  'Financing & Appraisal',   -10),
+    _s('Homeowner\'s insurance binder received',                 'Pre-Closing',             -14),
+    _s('HOA documents reviewed (if applicable)',                 'Pre-Closing',             -20),
+    _s('Closing Disclosure received (TRID: 3 business days)',    'Pre-Closing',              -3),
+    _s('Final walkthrough scheduled (24–48 hrs before close)',   'Pre-Closing',              -1),
+    _s('Closing scheduled at title company',                     'Closing & Recording',       0),
+    _s('Closing documents signed',                               'Closing & Recording',       0),
+    _s('Funds wired to title company',                           'Closing & Recording',       0),
+    _s('Deed recorded with county recorder',                     'Closing & Recording',       1),
+    _s('Keys & possession transferred to buyer',                 'Closing & Recording',       0),
+  ],
+  'IA-commercial': [
+    _s('Purchase agreement executed & filed',                    'Contract & Due Diligence', -60),
+    _s('Earnest money deposited',                                'Contract & Due Diligence', -57),
+    _s('Iowa Seller Disclosure received (§558A)',                'Contract & Due Diligence', -57),
+    _s('Due diligence timeline established (30–60 days)',        'Contract & Due Diligence', -57),
+    _s('Phase I ESA ordered',                                    'Environmental & Physical', -55),
+    _s('Phase I ESA reviewed — No RECs confirmed',              'Environmental & Physical', -40),
+    _s('Phase II ESA (if Phase I recommends)',                   'Environmental & Physical', -35),
+    _s('Property Condition Assessment (PCA) ordered',            'Environmental & Physical', -50),
+    _s('PCA report reviewed',                                    'Environmental & Physical', -35),
+    _s('ALTA/NSPS Land Survey ordered',                         'Survey & Title',            -55),
+    _s('Survey received & reviewed',                             'Survey & Title',            -35),
+    _s('Title search ordered — Iowa Land Records',              'Survey & Title',            -55),
+    _s('Title commitment received',                              'Survey & Title',            -25),
+    _s('ALTA title endorsements reviewed',                       'Survey & Title',            -20),
+    _s('IA Documentary Stamp Tax calculated ($1.60/$1,000)',     'Survey & Title',             -5),
+    _s('3-year operating statements received',                   'Financial Due Diligence',  -50),
+    _s('Rent roll audited',                                      'Financial Due Diligence',  -45),
+    _s('Lease abstracts reviewed',                               'Financial Due Diligence',  -40),
+    _s('Estoppel certificates received (multi-tenant)',          'Financial Due Diligence',  -35),
+    _s('CAM reconciliations reviewed',                           'Financial Due Diligence',  -30),
+    _s('Zoning verification letter obtained',                    'Zoning & Entitlements',    -50),
+    _s('Use & occupancy compliance confirmed',                   'Zoning & Entitlements',    -45),
+    _s('Certificates of occupancy obtained',                    'Zoning & Entitlements',    -40),
+    _s('Loan application submitted',                             'Financing',                -55),
+    _s('Commercial appraisal ordered',                           'Financing',                -50),
+    _s('Appraisal received & reviewed',                         'Financing',                -25),
+    _s('Loan commitment received',                               'Financing',                -20),
+    _s('Lender lease approvals obtained',                        'Financing',                -15),
+    _s('Closing Disclosure received',                            'Pre-Closing',               -3),
+    _s('Final walkthrough / property inspection',                'Pre-Closing',               -1),
+    _s('Closing scheduled at title company',                     'Closing & Recording',        0),
+    _s('Closing documents signed',                               'Closing & Recording',        0),
+    _s('Funds wired',                                            'Closing & Recording',        0),
+    _s('Deed recorded with county recorder',                     'Closing & Recording',        1),
+    _s('Iowa Documentary Stamp Tax paid',                        'Closing & Recording',        0),
+    _s('Keys & possession transferred',                          'Closing & Recording',        0),
+  ],
+
+  // ══ SOUTH DAKOTA ══════════════════════════════════════════════════════════
+  'SD-residential': [
+    _s('Purchase agreement executed & filed',                    'Contract & Disclosures', -42),
+    _s('Earnest money deposited (3–5 business days)',            'Contract & Disclosures', -39),
+    _s('Lead-based paint disclosure (pre-1978 homes)',           'Contract & Disclosures', -39),
+    _s('Property condition disclosure reviewed',                 'Contract & Disclosures', -38),
+    _s('Title search ordered',                                   'Title & Escrow',         -40),
+    _s('Title commitment received',                              'Title & Escrow',         -20),
+    _s('Title exceptions reviewed',                              'Title & Escrow',         -18),
+    _s('SD Transfer Tax calculated ($0.50 per $500 of value)',   'Title & Escrow',          -5),
+    _s('Home inspection scheduled',                              'Inspection Period',       -35),
+    _s('Well flow & water quality test ordered',                 'Inspection Period',       -35, 'Well water testing is standard on South Dakota rural and semi-rural properties.'),
+    _s('Septic system inspection ordered',                       'Inspection Period',       -34, 'SD has a high number of private septic systems. Inspection is strongly recommended.'),
+    _s('Rural property survey ordered (if applicable)',          'Inspection Period',       -34),
+    _s('Inspection report reviewed',                             'Inspection Period',       -28),
+    _s('Buyer\'s response / amendment signed',                   'Inspection Period',       -25),
+    _s('Loan application submitted',                             'Financing & Appraisal',  -38),
+    _s('Appraisal ordered',                                      'Financing & Appraisal',  -30),
+    _s('Appraisal received & reviewed',                         'Financing & Appraisal',  -20),
+    _s('Financing contingency removed',                          'Financing & Appraisal',  -18),
+    _s('Final loan approval / Clear to Close',                  'Financing & Appraisal',  -10),
+    _s('Homeowner\'s insurance binder received',                 'Pre-Closing',            -14),
+    _s('HOA documents reviewed (if applicable)',                 'Pre-Closing',            -20),
+    _s('Closing Disclosure received (3 business days)',          'Pre-Closing',             -3),
+    _s('Final walkthrough scheduled (24–48 hrs before close)',   'Pre-Closing',             -1),
+    _s('Closing at title company or attorney\'s office',         'Closing & Recording',      0),
+    _s('Closing documents signed',                               'Closing & Recording',      0),
+    _s('Funds transferred to title company',                     'Closing & Recording',      0),
+    _s('Deed recorded — county Register of Deeds',              'Closing & Recording',      1),
+    _s('SD Transfer Tax paid',                                   'Closing & Recording',      0),
+    _s('Keys & possession transferred to buyer',                 'Closing & Recording',      0),
+  ],
+  'SD-commercial': [
+    _s('Purchase agreement executed & filed',                    'Contract & Due Diligence', -60),
+    _s('Earnest money deposited',                                'Contract & Due Diligence', -57),
+    _s('Due diligence period established (30–60 days)',          'Contract & Due Diligence', -57),
+    _s('Phase I ESA ordered',                                    'Environmental & Physical', -55),
+    _s('Phase I ESA reviewed — No RECs confirmed',              'Environmental & Physical', -40),
+    _s('Phase II ESA (if Phase I recommends)',                   'Environmental & Physical', -35),
+    _s('Property Condition Assessment (PCA) ordered',            'Environmental & Physical', -50),
+    _s('PCA report reviewed',                                    'Environmental & Physical', -35),
+    _s('ALTA Survey ordered',                                    'Survey & Title',           -55, 'SD surveyors required for rural commercial properties.'),
+    _s('Survey received & reviewed',                             'Survey & Title',           -35),
+    _s('Title search ordered',                                   'Survey & Title',           -55),
+    _s('Title commitment received',                              'Survey & Title',           -25),
+    _s('SD Transfer Tax calculated ($0.50 per $500)',            'Survey & Title',            -5),
+    _s('3-year operating statements received',                   'Financial Due Diligence',  -50),
+    _s('Rent roll reviewed',                                     'Financial Due Diligence',  -45),
+    _s('Lease abstracts reviewed',                               'Financial Due Diligence',  -40),
+    _s('Estoppel certificates received',                         'Financial Due Diligence',  -35),
+    _s('Zoning confirmed',                                       'Zoning & Entitlements',    -50),
+    _s('Use & occupancy confirmed',                              'Zoning & Entitlements',    -45),
+    _s('Loan application submitted',                             'Financing',                -55),
+    _s('Commercial appraisal ordered',                           'Financing',                -50),
+    _s('Appraisal received',                                     'Financing',                -25),
+    _s('Loan commitment received',                               'Financing',                -20),
+    _s('Closing Disclosure received',                            'Pre-Closing',               -3),
+    _s('Final walkthrough',                                      'Pre-Closing',               -1),
+    _s('Closing at title company or attorney\'s office',         'Closing & Recording',        0),
+    _s('Closing documents signed',                               'Closing & Recording',        0),
+    _s('Funds transferred',                                      'Closing & Recording',        0),
+    _s('Deed recorded — county Register of Deeds',              'Closing & Recording',        1),
+    _s('SD Transfer Tax paid',                                   'Closing & Recording',        0),
+    _s('Keys transferred',                                       'Closing & Recording',        0),
+  ],
+
+  // ══ NEBRASKA ══════════════════════════════════════════════════════════════
+  'NE-residential': [
+    _s('Purchase agreement executed & filed',                    'Contract & Disclosures', -42),
+    _s('Earnest money deposited (3 business days)',              'Contract & Disclosures', -39),
+    _s('NE Seller Property Disclosure received (§76-2120)',      'Contract & Disclosures', -39),
+    _s('Lead-based paint disclosure (pre-1978 homes)',           'Contract & Disclosures', -39),
+    _s('Form 521 (Real Estate Transfer Statement) prepared',     'Contract & Disclosures', -10),
+    _s('Escrow opened with title company',                       'Title & Escrow',         -40),
+    _s('Title search ordered',                                   'Title & Escrow',         -40),
+    _s('Title commitment received',                              'Title & Escrow',         -20),
+    _s('Title exceptions reviewed',                              'Title & Escrow',         -18),
+    _s('NE Documentary Stamp Tax calculated ($2.25/$1,000)',     'Title & Escrow',          -5),
+    _s('Home inspection scheduled',                              'Inspection Period',       -35),
+    _s('Radon test ordered — CRITICAL (NE Zone 1)',             'Inspection Period',       -35, 'Nebraska is in EPA Radon Zone 1 — the highest-risk zone in the US. Action level: 4 pCi/L. Mitigation system quote required if elevated.'),
+    _s('Termite / WDO inspection (Omaha metro)',                 'Inspection Period',       -34, 'Omaha and eastern Nebraska have elevated subterranean termite pressure. WDO report strongly recommended.'),
+    _s('Well & septic inspection (rural Nebraska)',              'Inspection Period',       -34),
+    _s('Inspection report reviewed',                             'Inspection Period',       -28),
+    _s('Radon mitigation quote obtained (if ≥ 4 pCi/L)',        'Inspection Period',       -26),
+    _s('Inspection amendment / addendum signed',                 'Inspection Period',       -25),
+    _s('Loan application submitted',                             'Financing & Appraisal',  -38),
+    _s('Appraisal ordered by lender',                           'Financing & Appraisal',  -30),
+    _s('Appraisal received & reviewed',                         'Financing & Appraisal',  -20),
+    _s('Financing contingency removed',                          'Financing & Appraisal',  -18),
+    _s('Final loan approval / Clear to Close',                  'Financing & Appraisal',  -10),
+    _s('Homeowner\'s insurance binder received',                 'Pre-Closing',            -14),
+    _s('HOA documents reviewed (if applicable)',                 'Pre-Closing',            -20),
+    _s('Closing Disclosure received (TRID: 3 business days)',    'Pre-Closing',             -3),
+    _s('Final walkthrough scheduled (24–48 hrs before close)',   'Pre-Closing',             -1),
+    _s('Closing at title company or attorney\'s office',         'Closing & Recording',      0),
+    _s('Closing documents signed',                               'Closing & Recording',      0),
+    _s('Funds wired to title company',                           'Closing & Recording',      0),
+    _s('Form 521 filed with Register of Deeds',                 'Closing & Recording',      0),
+    _s('Deed recorded — Register of Deeds',                     'Closing & Recording',      1),
+    _s('NE Documentary Stamp Tax paid ($2.25 per $1,000)',       'Closing & Recording',      0),
+    _s('Keys & possession transferred to buyer',                 'Closing & Recording',      0),
+  ],
+  'NE-commercial': [
+    _s('Purchase agreement executed & filed',                    'Contract & Due Diligence', -60),
+    _s('Earnest money deposited',                                'Contract & Due Diligence', -57),
+    _s('NE Seller Property Disclosure received (§76-2120)',      'Contract & Due Diligence', -57),
+    _s('Due diligence timeline established (30–60 days)',        'Contract & Due Diligence', -57),
+    _s('Form 521 (Real Estate Transfer Statement) prepared',     'Contract & Due Diligence', -10),
+    _s('Phase I ESA ordered (required for most bank financing)', 'Environmental & Physical',  -55),
+    _s('Phase I ESA reviewed — No RECs confirmed',              'Environmental & Physical',  -40),
+    _s('Radon assessment ordered',                               'Environmental & Physical',  -55, 'Nebraska is in EPA Zone 1 — highest radon potential in the US. All commercial buyers should assess radon risk.'),
+    _s('Phase II ESA (if Phase I recommends)',                   'Environmental & Physical',  -35),
+    _s('Property Condition Assessment (PCA) ordered',            'Environmental & Physical',  -50),
+    _s('PCA report reviewed',                                    'Environmental & Physical',  -35),
+    _s('ALTA Survey ordered',                                    'Survey & Title',            -55),
+    _s('Survey received & reviewed',                             'Survey & Title',            -35),
+    _s('Title search ordered (NE: lien theory state)',           'Survey & Title',            -55),
+    _s('Title commitment received',                              'Survey & Title',            -25),
+    _s('NE Documentary Stamp Tax calculated ($2.25/$1,000)',     'Survey & Title',             -5),
+    _s('3-year operating statements received',                   'Financial Due Diligence',  -50),
+    _s('Rent roll audited',                                      'Financial Due Diligence',  -45),
+    _s('Lease abstracts reviewed',                               'Financial Due Diligence',  -40),
+    _s('Estoppel certificates received',                         'Financial Due Diligence',  -35),
+    _s('Zoning letter ordered',                                  'Zoning & Entitlements',    -50),
+    _s('Use & occupancy compliance confirmed',                   'Zoning & Entitlements',    -45),
+    _s('Flood zone determination obtained',                      'Zoning & Entitlements',    -45),
+    _s('Loan application submitted',                             'Financing',                -55),
+    _s('Commercial appraisal ordered',                           'Financing',                -50),
+    _s('Appraisal received & reviewed',                         'Financing',                -25),
+    _s('Loan commitment received',                               'Financing',                -20),
+    _s('Lender lease approvals obtained',                        'Financing',                -15),
+    _s('Closing Disclosure received',                            'Pre-Closing',               -3),
+    _s('Final walkthrough',                                      'Pre-Closing',               -1),
+    _s('Closing scheduled',                                      'Closing & Recording',        0),
+    _s('Closing documents signed',                               'Closing & Recording',        0),
+    _s('Funds wired',                                            'Closing & Recording',        0),
+    _s('Form 521 filed with Register of Deeds',                 'Closing & Recording',        0),
+    _s('Deed recorded — Register of Deeds',                     'Closing & Recording',        1),
+    _s('NE Documentary Stamp Tax paid ($2.25 per $1,000)',       'Closing & Recording',        0),
+    _s('Keys transferred',                                       'Closing & Recording',        0),
+  ],
+
+  // ══ GENERIC (other states) ═════════════════════════════════════════════════
+  'OTHER-residential': [
+    _s('Purchase agreement executed & filed',                    'Contract & Disclosures', -42),
+    _s('Earnest money deposited',                                'Contract & Disclosures', -39),
+    _s('Seller disclosures received',                            'Contract & Disclosures', -39),
+    _s('Title search ordered',                                   'Title & Escrow',         -40),
+    _s('Title commitment received',                              'Title & Escrow',         -20),
+    _s('Title exceptions reviewed',                              'Title & Escrow',         -18),
+    _s('Home inspection scheduled',                              'Inspection Period',       -35),
+    _s('Inspection report reviewed',                             'Inspection Period',       -28),
+    _s('Inspection amendment signed',                            'Inspection Period',       -25),
+    _s('Loan application submitted',                             'Financing & Appraisal',  -38),
+    _s('Appraisal ordered',                                      'Financing & Appraisal',  -30),
+    _s('Appraisal received & reviewed',                         'Financing & Appraisal',  -20),
+    _s('Financing contingency removed',                          'Financing & Appraisal',  -18),
+    _s('Clear to Close received',                                'Financing & Appraisal',  -10),
+    _s('Homeowner\'s insurance binder received',                 'Pre-Closing',            -14),
+    _s('Closing Disclosure received (3 business days)',          'Pre-Closing',             -3),
+    _s('Final walkthrough',                                      'Pre-Closing',             -1),
+    _s('Closing documents signed',                               'Closing & Recording',      0),
+    _s('Deed recorded',                                          'Closing & Recording',      1),
+    _s('Keys transferred',                                       'Closing & Recording',      0),
+  ],
+  'OTHER-commercial': [
+    _s('Purchase agreement executed',                            'Contract & Due Diligence', -60),
+    _s('Earnest money deposited',                                'Contract & Due Diligence', -57),
+    _s('Phase I ESA ordered',                                    'Environmental & Physical',  -55),
+    _s('Phase I ESA reviewed',                                   'Environmental & Physical',  -40),
+    _s('Property Condition Assessment ordered',                  'Environmental & Physical',  -50),
+    _s('PCA reviewed',                                           'Environmental & Physical',  -35),
+    _s('ALTA Survey ordered',                                    'Survey & Title',            -55),
+    _s('Survey received',                                        'Survey & Title',            -35),
+    _s('Title search ordered',                                   'Survey & Title',            -55),
+    _s('Title commitment received',                              'Survey & Title',            -25),
+    _s('3-year operating statements received',                   'Financial Due Diligence',  -50),
+    _s('Rent roll reviewed',                                     'Financial Due Diligence',  -45),
+    _s('Lease abstracts reviewed',                               'Financial Due Diligence',  -40),
+    _s('Estoppel certificates received',                         'Financial Due Diligence',  -35),
+    _s('Zoning confirmed',                                       'Zoning & Entitlements',    -50),
+    _s('Loan application submitted',                             'Financing',                -55),
+    _s('Commercial appraisal ordered',                           'Financing',                -50),
+    _s('Appraisal received',                                     'Financing',                -25),
+    _s('Loan commitment received',                               'Financing',                -20),
+    _s('Closing Disclosure received',                            'Pre-Closing',               -3),
+    _s('Closing documents signed',                               'Closing & Recording',        0),
+    _s('Deed recorded',                                          'Closing & Recording',        1),
+    _s('Keys transferred',                                       'Closing & Recording',        0),
+  ],
+}
+
+const TC_STATE_LABELS = { IA: 'Iowa', SD: 'South Dakota', NE: 'Nebraska', OTHER: 'Generic' }
+
+const TC_CAT_COLORS = {
+  'Contract & Disclosures':   'var(--gw-slate)',
+  'Contract & Due Diligence': 'var(--gw-slate)',
+  'Title & Escrow':           'var(--gw-azure)',
+  'Survey & Title':           'var(--gw-azure)',
+  'Inspection Period':        'var(--gw-amber)',
+  'Environmental & Physical': '#c0392b',
+  'Financial Due Diligence':  'var(--gw-purple)',
+  'Zoning & Entitlements':    '#1a7f5a',
+  'Financing & Appraisal':    'var(--gw-purple)',
+  'Financing':                'var(--gw-purple)',
+  'Pre-Closing':              'var(--gw-green)',
+  'Closing & Recording':      'var(--gw-ink)',
+}
 
 const CHECKLIST_STAGES = ['under-contract','closed']
 
 const DEFAULT_KEY_DATE_TYPES = ['Closing','Financing Contingency','Inspection','HUD Approval','Appraisal','Lease Start Date','Possession Date']
 
 function ChecklistTab({ deal }) {
-  const [steps, setSteps]       = useState([])
-  const [loading, setLoading]   = useState(true)
-  const [newTitle, setNewTitle] = useState('')
-  const [adding, setAdding]     = useState(false)
-  const [ready, setReady]       = useState(true)
+  const [steps,       setSteps]       = useState([])
+  const [loading,     setLoading]     = useState(true)
+  const [newTitle,    setNewTitle]    = useState('')
+  const [adding,      setAdding]      = useState(false)
+  const [ready,       setReady]       = useState(true)
+  const [showRegen,   setShowRegen]   = useState(false)
+  const [editingDate, setEditingDate] = useState(null)
 
-  const defaultSteps = deal?.prop_category === 'commercial' ? DEFAULT_STEPS_COMMERCIAL : DEFAULT_STEPS_RESIDENTIAL
+  const dealState   = deal?.deal_state || 'OTHER'
+  const propCat     = deal?.prop_category || 'residential'
+  const templateKey = `${dealState}-${propCat}`
+  const template    = TC_TEMPLATES[templateKey] || TC_TEMPLATES[`OTHER-${propCat}`] || TC_TEMPLATES['OTHER-residential']
+  const stateLabel  = TC_STATE_LABELS[dealState] || dealState
+  const closingDate = deal?.expected_close_date ? new Date(deal.expected_close_date + 'T00:00:00') : null
 
-  React.useEffect(() => {
-    if (!deal?.id) return
-    loadSteps()
-  }, [deal?.id])
+  React.useEffect(() => { if (deal?.id) loadSteps() }, [deal?.id])
 
   const loadSteps = async () => {
     setLoading(true)
     const { data, error } = await supabase
-      .from('transaction_steps')
-      .select('*')
-      .eq('deal_id', deal.id)
+      .from('transaction_steps').select('*').eq('deal_id', deal.id)
       .order('sort_order', { ascending: true })
     if (error) { setReady(false); setLoading(false); return }
     if (data.length === 0 && CHECKLIST_STAGES.includes(deal.stage)) {
-      await autoCreate()
+      await autoCreate(template)
     } else {
       setSteps(data)
     }
     setLoading(false)
   }
 
-  const autoCreate = async () => {
-    const rows = defaultSteps.map((title, i) => ({ deal_id: deal.id, title, completed: false, sort_order: i }))
+  const autoCreate = async (tmpl) => {
+    const rows = tmpl.map((step, i) => {
+      let due_date = null
+      if (closingDate && step.offset !== undefined) {
+        const d = new Date(closingDate)
+        d.setDate(d.getDate() + step.offset)
+        due_date = d.toISOString().slice(0, 10)
+      }
+      return { deal_id: deal.id, title: step.title, category: step.cat, step_note: step.note || null, due_date, completed: false, sort_order: i }
+    })
     const { data } = await supabase.from('transaction_steps').insert(rows).select()
     setSteps(data || [])
-    pushToast(`${deal?.prop_category === 'commercial' ? 'Commercial' : 'Residential'} closing checklist created`, 'info')
+    pushToast(`${stateLabel} ${propCat} TC checklist created`, 'info')
+  }
+
+  const regenerate = async () => {
+    await supabase.from('transaction_steps').delete().eq('deal_id', deal.id)
+    setSteps([])
+    await autoCreate(template)
+    setShowRegen(false)
   }
 
   const toggle = async (step) => {
-    const now = new Date().toISOString()
+    const now   = new Date().toISOString()
     const patch = { completed: !step.completed, completed_at: !step.completed ? now : null }
     await supabase.from('transaction_steps').update(patch).eq('id', step.id)
     setSteps(p => p.map(s => s.id === step.id ? { ...s, ...patch } : s))
+  }
+
+  const setDueDate = async (stepId, dateStr) => {
+    await supabase.from('transaction_steps').update({ due_date: dateStr || null }).eq('id', stepId)
+    setSteps(p => p.map(s => s.id === stepId ? { ...s, due_date: dateStr || null } : s))
+    setEditingDate(null)
   }
 
   const addStep = async () => {
@@ -100,14 +375,35 @@ function ChecklistTab({ deal }) {
     setSteps(p => p.filter(s => s.id !== id))
   }
 
+  // Urgency badge for due date
+  const getUrgency = (step) => {
+    if (step.completed || !step.due_date) return null
+    const today = new Date(); today.setHours(0,0,0,0)
+    const due   = new Date(step.due_date + 'T00:00:00')
+    const diff  = Math.round((due - today) / 86400000)
+    if (diff < 0)   return { label: `${Math.abs(diff)}d overdue`, color: 'var(--gw-red)' }
+    if (diff === 0) return { label: 'Due today',                  color: 'var(--gw-amber)' }
+    if (diff <= 3)  return { label: `${diff}d left`,              color: 'var(--gw-amber)' }
+    return               { label: `${diff}d`,                     color: 'var(--gw-mist)' }
+  }
+
+  // Group steps by category in insertion order
+  const grouped = useMemo(() => {
+    const map = new Map()
+    for (const step of steps) {
+      const cat = step.category || 'General'
+      if (!map.has(cat)) map.set(cat, [])
+      map.get(cat).push(step)
+    }
+    return [...map.entries()].map(([cat, items]) => ({ cat, items }))
+  }, [steps])
+
   if (!ready) return (
     <div style={{ padding: 24, textAlign: 'center', color: 'var(--gw-mist)' }}>
-      <Icon name="alert" size={20} style={{ marginBottom: 8 }} />
-      <div style={{ fontSize: 13 }}>transaction_steps table not found.</div>
-      <div style={{ fontSize: 12, marginTop: 4 }}>Run the SQL from the setup guide to enable checklists.</div>
+      <div style={{ fontSize: 13, marginBottom: 6 }}>transaction_steps table not found.</div>
+      <div style={{ fontSize: 12 }}>Run the schema migration to enable checklists.</div>
     </div>
   )
-
   if (loading) return <div style={{ padding: 24, color: 'var(--gw-mist)', fontSize: 13 }}>Loading checklist…</div>
 
   const doneCount = steps.filter(s => s.completed).length
@@ -115,61 +411,151 @@ function ChecklistTab({ deal }) {
 
   return (
     <div style={{ padding: 16, overflowY: 'auto', flex: 1 }}>
+
+      {/* Header row: state label + re-generate */}
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom: 14 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gw-mist)' }}>
+          {stateLabel} · {propCat.charAt(0).toUpperCase() + propCat.slice(1)} Closing
+        </div>
+        {steps.length > 0 && (
+          <button className="btn btn--ghost btn--sm" onClick={() => setShowRegen(true)} style={{ fontSize: 11 }}>
+            ↺ Re-generate
+          </button>
+        )}
+      </div>
+
+      {/* Re-generate confirmation */}
+      {showRegen && (
+        <div style={{ background:'#fff7ed', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:'12px 14px', marginBottom: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Re-generate checklist?</div>
+          <div style={{ fontSize: 12, color:'var(--gw-mist)', marginBottom: 10, lineHeight: 1.5 }}>
+            All current steps will be replaced with the {stateLabel} {propCat} template. Custom steps will be lost.
+          </div>
+          <div style={{ display:'flex', gap: 8 }}>
+            <button className="btn btn--primary btn--sm" onClick={regenerate}>Yes, re-generate</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => setShowRegen(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
       {/* Progress bar */}
       {steps.length > 0 && (
         <div style={{ marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
-            <span>{doneCount}/{steps.length} complete</span>
+          <div style={{ display:'flex', justifyContent:'space-between', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+            <span>{doneCount} / {steps.length} complete</span>
             <span style={{ color: pct === 100 ? 'var(--gw-green)' : 'var(--gw-mist)' }}>{pct}%</span>
           </div>
-          <div style={{ height: 6, background: 'var(--gw-border)', borderRadius: 3, overflow: 'hidden' }}>
-            <div style={{ width: `${pct}%`, height: '100%', background: pct === 100 ? 'var(--gw-green)' : 'var(--gw-azure)', borderRadius: 3, transition: 'width 300ms ease' }} />
+          <div style={{ height: 6, background:'var(--gw-border)', borderRadius: 3, overflow:'hidden' }}>
+            <div style={{ width:`${pct}%`, height:'100%', background: pct === 100 ? 'var(--gw-green)' : 'var(--gw-azure)', borderRadius: 3, transition:'width 300ms ease' }} />
           </div>
         </div>
       )}
 
-      {/* Steps */}
-      {steps.length === 0 && !CHECKLIST_STAGES.includes(deal.stage) && (
-        <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--gw-mist)', fontSize: 13 }}>
-          Checklist auto-creates when this deal reaches <strong>Under Contract</strong>.<br />
-          {deal?.prop_category === 'commercial' ? 'Commercial closing steps will be loaded.' : 'Residential closing steps will be loaded.'}<br />
-          Or add steps manually below.
-        </div>
-      )}
-
-      {steps.map(step => (
-        <div key={step.id} onClick={() => toggle(step)}
-          style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 'var(--radius)', cursor: 'pointer', marginBottom: 3, transition: 'background 120ms' }}
-          onMouseEnter={e => e.currentTarget.style.background = 'var(--gw-bone)'}
-          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-          <div style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${step.completed ? 'var(--gw-green)' : 'var(--gw-border)'}`, background: step.completed ? 'var(--gw-green)' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, transition: 'all 150ms' }}>
-            {step.completed && <Icon name="check" size={11} style={{ color: '#fff' }} />}
-          </div>
-          <span style={{ flex: 1, fontSize: 13, textDecoration: step.completed ? 'line-through' : 'none', color: step.completed ? 'var(--gw-mist)' : 'var(--gw-ink)' }}>
-            {step.title}
-          </span>
-          {step.completed && step.completed_at && (
-            <span style={{ fontSize: 10, color: 'var(--gw-mist)', whiteSpace: 'nowrap' }}>
-              {new Date(step.completed_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-            </span>
+      {/* Empty state */}
+      {steps.length === 0 && (
+        <div style={{ textAlign:'center', padding:'24px 0', color:'var(--gw-mist)', fontSize: 13, lineHeight: 1.7 }}>
+          {CHECKLIST_STAGES.includes(deal.stage)
+            ? 'Generating checklist…'
+            : <>Move to <strong>Under Contract</strong> to auto-generate, or generate now:</>
+          }
+          {!CHECKLIST_STAGES.includes(deal.stage) && (
+            <div style={{ marginTop: 12 }}>
+              <button className="btn btn--primary btn--sm" onClick={() => autoCreate(template)}>
+                Generate {stateLabel} {propCat.charAt(0).toUpperCase() + propCat.slice(1)} Checklist
+              </button>
+            </div>
           )}
-          <button className="btn btn--ghost btn--icon" style={{ padding: 2, opacity: 0.4 }}
-            onClick={e => { e.stopPropagation(); removeStep(step.id) }}>
-            <Icon name="x" size={11} />
-          </button>
         </div>
-      ))}
+      )}
+
+      {/* Grouped steps */}
+      {grouped.map(({ cat, items }) => {
+        const catColor = TC_CAT_COLORS[cat] || 'var(--gw-mist)'
+        const catDone  = items.filter(i => i.completed).length
+        return (
+          <div key={cat} style={{ marginBottom: 18 }}>
+            {/* Category header */}
+            <div style={{ display:'flex', alignItems:'center', gap: 8, marginBottom: 8 }}>
+              <div style={{ width: 8, height: 8, borderRadius:'50%', background: catColor, flexShrink: 0 }} />
+              <div style={{ fontSize: 10, fontWeight: 700, textTransform:'uppercase', letterSpacing:'0.08em', color: catColor, flex: 1 }}>
+                {cat}
+              </div>
+              <div style={{ height: 1, flex: 1, background:'var(--gw-border)' }} />
+              <div style={{ fontSize: 10, color:'var(--gw-mist)' }}>{catDone}/{items.length}</div>
+            </div>
+
+            {/* Steps in category */}
+            {items.map(step => {
+              const urg = getUrgency(step)
+              return (
+                <div key={step.id}
+                  style={{ display:'flex', alignItems:'flex-start', gap: 10, padding:'8px 8px', borderRadius:'var(--radius)', marginBottom: 2, transition:'background 120ms', cursor:'pointer' }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'var(--gw-bone)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                  onClick={() => toggle(step)}>
+
+                  {/* Checkbox */}
+                  <div style={{ width: 18, height: 18, borderRadius: 4, border:`2px solid ${step.completed ? 'var(--gw-green)' : 'var(--gw-border)'}`, background: step.completed ? 'var(--gw-green)' : '#fff', display:'flex', alignItems:'center', justifyContent:'center', flexShrink: 0, transition:'all 150ms', marginTop: 1 }}>
+                    {step.completed && <Icon name="check" size={10} style={{ color:'#fff' }} />}
+                  </div>
+
+                  {/* Title + state note + due date */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12.5, textDecoration: step.completed ? 'line-through' : 'none', color: step.completed ? 'var(--gw-mist)' : 'var(--gw-ink)', lineHeight: 1.4 }}>
+                      {step.title}
+                    </div>
+                    {step.step_note && !step.completed && (
+                      <div style={{ fontSize: 11, color:'var(--gw-amber)', marginTop: 3, lineHeight: 1.4 }}>
+                        ⚠ {step.step_note}
+                      </div>
+                    )}
+                    {/* Due date */}
+                    <div style={{ display:'flex', alignItems:'center', gap: 6, marginTop: 3 }} onClick={e => e.stopPropagation()}>
+                      {editingDate === step.id ? (
+                        <input type="date" className="form-control"
+                          style={{ fontSize: 11, padding:'2px 6px', height:'auto', width: 'auto' }}
+                          defaultValue={step.due_date || ''}
+                          onBlur={e => setDueDate(step.id, e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') setDueDate(step.id, e.target.value); if (e.key === 'Escape') setEditingDate(null) }}
+                          autoFocus />
+                      ) : (
+                        <button
+                          style={{ border:'none', background:'none', padding: 0, cursor:'pointer', fontSize: 11, color: urg ? urg.color : 'var(--gw-border)' }}
+                          onClick={() => setEditingDate(step.id)}>
+                          {step.due_date
+                            ? `📅 ${new Date(step.due_date + 'T00:00:00').toLocaleDateString('en-US', { month:'short', day:'numeric' })}${urg ? ` · ${urg.label}` : ''}`
+                            : '+ due date'
+                          }
+                        </button>
+                      )}
+                      {step.completed && step.completed_at && (
+                        <span style={{ fontSize: 10, color:'var(--gw-mist)' }}>
+                          ✓ {new Date(step.completed_at).toLocaleDateString('en-US', { month:'short', day:'numeric' })}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Delete */}
+                  <button className="btn btn--ghost btn--icon" style={{ padding: 2, opacity: 0.35, flexShrink: 0 }}
+                    onClick={e => { e.stopPropagation(); removeStep(step.id) }}>
+                    <Icon name="x" size={11} />
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        )
+      })}
 
       {/* Add custom step */}
-      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+      <div style={{ display:'flex', gap: 8, marginTop: 12, borderTop:'1px solid var(--gw-border)', paddingTop: 12 }}>
         <input className="form-control" style={{ flex: 1, fontSize: 13 }}
-          placeholder="Add a step…"
+          placeholder="Add a custom step…"
           value={newTitle} onChange={e => setNewTitle(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && addStep()}
           disabled={adding} />
-        <button className="btn btn--secondary btn--sm" onClick={addStep} disabled={adding || !newTitle.trim()}>
-          Add
-        </button>
+        <button className="btn btn--secondary btn--sm" onClick={addStep} disabled={adding || !newTitle.trim()}>Add</button>
       </div>
     </div>
   )
@@ -1205,7 +1591,7 @@ async function loadUserKey(metaField, localKey) {
 }
 
 function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave }) {
-  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, is_1031:false }
+  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, is_1031:false, deal_state:'' }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
@@ -1213,7 +1599,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
   const [generating, setGenerating] = useState(false)
 
   React.useEffect(() => {
-    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {}, is_1031: deal.is_1031 || false } : blank)
+    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {}, is_1031: deal.is_1031 || false, deal_state: deal.deal_state || '' } : blank)
     setErrors({})
     setTab('details')
     setGenerating(false)
@@ -1288,6 +1674,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
         prop_subtype:        form.prop_subtype  || null,
         comp_data:           form.comp_data     || null,
         is_1031:             form.is_1031       || false,
+        deal_state:          form.deal_state    || null,
       }
       let error
       if (deal?.id) {
@@ -1363,6 +1750,23 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
                 </select>
               </div>
             )}
+
+            {/* State — drives TC checklist template */}
+            <div className="form-group">
+              <label className="form-label">State</label>
+              <select className="form-control" value={form.deal_state||''} onChange={e=>set('deal_state',e.target.value)}>
+                <option value="">— Select state —</option>
+                <option value="IA">Iowa</option>
+                <option value="SD">South Dakota</option>
+                <option value="NE">Nebraska</option>
+                <option value="OTHER">Other / Generic</option>
+              </select>
+              {form.deal_state && (
+                <div style={{ fontSize:11, color:'var(--gw-azure)', marginTop:4 }}>
+                  TC Checklist will use the {TC_STATE_LABELS[form.deal_state]} {form.prop_category} template.
+                </div>
+              )}
+            </div>
 
             <div className="form-group"><label className="form-label">Stage</label><select className="form-control" value={form.stage} onChange={e=>set('stage',e.target.value)}>{STAGE_ORDER.map(s=><option key={s} value={s}>{STAGE_LABELS[s]}</option>)}</select></div>
             <div className="form-row">
