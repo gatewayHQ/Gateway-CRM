@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Badge, Drawer, EmptyState, ConfirmDialog, Modal, pushToast } from '../components/UI.jsx'
@@ -438,11 +438,274 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
   )
 }
 
+// ─── Merge tag resolver ────────────────────────────────────────────────────────
+function resolveText(text, contact, agentName) {
+  return (text || '')
+    .replace(/{{firstName}}/g,       contact?.first_name || '')
+    .replace(/{{lastName}}/g,        contact?.last_name  || '')
+    .replace(/{{fullName}}/g,        [contact?.first_name, contact?.last_name].filter(Boolean).join(' '))
+    .replace(/{{agentName}}/g,       agentName || '')
+    .replace(/{{propertyAddress}}/g, '')
+    .replace(/{{dealValue}}/g,       '')
+}
+
+function textToHtml(text) {
+  const escaped = (text || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.7;color:#1a1a2e;max-width:600px;padding:8px 0">${escaped.replace(/\n/g,'<br>')}</div>`
+}
+
+// ─── Bulk Send Modal ───────────────────────────────────────────────────────────
+function BulkSendModal({ template, contacts, activeAgent, onClose }) {
+  const [resendKey,  setResendKey]  = useState('')
+  const [resendFrom, setResendFrom] = useState('')
+  const [search,     setSearch]     = useState('')
+  const [filterType, setFilterType] = useState('')
+  const [selected,   setSelected]   = useState([])    // contact ids
+  const [sending,    setSending]    = useState(false)
+  const [progress,   setProgress]   = useState(0)     // contacts processed so far
+  const [result,     setResult]     = useState(null)  // { sent, failed }
+
+  useEffect(() => {
+    loadUserKey('resend_key',  'gw_resend_key').then(setResendKey)
+    loadUserKey('resend_from', 'gw_resend_from').then(setResendFrom)
+  }, [])
+
+  const agentName = activeAgent?.name || ''
+
+  // Only contacts with a real email address
+  const emailContacts = useMemo(() =>
+    (contacts || []).filter(c => c.email && c.email.includes('@')),
+    [contacts])
+
+  const filtered = useMemo(() => emailContacts.filter(c => {
+    const q = search.toLowerCase()
+    const matchSearch = !q || `${c.first_name} ${c.last_name} ${c.email}`.toLowerCase().includes(q)
+    const matchType   = !filterType || c.type === filterType
+    return matchSearch && matchType
+  }), [emailContacts, search, filterType])
+
+  const selectedContacts = useMemo(() =>
+    emailContacts.filter(c => selected.includes(c.id)),
+    [emailContacts, selected])
+
+  // First selected (or first filtered) for preview
+  const previewContact = selectedContacts[0] || filtered[0] || null
+
+  const toggle = (id) =>
+    setSelected(p => p.includes(id) ? p.filter(x => x !== id) : [...p, id])
+
+  const toggleAll = () => {
+    const filteredIds = filtered.map(c => c.id)
+    const allOn = filteredIds.every(id => selected.includes(id))
+    setSelected(p => allOn
+      ? p.filter(id => !filteredIds.includes(id))
+      : [...new Set([...p, ...filteredIds])])
+  }
+
+  const contactTypes = useMemo(() => {
+    const types = [...new Set((contacts || []).map(c => c.type).filter(Boolean))]
+    return types.sort()
+  }, [contacts])
+
+  const sendAll = async () => {
+    if (!resendKey) { pushToast('Add your Resend API key in Settings → Email Sending', 'error'); return }
+    if (!resendFrom) { pushToast('Set a From address in Settings → Email Sending', 'error'); return }
+    if (selectedContacts.length === 0) { pushToast('Select at least one contact', 'error'); return }
+
+    setSending(true)
+    setProgress(0)
+    let sent = 0, failed = 0
+
+    for (const contact of selectedContacts) {
+      try {
+        const subject = resolveText(template.subject, contact, agentName)
+        const html    = textToHtml(resolveText(template.body, contact, agentName))
+
+        const res = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${resendKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from: resendFrom, to: [contact.email], subject, html }),
+        })
+
+        if (res.ok) {
+          sent++
+          await supabase.from('activities').insert({
+            contact_id: contact.id,
+            agent_id:   activeAgent?.id || null,
+            type:       'email',
+            body:       `Campaign: ${subject}`,
+          })
+        } else {
+          failed++
+        }
+      } catch {
+        failed++
+      }
+      setProgress(sent + failed)
+      await new Promise(r => setTimeout(r, 120)) // respect Resend rate limits
+    }
+
+    setSending(false)
+    setResult({ sent, failed })
+  }
+
+  const resolvedSubject = resolveText(template.subject, previewContact, agentName)
+  const resolvedBody    = resolveText(template.body,    previewContact, agentName)
+
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.45)', zIndex:1200, display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}>
+      <div style={{ background:'#fff', borderRadius:12, width:'100%', maxWidth:920, maxHeight:'90vh', display:'flex', flexDirection:'column', overflow:'hidden', boxShadow:'0 20px 60px rgba(0,0,0,0.25)' }}>
+
+        {/* Header */}
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'18px 24px', borderBottom:'1px solid var(--gw-border)' }}>
+          <div>
+            <div style={{ fontWeight:700, fontSize:16, fontFamily:'var(--font-display)' }}>Send Campaign</div>
+            <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:2 }}>
+              Template: <strong>{template.name}</strong>
+            </div>
+          </div>
+          <button className="btn btn--ghost btn--icon" onClick={onClose}><Icon name="x" size={16} /></button>
+        </div>
+
+        {/* Body — two columns */}
+        <div style={{ display:'grid', gridTemplateColumns:'340px 1fr', flex:1, overflow:'hidden' }}>
+
+          {/* LEFT: contact picker */}
+          <div style={{ borderRight:'1px solid var(--gw-border)', display:'flex', flexDirection:'column', overflow:'hidden' }}>
+            <div style={{ padding:'14px 16px', borderBottom:'1px solid var(--gw-border)' }}>
+              <div style={{ display:'flex', gap:8, marginBottom:8 }}>
+                <input className="form-control" style={{ flex:1, fontSize:12 }}
+                  placeholder="Search name or email…"
+                  value={search} onChange={e => setSearch(e.target.value)} />
+                <select className="form-control filter-select" style={{ width:110, fontSize:12 }}
+                  value={filterType} onChange={e => setFilterType(e.target.value)}>
+                  <option value="">All types</option>
+                  {contactTypes.map(t => <option key={t} value={t}>{t.charAt(0).toUpperCase()+t.slice(1)}</option>)}
+                </select>
+              </div>
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+                <label style={{ display:'flex', alignItems:'center', gap:6, fontSize:12, cursor:'pointer', userSelect:'none' }}>
+                  <input type="checkbox"
+                    checked={filtered.length > 0 && filtered.every(c => selected.includes(c.id))}
+                    onChange={toggleAll} />
+                  Select all ({filtered.length})
+                </label>
+                <span style={{ fontSize:11, color: selected.length > 0 ? 'var(--gw-azure)' : 'var(--gw-mist)', fontWeight:600 }}>
+                  {selected.length} selected
+                </span>
+              </div>
+            </div>
+
+            {emailContacts.length === 0 ? (
+              <div style={{ padding:24, textAlign:'center', color:'var(--gw-mist)', fontSize:13 }}>
+                No contacts with email addresses found.
+              </div>
+            ) : (
+              <div style={{ overflowY:'auto', flex:1 }}>
+                {filtered.length === 0 ? (
+                  <div style={{ padding:24, textAlign:'center', color:'var(--gw-mist)', fontSize:13 }}>No matches</div>
+                ) : filtered.map(c => {
+                  const isSelected = selected.includes(c.id)
+                  return (
+                    <label key={c.id}
+                      style={{ display:'flex', alignItems:'center', gap:10, padding:'9px 16px', cursor:'pointer', borderBottom:'1px solid var(--gw-border)', transition:'background 100ms', background: isSelected ? 'var(--gw-sky)' : 'transparent' }}
+                      onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background='var(--gw-bone)' }}
+                      onMouseLeave={e => { e.currentTarget.style.background = isSelected ? 'var(--gw-sky)' : 'transparent' }}>
+                      <input type="checkbox" checked={isSelected} onChange={() => toggle(c.id)} style={{ flexShrink:0 }} />
+                      <div style={{ minWidth:0, flex:1 }}>
+                        <div style={{ fontSize:13, fontWeight:500, color:'var(--gw-ink)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                          {c.first_name} {c.last_name}
+                        </div>
+                        <div style={{ fontSize:11, color:'var(--gw-mist)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                          {c.email}
+                        </div>
+                      </div>
+                      {c.type && (
+                        <span style={{ fontSize:10, padding:'2px 6px', background:'var(--gw-bone)', borderRadius:4, color:'var(--gw-mist)', flexShrink:0 }}>
+                          {c.type}
+                        </span>
+                      )}
+                    </label>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* RIGHT: preview + send */}
+          <div style={{ display:'flex', flexDirection:'column', overflow:'hidden' }}>
+            <div style={{ padding:'12px 20px', borderBottom:'1px solid var(--gw-border)', background:'var(--gw-bone)' }}>
+              <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:4 }}>
+                Email Preview {previewContact ? `— as ${previewContact.first_name} ${previewContact.last_name}` : ''}
+              </div>
+              <div style={{ fontSize:13, fontWeight:600, color:'var(--gw-ink)' }}>{resolvedSubject || '(no subject)'}</div>
+              <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>
+                From: {resendFrom || <span style={{ color:'var(--gw-amber)' }}>⚠ not set — configure in Settings</span>}
+              </div>
+            </div>
+            <div style={{ flex:1, overflowY:'auto', padding:'20px 24px' }}>
+              {resolvedBody ? (
+                <div style={{ fontSize:14, lineHeight:1.7, color:'var(--gw-ink)', whiteSpace:'pre-wrap' }}>
+                  {resolvedBody}
+                </div>
+              ) : (
+                <div style={{ color:'var(--gw-mist)', fontSize:13 }}>Template body is empty.</div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding:'14px 24px', borderTop:'1px solid var(--gw-border)', display:'flex', alignItems:'center', gap:12 }}>
+          {/* Progress / result */}
+          {sending && (
+            <div style={{ flex:1 }}>
+              <div style={{ fontSize:12, color:'var(--gw-mist)', marginBottom:5 }}>
+                Sending {progress} / {selectedContacts.length}…
+              </div>
+              <div style={{ height:4, background:'var(--gw-border)', borderRadius:2, overflow:'hidden' }}>
+                <div style={{ height:'100%', width:`${Math.round(progress/selectedContacts.length*100)}%`, background:'var(--gw-azure)', borderRadius:2, transition:'width 200ms ease' }} />
+              </div>
+            </div>
+          )}
+          {result && !sending && (
+            <div style={{ flex:1, fontSize:13 }}>
+              <span style={{ color:'var(--gw-green)', fontWeight:700 }}>✓ {result.sent} sent</span>
+              {result.failed > 0 && <span style={{ color:'var(--gw-red)', marginLeft:12 }}>✗ {result.failed} failed</span>}
+              <span style={{ color:'var(--gw-mist)', marginLeft:8 }}>· Activities logged</span>
+            </div>
+          )}
+          {!sending && !result && (
+            <div style={{ flex:1, fontSize:12, color:'var(--gw-mist)' }}>
+              {selected.length === 0
+                ? 'Select contacts on the left to send.'
+                : `Ready to send to ${selected.length} contact${selected.length !== 1 ? 's' : ''}.`}
+            </div>
+          )}
+
+          <button className="btn btn--ghost" onClick={onClose} disabled={sending}>
+            {result ? 'Close' : 'Cancel'}
+          </button>
+          {!result && (
+            <button className="btn btn--primary" onClick={sendAll}
+              disabled={sending || selected.length === 0}>
+              {sending
+                ? <><Icon name="refresh" size={13} /> Sending…</>
+                : <><Icon name="send" size={13} /> Send to {selected.length} contact{selected.length !== 1 ? 's' : ''}</>}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function TemplatesPage({ db, setDb, activeAgent, openCompose }) {
   const [drawer, setDrawer] = useState(false)
   const [editing, setEditing] = useState(null)
   const [confirm, setConfirm] = useState(null)
   const [filterCat, setFilterCat] = useState('')
+  const [bulkSendTemplate, setBulkSendTemplate] = useState(null)
 
   const templates = db.templates || []
   const agents    = db.agents    || []
@@ -502,6 +765,14 @@ export default function TemplatesPage({ db, setDb, activeAgent, openCompose }) {
                   <button className="btn btn--ghost btn--icon btn--sm" title="Edit" onClick={() => { setEditing(t); setDrawer(true) }}><Icon name="edit" size={13} /></button>
                   <button className="btn btn--ghost btn--icon btn--sm" title="Delete" onClick={() => setConfirm(t.id)}><Icon name="trash" size={13} /></button>
                 </div>
+                <button
+                  className="btn btn--secondary btn--sm"
+                  title="Send to multiple contacts"
+                  onClick={() => setBulkSendTemplate(t)}
+                  style={{ fontSize:11 }}
+                >
+                  <Icon name="users" size={12} /> Send Campaign
+                </button>
               </div>
             </div>
           ))}
@@ -510,6 +781,14 @@ export default function TemplatesPage({ db, setDb, activeAgent, openCompose }) {
 
       <TemplateDrawer open={drawer} onClose={() => setDrawer(false)} template={editing} agents={agents} contacts={contacts} onSave={reload} />
       {confirm && <ConfirmDialog message="Delete this template?" onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
+      {bulkSendTemplate && (
+        <BulkSendModal
+          template={bulkSendTemplate}
+          contacts={contacts}
+          activeAgent={activeAgent}
+          onClose={() => setBulkSendTemplate(null)}
+        />
+      )}
     </div>
   )
 }
