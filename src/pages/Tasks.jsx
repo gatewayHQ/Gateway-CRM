@@ -91,10 +91,17 @@ function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave }) {
 // Defining components inside a parent causes React to treat them as new types
 // every render → full unmount/remount of every row. Moving outside prevents this.
 
-const TaskRow = React.memo(function TaskRow({ task, contact, agent, onToggle, onEdit, onDelete }) {
+const TaskRow = React.memo(function TaskRow({ task, contact, agent, onToggle, onEdit, onDelete, selected, onSelect }) {
   const od = !task.completed && task.due_date && new Date(task.due_date) < new Date()
   return (
-    <div className={`task-row${task.completed?' completed':''}`}>
+    <div className={`task-row${task.completed?' completed':''}${selected?' bulk-selected':''}`} style={{ background: selected ? 'var(--gw-sky)' : undefined }}>
+      <input
+        type="checkbox"
+        checked={selected}
+        onChange={e => onSelect(task.id, e.target.checked)}
+        onClick={e => e.stopPropagation()}
+        style={{ flexShrink: 0, width: 14, height: 14, cursor: 'pointer' }}
+      />
       <div className={`task-checkbox${task.completed?' checked':''}`} onClick={() => onToggle(task)}>
         {task.completed && <Icon name="check" size={10} style={{ color:'#fff' }} />}
       </div>
@@ -117,7 +124,7 @@ const TaskRow = React.memo(function TaskRow({ task, contact, agent, onToggle, on
   )
 })
 
-const TaskGroup = React.memo(function TaskGroup({ label, items, color, contactMap, agentMap, onToggle, onEdit, onDelete }) {
+const TaskGroup = React.memo(function TaskGroup({ label, items, color, contactMap, agentMap, onToggle, onEdit, onDelete, selectedIds, onSelect }) {
   if (items.length === 0) return null
   return (
     <div className="task-group">
@@ -131,6 +138,8 @@ const TaskGroup = React.memo(function TaskGroup({ label, items, color, contactMa
           onToggle={onToggle}
           onEdit={onEdit}
           onDelete={onDelete}
+          selected={selectedIds.has(t.id)}
+          onSelect={onSelect}
         />
       ))}
     </div>
@@ -144,6 +153,9 @@ export default function TasksPage({ db, setDb, activeAgent }) {
   const [filterPriority, setFilterPriority] = useState('')
   const [filterType, setFilterType]   = useState('')
   const [showCompleted, setShowCompleted] = useState(false)
+  const [selectedIds, setSelectedIds] = useState(new Set())
+  const [bulkAgent, setBulkAgent]     = useState('')
+  const [bulkAssigning, setBulkAssigning] = useState(false)
 
   const tasks    = db.tasks    || []
   const agents   = db.agents   || []
@@ -245,6 +257,47 @@ export default function TasksPage({ db, setDb, activeAgent }) {
   const handleEdit   = useCallback((task) => { setEditing(task); setDrawer(true) }, [])
   const handleDelete = useCallback((id)   => setConfirm(id), [])
 
+  const handleSelect = useCallback((id, checked) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      checked ? next.add(id) : next.delete(id)
+      return next
+    })
+  }, [])
+
+  const selectAll = () => {
+    const allIds = filtered.filter(t => !t.completed).map(t => t.id)
+    setSelectedIds(new Set(allIds))
+  }
+  const clearSelection = () => setSelectedIds(new Set())
+
+  const bulkComplete = useCallback(async () => {
+    const ids = [...selectedIds]
+    await Promise.all(ids.map(id => supabase.from('tasks').update({ completed: true }).eq('id', id)))
+    setDb(p => ({ ...p, tasks: p.tasks.map(t => ids.includes(t.id) ? { ...t, completed: true } : t) }))
+    pushToast(`${ids.length} task${ids.length !== 1 ? 's' : ''} completed`)
+    setSelectedIds(new Set())
+  }, [selectedIds, setDb])
+
+  const bulkDelete = useCallback(async () => {
+    const ids = [...selectedIds]
+    await Promise.all(ids.map(id => supabase.from('tasks').delete().eq('id', id)))
+    setDb(p => ({ ...p, tasks: p.tasks.filter(t => !ids.includes(t.id)) }))
+    pushToast(`${ids.length} task${ids.length !== 1 ? 's' : ''} deleted`, 'info')
+    setSelectedIds(new Set())
+  }, [selectedIds, setDb])
+
+  const bulkReassign = useCallback(async () => {
+    if (!bulkAgent) { pushToast('Select an agent first', 'error'); return }
+    setBulkAssigning(true)
+    const ids = [...selectedIds]
+    await Promise.all(ids.map(id => supabase.from('tasks').update({ agent_id: bulkAgent }).eq('id', id)))
+    setDb(p => ({ ...p, tasks: p.tasks.map(t => ids.includes(t.id) ? { ...t, agent_id: bulkAgent } : t) }))
+    pushToast(`${ids.length} task${ids.length !== 1 ? 's' : ''} reassigned`)
+    setSelectedIds(new Set())
+    setBulkAssigning(false)
+  }, [selectedIds, bulkAgent, setDb])
+
   return (
     <div className="page-content">
       <div className="page-header">
@@ -261,15 +314,49 @@ export default function TasksPage({ db, setDb, activeAgent }) {
         </label>
       </div>
 
+      {/* ── Bulk action toolbar ── */}
+      {selectedIds.size > 0 && (
+        <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 14px', background:'var(--gw-sky)', border:'1px solid #c5d9f5', borderRadius:'var(--radius)', marginBottom:12, flexWrap:'wrap' }}>
+          <span style={{ fontSize:13, fontWeight:700, color:'var(--gw-azure)' }}>{selectedIds.size} selected</span>
+          <button className="btn btn--secondary btn--sm" onClick={bulkComplete} title="Mark all selected complete">
+            <Icon name="check" size={12} /> Mark Complete
+          </button>
+          <button className="btn btn--danger btn--sm" onClick={bulkDelete} title="Delete all selected">
+            <Icon name="trash" size={12} /> Delete
+          </button>
+          {agents.length > 0 && (
+            <>
+              <select className="filter-select" style={{ height:30, fontSize:11 }} value={bulkAgent} onChange={e=>setBulkAgent(e.target.value)}>
+                <option value="">Reassign to…</option>
+                {agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+              <button className="btn btn--secondary btn--sm" onClick={bulkReassign} disabled={!bulkAgent || bulkAssigning}>
+                {bulkAssigning ? 'Reassigning…' : 'Reassign'}
+              </button>
+            </>
+          )}
+          <button className="btn btn--ghost btn--sm" onClick={clearSelection} style={{ marginLeft:'auto' }}>
+            Clear selection
+          </button>
+        </div>
+      )}
+      {filtered.length > 0 && selectedIds.size === 0 && (
+        <div style={{ marginBottom:8 }}>
+          <button className="btn btn--ghost btn--sm" style={{ fontSize:11 }} onClick={selectAll}>
+            Select all open
+          </button>
+        </div>
+      )}
+
       {filtered.length === 0 ? (
         <EmptyState icon="tasks" title="No tasks" message="Add tasks to track follow-ups, showings, and reminders." action={<button className="btn btn--primary" onClick={() => setDrawer(true)}><Icon name="plus" size={14} /> Add Task</button>} />
       ) : (
         <>
-          <TaskGroup label="Overdue"          items={overdue}        color="var(--gw-red)"   contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} />
-          <TaskGroup label="Today"            items={todayTasks}     color="var(--gw-azure)" contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} />
-          <TaskGroup label="This Week"        items={upcoming}                                contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} />
-          <TaskGroup label="Upcoming & Other" items={other}                                   contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} />
-          {showCompleted && <TaskGroup label="Completed" items={completedTasks} color="var(--gw-mist)" contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} />}
+          <TaskGroup label="Overdue"          items={overdue}        color="var(--gw-red)"   contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} selectedIds={selectedIds} onSelect={handleSelect} />
+          <TaskGroup label="Today"            items={todayTasks}     color="var(--gw-azure)" contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} selectedIds={selectedIds} onSelect={handleSelect} />
+          <TaskGroup label="This Week"        items={upcoming}                                contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} selectedIds={selectedIds} onSelect={handleSelect} />
+          <TaskGroup label="Upcoming & Other" items={other}                                   contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} selectedIds={selectedIds} onSelect={handleSelect} />
+          {showCompleted && <TaskGroup label="Completed" items={completedTasks} color="var(--gw-mist)" contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} selectedIds={selectedIds} onSelect={handleSelect} />}
         </>
       )}
 

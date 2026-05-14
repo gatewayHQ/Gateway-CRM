@@ -5,12 +5,21 @@ import { Icon, Badge, Avatar, Loading, pushToast } from '../components/UI.jsx'
 
 export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
   const today = new Date().toDateString()
-  const contacts   = db.contacts   || []
-  const deals      = db.deals      || []
-  const properties = db.properties || []
-  const tasks      = db.tasks      || []
-  const agents     = db.agents     || []
-  const activities = db.activities || []
+  const allContacts   = db.contacts   || []
+  const allDeals      = db.deals      || []
+  const allProperties = db.properties || []
+  const allTasks      = db.tasks      || []
+  const agents        = db.agents     || []
+  const allActivities = db.activities || []
+
+  // ── Agent filter ──────────────────────────────────────────────────────────
+  const [filterAgentId, setFilterAgentId] = useState('')
+  const filt = filterAgentId
+  const contacts   = filt ? allContacts.filter(c => c.assigned_agent_id === filt) : allContacts
+  const deals      = filt ? allDeals.filter(d => d.agent_id === filt) : allDeals
+  const properties = filt ? allProperties.filter(p => p.assigned_agent_id === filt) : allProperties
+  const tasks      = filt ? allTasks.filter(t => t.agent_id === filt) : allTasks
+  const activities = filt ? allActivities.filter(a => a.agent_id === filt) : allActivities
 
   const todayTasks   = tasks.filter(t => !t.completed && t.due_date && new Date(t.due_date).toDateString() === today)
   const activeDeals  = deals.filter(d => d.stage !== 'closed' && d.stage !== 'lost')
@@ -118,7 +127,18 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
           <div className="page-title">{greeting}{firstName ? `, ${firstName}` : ''} {greetEmoji}</div>
           <div className="page-sub">{new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</div>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {agents.length > 1 && (
+            <select
+              className="filter-select"
+              value={filterAgentId}
+              onChange={e => setFilterAgentId(e.target.value)}
+              style={{ height: 34 }}
+            >
+              <option value="">All Agents</option>
+              {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          )}
           <button className="btn btn--secondary" onClick={() => go('contacts')}><Icon name="plus" size={14} /> Contact</button>
           <button className="btn btn--primary" onClick={() => go('pipeline')}><Icon name="plus" size={14} /> Deal</button>
         </div>
@@ -131,9 +151,7 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
             label: 'Pipeline Value',
             value: formatCurrency(totalDealValue),
             icon: 'pipeline',
-            sub: weightedDealValue > 0
-              ? `${formatCurrency(weightedDealValue)} weighted`
-              : `${activeDeals.length} open deals`,
+            sub: `${activeDeals.length} open deals${weightedDealValue > 0 ? ` · ${formatCurrency(weightedDealValue)} wtd` : ''}`,
           },
           { label: 'Properties', value: properties.length, icon: 'building', sub: `${properties.filter(p=>p.status==='active').length} active listings` },
           { label: 'Tasks Today', value: todayTasks.length, icon: 'tasks', sub: `${overdueTasks.length > 0 ? overdueTasks.length + ' overdue · ' : ''}${tasks.filter(t=>!t.completed).length} total open` },

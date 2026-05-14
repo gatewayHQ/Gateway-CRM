@@ -689,7 +689,7 @@ export default function App() {
           {route === 'templates'  && <TemplatesPage {...props} />}
           {route === 'sequences'  && <SequencesPage {...props} />}
           {route === 'reports'    && <ReportsPage {...props} />}
-          {route === 'om'         && <OmPage />}
+          {route === 'om'         && <OmPage db={db} activeAgent={activeAgent} />}
           {route === 'social'     && <SocialPage db={db} activeAgent={activeAgent} />}
           {route === 'leads'      && <LeadsPage {...props} />}
           {route === 'integrations' && <IntegrationsPage db={db} />}

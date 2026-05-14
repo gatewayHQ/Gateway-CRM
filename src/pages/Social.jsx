@@ -210,14 +210,15 @@ function propertyToFields(p) {
   if (!p) return { address: '', price: '', beds: '', baths: '', features: '' }
   const d = p.details || {}
   const addr = [p.address, p.city, p.state].filter(Boolean).join(', ')
-  const priceStr = p.price ? `$${Number(p.price).toLocaleString()}` : ''
+  const priceStr = p.list_price ? `$${Number(p.list_price).toLocaleString()}` : ''
   const parts = []
-  if (p.sqft)       parts.push(`${Number(p.sqft).toLocaleString()} sqft`)
-  if (p.year_built) parts.push(`Built ${p.year_built}`)
-  if (p.garage)     parts.push(`${p.garage}-car garage`)
-  if (d.pool)       parts.push('Pool')
-  if (p.description) parts.push(p.description.slice(0, 120))
-  return { address: addr, price: priceStr, beds: String(d.beds || p.beds || ''), baths: String(d.baths || p.baths || ''), features: parts.join(' · ') }
+  if (p.sqft)         parts.push(`${Number(p.sqft).toLocaleString()} sqft`)
+  if (d.year_built)   parts.push(`Built ${d.year_built}`)
+  if (p.garage > 0)   parts.push(`${p.garage}-car garage`)
+  if (d.total_units)  parts.push(`${d.total_units} units`)
+  if (d.unit_mix)     parts.push(d.unit_mix)
+  if (p.notes)        parts.push(p.notes.slice(0, 120))
+  return { address: addr, price: priceStr, beds: String(p.beds || ''), baths: String(p.baths || ''), features: parts.join(' · ') }
 }
 
 // ─── Post card export (screenshot-able) ───────────────────────────────────────

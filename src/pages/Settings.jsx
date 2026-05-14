@@ -74,6 +74,8 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
   const [aiKey, setAiKey]         = useState('')
   const [aiKeySaved, setAiKeySaved] = useState(false)
   const [showAiKey, setShowAiKey] = useState(false)
+  const [aiKeyTesting, setAiKeyTesting] = useState(false)
+  const [aiKeyTestResult, setAiKeyTestResult] = useState(null) // null | 'ok' | 'fail'
 
   // Resend key — same storage strategy
   const [resendKey, setResendKey]         = useState('')
@@ -99,6 +101,37 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
     setAiKeySaved(true)
     setTimeout(() => setAiKeySaved(false), 2000)
     pushToast('AI key saved — works on all your devices now')
+  }
+
+  const testAiKey = async () => {
+    setAiKeyTesting(true)
+    setAiKeyTestResult(null)
+    try {
+      const res = await fetch('/api/claude', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: aiKey.trim(),
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 16,
+          messages: [{ role: 'user', content: 'Reply with exactly: ok' }],
+        }),
+      })
+      const json = await res.json()
+      const text = json?.content?.[0]?.text || ''
+      if (res.ok && text) {
+        setAiKeyTestResult('ok')
+        pushToast('API key is valid!')
+      } else {
+        setAiKeyTestResult('fail')
+        pushToast(json?.error?.message || 'Key test failed', 'error')
+      }
+    } catch (e) {
+      setAiKeyTestResult('fail')
+      pushToast('Key test failed: ' + e.message, 'error')
+    }
+    setAiKeyTesting(false)
+    setTimeout(() => setAiKeyTestResult(null), 5000)
   }
 
   const saveResendKey = async () => {
@@ -326,17 +359,25 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
             </div>
             <div className="form-hint">Get your key at <strong>console.anthropic.com</strong> → API Keys.</div>
           </div>
-          <button className="btn btn--primary btn--sm" onClick={saveAiKey} disabled={!aiKey.trim()}>
-            {aiKeySaved ? '✓ Saved' : 'Save Key'}
-          </button>
-          {aiKey && (
-            <button className="btn btn--ghost btn--sm" style={{ marginLeft: 8 }} onClick={async () => {
-              await supabase.auth.updateUser({ data: { anthropic_key: '' } })
-              localStorage.removeItem('gw_anthropic_key')
-              setAiKey('')
-              pushToast('Key removed')
-            }}>Remove</button>
-          )}
+          <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+            <button className="btn btn--primary btn--sm" onClick={saveAiKey} disabled={!aiKey.trim()}>
+              {aiKeySaved ? '✓ Saved' : 'Save Key'}
+            </button>
+            {aiKey.trim() && (
+              <button className="btn btn--secondary btn--sm" onClick={testAiKey} disabled={aiKeyTesting}>
+                {aiKeyTesting ? 'Testing…' : aiKeyTestResult === 'ok' ? '✓ Valid' : aiKeyTestResult === 'fail' ? '✗ Failed' : 'Test Key'}
+              </button>
+            )}
+            {aiKey && (
+              <button className="btn btn--ghost btn--sm" onClick={async () => {
+                await supabase.auth.updateUser({ data: { anthropic_key: '' } })
+                localStorage.removeItem('gw_anthropic_key')
+                setAiKey('')
+                setAiKeyTestResult(null)
+                pushToast('Key removed')
+              }}>Remove</button>
+            )}
+          </div>
         </div>
       </div>
 

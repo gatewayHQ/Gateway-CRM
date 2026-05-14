@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { formatCurrency } from '../lib/helpers.js'
-import { Avatar } from '../components/UI.jsx'
+import { Avatar, Icon } from '../components/UI.jsx'
 
 const SOURCES      = ['referral','website','open house','social','cold call','other']
 const STAGE_LABELS = { lead:'Lead', qualified:'Qualified', showing:'Showing', offer:'Offer Made', 'under-contract':'Under Contract', closed:'Closed' }
@@ -185,15 +185,79 @@ function LeaderboardTab({ db }) {
 
 export default function ReportsPage({ db }) {
   const [activeTab, setActiveTab] = useState('roi')
+  const [customFrom, setCustomFrom] = useState('')
+  const [customTo,   setCustomTo]   = useState('')
   const contacts    = db.contacts    || []
   const deals       = db.deals       || []
   const commissions = db.commissions || []
 
+  // ── Custom date filter for ROI tab ──
+  const filteredContacts = useMemo(() => {
+    if (!customFrom && !customTo) return contacts
+    return contacts.filter(c => {
+      const d = new Date(c.created_at)
+      if (customFrom && d < new Date(customFrom)) return false
+      if (customTo   && d > new Date(customTo + 'T23:59:59')) return false
+      return true
+    })
+  }, [contacts, customFrom, customTo])
+
+  const filteredDeals = useMemo(() => {
+    if (!customFrom && !customTo) return deals
+    return deals.filter(d => {
+      const dt = new Date(d.created_at)
+      if (customFrom && dt < new Date(customFrom)) return false
+      if (customTo   && dt > new Date(customTo + 'T23:59:59')) return false
+      return true
+    })
+  }, [deals, customFrom, customTo])
+
+  const exportROIcsv = () => {
+    const rows = SOURCES.map(source => {
+      const sc = filteredContacts.filter(c => (c.source || 'other') === source)
+      const ids = new Set(sc.map(c => c.id))
+      const sd = filteredDeals.filter(d => ids.has(d.contact_id))
+      const closed = sd.filter(d => d.stage === 'closed')
+      const closedValue = closed.reduce((s, d) => s + (d.value || 0), 0)
+      const convRate = sc.length > 0 ? Math.round(closed.length / sc.length * 100) : 0
+      return [source, sc.length, closed.length, convRate + '%', closedValue]
+    }).filter(r => r[1] > 0)
+    const headers = ['Source', 'Contacts', 'Closed', 'Conv. Rate', 'Closed Value']
+    const csv = [headers, ...rows].map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob)
+    a.download = `lead-roi-${new Date().toISOString().slice(0,10)}.csv`
+    a.click()
+  }
+
+  const exportROIpdf = () => {
+    const rows = SOURCES.map(source => {
+      const sc = filteredContacts.filter(c => (c.source || 'other') === source)
+      const ids = new Set(sc.map(c => c.id))
+      const sd = filteredDeals.filter(d => ids.has(d.contact_id))
+      const closed = sd.filter(d => d.stage === 'closed')
+      const closedValue = closed.reduce((s, d) => s + (d.value || 0), 0)
+      const convRate = sc.length > 0 ? Math.round(closed.length / sc.length * 100) : 0
+      return { source, count: sc.length, closedCount: closed.length, convRate, closedValue }
+    }).filter(r => r.count > 0).sort((a, b) => b.count - a.count)
+
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Lead ROI Report</title>
+<style>body{font-family:system-ui,sans-serif;font-size:12px;color:#1a2236;margin:32px}h1{font-size:20px;margin-bottom:4px}.sub{color:#6b7280;margin-bottom:20px}table{width:100%;border-collapse:collapse}th{background:#1a2236;color:#fff;padding:8px 10px;text-align:left;font-size:11px}td{padding:7px 10px;border-bottom:1px solid #e5e7eb}tfoot td{font-weight:700;background:#f3f4f6;border-top:2px solid #1a2236}.green{color:#16a34a;font-weight:700}@media print{body{margin:16px}}</style>
+</head><body>
+<h1>Lead Source ROI Report</h1>
+<div class="sub">Gateway Real Estate Advisors · Generated ${new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'})}${customFrom||customTo ? ` · ${customFrom||'All'}–${customTo||'Now'}` : ''}</div>
+<table><thead><tr><th>Source</th><th>Contacts</th><th>Closed</th><th>Conv. Rate</th><th>Closed Value</th></tr></thead>
+<tbody>${rows.map(r=>`<tr><td style="text-transform:capitalize;font-weight:600">${r.source}</td><td>${r.count}</td><td>${r.closedCount}</td><td><span style="font-weight:700;color:${r.convRate>=20?'#16a34a':r.convRate>=8?'#856404':'#9ca3af'}">${r.convRate}%</span></td><td class="green">${r.closedValue>0?formatCurrency(r.closedValue):'—'}</td></tr>`).join('')}</tbody>
+<tfoot><tr><td>TOTALS</td><td>${rows.reduce((s,r)=>s+r.count,0)}</td><td>${rows.reduce((s,r)=>s+r.closedCount,0)}</td><td></td><td class="green">${formatCurrency(rows.reduce((s,r)=>s+r.closedValue,0))}</td></tr></tfoot>
+</table></body></html>`
+    const win = window.open('','_blank'); win.document.write(html); win.document.close(); win.focus(); setTimeout(()=>win.print(),400)
+  }
+
   const sourceStats = useMemo(() => {
     return SOURCES.map(source => {
-      const sc = contacts.filter(c => (c.source || 'other') === source)
+      const sc = filteredContacts.filter(c => (c.source || 'other') === source)
       const ids = new Set(sc.map(c => c.id))
-      const sd = deals.filter(d => ids.has(d.contact_id))
+      const sd = filteredDeals.filter(d => ids.has(d.contact_id))
       const closed = sd.filter(d => d.stage === 'closed')
       const closedValue = closed.reduce((s, d) => s + (d.value || 0), 0)
       const closedIds = new Set(closed.map(d => d.id))
@@ -203,10 +267,10 @@ export default function ReportsPage({ db }) {
       const convRate = sc.length > 0 ? Math.round(closed.length / sc.length * 100) : 0
       return { source, count: sc.length, closedCount: closed.length, closedValue, agentEarnings, convRate }
     }).filter(s => s.count > 0)
-  }, [contacts, deals, commissions])
+  }, [filteredContacts, filteredDeals, commissions])
 
-  const totalContacts  = contacts.length
-  const closedDeals    = deals.filter(d => d.stage === 'closed')
+  const totalContacts  = filteredContacts.length
+  const closedDeals    = filteredDeals.filter(d => d.stage === 'closed')
   const totalClosed    = closedDeals.length
   const totalRevenue   = closedDeals.reduce((s, d) => s + (d.value || 0), 0)
   const overallConv    = totalContacts > 0 ? Math.round(totalClosed / totalContacts * 100) : 0
@@ -219,6 +283,16 @@ export default function ReportsPage({ db }) {
           <div className="page-title">Reports</div>
           <div className="page-sub">Lead source ROI &amp; agent activity</div>
         </div>
+        {activeTab === 'roi' && sourceStats.length > 0 && (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn--ghost btn--sm" onClick={exportROIcsv} title="Export as CSV">
+              <Icon name="download" size={13} /> CSV
+            </button>
+            <button className="btn btn--ghost btn--sm" onClick={exportROIpdf} title="Print / PDF">
+              <Icon name="document" size={13} /> PDF
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Tab bar */}
@@ -237,6 +311,24 @@ export default function ReportsPage({ db }) {
         <LeaderboardTab db={db} />
       ) : (
         <>
+          {/* ── Date range filter ── */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--gw-mist)' }}>Date Range:</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="date" className="form-control" style={{ width: 150, height: 32, fontSize: 12 }} value={customFrom} onChange={e => setCustomFrom(e.target.value)} />
+              <span style={{ fontSize: 12, color: 'var(--gw-mist)' }}>to</span>
+              <input type="date" className="form-control" style={{ width: 150, height: 32, fontSize: 12 }} value={customTo} onChange={e => setCustomTo(e.target.value)} />
+            </div>
+            {(customFrom || customTo) && (
+              <button className="btn btn--ghost btn--sm" onClick={() => { setCustomFrom(''); setCustomTo('') }}>Clear</button>
+            )}
+            {(customFrom || customTo) && (
+              <span style={{ fontSize: 11, color: 'var(--gw-azure)', fontWeight: 600 }}>
+                {filteredContacts.length} contacts · {filteredDeals.length} deals in range
+              </span>
+            )}
+          </div>
+
           {/* Summary stats */}
           <div className="stats-grid" style={{ marginBottom: 24 }}>
             <div className="stat-card">

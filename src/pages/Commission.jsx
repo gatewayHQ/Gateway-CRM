@@ -7,6 +7,15 @@ const D_GROSS = 3.0
 const D_BROKER = 30.0
 const D_AGENT = 70.0
 
+const DEFAULTS_KEY = 'gw_comm_defaults'
+
+function loadDefaults() {
+  try { return JSON.parse(localStorage.getItem(DEFAULTS_KEY) || 'null') } catch { return null }
+}
+function saveDefaults(gross_pct, broker_pct, agent_pct) {
+  localStorage.setItem(DEFAULTS_KEY, JSON.stringify({ gross_pct, broker_pct, agent_pct }))
+}
+
 const COMMISSION_SQL = `create table if not exists commissions (
   id uuid primary key default gen_random_uuid(),
   deal_id uuid references deals(id) on delete cascade unique not null,
@@ -48,29 +57,31 @@ function CapCelebration({ agentName, onClose }) {
 
 // ── Commission Drawer ──────────────────────────────────────────────────────────
 function CommissionDrawer({ open, onClose, deal, commission, onSave }) {
-  const init = {
-    gross_pct:       commission?.gross_pct       ?? D_GROSS,
-    broker_pct:      commission?.broker_pct      ?? D_BROKER,
-    agent_pct:       commission?.agent_pct       ?? D_AGENT,
-    referral_pct:    commission?.referral_pct    ?? 0,
-    co_agent_pct:    commission?.co_agent_pct    ?? 0,
-    transaction_fee: commission?.transaction_fee ?? 0,
-    notes: commission?.notes ?? '',
-  }
-  const [form, setForm] = useState(init)
-  const [saving, setSaving] = useState(false)
+  const defs = loadDefaults()
+  const fallbackGross  = defs?.gross_pct  ?? D_GROSS
+  const fallbackBroker = defs?.broker_pct ?? D_BROKER
+  const fallbackAgent  = defs?.agent_pct  ?? D_AGENT
 
-  React.useEffect(() => {
-    setForm({
-      gross_pct:       commission?.gross_pct       ?? D_GROSS,
-      broker_pct:      commission?.broker_pct      ?? D_BROKER,
-      agent_pct:       commission?.agent_pct       ?? D_AGENT,
-      referral_pct:    commission?.referral_pct    ?? 0,
-      co_agent_pct:    commission?.co_agent_pct    ?? 0,
-      transaction_fee: commission?.transaction_fee ?? 0,
-      notes: commission?.notes ?? '',
-    })
-  }, [commission, open])
+  const buildForm = (c) => ({
+    gross_pct:       c?.gross_pct       ?? fallbackGross,
+    broker_pct:      c?.broker_pct      ?? fallbackBroker,
+    agent_pct:       c?.agent_pct       ?? fallbackAgent,
+    referral_pct:    c?.referral_pct    ?? 0,
+    co_agent_pct:    c?.co_agent_pct    ?? 0,
+    transaction_fee: c?.transaction_fee ?? 0,
+    notes: c?.notes ?? '',
+  })
+  const [form, setForm] = useState(() => buildForm(commission))
+  const [saving, setSaving] = useState(false)
+  const [defaultsSaved, setDefaultsSaved] = useState(false)
+
+  React.useEffect(() => { setForm(buildForm(commission)) }, [commission, open])
+
+  const handleSaveDefaults = () => {
+    saveDefaults(Number(form.gross_pct), Number(form.broker_pct), Number(form.agent_pct))
+    setDefaultsSaved(true)
+    setTimeout(() => setDefaultsSaved(false), 2000)
+  }
 
   const setBroker = (v) => { const b = Math.min(100,Math.max(0,Number(v)||0)); setForm(p=>({...p,broker_pct:b,agent_pct:Math.round((100-b)*10)/10})) }
   const setAgent  = (v) => { const a = Math.min(100,Math.max(0,Number(v)||0)); setForm(p=>({...p,agent_pct:a,broker_pct:Math.round((100-a)*10)/10})) }
@@ -181,7 +192,10 @@ function CommissionDrawer({ open, onClose, deal, commission, onSave }) {
           <textarea className="form-control form-control--textarea" value={form.notes} onChange={e=>setForm(p=>({...p,notes:e.target.value}))} placeholder="Any commission notes…" />
         </div>
       </div>
-      <div className="drawer__foot">
+      <div className="drawer__foot" style={{ flexWrap:'wrap', gap:8 }}>
+        <button className="btn btn--ghost btn--sm" onClick={handleSaveDefaults} title="Save current GC%/splits as team defaults for new deals" style={{ marginRight:'auto' }}>
+          {defaultsSaved ? '✓ Saved as Default' : 'Save as Default'}
+        </button>
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
         <button className="btn btn--primary" onClick={save} disabled={saving}>{saving?'Saving…':'Save'}</button>
       </div>
@@ -839,7 +853,7 @@ ${rows.map(r => `<tr>
           {agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
         <span style={{ fontSize:12, color:'var(--gw-mist)', marginLeft:'auto' }}>
-          Defaults: {D_GROSS}% gross · {D_AGENT}/{D_BROKER} agent/broker. Click edit to customize.
+          {(() => { const d = loadDefaults(); const g = d?.gross_pct ?? D_GROSS; const a = d?.agent_pct ?? D_AGENT; const b = d?.broker_pct ?? D_BROKER; return `Defaults: ${g}% GC · ${a}/${b} agent/broker` })()}
         </span>
       </div>
 

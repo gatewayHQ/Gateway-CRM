@@ -1373,7 +1373,7 @@ async function loadUserKey(metaField, localKey) {
 }
 
 function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave }) {
-  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, is_1031:false, deal_state:'' }
+  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, is_1031:false, deal_state:'', lost_reason:'' }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
@@ -1381,7 +1381,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
   const [generating, setGenerating] = useState(false)
 
   React.useEffect(() => {
-    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {}, is_1031: deal.is_1031 || false, deal_state: deal.deal_state || '' } : blank)
+    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {}, is_1031: deal.is_1031 || false, deal_state: deal.deal_state || '', lost_reason: deal.lost_reason || '' } : blank)
     setErrors({})
     setTab('details')
     setGenerating(false)
@@ -1457,6 +1457,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
         comp_data:           form.comp_data     || null,
         is_1031:             form.is_1031       || false,
         deal_state:          form.deal_state    || null,
+        lost_reason:         form.lost_reason   || null,
       }
       let error
       if (deal?.id) {
@@ -1473,6 +1474,16 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
           ;({ error } = await supabase.from('deals').insert([safePayload]))
         }
         if (!error) pushToast('Saved (run schema migration to enable 1031 tracking)', 'warn')
+      }
+      // Gracefully handle missing lost_reason column
+      if (error?.message?.includes('lost_reason')) {
+        const { lost_reason: _lr, ...safePayload } = payload
+        if (deal?.id) {
+          ;({ error } = await supabase.from('deals').update(safePayload).eq('id', deal.id))
+        } else {
+          ;({ error } = await supabase.from('deals').insert([safePayload]))
+        }
+        if (!error) pushToast('Saved (add lost_reason column to deals table to enable reason tracking)', 'warn')
       }
       if (error) { pushToast(error.message, 'error'); return }
       pushToast(deal?.id ? 'Deal updated' : 'Deal added')
@@ -1551,6 +1562,23 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
             </div>
 
             <div className="form-group"><label className="form-label">Stage</label><select className="form-control" value={form.stage} onChange={e=>set('stage',e.target.value)}>{STAGE_ORDER.map(s=><option key={s} value={s}>{STAGE_LABELS[s]}</option>)}</select></div>
+            {form.stage === 'lost' && (
+              <div className="form-group" style={{ marginTop:-8 }}>
+                <label className="form-label">Lost Reason</label>
+                <select className="form-control" value={form.lost_reason||''} onChange={e=>set('lost_reason',e.target.value)}>
+                  <option value="">— Select reason —</option>
+                  <option value="price">Price — too high / low</option>
+                  <option value="financing">Financing fell through</option>
+                  <option value="competition">Lost to competitor</option>
+                  <option value="timing">Timing — not ready</option>
+                  <option value="inspection">Inspection issues</option>
+                  <option value="appraisal">Appraisal gap</option>
+                  <option value="no_response">No response / ghosted</option>
+                  <option value="withdrew">Seller/buyer withdrew</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+            )}
             <div className="form-row">
               <div className="form-group"><label className="form-label">Sale / Deal Value</label><input className="form-control" type="number" value={form.value||''} onChange={e=>set('value',e.target.value)} placeholder="0" /></div>
               <div className="form-group"><label className="form-label">Probability %</label><input className="form-control" type="number" min="0" max="100" value={form.probability||0} onChange={e=>set('probability',e.target.value)} /></div>
@@ -1955,7 +1983,15 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                         </div>
                       )}
                       {contact && <div className="deal-card__contact">{contact.first_name} {contact.last_name}</div>}
-                      {deal.value > 0 && <div className="deal-card__value">{formatCurrency(deal.value)}</div>}
+                      <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                        {deal.value > 0 && <div className="deal-card__value">{formatCurrency(deal.value)}</div>}
+                        {daysSinceUpdate !== null && (
+                          <span style={{ fontSize:9, color:'var(--gw-mist)', background:'var(--gw-bone)', padding:'1px 5px', borderRadius:4, whiteSpace:'nowrap' }}>{daysSinceUpdate}d</span>
+                        )}
+                      </div>
+                      {deal.stage === 'lost' && deal.lost_reason && (
+                        <div style={{ fontSize:10, color:'var(--gw-red)', marginBottom:2 }}>Lost: {deal.lost_reason.replace(/_/g,' ')}</div>
+                      )}
                       <div className="deal-card__meta">
                         <div style={{ fontSize:11, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)' }}>
                           {deal.expected_close_date ? formatDate(deal.expected_close_date) : ''}
@@ -2022,6 +2058,9 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                       <td style={{ fontWeight:600 }}>
                         {deal.is_1031 && <span title="1031 Exchange" style={{ marginRight:4 }}>🔄</span>}
                         {deal.title}
+                        {deal.stage === 'lost' && deal.lost_reason && (
+                          <div style={{ fontSize:10, color:'var(--gw-red)', fontWeight:400, marginTop:1 }}>Lost: {deal.lost_reason.replace(/_/g,' ')}</div>
+                        )}
                       </td>
                       <td>
                         <span style={{ padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:700, background:`${STAGE_COLORS[deal.stage]}20`, color:STAGE_COLORS[deal.stage] }}>

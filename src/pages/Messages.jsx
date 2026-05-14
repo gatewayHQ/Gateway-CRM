@@ -111,11 +111,23 @@ function ConvList({ convs, activeId, onSelect, agents, filterAgent, setFilterAge
 }
 
 // ── Message Thread ────────────────────────────────────────────────────────────
+const CANNED_RESPONSES = [
+  { label: 'On my way',         text: "Hi! Just wanted to let you know I'm on my way and should be there shortly." },
+  { label: 'Showing confirmed', text: "Your showing is confirmed! I'll meet you at the property. Please let me know if anything comes up." },
+  { label: 'Docs received',     text: "Got it — I've received your documents and will review them shortly. I'll be in touch soon!" },
+  { label: 'Call me',           text: "Hey! When you get a chance, give me a call at your convenience. I have some updates to share." },
+  { label: 'Offer accepted',    text: "Great news — your offer has been accepted! I'll send over the next steps shortly. Exciting times ahead!" },
+  { label: 'Under contract',    text: "We're officially under contract! I'll keep you updated every step of the way through closing." },
+  { label: 'Follow up',         text: "Just checking in to see if you have any questions or if there's anything I can help with. Happy to chat!" },
+  { label: 'Inspection done',   text: "The inspection is complete. I'm reviewing the report now and will reach out shortly to go over the findings." },
+]
+
 function Thread({ conv, msgs, sending, onSend, contacts, onMarkRead }) {
-  const [draft, setDraft]   = useState('')
-  const bottomRef           = useRef(null)
-  const inputRef            = useRef(null)
-  const contact             = contacts.find(c => c.id === conv?.contact_id)
+  const [draft, setDraft]       = useState('')
+  const [showCanned, setShowCanned] = useState(false)
+  const bottomRef               = useRef(null)
+  const inputRef                = useRef(null)
+  const contact                 = contacts.find(c => c.id === conv?.contact_id)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -200,8 +212,29 @@ function Thread({ conv, msgs, sending, onSend, contacts, onMarkRead }) {
         <div ref={bottomRef} />
       </div>
 
+      {/* Canned response picker */}
+      {showCanned && (
+        <div style={{ padding:'8px 12px', borderTop:'1px solid var(--gw-border)', background:'var(--gw-bone)', display:'flex', flexWrap:'wrap', gap:6 }}>
+          {CANNED_RESPONSES.map(cr => (
+            <button key={cr.label} className="btn btn--ghost btn--sm"
+              style={{ fontSize:11, padding:'3px 10px', borderRadius:12 }}
+              onClick={() => { setDraft(d => d ? d + ' ' + cr.text : cr.text); setShowCanned(false); inputRef.current?.focus() }}>
+              {cr.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Compose bar */}
       <div className="msg-compose">
+        <button
+          className="btn btn--ghost btn--icon"
+          style={{ flexShrink:0, padding:'8px', color: showCanned ? 'var(--gw-azure)' : 'var(--gw-mist)' }}
+          onClick={() => setShowCanned(s => !s)}
+          title="Quick replies"
+        >
+          <Icon name="sparkles" size={14} />
+        </button>
         <textarea
           ref={inputRef}
           className="msg-compose__input"
