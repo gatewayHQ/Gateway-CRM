@@ -40,6 +40,8 @@ function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivit
     }]).select().single()
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
+    // Keep last_contacted_at current — drives heat score accuracy
+    await supabase.from('contacts').update({ last_contacted_at: new Date().toISOString() }).eq('id', contact.id)
     pushToast(`${type.charAt(0).toUpperCase() + type.slice(1)} logged`)
     setBody('')
     onActivityAdded(data)
@@ -164,7 +166,7 @@ function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivit
   )
 }
 
-function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activities, activeAgent, onSave, onActivityAdded }) {
+function ContactDrawer({ open, onClose, contact, contacts, agents, deals, tasks, activities, activeAgent, onSave, onActivityAdded }) {
   const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'', birthday:'', anniversary_date:'', submarket:'', asset_types:[], size_min:'', size_max:'', size_unit:'sqft' }
   const blankProp = { address:'', list_price:'', type:'residential', subtype:'', beds:'', baths:'', sqft:'', garage:'', details:{} }
   const [form, setForm] = useState(contact || blank)
@@ -173,6 +175,7 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
   const [tab, setTab] = useState('details')
   const [addProp, setAddProp] = useState(false)
   const [propForm, setPropForm] = useState(blankProp)
+  const [dupWarning, setDupWarning] = useState(null)
 
   React.useEffect(() => {
     setForm(contact || blank)
@@ -180,6 +183,7 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
     setTab('details')
     setAddProp(false)
     setPropForm(blankProp)
+    setDupWarning(null)
   }, [contact, open])
 
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
@@ -198,8 +202,23 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
     return Object.keys(e).length === 0
   }
 
-  const save = async () => {
+  const save = async (force = false) => {
     if (!validate()) return
+    // Check for duplicates on new contacts only
+    if (!contact?.id && !force) {
+      const all = contacts || []
+      const emailDups = form.email?.trim()
+        ? all.filter(c => c.email?.toLowerCase() === form.email.trim().toLowerCase())
+        : []
+      const nameDups = all.filter(c =>
+        c.first_name?.toLowerCase() === form.first_name.trim().toLowerCase() &&
+        c.last_name?.toLowerCase()  === form.last_name.trim().toLowerCase()
+      )
+      if (emailDups.length > 0 || nameDups.length > 0) {
+        setDupWarning({ emailDups, nameDups })
+        return
+      }
+    }
     setSaving(true)
 
     // Destructure buyer-criteria fields out of form so ...baseForm never spreads
@@ -516,9 +535,25 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
               </div>
             )}
           </div>
+          {/* Duplicate warning */}
+          {dupWarning && (
+            <div style={{ margin: '0 20px 12px', padding: '12px 14px', background: '#fff8ec', border: '1px solid var(--gw-amber)', borderRadius: 'var(--radius)', fontSize: 13 }}>
+              <div style={{ fontWeight: 700, color: 'var(--gw-amber)', marginBottom: 6 }}>⚠ Possible Duplicate</div>
+              {dupWarning.emailDups.length > 0 && (
+                <div style={{ marginBottom: 4 }}>Same email: <strong>{dupWarning.emailDups.map(c => `${c.first_name} ${c.last_name}`).join(', ')}</strong></div>
+              )}
+              {dupWarning.nameDups.length > 0 && (
+                <div style={{ marginBottom: 8 }}>Same name: <strong>{dupWarning.nameDups.map(c => `${c.first_name} ${c.last_name}`).join(', ')}</strong></div>
+              )}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="btn btn--secondary btn--sm" onClick={() => setDupWarning(null)}>Cancel</button>
+                <button className="btn btn--primary btn--sm" onClick={() => { setDupWarning(null); save(true) }}>Save Anyway</button>
+              </div>
+            </div>
+          )}
           <div className="drawer__foot">
             <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-            <button className="btn btn--primary" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save Contact'}</button>
+            <button className="btn btn--primary" onClick={() => save()} disabled={saving}>{saving ? 'Saving…' : 'Save Contact'}</button>
           </div>
         </>
       )}
@@ -866,6 +901,30 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
     else { setSortKey(key); setSortDir('asc') }
   }
 
+  const exportCSV = () => {
+    const headers = ['First Name','Last Name','Email','Phone','Type','Status','Source','Tags','Owner Address','City','State','ZIP','Birthday','Anniversary','Last Contacted','Assigned Agent','Notes']
+    const rows = filtered.map(c => {
+      const agent = agents.find(a => a.id === c.assigned_agent_id)
+      return [
+        c.first_name, c.last_name, c.email || '', c.phone || '',
+        c.type, c.status, c.source || '', (c.tags || []).join(';'),
+        c.owner_address || '', c.owner_city || '', c.owner_state || '', c.owner_zip || '',
+        c.birthday || '', c.anniversary_date || '',
+        c.last_contacted_at ? new Date(c.last_contacted_at).toLocaleDateString() : '',
+        agent?.name || '', c.notes || '',
+      ]
+    })
+    const csv = [headers, ...rows].map(row =>
+      row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')
+    ).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href = url; a.download = `contacts-${new Date().toISOString().slice(0,10)}.csv`
+    a.click(); URL.revokeObjectURL(url)
+    pushToast(`Exported ${filtered.length} contacts`)
+  }
+
   const SortIcon = ({ k }) => sortKey === k ? <Icon name={sortDir === 'asc' ? 'chevronRight' : 'chevronDown'} size={12} /> : null
 
   return (
@@ -876,6 +935,9 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
           <div className="page-sub">{contacts.length} total contacts</div>
         </div>
         <div style={{ display:'flex', gap:8 }}>
+          {filtered.length > 0 && (
+            <button className="btn btn--ghost" onClick={exportCSV} title="Export visible contacts as CSV"><Icon name="download" size={14} /> Export</button>
+          )}
           <button className="btn btn--secondary" onClick={() => setImportModal(true)}><Icon name="import" size={14} /> Import CSV</button>
           <button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Contact</button>
         </div>
@@ -973,10 +1035,20 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
 
       <ContactDrawer
         open={drawer} onClose={() => setDrawer(false)}
-        contact={editing} agents={agents} deals={deals}
+        contact={editing} contacts={contacts} agents={agents} deals={deals}
         tasks={db.tasks||[]} activities={activities}
         activeAgent={activeAgent}
-        onActivityAdded={act => setDb(p => ({ ...p, activities: [act, ...(p.activities || [])] }))}
+        onActivityAdded={act => {
+          setDb(p => ({
+            ...p,
+            activities: [act, ...(p.activities || [])],
+            // Optimistically update last_contacted_at on the contact in memory
+            contacts: p.contacts.map(c => c.id === act.contact_id
+              ? { ...c, last_contacted_at: act.created_at || new Date().toISOString() }
+              : c
+            ),
+          }))
+        }}
         onSave={reload}
       />
       {selected.size > 0 && (

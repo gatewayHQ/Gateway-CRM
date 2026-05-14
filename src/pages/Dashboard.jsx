@@ -1,24 +1,35 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useState, useMemo } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER, upcomingReminders } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Loading, pushToast } from '../components/UI.jsx'
 
 export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
   const today = new Date().toDateString()
-  const contacts = db.contacts || []
-  const deals = db.deals || []
+  const contacts   = db.contacts   || []
+  const deals      = db.deals      || []
   const properties = db.properties || []
-  const tasks = db.tasks || []
-  const agents = db.agents || []
+  const tasks      = db.tasks      || []
+  const agents     = db.agents     || []
+  const activities = db.activities || []
 
-  const todayTasks = tasks.filter(t => !t.completed && t.due_date && new Date(t.due_date).toDateString() === today)
-  const activeDeals = deals.filter(d => d.stage !== 'closed' && d.stage !== 'lost')
-  const totalDealValue = activeDeals.reduce((s, d) => s + (d.value || 0), 0)
+  const todayTasks   = tasks.filter(t => !t.completed && t.due_date && new Date(t.due_date).toDateString() === today)
+  const activeDeals  = deals.filter(d => d.stage !== 'closed' && d.stage !== 'lost')
+  const totalDealValue     = activeDeals.reduce((s, d) => s + (d.value || 0), 0)
+  const weightedDealValue  = activeDeals.reduce((s, d) => s + (d.value || 0) * ((d.probability || 0) / 100), 0)
 
   const upcomingTasks = tasks
     .filter(t => !t.completed && t.due_date)
     .sort((a, b) => new Date(a.due_date) - new Date(b.due_date))
     .slice(0, 5)
+
+  // Overdue tasks for today's action plan
+  const now = new Date()
+  const weekEnd = new Date(now); weekEnd.setDate(now.getDate() + 7)
+  const overdueTasks = tasks.filter(t => !t.completed && t.due_date && new Date(t.due_date) < now)
+  const actionPlanItems = [
+    ...overdueTasks,
+    ...tasks.filter(t => !t.completed && t.due_date && new Date(t.due_date).toDateString() === today),
+  ].filter((t, i, arr) => arr.findIndex(x => x.id === t.id) === i).slice(0, 8)
 
   const stageData = STAGE_ORDER.slice(0, 5).map(s => ({
     stage: s,
@@ -29,10 +40,27 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
 
   const reminders = useMemo(() => upcomingReminders(contacts, 30), [contacts])
 
+  // Smart follow-up suggestions: contacts with active deals not touched in 14+ days
+  const followUpSuggestions = useMemo(() => {
+    const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 14)
+    return contacts
+      .filter(c => {
+        const hasActiveDeal = deals.some(d => d.contact_id === c.id && !['closed','lost'].includes(d.stage))
+        if (!hasActiveDeal) return false
+        const lastContact = c.last_contacted_at ? new Date(c.last_contacted_at) : null
+        const lastActivity = activities
+          .filter(a => a.contact_id === c.id)
+          .reduce((max, a) => new Date(a.created_at) > max ? new Date(a.created_at) : max, new Date(0))
+        const lastTouch = lastActivity > (lastContact || new Date(0)) ? lastActivity : (lastContact || new Date(0))
+        return lastTouch < cutoff
+      })
+      .slice(0, 5)
+  }, [contacts, deals, activities])
+
   const createReminderTask = async (reminder) => {
     const { contact, type, days } = reminder
     const dueDate = new Date()
-    dueDate.setDate(dueDate.getDate() + Math.max(0, days - 2))  // remind 2 days early
+    dueDate.setDate(dueDate.getDate() + Math.max(0, days - 2))
     dueDate.setHours(9, 0, 0, 0)
     const title = type === 'birthday'
       ? `Send birthday message to ${contact.first_name} ${contact.last_name}`
@@ -50,11 +78,36 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
     pushToast(`Task created for ${contact.first_name}'s ${type}`)
   }
 
+  const createFollowUpTask = async (contact) => {
+    const activeDeal = deals.find(d => d.contact_id === contact.id && !['closed','lost'].includes(d.stage))
+    const due = new Date(); due.setHours(9, 0, 0, 0)
+    const payload = {
+      title: `Follow up with ${contact.first_name} ${contact.last_name}${activeDeal ? ` — ${activeDeal.title}` : ''}`,
+      type: 'follow-up', priority: 'medium',
+      due_date: due.toISOString(),
+      contact_id: contact.id,
+      deal_id: activeDeal?.id || null,
+      agent_id: activeAgent?.id || null,
+      completed: false,
+    }
+    const { data, error } = await supabase.from('tasks').insert([payload]).select().single()
+    if (error) { pushToast(error.message, 'error'); return }
+    setDb(p => ({ ...p, tasks: [data, ...p.tasks] }))
+    pushToast(`Follow-up task created for ${contact.first_name}`)
+  }
+
+  const toggleTask = async (task) => {
+    const completed = !task.completed
+    await supabase.from('tasks').update({ completed }).eq('id', task.id)
+    setDb(p => ({ ...p, tasks: p.tasks.map(t => t.id === task.id ? { ...t, completed } : t) }))
+    pushToast(completed ? 'Done ✓' : 'Reopened')
+  }
+
   const cstHour = parseInt(
     new Date().toLocaleString('en-US', { timeZone: 'America/Chicago', hour: 'numeric', hour12: false }),
     10
   )
-  const greeting = cstHour < 12 ? 'Good Morning' : cstHour < 17 ? 'Good Afternoon' : 'Good Evening'
+  const greeting  = cstHour < 12 ? 'Good Morning' : cstHour < 17 ? 'Good Afternoon' : 'Good Evening'
   const greetEmoji = cstHour < 17 ? '👋' : '🌙'
   const firstName = activeAgent?.name?.split(' ')[0] || ''
 
@@ -74,9 +127,16 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
       <div className="stats-grid">
         {[
           { label: 'Total Contacts', value: contacts.length, icon: 'contacts', sub: `${contacts.filter(c=>c.status==='active').length} active` },
-          { label: 'Active Deals', value: formatCurrency(totalDealValue), icon: 'pipeline', sub: `${activeDeals.length} open deals` },
+          {
+            label: 'Pipeline Value',
+            value: formatCurrency(totalDealValue),
+            icon: 'pipeline',
+            sub: weightedDealValue > 0
+              ? `${formatCurrency(weightedDealValue)} weighted`
+              : `${activeDeals.length} open deals`,
+          },
           { label: 'Properties', value: properties.length, icon: 'building', sub: `${properties.filter(p=>p.status==='active').length} active listings` },
-          { label: 'Tasks Today', value: todayTasks.length, icon: 'tasks', sub: `${tasks.filter(t=>!t.completed).length} total open` },
+          { label: 'Tasks Today', value: todayTasks.length, icon: 'tasks', sub: `${overdueTasks.length > 0 ? overdueTasks.length + ' overdue · ' : ''}${tasks.filter(t=>!t.completed).length} total open` },
         ].map((s, i) => (
           <div key={i} className="card">
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
@@ -88,6 +148,46 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
           </div>
         ))}
       </div>
+
+      {/* ── Today's Action Plan ── */}
+      {actionPlanItems.length > 0 && (
+        <div className="card" style={{ marginBottom: 0 }}>
+          <div className="section-head">
+            <div className="section-title">
+              Today's Action Plan
+              <span style={{ marginLeft: 8, background: overdueTasks.length > 0 ? 'var(--gw-red)' : 'var(--gw-azure)', color: '#fff', borderRadius: 10, fontSize: 10, padding: '2px 7px', fontWeight: 700, verticalAlign: 'middle' }}>
+                {actionPlanItems.length}
+              </span>
+            </div>
+            <button className="btn btn--ghost btn--sm" onClick={() => go('tasks')}>All tasks</button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {actionPlanItems.map(task => {
+              const contact  = contacts.find(c => c.id === task.contact_id)
+              const isOverdue = task.due_date && new Date(task.due_date) < now
+              return (
+                <div key={task.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', borderBottom: '1px solid var(--gw-border)' }}>
+                  <div
+                    onClick={() => toggleTask(task)}
+                    style={{ width: 18, height: 18, borderRadius: 4, border: '2px solid var(--gw-border)', background: '#fff', cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  >
+                    <Icon name="check" size={10} style={{ color: 'transparent' }} />
+                  </div>
+                  <Icon name={task.type === 'call' ? 'phone' : task.type === 'email' ? 'mail' : 'tasks'} size={13} style={{ color: 'var(--gw-mist)', flexShrink: 0 }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500 }}>{task.title}</div>
+                    {contact && <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>{contact.first_name} {contact.last_name}</div>}
+                  </div>
+                  {isOverdue && (
+                    <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--gw-red)', background: '#fef2f2', padding: '2px 6px', borderRadius: 4, flexShrink: 0 }}>Overdue</span>
+                  )}
+                  <div style={{ fontSize: 11, color: isOverdue ? 'var(--gw-red)' : 'var(--gw-mist)', fontWeight: isOverdue ? 600 : 400, whiteSpace: 'nowrap' }}>{formatDate(task.due_date)}</div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="dash-grid">
         <div className="card">
@@ -123,8 +223,8 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {upcomingTasks.map(task => {
-                const contact = (db.contacts||[]).find(c => c.id === task.contact_id)
-                const overdue = task.due_date && new Date(task.due_date) < new Date()
+                const contact = contacts.find(c => c.id === task.contact_id)
+                const overdue = task.due_date && new Date(task.due_date) < now
                 return (
                   <div key={task.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--gw-border)' }}>
                     <Icon name={task.type === 'call' ? 'phone' : task.type === 'email' ? 'mail' : 'tasks'} size={14} style={{ color: 'var(--gw-mist)' }} />
@@ -139,6 +239,43 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
             </div>
           )}
         </div>
+
+        {/* ── Smart Follow-Up Suggestions ── */}
+        {followUpSuggestions.length > 0 && (
+          <div className="card">
+            <div className="section-head">
+              <div className="section-title">
+                Needs Attention
+                <span style={{ marginLeft: 8, background: 'var(--gw-amber)', color: '#fff', borderRadius: 10, fontSize: 10, padding: '2px 7px', fontWeight: 700, verticalAlign: 'middle' }}>
+                  {followUpSuggestions.length}
+                </span>
+              </div>
+              <button className="btn btn--ghost btn--sm" onClick={() => go('contacts')}>All contacts</button>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 10 }}>Active deals · no contact in 14+ days</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {followUpSuggestions.map(contact => {
+                const activeDeal = deals.find(d => d.contact_id === contact.id && !['closed','lost'].includes(d.stage))
+                const alreadyHasTask = tasks.some(t => !t.completed && t.contact_id === contact.id && t.type === 'follow-up')
+                return (
+                  <div key={contact.id} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>{contact.first_name} {contact.last_name}</div>
+                      {activeDeal && <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>{activeDeal.title}</div>}
+                    </div>
+                    {alreadyHasTask ? (
+                      <span style={{ fontSize: 11, color: 'var(--gw-green)', fontWeight: 600 }}>✓ Task set</span>
+                    ) : (
+                      <button className="btn btn--ghost btn--sm" onClick={() => createFollowUpTask(contact)} title="Create follow-up task">
+                        + Task
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
 
         {/* ── Upcoming Reminders ── */}
         <div className="card" style={{ gridColumn: '1 / -1' }}>
@@ -185,8 +322,7 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
                     {alreadyHasTask ? (
                       <span style={{ fontSize: 11, color: 'var(--gw-green)', fontWeight: 600 }}>✓ Task set</span>
                     ) : (
-                      <button className="btn btn--ghost btn--sm" onClick={() => createReminderTask(r)}
-                        title="Create a reminder task">
+                      <button className="btn btn--ghost btn--sm" onClick={() => createReminderTask(r)} title="Create a reminder task">
                         + Task
                       </button>
                     )}

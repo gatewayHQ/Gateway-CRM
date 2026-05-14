@@ -626,6 +626,63 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
     </div>
   )
 
+  const exportPDF = () => {
+    const rows = filtered.map(deal => {
+      const { gross_pct, agent_pct, sp, gross, agentAmt, brokerAmt } = calc(deal)
+      const agent   = agents.find(a => a.id === deal.agent_id)
+      const contact = contacts.find(c => c.id === deal.contact_id)
+      return { deal, gross_pct, agent_pct, sp, gross, agentAmt, brokerAmt, agent, contact }
+    })
+    const fmt = (n) => n > 0 ? '$' + Math.round(n).toLocaleString() : '—'
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Commission Report — Gateway Real Estate Advisors</title>
+<style>
+  body { font-family: system-ui, sans-serif; font-size: 12px; color: #1a2236; margin: 32px; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .sub { color: #6b7280; margin-bottom: 24px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { background: #1a2236; color: #fff; padding: 8px 10px; text-align: left; font-size: 11px; }
+  td { padding: 7px 10px; border-bottom: 1px solid #e5e7eb; }
+  tr:hover td { background: #f9fafb; }
+  tfoot td { font-weight: 700; background: #f3f4f6; border-top: 2px solid #1a2236; }
+  .green { color: #16a34a; font-weight: 700; }
+  .blue  { color: #2563eb; }
+  @media print { body { margin: 16px; } }
+</style>
+</head>
+<body>
+<h1>Commission Report</h1>
+<div class="sub">Gateway Real Estate Advisors · Generated ${new Date().toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' })}</div>
+<table>
+<thead><tr><th>Deal</th><th>Agent</th><th>Type</th><th>Stage</th><th>Sale Price</th><th>GC %</th><th>Gross Comm</th><th>Agent %</th><th>Agent $</th><th>House $</th></tr></thead>
+<tbody>
+${rows.map(r => `<tr>
+<td><strong>${r.deal.title}</strong>${r.contact ? `<br><small>${r.contact.first_name} ${r.contact.last_name}</small>` : ''}</td>
+<td>${r.agent?.name || '—'}</td>
+<td>${r.deal.prop_category === 'commercial' ? '🏢 Commercial' : '🏠 Residential'}</td>
+<td>${(r.deal.stage||'').replace('-',' ')}</td>
+<td>${r.sp > 0 ? '$' + r.sp.toLocaleString() : '—'}</td>
+<td>${r.gross_pct}%</td>
+<td>${fmt(r.gross)}</td>
+<td>${r.agent_pct}%</td>
+<td class="green">${fmt(r.agentAmt)}</td>
+<td class="blue">${fmt(r.brokerAmt)}</td>
+</tr>`).join('')}
+</tbody>
+<tfoot><tr><td colspan="4">TOTALS — ${rows.length} deals</td><td>$${Math.round(totals.sp).toLocaleString()}</td><td></td><td>$${Math.round(totals.gross).toLocaleString()}</td><td></td><td class="green">$${Math.round(totals.agent).toLocaleString()}</td><td class="blue">$${Math.round(totals.broker).toLocaleString()}</td></tr></tfoot>
+</table>
+</body>
+</html>`
+    const win = window.open('', '_blank')
+    win.document.write(html)
+    win.document.close()
+    win.focus()
+    setTimeout(() => win.print(), 400)
+  }
+
   return (
     <div className="page-content">
       <div className="page-header">
@@ -633,7 +690,10 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
           <div className="page-title">Commission Tracker</div>
           <div className="page-sub">{deals.length} deals · {formatCurrency(deals.reduce((s,d)=>s+(d.value||0),0))} total pipeline</div>
         </div>
-        <button className="btn btn--secondary btn--sm" onClick={reload}><Icon name="refresh" size={13} /> Refresh</button>
+        <div style={{ display:'flex', gap:8 }}>
+          {filtered.length > 0 && <button className="btn btn--ghost btn--sm" onClick={exportPDF}><Icon name="document" size={13} /> Export PDF</button>}
+          <button className="btn btn--secondary btn--sm" onClick={reload}><Icon name="refresh" size={13} /> Refresh</button>
+        </div>
       </div>
 
       {/* ── Summary stats ── */}

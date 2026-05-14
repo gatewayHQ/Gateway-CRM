@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { supabase } from './lib/supabase.js'
 import { Icon, Avatar, Modal, Badge, ToastHost, Loading, ErrorBoundary, pushToast } from './components/UI.jsx'
 import Dashboard from './pages/Dashboard.jsx'
@@ -197,6 +197,10 @@ export default function App() {
   const [toolsOpen, setToolsOpen] = useState(
     () => localStorage.getItem('gw_tools_open') === 'true'
   )
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchOpen, setSearchOpen]   = useState(false)
+  const searchRef = useRef(null)
+  const toolkitUrl = localStorage.getItem('gw_toolkit_url') || ''
 
   // Auto-expand tools section when navigating to a tools page
   useEffect(() => {
@@ -370,6 +374,32 @@ export default function App() {
     return () => { supabase.removeChannel(channel) }
   }, [activeAgentId])
 
+  // Close search on outside click
+  useEffect(() => {
+    const handler = (e) => {
+      if (searchRef.current && !searchRef.current.contains(e.target)) setSearchOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const searchResults = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (q.length < 2) return []
+    const contacts = (db.contacts || [])
+      .filter(c => `${c.first_name} ${c.last_name}`.toLowerCase().includes(q) || c.email?.toLowerCase().includes(q) || (c.phone || '').includes(q))
+      .slice(0, 4).map(c => ({ type: 'contact', label: `${c.first_name} ${c.last_name}`, sub: c.email || c.phone || '', route: 'contacts' }))
+    const properties = (db.properties || [])
+      .filter(p => p.address?.toLowerCase().includes(q) || p.city?.toLowerCase().includes(q))
+      .slice(0, 3).map(p => ({ type: 'property', label: p.address, sub: [p.city, p.state].filter(Boolean).join(', '), route: 'properties' }))
+    const deals = (db.deals || [])
+      .filter(d => d.title?.toLowerCase().includes(q))
+      .slice(0, 3).map(d => ({ type: 'deal', label: d.title, sub: d.stage ? (d.stage.charAt(0).toUpperCase() + d.stage.slice(1)) : '', route: 'pipeline' }))
+    return [...contacts, ...properties, ...deals]
+  }, [searchQuery, db])
+
+  const SEARCH_ICONS = { contact: 'contacts', property: 'building', deal: 'pipeline' }
+
   const markNotifRead = async (id) => {
     await supabase.from('agent_notifications').update({ read: true }).eq('id', id)
     setNotifications(prev => prev.filter(n => n.id !== id))
@@ -512,9 +542,41 @@ export default function App() {
             <div className="topbar__title">{TITLES[route]?.title}</div>
             <div className="topbar__breadcrumb">{TITLES[route]?.crumb}</div>
           </div>
-          <div className="topbar__search">
+          <div className="topbar__search" ref={searchRef} style={{ position: 'relative' }}>
             <Icon name="search" size={14} style={{ color: 'var(--gw-mist)' }} />
-            <input placeholder="Search contacts, properties, deals…" defaultValue="" />
+            <input
+              placeholder="Search contacts, properties, deals…"
+              value={searchQuery}
+              onChange={e => { setSearchQuery(e.target.value); setSearchOpen(true) }}
+              onFocus={() => setSearchOpen(true)}
+              onKeyDown={e => { if (e.key === 'Escape') { setSearchOpen(false); setSearchQuery('') } }}
+            />
+            {searchOpen && searchQuery.length >= 2 && (
+              <div style={{
+                position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0,
+                background: '#fff', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)',
+                boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 300, overflow: 'hidden',
+              }}>
+                {searchResults.length === 0 ? (
+                  <div style={{ padding: '12px 14px', fontSize: 13, color: 'var(--gw-mist)' }}>No results for "{searchQuery}"</div>
+                ) : (
+                  searchResults.map((r, i) => (
+                    <div key={i} onClick={() => { setRoute(r.route); setSearchOpen(false); setSearchQuery('') }}
+                      style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', cursor: 'pointer', borderBottom: i < searchResults.length - 1 ? '1px solid var(--gw-border)' : 'none' }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'var(--gw-bone)'}
+                      onMouseLeave={e => e.currentTarget.style.background = ''}
+                    >
+                      <Icon name={SEARCH_ICONS[r.type]} size={13} style={{ color: 'var(--gw-mist)', flexShrink: 0 }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.label}</div>
+                        {r.sub && <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>{r.sub}</div>}
+                      </div>
+                      <span style={{ fontSize: 10, color: 'var(--gw-mist)', textTransform: 'capitalize', flexShrink: 0 }}>{r.type}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
           </div>
           {activeAgent && (
             <div className="topbar__agent-badge">
@@ -525,6 +587,17 @@ export default function App() {
               </div>
             </div>
           )}
+          {/* Gateway Toolkit launcher */}
+          {toolkitUrl && (
+            <a href={toolkitUrl} target="_blank" rel="noopener noreferrer"
+              className="btn btn--ghost btn--icon"
+              title="Open Gateway Toolkit"
+              style={{ textDecoration: 'none' }}
+            >
+              <Icon name="om" size={16} />
+            </a>
+          )}
+
           {/* Notification bell */}
           <div style={{ position: 'relative' }}>
             <button
@@ -617,7 +690,7 @@ export default function App() {
           {route === 'sequences'  && <SequencesPage {...props} />}
           {route === 'reports'    && <ReportsPage {...props} />}
           {route === 'om'         && <OmPage />}
-          {route === 'social'     && <SocialPage />}
+          {route === 'social'     && <SocialPage db={db} activeAgent={activeAgent} />}
           {route === 'leads'      && <LeadsPage {...props} />}
           {route === 'integrations' && <IntegrationsPage db={db} />}
           {route === 'settings'     && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}

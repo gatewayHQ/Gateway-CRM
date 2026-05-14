@@ -174,9 +174,17 @@ function SpecGrid({ property }) {
     if (d.floors)       specs.push({ label: 'Floors', value: d.floors })
     if (d.year_built)   specs.push({ label: 'Year Built', value: d.year_built })
     if (property.sqft)  specs.push({ label: 'Total Sq Ft', value: Number(property.sqft).toLocaleString() })
-    if (d.vacancy)      specs.push({ label: 'Vacancy Rate', value: `${d.vacancy}%` })
-    if (d.noi)          specs.push({ label: 'NOI', value: fmt(d.noi) })
-    if (d.cap_rate)     specs.push({ label: 'Cap Rate', value: `${d.cap_rate}%` })
+    if (d.vacancy_pct || d.vacancy) specs.push({ label: 'Vacancy Rate', value: `${d.vacancy_pct || d.vacancy}%` })
+    // Show computed NOI/cap rate from calculator fields, fall back to manual fields
+    const _inc = Number(d.annual_income || 0)
+    if (_inc > 0) {
+      const _noi = Math.round(_inc * (1 - Number(d.vacancy_pct || 0) / 100) - Number(d.annual_expenses || 0))
+      specs.push({ label: 'Annual NOI', value: `$${_noi.toLocaleString()}` })
+      if (property.list_price) specs.push({ label: 'Cap Rate', value: `${(_noi / property.list_price * 100).toFixed(2)}%` })
+    } else {
+      if (d.noi)      specs.push({ label: 'NOI', value: fmt(d.noi) })
+      if (d.cap_rate) specs.push({ label: 'Cap Rate', value: `${d.cap_rate}%` })
+    }
   } else if (type === 'office') {
     if (property.sqft)  specs.push({ label: 'Sq Ft', value: Number(property.sqft).toLocaleString() })
     if (d.class)        specs.push({ label: 'Class', value: `Class ${d.class}` })
@@ -287,8 +295,8 @@ function GateForm({ propertyId, isCommercial, agentName }) {
         <div className="lp__gate-success-icon">✓</div>
         <h3 className="lp__gate-success-title">Request Received</h3>
         <p className="lp__gate-success-body">
-          {agentName ? `${agentName} will` : 'Our team will'} be in touch within 24 hours with the{' '}
-          {isCommercial ? 'offering memorandum and financials' : 'full property details'}.
+          {agentName ? `${agentName} will` : 'Our team will'} be in touch within 24 hours to{' '}
+          {isCommercial ? 'send the offering memorandum and financials' : 'confirm your showing time'}.
         </p>
       </div>
     )
@@ -336,7 +344,7 @@ function GateForm({ propertyId, isCommercial, agentName }) {
       </div>
       {error && <div className="lp__gate-error" role="alert">{error}</div>}
       <button type="submit" className="lp__cta-btn" disabled={submitting}>
-        {submitting ? 'Sending…' : isCommercial ? 'Request Financials & OM →' : 'Request More Information →'}
+        {submitting ? 'Sending…' : isCommercial ? 'Request Financials & OM →' : 'Schedule a Showing →'}
       </button>
       <p className="lp__gate-privacy">
         Your information is kept confidential and will only be used to send you property details.
@@ -463,12 +471,12 @@ export default function PropertyLandingPage({ propertyId }) {
               {/* Gate / Inquiry Form */}
               <div className="lp__gate-card" id="inquire">
                 <h2 className="lp__gate-title">
-                  {commercial ? '📋 Request Financials & OM' : '📬 Request More Information'}
+                  {commercial ? '📋 Request Financials & OM' : '📅 Schedule a Showing'}
                 </h2>
                 <p className="lp__gate-sub">
                   {commercial
-                    ? 'Complete the form below to receive the offering memorandum, financials, and rent roll.'
-                    : 'Fill out the form below and an agent will reach out with full details.'}
+                    ? 'Complete the form to receive the offering memorandum, financials, rent roll, and investment summary.'
+                    : `Ready to see this ${property.type === 'rental' ? 'rental' : 'home'}? Fill in your info and ${agent?.name?.split(' ')[0] || 'an agent'} will reach out to schedule a convenient time.`}
                 </p>
                 <GateForm
                   propertyId={propertyId}

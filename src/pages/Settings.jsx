@@ -59,6 +59,17 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
   const [confirmClear, setConfirmClear] = useState(false)
   const [copied, setCopied] = useState(null)
 
+  // Gateway Toolkit URL — stored in localStorage
+  const [toolkitUrl, setToolkitUrl]         = useState(() => localStorage.getItem('gw_toolkit_url') || '')
+  const [toolkitSaved, setToolkitSaved]     = useState(false)
+
+  const saveToolkitUrl = () => {
+    localStorage.setItem('gw_toolkit_url', toolkitUrl.trim())
+    setToolkitSaved(true)
+    setTimeout(() => setToolkitSaved(false), 2000)
+    pushToast('Toolkit URL saved')
+  }
+
   // AI key — loaded from Supabase auth metadata (persists across devices)
   const [aiKey, setAiKey]         = useState('')
   const [aiKeySaved, setAiKeySaved] = useState(false)
@@ -261,6 +272,36 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
             </div>
           </div>
         )}
+      </div>
+
+      {/* ── Gateway Toolkit ── */}
+      <div className="settings-section">
+        <div className="settings-section__title">Gateway Toolkit</div>
+        <div className="settings-section__sub">
+          Paste the URL to your Gateway Toolkit (Canva, OM Generator, Social Templates, etc.).
+          A launcher icon will appear in the top bar so agents can jump to it instantly.
+        </div>
+        <div style={{ maxWidth: 480 }}>
+          <div className="form-group">
+            <label className="form-label">Toolkit URL</label>
+            <input
+              className="form-control"
+              type="url"
+              value={toolkitUrl}
+              onChange={e => setToolkitUrl(e.target.value)}
+              placeholder="https://www.canva.com/design/…"
+            />
+            <div className="form-hint">Saved to this browser only. Each agent sets their own Toolkit link.</div>
+          </div>
+          <div style={{ display:'flex', gap:8 }}>
+            <button className="btn btn--primary btn--sm" onClick={saveToolkitUrl} disabled={!toolkitUrl.trim()}>
+              {toolkitSaved ? '✓ Saved' : 'Save Toolkit URL'}
+            </button>
+            {toolkitUrl && (
+              <button className="btn btn--ghost btn--sm" onClick={() => { setToolkitUrl(''); localStorage.removeItem('gw_toolkit_url'); pushToast('Toolkit URL removed') }}>Remove</button>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* ── AI Configuration ── */}

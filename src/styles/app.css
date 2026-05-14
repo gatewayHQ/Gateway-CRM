@@ -1442,3 +1442,39 @@ select.form-control { cursor: pointer; }
 }
 .coagent-item span:first-of-type { flex: 1; }
 .lp__404-sub { font-size: 15px; color: var(--gw-mist); margin-bottom: 28px; }
+
+/* ── Mobile responsiveness improvements ───────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Page header buttons wrap on narrow screens */
+  .page-header > div:last-child {
+    flex-wrap: wrap; gap: 6px;
+  }
+  /* Pipeline list table: force horizontal scroll */
+  .kanban-board {
+    min-height: calc(100vh - 240px);
+  }
+  .kanban-col { min-width: 180px; width: 180px; }
+  /* Social page: stack the 2-col grid */
+  .page-content > div[style*="grid-template-columns: 1fr 1fr"] {
+    grid-template-columns: 1fr !important;
+  }
+  /* Commission & pipeline table: all columns visible via scroll */
+  .data-table th:nth-child(n+6),
+  .data-table td:nth-child(n+6) {
+    min-width: 90px;
+  }
+  /* Settings: widen toolkit URL input */
+  .settings-section input[type="url"] {
+    width: 100%; box-sizing: border-box;
+  }
+  /* Funnel bars: don't overflow */
+  .funnel-bar__track { min-width: 0; overflow: hidden; }
+  /* Reports leaderboard table: hide breakdown column on very small */
+}
+@media (max-width: 480px) {
+  .stats-grid { grid-template-columns: 1fr; }
+  .page-title { font-size: 18px; }
+  .filters-bar { flex-direction: column; align-items: stretch; }
+  .filter-select { width: 100%; }
+  .page-header { flex-direction: column; align-items: flex-start; }
+}

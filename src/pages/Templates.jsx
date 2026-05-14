@@ -11,12 +11,13 @@ async function loadUserKey(metaField, localKey) {
 
 const MERGE_TAGS = ['{{firstName}}','{{lastName}}','{{agentName}}','{{propertyAddress}}','{{dealValue}}']
 
-function TemplateDrawer({ open, onClose, template, agents, onSave }) {
+function TemplateDrawer({ open, onClose, template, agents, contacts, onSave }) {
   const blank = { name:'', subject:'', body:'', category:'follow-up', agent_id:'' }
   const [form, setForm] = useState(template || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
   const [preview, setPreview] = useState(false)
+  const [previewContactId, setPreviewContactId] = useState('')
   const [aiOpen, setAiOpen] = useState(false)
   const [aiPrompt, setAiPrompt] = useState('')
   const [generating, setGenerating] = useState(false)
@@ -60,10 +61,13 @@ Rules:
     setGenerating(false)
   }
 
+  const previewContact = previewContactId ? (contacts || []).find(c => c.id === previewContactId) : null
   const previewBody = (form.body||'')
-    .replace(/{{firstName}}/g, 'Jane').replace(/{{lastName}}/g, 'Smith')
-    .replace(/{{agentName}}/g, 'Your Name').replace(/{{propertyAddress}}/g, '123 Main St')
-    .replace(/{{dealValue}}/g, '$450,000')
+    .replace(/{{firstName}}/g,       previewContact?.first_name   || 'Jane')
+    .replace(/{{lastName}}/g,        previewContact?.last_name    || 'Smith')
+    .replace(/{{agentName}}/g,       agents.find(a=>a.id===form.agent_id)?.name || 'Your Name')
+    .replace(/{{propertyAddress}}/g, '123 Main St')
+    .replace(/{{dealValue}}/g,       '$450,000')
 
   const save = async () => {
     const e = {}
@@ -197,12 +201,31 @@ Rules:
         </div>
 
         <div className="form-group">
-          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:5 }}>
+          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:5, alignItems:'center' }}>
             <label className="form-label" style={{ margin:0 }}>Body</label>
-            <button className="btn btn--ghost btn--sm" onClick={() => setPreview(p=>!p)}><Icon name="eye" size={12} /> {preview?'Edit':'Preview'}</button>
+            <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+              {preview && (contacts||[]).length > 0 && (
+                <select
+                  className="form-control"
+                  style={{ fontSize:11, padding:'3px 8px', height:'auto', minWidth:160 }}
+                  value={previewContactId}
+                  onChange={e => setPreviewContactId(e.target.value)}
+                  title="Preview with real contact data"
+                >
+                  <option value="">Sample data</option>
+                  {(contacts||[]).slice(0,20).map(c => (
+                    <option key={c.id} value={c.id}>{c.first_name} {c.last_name}</option>
+                  ))}
+                </select>
+              )}
+              <button className="btn btn--ghost btn--sm" onClick={() => setPreview(p=>!p)}><Icon name="eye" size={12} /> {preview?'Edit':'Preview'}</button>
+            </div>
           </div>
           {preview ? (
-            <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:12, fontSize:13, lineHeight:1.7, whiteSpace:'pre-wrap', minHeight:160 }}>{previewBody || <span style={{ color:'var(--gw-mist)' }}>No content yet</span>}</div>
+            <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:12, fontSize:13, lineHeight:1.7, whiteSpace:'pre-wrap', minHeight:160 }}>
+              {previewContactId && previewContact && <div style={{ fontSize:10, color:'var(--gw-azure)', fontWeight:700, marginBottom:8, textTransform:'uppercase', letterSpacing:'0.06em' }}>Previewing as: {previewContact.first_name} {previewContact.last_name}</div>}
+              {previewBody || <span style={{ color:'var(--gw-mist)' }}>No content yet</span>}
+            </div>
           ) : (
             <textarea className="form-control form-control--textarea" style={{ minHeight:160 }} value={form.body||''} onChange={e=>set('body',e.target.value)} placeholder="Write your email template here. Use merge tags to personalize." />
           )}
@@ -211,7 +234,7 @@ Rules:
               <span key={tag} className="merge-tag" onClick={() => set('body', (form.body||'') + tag)}>{tag}</span>
             ))}
           </div>
-          <div className="form-hint">Click a merge tag to insert it. Preview shows how it looks with sample data.</div>
+          <div className="form-hint">Click a merge tag to insert it. In Preview, pick a contact from the dropdown to use real data instead of sample names.</div>
         </div>
       </div>
       <div className="drawer__foot">
@@ -422,7 +445,8 @@ export default function TemplatesPage({ db, setDb, activeAgent, openCompose }) {
   const [filterCat, setFilterCat] = useState('')
 
   const templates = db.templates || []
-  const agents = db.agents || []
+  const agents    = db.agents    || []
+  const contacts  = db.contacts  || []
 
   const filtered = templates.filter(t => !filterCat || t.category === filterCat)
 
@@ -484,7 +508,7 @@ export default function TemplatesPage({ db, setDb, activeAgent, openCompose }) {
         </div>
       )}
 
-      <TemplateDrawer open={drawer} onClose={() => setDrawer(false)} template={editing} agents={agents} onSave={reload} />
+      <TemplateDrawer open={drawer} onClose={() => setDrawer(false)} template={editing} agents={agents} contacts={contacts} onSave={reload} />
       {confirm && <ConfirmDialog message="Delete this template?" onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
     </div>
   )

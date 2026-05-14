@@ -1,4 +1,5 @@
 import React, { useState, useRef, useMemo, useCallback } from 'react'
+import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '../lib/supabase.js'
 import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -1198,17 +1199,24 @@ create policy "agent_notifications_policy" on agent_notifications
   )
 }
 
+async function loadUserKey(metaField, localKey) {
+  const { data: { user } } = await supabase.auth.getUser()
+  return user?.user_metadata?.[metaField] || localStorage.getItem(localKey) || ''
+}
+
 function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave }) {
-  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
+  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, is_1031:false }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
   const [tab, setTab]       = useState('details')
+  const [generating, setGenerating] = useState(false)
 
   React.useEffect(() => {
-    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {} } : blank)
+    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {}, is_1031: deal.is_1031 || false } : blank)
     setErrors({})
     setTab('details')
+    setGenerating(false)
   }, [deal, open])
 
   const set  = (k, v) => setForm(p => ({...p, [k]: v}))
@@ -1216,6 +1224,47 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
   const cd = form.comp_data || {}
 
   const COMM_SUBTYPES = ['multifamily','office','land','retail','industrial','mixed-use']
+
+  const generateMemo = async () => {
+    const apiKey = await loadUserKey('anthropic_key', 'gw_anthropic_key')
+    if (!apiKey) { pushToast('Add your Anthropic API key in Settings → AI Configuration', 'error'); return }
+    const contact  = contacts.find(c => c.id === form.contact_id)
+    const property = properties.find(p => p.id === form.property_id)
+    const context  = [
+      `Deal: ${form.title}`,
+      `Stage: ${STAGE_LABELS[form.stage] || form.stage}`,
+      `Value: ${form.value ? `$${Number(form.value).toLocaleString()}` : 'TBD'}`,
+      `Category: ${form.prop_category || 'N/A'} ${form.prop_subtype ? `· ${form.prop_subtype}` : ''}`,
+      form.probability ? `Probability: ${form.probability}%` : null,
+      form.expected_close_date ? `Expected Close: ${formatDate(form.expected_close_date)}` : null,
+      contact ? `Contact: ${contact.first_name} ${contact.last_name}${contact.type ? ` (${contact.type})` : ''}` : null,
+      property ? `Property: ${property.address}${property.city ? `, ${property.city}` : ''}` : null,
+      form.is_1031 ? '1031 Exchange deal' : null,
+      form.notes ? `Notes: ${form.notes}` : null,
+    ].filter(Boolean).join('\n')
+    setGenerating(true)
+    set('notes', '')
+    try {
+      const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true, timeout: 60000 })
+      const stream = client.messages.stream({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 512,
+        messages: [{
+          role: 'user',
+          content: `You are a real estate CRM assistant for Gateway Real Estate Advisors. Write a concise deal memo (3-5 bullet points) based on this information:\n\n${context}\n\nFormat as clean bullet points. Focus on deal status, key next steps, and any risks. Keep it under 150 words.`,
+        }],
+      })
+      for await (const chunk of stream) {
+        if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
+          setForm(prev => ({ ...prev, notes: prev.notes + chunk.delta.text }))
+        }
+      }
+      pushToast('Deal memo generated')
+    } catch (err) {
+      pushToast('AI generation failed: ' + err.message, 'error')
+    }
+    setGenerating(false)
+  }
 
   const save = async () => {
     const e = {}
@@ -1238,6 +1287,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
         prop_category:       form.prop_category || null,
         prop_subtype:        form.prop_subtype  || null,
         comp_data:           form.comp_data     || null,
+        is_1031:             form.is_1031       || false,
       }
       let error
       if (deal?.id) {
@@ -1313,6 +1363,15 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
             <div className="form-group"><label className="form-label">Contact</label><SearchDropdown items={contacts} value={form.contact_id} onSelect={v=>set('contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
             <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+
+            {/* 1031 Exchange flag */}
+            <label style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:`1px solid ${form.is_1031 ? 'var(--gw-amber)' : 'var(--gw-border)'}`, borderRadius:'var(--radius)', cursor:'pointer', background: form.is_1031 ? '#fef9ec' : '#fff', marginBottom:4, transition:'all 150ms' }}>
+              <input type="checkbox" checked={!!form.is_1031} onChange={e => set('is_1031', e.target.checked)} style={{ width:15, height:15, cursor:'pointer' }} />
+              <div>
+                <div style={{ fontSize:13, fontWeight:700, color: form.is_1031 ? 'var(--gw-amber)' : 'var(--gw-ink)' }}>🔄 1031 Exchange</div>
+                <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Check if this is a tax-deferred 1031 exchange deal</div>
+              </div>
+            </label>
 
             {/* ── Comp Data ─────────────────────────────────────── */}
             <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
@@ -1414,7 +1473,22 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
               )}
             </div>
 
-            <div className="form-group" style={{ marginTop:4 }}><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} /></div>
+            <div className="form-group" style={{ marginTop:4 }}>
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:4 }}>
+                <label className="form-label" style={{ margin:0 }}>Notes</label>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  style={{ fontSize:11, display:'flex', alignItems:'center', gap:4 }}
+                  onClick={generateMemo}
+                  disabled={generating}
+                  title="Generate deal memo with AI"
+                >
+                  {generating ? '⟳ Generating…' : '✦ AI Memo'}
+                </button>
+              </div>
+              <textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} placeholder="Deal notes, key context, next steps…" disabled={generating} />
+            </div>
           </div>
           <div className="drawer__foot">
             <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
@@ -1462,6 +1536,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const [dragging, setDragging] = useState(null)
   const [dragOver, setDragOver] = useState(null)
   const [agentFilter, setAgentFilter] = useState('all')
+  const [viewMode, setViewMode] = useState('kanban')
 
   const deals      = db.deals      || []
   const agents     = db.agents     || []
@@ -1480,19 +1555,49 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   }, [deals, isAdmin, agentFilter])
 
   // Single-pass O(n) grouping — replaces repeated stageDeals()/stageValue() calls per render
-  const { stageGroups, stageTotals, totalValue } = useMemo(() => {
-    const groups = Object.fromEntries(STAGE_ORDER.map(s => [s, []]))
-    const totals = Object.fromEntries(STAGE_ORDER.map(s => [s, 0]))
-    let total = 0
+  const { stageGroups, stageTotals, stageWeighted, totalValue, weightedValue } = useMemo(() => {
+    const groups   = Object.fromEntries(STAGE_ORDER.map(s => [s, []]))
+    const totals   = Object.fromEntries(STAGE_ORDER.map(s => [s, 0]))
+    const weighted = Object.fromEntries(STAGE_ORDER.map(s => [s, 0]))
+    let total = 0, wTotal = 0
     visibleDeals.forEach(d => {
       if (groups[d.stage]) {
         groups[d.stage].push(d)
-        totals[d.stage] += d.value || 0
-        total += d.value || 0
+        totals[d.stage]   += d.value || 0
+        weighted[d.stage] += (d.value || 0) * ((d.probability || 0) / 100)
+        total  += d.value || 0
+        wTotal += (d.value || 0) * ((d.probability || 0) / 100)
       }
     })
-    return { stageGroups: groups, stageTotals: totals, totalValue: total }
+    return { stageGroups: groups, stageTotals: totals, stageWeighted: weighted, totalValue: total, weightedValue: wTotal }
   }, [visibleDeals])
+
+  const exportCSV = () => {
+    const headers = ['Title','Stage','Value','Probability','Expected Close','Contact','Agent','Category','Type','1031','Notes']
+    const rows = visibleDeals.map(d => {
+      const contact = contactMap[d.contact_id]
+      const agent   = agentMap[d.agent_id]
+      return [
+        d.title, STAGE_LABELS[d.stage] || d.stage,
+        d.value || '', d.probability || '',
+        d.expected_close_date || '',
+        contact ? `${contact.first_name} ${contact.last_name}` : '',
+        agent?.name || '',
+        d.prop_category || '', d.prop_subtype || '',
+        d.is_1031 ? 'Yes' : 'No',
+        (d.notes || '').replace(/\n/g, ' '),
+      ]
+    })
+    const csv = [headers, ...rows].map(row =>
+      row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')
+    ).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href = url; a.download = `pipeline-${new Date().toISOString().slice(0,10)}.csv`
+    a.click(); URL.revokeObjectURL(url)
+    pushToast(`Exported ${visibleDeals.length} deals`)
+  }
 
   const reload = useCallback(async () => {
     let q = supabase.from('deals').select('*').order('created_at', { ascending: false })
@@ -1544,20 +1649,30 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
       <div className="page-header">
         <div>
           <div className="page-title">Pipeline{isAdmin ? ' — Admin View' : ''}</div>
-          <div className="page-sub">{visibleDeals.length} deal{visibleDeals.length !== 1 ? 's' : ''} · {formatCurrency(totalValue)} total value</div>
+          <div className="page-sub">
+            {visibleDeals.length} deal{visibleDeals.length !== 1 ? 's' : ''} · {formatCurrency(totalValue)}
+            {weightedValue > 0 && <span style={{ color:'var(--gw-mist)' }}> · {formatCurrency(weightedValue)} weighted</span>}
+          </div>
         </div>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
           {isAdmin && (
-            <select
-              value={agentFilter}
-              onChange={e => setAgentFilter(e.target.value)}
-              className="form-control"
-              style={{ fontSize:13, minWidth:160 }}
-            >
+            <select value={agentFilter} onChange={e => setAgentFilter(e.target.value)} className="form-control" style={{ fontSize:13, minWidth:160 }}>
               <option value="all">All Agents</option>
               {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
           )}
+          {visibleDeals.length > 0 && (
+            <button className="btn btn--ghost" onClick={exportCSV} title="Export pipeline as CSV"><Icon name="download" size={14} /> Export</button>
+          )}
+          {/* View toggle */}
+          <div style={{ display:'flex', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
+            {[['kanban','Kanban'],['list','List']].map(([mode, label]) => (
+              <button key={mode} onClick={() => setViewMode(mode)}
+                style={{ padding:'5px 12px', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, transition:'all 150ms', background: viewMode === mode ? 'var(--gw-slate)' : '#fff', color: viewMode === mode ? '#fff' : 'var(--gw-mist)' }}>
+                {label}
+              </button>
+            ))}
+          </div>
           {!isAdmin && (
             <button className="btn btn--primary" onClick={() => { setEditing(null); setDefaultStage('lead'); setDrawer(true) }}>
               <Icon name="plus" size={14} /> Add Deal
@@ -1568,14 +1683,21 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
       {deals.length === 0 ? (
         <EmptyState icon="pipeline" title="No deals yet" message="Add your first deal to start tracking your pipeline." action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Deal</button>} />
-      ) : (
+      ) : viewMode === 'kanban' ? (
         <div className="kanban-board">
           {STAGE_ORDER.map(stage => (
             <div key={stage} className="kanban-col">
               <div className="kanban-col__head">
                 <div>
                   <div className="kanban-col__label">{STAGE_LABELS[stage]}</div>
-                  {stageTotals[stage] > 0 && <div style={{ fontSize:10, color:'var(--gw-mist)', marginTop:1 }}>{formatCurrency(stageTotals[stage])}</div>}
+                  {stageTotals[stage] > 0 && (
+                    <div style={{ fontSize:10, color:'var(--gw-mist)', marginTop:1 }}>
+                      {formatCurrency(stageTotals[stage])}
+                      {stageWeighted[stage] > 0 && stageTotals[stage] !== stageWeighted[stage] && (
+                        <span style={{ color:'var(--gw-azure)', marginLeft:4 }}>· {formatCurrency(stageWeighted[stage])}w</span>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <span className="kanban-col__count">{stageGroups[stage].length}</span>
               </div>
@@ -1596,7 +1718,13 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                   const overdue    = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
                   const urgency    = getKeyDateUrgency(deal)
                   const nearestKD  = urgency ? getNearestKeyDate(deal) : null
-                  const cardBorder = urgency === 'urgent' ? '2px solid #ef4444' : urgency === 'warning' ? '2px solid #f59e0b' : undefined
+                  // Days since last update — proxy for days stuck in stage
+                  const daysSinceUpdate = deal.updated_at
+                    ? Math.floor((Date.now() - new Date(deal.updated_at)) / 86400000)
+                    : null
+                  const isStuck   = daysSinceUpdate !== null && !['closed','lost'].includes(stage) && daysSinceUpdate > 14
+                  const isVeryStuck = daysSinceUpdate !== null && !['closed','lost'].includes(stage) && daysSinceUpdate > 30
+                  const cardBorder = urgency === 'urgent' ? '2px solid #ef4444' : urgency === 'warning' ? '2px solid #f59e0b' : isVeryStuck ? '2px solid var(--gw-red)' : isStuck ? '2px solid var(--gw-amber)' : undefined
                   const cardBg     = urgency === 'urgent' ? '#fef2f2' : urgency === 'warning' ? '#fffbeb' : undefined
                   return (
                     <div key={deal.id} className={`deal-card${dragging === deal.id ? ' dragging' : ''}`}
@@ -1606,13 +1734,24 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                       onDragEnd={() => { setDragging(null); setDragOver(null) }}
                       onClick={() => { setEditing(deal); setDrawer(true) }}
                     >
+                      {/* Key date warning */}
                       {urgency && nearestKD && (
                         <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:5, fontSize:10, fontWeight:700, color: urgency === 'urgent' ? '#dc2626' : '#d97706' }}>
                           <span style={{ fontSize:11 }}>⚠</span>
                           <span>{nearestKD.type}: {nearestKD.daysUntil === 0 ? 'Today' : nearestKD.daysUntil === 1 ? 'Tomorrow' : `${nearestKD.daysUntil} days`}</span>
                         </div>
                       )}
-                      <div className="deal-card__title">{deal.title}</div>
+                      {/* Stuck deal warning */}
+                      {!urgency && isStuck && (
+                        <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:5, fontSize:10, fontWeight:700, color: isVeryStuck ? 'var(--gw-red)' : 'var(--gw-amber)' }}>
+                          <span>⏸</span>
+                          <span>No activity {daysSinceUpdate}d</span>
+                        </div>
+                      )}
+                      <div className="deal-card__title">
+                        {deal.is_1031 && <span title="1031 Exchange" style={{ marginRight:4 }}>🔄</span>}
+                        {deal.title}
+                      </div>
                       {isAdmin && agent && (
                         <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:2 }}>
                           <Avatar agent={agent} size={14} />
@@ -1649,6 +1788,72 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
               </div>
             </div>
           ))}
+        </div>
+      ) : (
+        /* ── List / Table View ── */
+        <div className="card" style={{ padding:0, overflow:'hidden' }}>
+          <div className="data-table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Deal</th>
+                  <th>Stage</th>
+                  <th>Value</th>
+                  <th>Probability</th>
+                  <th>Weighted</th>
+                  <th>Contact</th>
+                  <th>Agent</th>
+                  <th>Expected Close</th>
+                  <th>Last Activity</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...visibleDeals].sort((a,b) => {
+                  const si = STAGE_ORDER.indexOf(a.stage) - STAGE_ORDER.indexOf(b.stage)
+                  if (si !== 0) return si
+                  return (b.value||0) - (a.value||0)
+                }).map(deal => {
+                  const contact  = contactMap[deal.contact_id]
+                  const agent    = agentMap[deal.agent_id]
+                  const overdue  = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && deal.stage !== 'closed' && deal.stage !== 'lost'
+                  const wVal     = (deal.value || 0) * ((deal.probability || 0) / 100)
+                  const daysSince = deal.updated_at ? Math.floor((Date.now() - new Date(deal.updated_at)) / 86400000) : null
+                  const isStuck  = daysSince !== null && !['closed','lost'].includes(deal.stage) && daysSince > 14
+                  const STAGE_COLORS = { lead:'var(--gw-mist)', qualified:'var(--gw-azure)', showing:'#4a6fa5', offer:'var(--gw-amber)', 'under-contract':'var(--gw-purple)', closed:'var(--gw-green)', lost:'var(--gw-red)' }
+                  return (
+                    <tr key={deal.id} onClick={() => { setEditing(deal); setDrawer(true) }}>
+                      <td style={{ fontWeight:600 }}>
+                        {deal.is_1031 && <span title="1031 Exchange" style={{ marginRight:4 }}>🔄</span>}
+                        {deal.title}
+                      </td>
+                      <td>
+                        <span style={{ padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:700, background:`${STAGE_COLORS[deal.stage]}20`, color:STAGE_COLORS[deal.stage] }}>
+                          {STAGE_LABELS[deal.stage] || deal.stage}
+                        </span>
+                      </td>
+                      <td style={{ fontFamily:'var(--font-mono)', fontSize:12 }}>{deal.value ? formatCurrency(deal.value) : '—'}</td>
+                      <td style={{ fontSize:12 }}>{deal.probability ? `${deal.probability}%` : '—'}</td>
+                      <td style={{ fontFamily:'var(--font-mono)', fontSize:12, color:'var(--gw-azure)' }}>{wVal > 0 ? formatCurrency(wVal) : '—'}</td>
+                      <td style={{ fontSize:12 }}>{contact ? `${contact.first_name} ${contact.last_name}` : '—'}</td>
+                      <td>{agent ? <div style={{ display:'flex', alignItems:'center', gap:6 }}><Avatar agent={agent} size={22} /><span style={{ fontSize:12 }}>{agent.name}</span></div> : '—'}</td>
+                      <td style={{ fontSize:12, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)', fontWeight: overdue ? 600 : 400 }}>{formatDate(deal.expected_close_date)}</td>
+                      <td style={{ fontSize:12 }}>
+                        {daysSince !== null && (
+                          <span style={{ color: isStuck ? (daysSince > 30 ? 'var(--gw-red)' : 'var(--gw-amber)') : 'var(--gw-mist)', fontWeight: isStuck ? 700 : 400 }}>
+                            {daysSince}d ago{isStuck ? ' ⏸' : ''}
+                          </span>
+                        )}
+                      </td>
+                      <td onClick={e => e.stopPropagation()}>
+                        {!isAdmin && <button className="btn btn--ghost btn--icon" onClick={() => setConfirm(deal.id)}><Icon name="trash" size={12} /></button>}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 

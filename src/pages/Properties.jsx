@@ -509,6 +509,49 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
           : <CommercialFields form={form} set={set} />
         }
 
+        {/* ── NOI / Cap Rate Calculator — commercial types only ── */}
+        {commercial && (
+          <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
+            <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:12 }}>NOI &amp; Cap Rate Calculator</div>
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Annual Gross Income ($)</label>
+                <input className="form-control" type="number" value={form.details?.annual_income||''} onChange={e=>set('details',{...(form.details||{}),annual_income:e.target.value})} placeholder="0" />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Vacancy Rate (%)</label>
+                <input className="form-control" type="number" min="0" max="100" value={form.details?.vacancy_pct||''} onChange={e=>set('details',{...(form.details||{}),vacancy_pct:e.target.value})} placeholder="5" />
+              </div>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Annual Operating Expenses ($)</label>
+              <input className="form-control" type="number" value={form.details?.annual_expenses||''} onChange={e=>set('details',{...(form.details||{}),annual_expenses:e.target.value})} placeholder="0" />
+              <div className="form-hint">Property taxes, insurance, management, maintenance — not mortgage</div>
+            </div>
+            {(() => {
+              const inc  = Number(form.details?.annual_income  || 0)
+              const vac  = Number(form.details?.vacancy_pct    || 0)
+              const exp  = Number(form.details?.annual_expenses || 0)
+              const price = Number(form.list_price || 0)
+              if (inc <= 0) return null
+              const egi     = inc * (1 - vac / 100)
+              const noi     = egi - exp
+              const capRate = price > 0 ? (noi / price * 100) : null
+              const grm     = price > 0 ? (price / inc) : null
+              return (
+                <div style={{ background:'var(--gw-sky)', border:'1px solid #c5d9f5', borderRadius:'var(--radius)', padding:'10px 14px', fontSize:12 }}>
+                  <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:8 }}>
+                    <div><div style={{ color:'var(--gw-mist)', marginBottom:2 }}>EGI</div><div style={{ fontWeight:700 }}>${Math.round(egi).toLocaleString()}</div></div>
+                    <div><div style={{ color:'var(--gw-mist)', marginBottom:2 }}>NOI</div><div style={{ fontWeight:700, color: noi >= 0 ? 'var(--gw-green)' : 'var(--gw-red)' }}>${Math.round(noi).toLocaleString()}</div></div>
+                    {capRate !== null && <div><div style={{ color:'var(--gw-mist)', marginBottom:2 }}>Cap Rate</div><div style={{ fontWeight:700, color:'var(--gw-azure)' }}>{capRate.toFixed(2)}%</div></div>}
+                  </div>
+                  {grm !== null && <div style={{ marginTop:6, color:'var(--gw-mist)', fontSize:11 }}>GRM: {grm.toFixed(1)}× (Gross Rent Multiplier)</div>}
+                </div>
+              )
+            })()}
+          </div>
+        )}
+
         {/* Always-present fields */}
         <div className="form-group"><label className="form-label">Linked Contact</label><SearchDropdown items={contacts} value={form.linked_contact_id} onSelect={v=>set('linked_contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
         <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.assigned_agent_id||''} onChange={e=>set('assigned_agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
@@ -959,11 +1002,43 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
     setConfirm(null); reload()
   }
 
+  const exportCSV = () => {
+    const headers = ['Address','City','State','ZIP','County','Type','Status','List Price','Beds','Baths','Sq Ft','MLS #','Agent','NOI','Cap Rate']
+    const rows = filtered.map(p => {
+      const agent = agents.find(a => a.id === p.assigned_agent_id)
+      const d = p.details || {}
+      const inc  = Number(d.annual_income  || 0)
+      const vac  = Number(d.vacancy_pct    || 0)
+      const exp  = Number(d.annual_expenses || 0)
+      const noi  = inc > 0 ? Math.round(inc * (1 - vac / 100) - exp) : ''
+      const cap  = inc > 0 && p.list_price ? ((inc * (1 - vac / 100) - exp) / p.list_price * 100).toFixed(2) + '%' : ''
+      return [
+        p.address, p.city, p.state, p.zip, p.county,
+        TYPE_LABELS[p.type] || p.type, p.status,
+        p.list_price || '',
+        p.beds || '', p.baths || '', p.sqft || '',
+        p.mls_number || '',
+        agent?.name || '',
+        noi, cap,
+      ]
+    })
+    const csv = [headers, ...rows].map(row =>
+      row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')
+    ).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href = url; a.download = `properties-${new Date().toISOString().slice(0,10)}.csv`
+    a.click(); URL.revokeObjectURL(url)
+    pushToast(`Exported ${filtered.length} properties`)
+  }
+
   return (
     <div className="page-content">
       <div className="page-header">
         <div><div className="page-title">Properties</div><div className="page-sub">{properties.length} listings</div></div>
         <div style={{ display:'flex', gap:8 }}>
+          {filtered.length > 0 && <button className="btn btn--ghost" onClick={exportCSV} title="Export as CSV"><Icon name="download" size={14} /> Export</button>}
           <div style={{ display:'flex', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
             {['grid','list'].map(v => <button key={v} className={`btn btn--${view===v?'primary':'secondary'}`} style={{ borderRadius:0, border:'none' }} onClick={() => setView(v)}><Icon name={v==='grid'?'dashboard':'pipeline'} size={14} /></button>)}
           </div>
