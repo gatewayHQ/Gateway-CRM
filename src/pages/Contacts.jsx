@@ -831,11 +831,16 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
   const [importModal, setImportModal] = useState(false)
   const [selected, setSelected]       = useState(new Set())
   const [reassignTo, setReassignTo]   = useState('')
+  const [loading, setLoading]         = useState(false)
+  const [loadError, setLoadError]     = useState(null)
 
   const contacts    = db.contacts    || []
   const agents      = db.agents      || []
   const activities  = db.activities  || []
   const deals       = db.deals       || []
+
+  const hasFilters = !!(search || filterType || filterStatus || filterAgent || filterHeat)
+  const clearFilters = () => { setSearch(''); setFilterType(''); setFilterStatus(''); setFilterAgent(''); setFilterHeat('') }
 
   // Compute heat scores once per contacts/activities/deals change — O(n×m) so must not run per render
   const heatScores = useMemo(() => {
@@ -860,14 +865,19 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
 
   const reload = async () => {
     if (!visibleAgentIds?.length) return
-    const { data } = await supabase.from('contacts').select('*')
+    setLoading(true)
+    setLoadError(null)
+    const { data, error } = await supabase.from('contacts').select('*')
       .in('assigned_agent_id', visibleAgentIds)
       .order('created_at', { ascending: false })
+    setLoading(false)
+    if (error) { setLoadError(error.message); return }
     setDb(p => ({ ...p, contacts: data || [] }))
   }
 
   const deleteContact = async (id) => {
-    await supabase.from('contacts').delete().eq('id', id)
+    const { error } = await supabase.from('contacts').delete().eq('id', id)
+    if (error) { pushToast(error.message, 'error'); setConfirm(null); return }
     pushToast('Contact deleted', 'info')
     setConfirm(null)
     reload()
@@ -875,7 +885,8 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
 
   const bulkDelete = async () => {
     const ids = [...selected]
-    await supabase.from('contacts').delete().in('id', ids)
+    const { error } = await supabase.from('contacts').delete().in('id', ids)
+    if (error) { pushToast(error.message, 'error'); return }
     pushToast(`${ids.length} contact${ids.length !== 1 ? 's' : ''} deleted`, 'info')
     setSelected(new Set())
     reload()
@@ -924,18 +935,32 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
       <div className="page-header">
         <div>
           <div className="page-title">Contacts</div>
-          <div className="page-sub">{contacts.length} total contacts</div>
+          <div className="page-sub">
+            {loading ? 'Loading…' : hasFilters
+              ? `${filtered.length} of ${contacts.length} contacts`
+              : `${contacts.length} total contacts`}
+          </div>
         </div>
         <div style={{ display:'flex', gap:8 }}>
+          <button className="btn btn--secondary" onClick={reload} title="Refresh" disabled={loading} style={{ padding:'0 10px' }}><Icon name="refresh" size={14} /></button>
           <button className="btn btn--secondary" onClick={() => setImportModal(true)}><Icon name="import" size={14} /> Import CSV</button>
           <button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Contact</button>
         </div>
       </div>
 
+      {loadError && (
+        <div style={{ background:'var(--gw-red-light)', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)', padding:'10px 14px', marginBottom:16, display:'flex', alignItems:'center', gap:10, fontSize:13 }}>
+          <Icon name="alertCircle" size={15} style={{ color:'var(--gw-red)', flexShrink:0 }} />
+          <span style={{ color:'var(--gw-red)', flex:1 }}>Failed to load contacts: {loadError}</span>
+          <button className="btn btn--ghost btn--sm" onClick={reload}>Retry</button>
+        </div>
+      )}
+
       <div className="filters-bar">
         <div style={{ display:'flex', alignItems:'center', gap:8, background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'0 10px', height:34, flex:1, maxWidth:300 }}>
           <Icon name="search" size={14} style={{ color:'var(--gw-mist)' }} />
           <input style={{ border:'none', outline:'none', fontSize:13, flex:1 }} placeholder="Search contacts…" value={search} onChange={e=>setSearch(e.target.value)} />
+          {search && <button onClick={() => setSearch('')} style={{ border:'none', background:'none', cursor:'pointer', color:'var(--gw-mist)', padding:0, lineHeight:1, fontSize:16 }}>×</button>}
         </div>
         <select className="filter-select" value={filterType} onChange={e=>setFilterType(e.target.value)}>
           <option value="">All Types</option>
@@ -955,13 +980,32 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
           <option value="warm">▲ Warm</option>
           <option value="cold">– Cold</option>
         </select>
+        {hasFilters && (
+          <button className="btn btn--ghost btn--sm" onClick={clearFilters} style={{ whiteSpace:'nowrap' }}>
+            Clear filters
+          </button>
+        )}
       </div>
 
-      {filtered.length === 0 ? (
-        <EmptyState icon="contacts" title="No contacts yet" message="Add your first contact to get started with your CRM."
-          action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Contact</button>} />
+      {loading && contacts.length === 0 ? (
+        <div style={{ display:'flex', flexDirection:'column', gap:8, marginTop:8 }}>
+          {[...Array(5)].map((_, i) => (
+            <div key={i} style={{ height:52, background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', opacity: 1 - i * 0.15 }}
+              className="skeleton-row" />
+          ))}
+        </div>
+      ) : filtered.length === 0 ? (
+        hasFilters ? (
+          <EmptyState icon="search" title="No contacts match your filters"
+            message="Try adjusting your search or filters to find what you're looking for."
+            action={<button className="btn btn--secondary" onClick={clearFilters}>Clear Filters</button>} />
+        ) : (
+          <EmptyState icon="contacts" title="No contacts yet" message="Add your first contact to get started with your CRM."
+            action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Contact</button>} />
+        )
       ) : (
-        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+        <div className="card" style={{ padding: 0, overflow: 'hidden', position:'relative', opacity: loading ? 0.6 : 1, transition:'opacity 200ms' }}>
+          {loading && <div style={{ position:'absolute', inset:0, zIndex:2, cursor:'wait' }} />}
           <div className="data-table-wrap">
           <table className="data-table">
             <thead>
