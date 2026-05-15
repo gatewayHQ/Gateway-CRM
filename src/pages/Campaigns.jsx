@@ -1254,11 +1254,12 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
   }
 
   const deleteCampaign = async (id) => {
-    await fetch('/api/campaigns', {
+    const res = await fetch('/api/campaigns', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'delete_campaign', id }),
     })
+    if (!res.ok) { const d = await res.json().catch(() => ({})); pushToast(d.error || 'Failed to delete campaign', 'error'); return }
     setCampaigns(p => p.filter(c => c.id !== id))
     if (selected?.id === id) setSelected(null)
     pushToast('Campaign deleted')
@@ -1311,13 +1312,18 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
 
           {/* Search + filter */}
           <div style={{ display:'flex', gap:8 }}>
-            <input
-              className="form-control"
-              style={{ flex:1 }}
-              placeholder="Search campaigns…"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-            />
+            <div style={{ flex:1, position:'relative' }}>
+              <input
+                className="form-control"
+                style={{ width:'100%', paddingRight: search ? 28 : undefined }}
+                placeholder="Search campaigns…"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+              />
+              {search && (
+                <button onClick={() => setSearch('')} style={{ position:'absolute', right:8, top:'50%', transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', color:'var(--gw-mist)', fontSize:16, lineHeight:1, padding:0 }}>×</button>
+              )}
+            </div>
             <select className="form-control" style={{ width:120 }} value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
               <option value="all">All Statuses</option>
               {Object.entries(STATUS_CONFIG).map(([v,c]) => <option key={v} value={v}>{c.label}</option>)}
@@ -1329,8 +1335,10 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
         <div style={{ flex:1, overflowY:'auto', padding:'8px 0' }}>
           {loading
             ? <div style={{ textAlign:'center', padding:40, color:'var(--gw-mist)', fontSize:13 }}>Loading…</div>
-            : filtered.length === 0
+            : campaigns.length === 0
               ? <EmptyState icon="mail" title="No campaigns yet" message="Create your first campaign to start tracking mail flyers and cold call outreach." action={<button className="btn btn--primary btn--sm" onClick={()=>setNewOpen(true)}>New Campaign</button>}/>
+            : filtered.length === 0
+              ? <EmptyState icon="mail" title="No campaigns match your filters" message="Try adjusting your search or status filter." action={<button className="btn btn--secondary btn--sm" onClick={()=>{ setSearch(''); setStatusFilter('all') }}>Clear Filters</button>}/>
               : filtered.map(c => {
                 const responseRate = c.total_sends > 0 ? Math.round(c.total_responses / c.total_sends * 100) : 0
                 const agent = agents.find(a => a.id === c.agent_id)
