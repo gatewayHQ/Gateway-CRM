@@ -248,6 +248,7 @@ export default function MessagesPage({ db, activeAgent }) {
       .select('*')
       .order('last_message_at', { ascending: false })
     if (error?.code === '42P01') { setHasTable(false); setLoading(false); return }
+    if (error) { pushToast('Failed to load conversations: ' + error.message, 'error'); setLoading(false); return }
     setConvs(data || [])
     setLoading(false)
   }, [])
@@ -272,7 +273,10 @@ export default function MessagesPage({ db, activeAgent }) {
       .select('*')
       .eq('conversation_id', activeConv.id)
       .order('created_at', { ascending: true })
-      .then(({ data }) => setMsgs(data || []))
+      .then(({ data, error }) => {
+        if (error) { pushToast('Failed to load messages: ' + error.message, 'error'); return }
+        setMsgs(data || [])
+      })
 
     // Subscribe to new messages
     const ch = supabase.channel(`gw-msgs-${activeConv.id}`)
