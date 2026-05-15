@@ -165,7 +165,7 @@ function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivit
 }
 
 function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activities, activeAgent, onSave, onActivityAdded }) {
-  const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'', birthday:'', anniversary_date:'', submarket:'', asset_types:[], size_min:'', size_max:'', size_unit:'sqft' }
+  const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', types:['buyer'], status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'', birthday:'', anniversary_date:'', submarket:'', asset_types:[], size_min:'', size_max:'', size_unit:'sqft', beds_min:'', beds_max:'', baths_min:'', baths_max:'', garage_min:'' }
   const blankProp = { address:'', list_price:'', type:'residential', subtype:'', beds:'', baths:'', sqft:'', garage:'', details:{} }
   const [form, setForm] = useState(contact || blank)
   const [errors, setErrors] = useState({})
@@ -175,7 +175,10 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
   const [propForm, setPropForm] = useState(blankProp)
 
   React.useEffect(() => {
-    setForm(contact || blank)
+    const base = contact || blank
+    // Hydrate types array from legacy type field for existing contacts
+    const types = base.types?.length ? base.types : (base.type ? [base.type] : ['buyer'])
+    setForm({ ...base, types })
     setErrors({})
     setTab('details')
     setAddProp(false)
@@ -204,11 +207,14 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
 
     // Destructure buyer-criteria fields out of form so ...baseForm never spreads
     // unmigrated columns to Supabase (causes schema cache error for all contact types)
-    const { submarket, asset_types, size_min, size_max, size_unit, ...baseForm } = form
-    const isBuyer = form.type === 'buyer' || form.type === 'investor'
+    const { submarket, asset_types, size_min, size_max, size_unit, beds_min, beds_max, baths_min, baths_max, garage_min, types: formTypes, ...baseForm } = form
+    const types = Array.isArray(formTypes) && formTypes.length ? formTypes : ['buyer']
+    const isBuyer = types.includes('buyer') || types.includes('investor')
 
     const payload = {
       ...baseForm,
+      types,
+      type: types[0],  // primary role — keeps legacy filters/display working
       // Coerce empty strings → null for typed DB columns
       birthday:          form.birthday          || null,
       anniversary_date:  form.anniversary_date  || null,
@@ -225,6 +231,11 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
         size_min:    size_min    ? Number(size_min)  : null,
         size_max:    size_max    ? Number(size_max)  : null,
         size_unit:   size_unit   || 'sqft',
+        beds_min:    beds_min    ? Number(beds_min)  : null,
+        beds_max:    beds_max    ? Number(beds_max)  : null,
+        baths_min:   baths_min   ? Number(baths_min) : null,
+        baths_max:   baths_max   ? Number(baths_max) : null,
+        garage_min:  garage_min  ? Number(garage_min): null,
       }),
     }
 
@@ -318,13 +329,26 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
               </div>
             </div>
 
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">Type</label>
-                <select className="form-control" value={form.type} onChange={e=>set('type',e.target.value)}>
-                  {['buyer','seller','landlord','tenant','investor'].map(t=><option key={t} value={t}>{t.charAt(0).toUpperCase()+t.slice(1)}</option>)}
-                </select>
+            <div className="form-group">
+              <label className="form-label">Role <span style={{ fontWeight:400, color:'var(--gw-mist)', fontSize:11 }}>(select all that apply)</span></label>
+              <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginTop:4 }}>
+                {['buyer','seller','investor','landlord','tenant'].map(role => {
+                  const on = (form.types||[]).includes(role)
+                  return (
+                    <button key={role} type="button" onClick={() => {
+                      const cur = form.types || []
+                      const next = on ? cur.filter(x => x !== role) : [...cur, role]
+                      set('types', next.length ? next : [role])
+                    }} style={{ padding:'5px 14px', borderRadius:20, border:`1.5px solid ${on ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+                      background: on ? 'var(--gw-sky)' : '#fff', color: on ? 'var(--gw-azure)' : 'var(--gw-mist)',
+                      fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, cursor:'pointer', transition:'all 120ms' }}>
+                      {role.charAt(0).toUpperCase()+role.slice(1)}
+                    </button>
+                  )
+                })}
               </div>
+            </div>
+            <div className="form-row">
               <div className="form-group">
                 <label className="form-label">Status</label>
                 <select className="form-control" value={form.status} onChange={e=>set('status',e.target.value)}>
@@ -364,10 +388,10 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
             <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} placeholder="Add notes…" /></div>
 
             {/* ── Investment / Buyer Criteria (buyer + investor only) ── */}
-            {(form.type === 'buyer' || form.type === 'investor') && (
+            {((form.types||[]).includes('buyer') || (form.types||[]).includes('investor')) && (
               <div style={{ borderTop:'1px solid var(--gw-border)', marginTop:4, paddingTop:14 }}>
                 <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:10 }}>
-                  {form.type === 'investor' ? 'Investment Criteria' : 'Buyer Criteria'}
+                  {!(form.types||[]).includes('buyer') && (form.types||[]).includes('investor') ? 'Investment Criteria' : 'Buyer Criteria'}
                 </div>
                 <div className="form-group">
                   <label className="form-label">Target Market / Area</label>
@@ -412,6 +436,32 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
                     </select>
                   </div>
                 </div>
+                {/* Residential buyer-specific criteria */}
+                {(form.asset_types||[]).some(t => ['residential','rental'].includes(t)) || !(form.asset_types||[]).length ? (
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label className="form-label">Beds (min–max)</label>
+                      <div style={{ display:'flex', gap:6 }}>
+                        <input className="form-control" type="number" value={form.beds_min||''} onChange={e=>set('beds_min',e.target.value)} placeholder="Min" />
+                        <input className="form-control" type="number" value={form.beds_max||''} onChange={e=>set('beds_max',e.target.value)} placeholder="Max" />
+                      </div>
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Baths (min–max)</label>
+                      <div style={{ display:'flex', gap:6 }}>
+                        <input className="form-control" type="number" step="0.5" value={form.baths_min||''} onChange={e=>set('baths_min',e.target.value)} placeholder="Min" />
+                        <input className="form-control" type="number" step="0.5" value={form.baths_max||''} onChange={e=>set('baths_max',e.target.value)} placeholder="Max" />
+                      </div>
+                    </div>
+                    <div className="form-group" style={{ maxWidth:100 }}>
+                      <label className="form-label">Garage (min)</label>
+                      <select className="form-control" value={form.garage_min||''} onChange={e=>set('garage_min',e.target.value)}>
+                        <option value="">Any</option>
+                        {[1,2,3,4].map(n=><option key={n} value={n}>{n}+</option>)}
+                      </select>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             )}
 
@@ -798,7 +848,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
     const name = `${c.first_name} ${c.last_name}`.toLowerCase()
     const q = search.toLowerCase()
     if (q && !name.includes(q) && !(c.email||'').toLowerCase().includes(q) && !(c.phone||'').includes(q)) return false
-    if (filterType   && c.type              !== filterType)   return false
+    if (filterType   && !(c.types?.includes(filterType) || c.type === filterType)) return false
     if (filterStatus && c.status            !== filterStatus) return false
     if (filterAgent  && c.assigned_agent_id !== filterAgent)  return false
     if (filterHeat   && heatScores[c.id]    !== filterHeat)   return false
@@ -950,7 +1000,11 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
                       </div>
                     </td>
                     <td><HeatBadge score={calcHeatScore(c, activities, deals)} /></td>
-                    <td><Badge variant={c.type}>{c.type}</Badge></td>
+                    <td>
+                      <div style={{ display:'flex', flexWrap:'wrap', gap:3 }}>
+                        {(c.types?.length ? c.types : [c.type]).map(t => <Badge key={t} variant={t}>{t}</Badge>)}
+                      </div>
+                    </td>
                     <td><Badge variant={c.status}>{c.status}</Badge></td>
                     <td style={{ fontFamily:'var(--font-mono)', fontSize:12 }}>{formatPhone(c.phone)}</td>
                     <td style={{ fontSize:12 }}>{c.email || '—'}</td>

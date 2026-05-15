@@ -43,12 +43,19 @@ create table if not exists contacts (
   -- Annual reminders
   birthday          date,
   anniversary_date  date,
+  -- Multi-role support (buyer, seller, investor, landlord, tenant)
+  types             text[],        -- all roles, e.g. ['buyer','seller']
   -- Buyer / investor search criteria (for matching)
   submarket         text,          -- target area / county
   asset_types       text[],        -- e.g. ['multifamily','office']
   size_min          numeric,
   size_max          numeric,
   size_unit         text default 'sqft',  -- sqft | acres | units
+  beds_min          numeric,
+  beds_max          numeric,
+  baths_min         numeric,
+  baths_max         numeric,
+  garage_min        integer,
   created_at        timestamptz default now()
 );
 
@@ -514,6 +521,12 @@ alter table contacts    add column if not exists asset_types      text[];
 alter table contacts    add column if not exists size_min         numeric;
 alter table contacts    add column if not exists size_max         numeric;
 alter table contacts    add column if not exists size_unit        text default 'sqft';
+alter table contacts    add column if not exists types            text[];   -- multi-role (buyer+seller etc.)
+alter table contacts    add column if not exists beds_min         numeric;
+alter table contacts    add column if not exists beds_max         numeric;
+alter table contacts    add column if not exists baths_min        numeric;
+alter table contacts    add column if not exists baths_max        numeric;
+alter table contacts    add column if not exists garage_min       integer;
 alter table properties  add column if not exists county           text;
 alter table properties  add column if not exists garage           integer default 0;
 alter table properties  add column if not exists details          jsonb default '{}';
