@@ -2,7 +2,7 @@ export const capitalize = (str) => str ? str.charAt(0).toUpperCase() + str.slice
 
 export const formatShortDate = (val) => {
   if (!val) return '—'
-  return new Date(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  return parseLocalDate(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
 export const formatCurrency = (val) => {
@@ -12,7 +12,18 @@ export const formatCurrency = (val) => {
 
 export const formatDate = (val) => {
   if (!val) return '—'
-  return new Date(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  return parseLocalDate(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+// Parse date strings as local time, not UTC (avoids off-by-one-day in US timezones)
+const parseLocalDate = (val) => {
+  const s = String(val)
+  // Date-only strings like "2025-01-15" must be parsed locally, not as UTC midnight
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const [y, m, d] = s.split('-').map(Number)
+    return new Date(y, m - 1, d)
+  }
+  return new Date(s)
 }
 
 export const formatPhone = (val) => {

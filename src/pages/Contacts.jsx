@@ -257,6 +257,7 @@ function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activitie
         garage: propForm.garage ? Number(propForm.garage) : 0,
         details: { ...propForm.details, category: propForm.type },
         contact_id: contactId,
+        assigned_agent_id: activeAgent?.id || null,
         status: 'active',
       }
       const { error: pe } = await supabase.from('properties').insert([propPayload])

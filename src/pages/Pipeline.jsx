@@ -174,9 +174,10 @@ function ChecklistTab({ deal }) {
   )
 }
 
-function KeyDatesTab({ deal }) {
+function KeyDatesTab({ deal, onSave }) {
   const [dates, setDates]         = useState([])
   const [saving, setSaving]       = useState(false)
+  const [saveErr, setSaveErr]     = useState(null)
   const [newType, setNewType]     = useState('')
   const [customType, setCustomType] = useState('')
   const [showCustom, setShowCustom] = useState(false)
@@ -193,9 +194,12 @@ function KeyDatesTab({ deal }) {
 
   const persist = async (updated) => {
     setSaving(true)
+    setSaveErr(null)
     const comp_data = { ...(deal.comp_data || {}), key_dates: updated }
-    await supabase.from('deals').update({ comp_data, updated_at: new Date().toISOString() }).eq('id', deal.id)
+    const { error } = await supabase.from('deals').update({ comp_data, updated_at: new Date().toISOString() }).eq('id', deal.id)
     setSaving(false)
+    if (error) { setSaveErr(error.message); return }
+    if (onSave) onSave()
   }
 
   const updateDate = (i, date) => {
@@ -225,7 +229,9 @@ function KeyDatesTab({ deal }) {
   return (
     <div style={{ padding: 16, overflowY: 'auto', flex: 1 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-        <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>{saving ? 'Saving…' : 'Changes auto-saved'}</div>
+        <div style={{ fontSize: 12, color: saveErr ? 'var(--gw-red)' : 'var(--gw-mist)' }}>
+          {saving ? 'Saving…' : saveErr ? `Save failed: ${saveErr}` : 'Changes auto-saved'}
+        </div>
       </div>
 
       {dates.map((row, i) => (
@@ -1425,7 +1431,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
 
       {/* Key Dates tab */}
       {tab === 'dates' && isExisting && (
-        <KeyDatesTab deal={deal} />
+        <KeyDatesTab deal={deal} onSave={onSave} />
       )}
 
       {/* Checklist tab */}

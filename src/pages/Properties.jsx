@@ -367,6 +367,12 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
       agent_id:    activeAgent?.id || form.assigned_agent_id || null,
       stage:       'lead',
       value:       form.list_price ? Number(form.list_price) : null,
+      comp_data: {
+        beds:   form.beds   ? Number(form.beds)   : null,
+        baths:  form.baths  ? Number(form.baths)  : null,
+        sqft:   form.sqft   ? Number(form.sqft)   : null,
+        garage: form.garage != null ? Number(form.garage) : 0,
+      },
     }
     const { data, error } = await supabase.from('deals').insert([dealPayload]).select().single()
     setStartingDeal(false)
