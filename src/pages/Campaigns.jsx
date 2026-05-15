@@ -230,6 +230,7 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
   const [selectedTemplate, setSelectedTemplate] = useState(campaign.flyer_template || '')
   const [generatedCopy,    setGeneratedCopy]    = useState(null)
   const [generating,       setGenerating]       = useState(false)
+  const [generateError,    setGenerateError]    = useState(null)
   const [copied,           setCopied]           = useState(false)
   const [saving,           setSaving]           = useState(false)
   const [canvaUrl,         setCanvaUrl]         = useState(campaign.canva_design_url || '')
@@ -238,8 +239,9 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
   const agentObj = agents?.find(a => a.id === campaign.agent_id)
 
   const generateCopy = async () => {
-    if (!selectedTemplate) { pushToast('Select a template first', 'error'); return }
+    if (!selectedTemplate) { pushToast('Select a campaign type first', 'error'); return }
     setGenerating(true)
+    setGenerateError(null)
     try {
       const res  = await fetch('/api/claude', {
         method: 'POST',
@@ -253,11 +255,18 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
         }),
       })
       const data = await res.json()
-      if (!res.ok) { pushToast(data.error || 'Failed to generate copy', 'error'); return }
+      if (!res.ok) {
+        const msg = data.error || 'Failed to generate copy'
+        setGenerateError(msg)
+        pushToast(msg, 'error')
+        return
+      }
       setGeneratedCopy(data.copy)
       pushToast('Copy generated!')
     } catch (err) {
-      pushToast(err.message, 'error')
+      const msg = err.message || 'Network error — could not reach server'
+      setGenerateError(msg)
+      pushToast(msg, 'error')
     } finally {
       setGenerating(false)
     }
@@ -355,8 +364,23 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
 
       {/* Generate button */}
       <button className="btn btn--primary" onClick={generateCopy} disabled={generating || !selectedTemplate}>
-        {generating ? 'Generating…' : 'Generate Copy with AI'}
+        {generating ? 'Generating…' : '✨ Generate Copy with AI'}
       </button>
+      {!selectedTemplate && (
+        <div style={{ fontSize:12, color:'var(--gw-mist)', textAlign:'center', marginTop:-12 }}>
+          ↑ Select a campaign type above to enable AI copy generation
+        </div>
+      )}
+      {generateError && (
+        <div style={{ background:'#fef2f2', border:'1px solid #fecaca', borderRadius:'var(--radius)', padding:'10px 14px', fontSize:12, color:'#dc2626', lineHeight:1.6 }}>
+          <strong>AI generation failed:</strong> {generateError}
+          {generateError.includes('ANTHROPIC_API_KEY') && (
+            <div style={{ marginTop:6, color:'#7f1d1d' }}>
+              To fix: add <code style={{ background:'#fee2e2', padding:'1px 5px', borderRadius:3, fontSize:11 }}>ANTHROPIC_API_KEY</code> to your Vercel project under <strong>Settings → Environment Variables</strong>, then redeploy.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Generated copy preview */}
       {generatedCopy && (
@@ -1164,13 +1188,18 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
               onCancel={() => setEditOpen(false)}
               onSave={async form => {
                 setSaving(true)
-                const res  = await fetch('/api/campaigns', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ action:'update_campaign', ...form }) })
-                const data = await res.json()
-                setSaving(false)
-                if (!res.ok) { pushToast(data.error, 'error'); return }
-                onUpdate(data.campaign)
-                setEditOpen(false)
-                pushToast('Campaign updated')
+                try {
+                  const res  = await fetch('/api/campaigns', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ action:'update_campaign', ...form }) })
+                  const data = await res.json()
+                  if (!res.ok) { pushToast(data.error || 'Failed to update campaign', 'error'); return }
+                  onUpdate(data.campaign)
+                  setEditOpen(false)
+                  pushToast('Campaign updated')
+                } catch (err) {
+                  pushToast(err.message || 'Network error — could not reach server', 'error')
+                } finally {
+                  setSaving(false)
+                }
               }}
             />
           </div>
@@ -1234,18 +1263,23 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
 
   const createCampaign = async (form) => {
     setSaving(true)
-    const res  = await fetch('/api/campaigns', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'create_campaign', ...form }),
-    })
-    const data = await res.json()
-    setSaving(false)
-    if (!res.ok || data.error) { pushToast(data.error || 'Failed to create campaign', 'error'); return }
-    setCampaigns(p => [data.campaign, ...p])
-    setNewOpen(false)
-    setSelected(data.campaign)
-    pushToast('Campaign created')
+    try {
+      const res  = await fetch('/api/campaigns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'create_campaign', ...form }),
+      })
+      const data = await res.json()
+      if (!res.ok || data.error) { pushToast(data.error || 'Failed to create campaign', 'error'); return }
+      setCampaigns(p => [data.campaign, ...p])
+      setNewOpen(false)
+      setSelected(data.campaign)
+      pushToast('Campaign created')
+    } catch (err) {
+      pushToast(err.message || 'Network error — could not reach server', 'error')
+    } finally {
+      setSaving(false)
+    }
   }
 
   const updateCampaign = (updated) => {
