@@ -654,6 +654,7 @@ export default function ColdCallsPage({ db, setDb, activeAgent }) {
   const loadLists = async () => {
     const { data, error } = await supabase.from('cold_call_lists').select('*').order('created_at', { ascending: false })
     if (error?.code === '42P01') { setReady(false); return }
+    if (error) { pushToast('Failed to load lists: ' + error.message, 'error'); return }
     const rows = data || []
     setLists(rows)
     if (rows.length && !selected) setSelected(rows[0])
@@ -663,13 +664,18 @@ export default function ColdCallsPage({ db, setDb, activeAgent }) {
     if (!selected) return
     setLoadingLeads(true)
     supabase.from('cold_call_leads').select('*').eq('list_id', selected.id).order('created_at', { ascending: true })
-      .then(({ data }) => { setLeads(data || []); setLoadingLeads(false) })
+      .then(({ data, error }) => {
+        setLoadingLeads(false)
+        if (error) { pushToast('Failed to load leads: ' + error.message, 'error'); return }
+        setLeads(data || [])
+      })
   }, [selected?.id])
 
   const updateLead = (id, patch) => setLeads(p => p.map(l => l.id === id ? {...l, ...patch} : l))
 
   const deleteList = async (list) => {
-    await supabase.from('cold_call_lists').delete().eq('id', list.id)
+    const { error } = await supabase.from('cold_call_lists').delete().eq('id', list.id)
+    if (error) { pushToast('Failed to delete list: ' + error.message, 'error'); return }
     setLists(p => p.filter(l => l.id !== list.id))
     if (selected?.id === list.id) {
       const rest = lists.filter(l => l.id !== list.id)
