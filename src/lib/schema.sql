@@ -535,6 +535,32 @@ alter table properties  add column if not exists lng              numeric;
 alter table deals       add column if not exists prop_category    text;
 alter table deals       add column if not exists prop_subtype     text;
 alter table deals       add column if not exists comp_data        jsonb default '{}';
+alter table deals       add column if not exists sold_price       numeric;
+alter table deals       add column if not exists commission_pct   numeric;
+alter table deals       add column if not exists listing_side_pct numeric;
+alter table deals       add column if not exists buyer_side_pct   numeric;
+alter table deals       add column if not exists referral_fee     numeric;
+alter table agents      add column if not exists default_commission_pct   numeric;
+alter table agents      add column if not exists default_listing_side_pct numeric;
+alter table agents      add column if not exists default_buyer_side_pct   numeric;
+
+-- deal_contacts junction table (multi-contact per deal)
+create table if not exists deal_contacts (
+  id         uuid primary key default uuid_generate_v4(),
+  deal_id    uuid references deals(id) on delete cascade,
+  contact_id uuid references contacts(id) on delete cascade,
+  role       text default 'Primary Buyer',
+  sort_order integer default 0,
+  created_at timestamptz default now(),
+  unique(deal_id, contact_id)
+);
+create index if not exists deal_contacts_deal_id_idx on deal_contacts(deal_id);
+alter table deal_contacts enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='deal_contacts' and policyname='allow_all') then
+    create policy "allow_all" on deal_contacts for all using (true) with check (true);
+  end if;
+end $$;
 alter table teams       add column if not exists type             text check (type in ('collaboration','split')) default 'collaboration';
 alter table teams       add column if not exists description      text;
 alter table team_splits add column if not exists share_contacts   boolean default true;

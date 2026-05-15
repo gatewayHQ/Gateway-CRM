@@ -1204,20 +1204,51 @@ create policy "agent_notifications_policy" on agent_notifications
   )
 }
 
+const DEAL_CONTACT_ROLES = ['Primary Buyer','Co-Buyer','Seller','Co-Seller','Tenant','Landlord','Investor','Other']
+
 function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave }) {
-  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
-  const [form, setForm]     = useState(deal || blank)
-  const [errors, setErrors] = useState({})
-  const [saving, setSaving] = useState(false)
-  const [tab, setTab]       = useState('details')
+  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, sold_price:'', commission_pct:'', listing_side_pct:'', buyer_side_pct:'', referral_fee:'' }
+  const [form, setForm]         = useState(deal || blank)
+  const [dealContacts, setDealContacts] = useState([])  // [{contact_id, role}]
+  const [errors, setErrors]     = useState({})
+  const [saving, setSaving]     = useState(false)
+  const [tab, setTab]           = useState('details')
+  const soldPriceRef            = React.useRef(null)
+  const prevStageRef            = React.useRef(form.stage)
 
   React.useEffect(() => {
-    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {} } : blank)
+    const agent = activeAgent
+    const defaults = deal ? {} : {
+      commission_pct:    agent?.default_commission_pct    ?? '',
+      listing_side_pct:  agent?.default_listing_side_pct  ?? '',
+      buyer_side_pct:    agent?.default_buyer_side_pct    ?? '',
+    }
+    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {}, sold_price: deal.sold_price ?? '', commission_pct: deal.commission_pct ?? '', listing_side_pct: deal.listing_side_pct ?? '', buyer_side_pct: deal.buyer_side_pct ?? '', referral_fee: deal.referral_fee ?? '' } : { ...blank, ...defaults })
     setErrors({})
     setTab('details')
+    prevStageRef.current = deal?.stage || 'lead'
+    // Load deal_contacts for existing deals
+    if (deal?.id) {
+      supabase.from('deal_contacts').select('contact_id,role,sort_order').eq('deal_id', deal.id).order('sort_order')
+        .then(({ data }) => {
+          if (data?.length) { setDealContacts(data) }
+          else if (deal.contact_id) { setDealContacts([{ contact_id: deal.contact_id, role: 'Primary Buyer' }]) }
+          else { setDealContacts([]) }
+        })
+    } else {
+      setDealContacts(deal?.contact_id ? [{ contact_id: deal.contact_id, role: 'Primary Buyer' }] : [])
+    }
   }, [deal, open])
 
-  const set  = (k, v) => setForm(p => ({...p, [k]: v}))
+  const set = (k, v) => {
+    setForm(p => ({...p, [k]: v}))
+    if (k === 'stage' && ['under-contract','closed'].includes(v) && !['under-contract','closed'].includes(prevStageRef.current)) {
+      prevStageRef.current = v
+      setTimeout(() => soldPriceRef.current?.focus(), 50)
+    } else if (k === 'stage') {
+      prevStageRef.current = v
+    }
+  }
   const setCD = (k, v) => setForm(p => ({...p, comp_data: {...(p.comp_data||{}), [k]: v}}))
   const cd = form.comp_data || {}
 
@@ -1237,13 +1268,18 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
         value:               form.value !== '' && form.value !== null ? Number(form.value) : null,
         probability:         Number(form.probability) || 0,
         expected_close_date: form.expected_close_date || null,
-        contact_id:          form.contact_id   || null,
+        contact_id:          dealContacts[0]?.contact_id || form.contact_id || null,
         property_id:         form.property_id  || null,
         agent_id:            form.agent_id     || null,
         notes:               form.notes        || null,
         prop_category:       form.prop_category || null,
         prop_subtype:        form.prop_subtype  || null,
         comp_data:           form.comp_data     || null,
+        sold_price:          form.sold_price      !== '' && form.sold_price      != null ? Number(form.sold_price)      : null,
+        commission_pct:      form.commission_pct  !== '' && form.commission_pct  != null ? Number(form.commission_pct)  : null,
+        listing_side_pct:    form.listing_side_pct !== '' && form.listing_side_pct != null ? Number(form.listing_side_pct) : null,
+        buyer_side_pct:      form.buyer_side_pct  !== '' && form.buyer_side_pct  != null ? Number(form.buyer_side_pct)  : null,
+        referral_fee:        form.referral_fee    !== '' && form.referral_fee    != null ? Number(form.referral_fee)    : null,
       }
       let error
       if (deal?.id) {
@@ -1252,6 +1288,16 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
         ;({ error } = await supabase.from('deals').insert([payload]))
       }
       if (error) { pushToast(error.message, 'error'); return }
+
+      // Sync deal_contacts junction table
+      const dealId = deal?.id || null
+      if (dealId && dealContacts.length > 0) {
+        await supabase.from('deal_contacts').delete().eq('deal_id', dealId)
+        await supabase.from('deal_contacts').insert(
+          dealContacts.map((dc, i) => ({ deal_id: dealId, contact_id: dc.contact_id, role: dc.role || 'Primary Buyer', sort_order: i }))
+        )
+      }
+
       pushToast(deal?.id ? 'Deal updated' : 'Deal added')
       await onSave()
       onClose()
@@ -1316,7 +1362,34 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
               <div className="form-group"><label className="form-label">Probability %</label><input className="form-control" type="number" min="0" max="100" value={form.probability||0} onChange={e=>set('probability',e.target.value)} /></div>
             </div>
             <div className="form-group"><label className="form-label">Expected Close Date</label><input className="form-control" type="date" value={form.expected_close_date||''} onChange={e=>set('expected_close_date',e.target.value)} /></div>
-            <div className="form-group"><label className="form-label">Contact</label><SearchDropdown items={contacts} value={form.contact_id} onSelect={v=>set('contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
+            {/* ── Deal Contacts (multi) ── */}
+            <div className="form-group">
+              <label className="form-label">Contacts</label>
+              {dealContacts.map((dc, i) => {
+                const c = contacts.find(x => x.id === dc.contact_id)
+                return (
+                  <div key={i} style={{ display:'flex', gap:6, alignItems:'center', marginBottom:6 }}>
+                    <div style={{ flex:1, background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'6px 10px', fontSize:13, fontWeight:500 }}>
+                      {c ? `${c.first_name} ${c.last_name}` : <span style={{ color:'var(--gw-mist)' }}>Unknown contact</span>}
+                    </div>
+                    <select style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'6px 8px', fontFamily:'var(--font-body)', fontSize:12, background:'#fff', color:'var(--gw-slate)' }}
+                      value={dc.role || 'Primary Buyer'}
+                      onChange={e => setDealContacts(p => p.map((x, j) => j===i ? {...x, role: e.target.value} : x))}>
+                      {DEAL_CONTACT_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                    <button type="button" onClick={() => setDealContacts(p => p.filter((_,j)=>j!==i))}
+                      style={{ border:'none', background:'none', cursor:'pointer', color:'var(--gw-mist)', padding:4, lineHeight:1 }} title="Remove">✕</button>
+                  </div>
+                )
+              })}
+              <SearchDropdown
+                items={contacts.filter(c => !dealContacts.some(dc => dc.contact_id === c.id))}
+                value={null}
+                onSelect={id => setDealContacts(p => [...p, { contact_id: id, role: p.length === 0 ? 'Primary Buyer' : 'Co-Buyer' }])}
+                placeholder={dealContacts.length === 0 ? 'Search contacts…' : 'Add another contact…'}
+                labelKey={c=>`${c.first_name} ${c.last_name}`}
+              />
+            </div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
             <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
 
@@ -1419,6 +1492,63 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
                 <div style={{ fontSize:12, color:'var(--gw-mist)', textAlign:'center', padding:'8px 0' }}>Select a commercial type above to enter comp data.</div>
               )}
             </div>
+
+            {/* ── Closing / Commission (Under Contract + Closed) ── */}
+            {['under-contract','closed'].includes(form.stage) && (
+              <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
+                <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:12 }}>Closing Details</div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label" style={{ display:'flex', alignItems:'center', gap:6 }}>
+                      Sold / Accepted Price
+                      {!form.sold_price && <span style={{ background:'var(--gw-amber)', color:'#fff', fontSize:10, fontWeight:700, padding:'1px 6px', borderRadius:10 }}>Enter price</span>}
+                    </label>
+                    <input ref={soldPriceRef} className="form-control" type="number" value={form.sold_price||''} onChange={e=>set('sold_price',e.target.value)} placeholder="0"
+                      style={{ borderColor: !form.sold_price ? 'var(--gw-amber)' : undefined, boxShadow: !form.sold_price ? '0 0 0 2px rgba(245,158,11,0.15)' : undefined }} />
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">Total Commission %</label>
+                    <input className="form-control" type="number" step="0.1" min="0" max="100" value={form.commission_pct||''} onChange={e=>set('commission_pct',e.target.value)} placeholder={activeAgent?.default_commission_pct ?? '3.0'} />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Referral Fee ($)</label>
+                    <input className="form-control" type="number" value={form.referral_fee||''} onChange={e=>set('referral_fee',e.target.value)} placeholder="0" />
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">Listing Side %</label>
+                    <input className="form-control" type="number" step="0.1" min="0" max="100" value={form.listing_side_pct||''} onChange={e=>set('listing_side_pct',e.target.value)} placeholder={activeAgent?.default_listing_side_pct ?? '50'} />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Buyer Side %</label>
+                    <input className="form-control" type="number" step="0.1" min="0" max="100" value={form.buyer_side_pct||''} onChange={e=>set('buyer_side_pct',e.target.value)} placeholder={activeAgent?.default_buyer_side_pct ?? '50'} />
+                  </div>
+                </div>
+                {/* Live commission estimate */}
+                {form.sold_price && form.commission_pct && (
+                  <div style={{ background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:'10px 14px', fontSize:12, display:'flex', gap:16, flexWrap:'wrap' }}>
+                    {(() => {
+                      const price = Number(form.sold_price)
+                      const totalPct = Number(form.commission_pct) / 100
+                      const gross = price * totalPct
+                      const listPct = Number(form.listing_side_pct || 50) / 100
+                      const buyPct  = Number(form.buyer_side_pct  || 50) / 100
+                      const ref = Number(form.referral_fee || 0)
+                      const fmt = n => new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(n)
+                      return <>
+                        <span><strong>Gross comm:</strong> {fmt(gross)}</span>
+                        <span><strong>Listing side:</strong> {fmt(gross * listPct)}</span>
+                        <span><strong>Buyer side:</strong> {fmt(gross * buyPct)}</span>
+                        {ref > 0 && <span><strong>After referral:</strong> {fmt(gross - ref)}</span>}
+                      </>
+                    })()}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="form-group" style={{ marginTop:4 }}><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} /></div>
           </div>

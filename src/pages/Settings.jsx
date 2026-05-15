@@ -53,11 +53,24 @@ alter table lead_captures enable row level security;
 create policy "Public insert" on lead_captures for insert with check (true);
 create policy "Auth read" on lead_captures for select using (auth.role() = 'authenticated');`
 
-export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnabled }) {
+export default function SettingsPage({ db, setDb, activeAgent, websiteEnabled, setWebsiteEnabled }) {
   const [companyName, setCompanyName] = useState('Gateway Real Estate Advisors')
   const [clearing, setClearing] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const [copied, setCopied] = useState(null)
+
+  // Commission defaults — per active agent
+  const [commPct,    setCommPct]    = useState('')
+  const [listSplit,  setListSplit]  = useState('')
+  const [buySplit,   setBuySplit]   = useState('')
+  const [commSaved,  setCommSaved]  = useState(false)
+
+  useEffect(() => {
+    if (!activeAgent) return
+    setCommPct(   activeAgent.default_commission_pct    ?? '')
+    setListSplit(  activeAgent.default_listing_side_pct  ?? '')
+    setBuySplit(   activeAgent.default_buyer_side_pct    ?? '')
+  }, [activeAgent?.id])
 
   // AI key — loaded from Supabase auth metadata (persists across devices)
   const [aiKey, setAiKey]         = useState('')
@@ -97,6 +110,21 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
     setResendKeySaved(true)
     setTimeout(() => setResendKeySaved(false), 2000)
     pushToast('Email settings saved')
+  }
+
+  const saveCommissionDefaults = async () => {
+    if (!activeAgent) return
+    const patch = {
+      default_commission_pct:   commPct   !== '' ? Number(commPct)   : null,
+      default_listing_side_pct: listSplit !== '' ? Number(listSplit) : null,
+      default_buyer_side_pct:   buySplit  !== '' ? Number(buySplit)  : null,
+    }
+    const { error } = await supabase.from('agents').update(patch).eq('id', activeAgent.id)
+    if (error) { pushToast(error.message, 'error'); return }
+    setDb(p => ({ ...p, agents: p.agents.map(a => a.id === activeAgent.id ? { ...a, ...patch } : a) }))
+    setCommSaved(true)
+    setTimeout(() => setCommSaved(false), 2000)
+    pushToast('Commission defaults saved')
   }
 
   const copy = (text, key) => {
@@ -262,6 +290,29 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
           </div>
         )}
       </div>
+
+      {/* ── Commission Defaults ── */}
+      {activeAgent && (
+        <div className="settings-section">
+          <div className="settings-section__title">Commission Defaults</div>
+          <div className="settings-section__sub">Pre-fill deal commission fields when a deal reaches Under Contract or Closed. Set per agent.</div>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:12, maxWidth:480 }}>
+            <div className="form-group">
+              <label className="form-label">Total Commission %</label>
+              <input className="form-control" type="number" step="0.1" min="0" max="100" value={commPct} onChange={e=>setCommPct(e.target.value)} placeholder="3.0" />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Listing Side %</label>
+              <input className="form-control" type="number" step="0.1" min="0" max="100" value={listSplit} onChange={e=>setListSplit(e.target.value)} placeholder="50" />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Buyer Side %</label>
+              <input className="form-control" type="number" step="0.1" min="0" max="100" value={buySplit} onChange={e=>setBuySplit(e.target.value)} placeholder="50" />
+            </div>
+          </div>
+          <button className="btn btn--primary btn--sm" onClick={saveCommissionDefaults}>{commSaved ? 'Saved ✓' : 'Save Defaults'}</button>
+        </div>
+      )}
 
       {/* ── AI Configuration ── */}
       <div className="settings-section">
