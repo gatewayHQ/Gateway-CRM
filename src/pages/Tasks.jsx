@@ -128,6 +128,7 @@ export default function TasksPage({ db, setDb, activeAgent }) {
   const [filterPriority, setFilterPriority] = useState('')
   const [filterType, setFilterType]   = useState('')
   const [showCompleted, setShowCompleted] = useState(false)
+  const [loadError, setLoadError]     = useState(null)
 
   const tasks    = db.tasks    || []
   const agents   = db.agents   || []
@@ -168,24 +169,34 @@ export default function TasksPage({ db, setDb, activeAgent }) {
 
   const reload = useCallback(async () => {
     if (!activeAgent?.id) return
-    const { data } = await supabase.from('tasks').select('*')
+    setLoadError(null)
+    const { data, error } = await supabase.from('tasks').select('*')
       .eq('agent_id', activeAgent.id)
       .order('due_date', { ascending: true })
+    if (error) { setLoadError(error.message); return }
     setDb(p => ({ ...p, tasks: data || [] }))
   }, [setDb, activeAgent?.id])
 
   const toggle = useCallback(async (task) => {
     const completed = !task.completed
-    await supabase.from('tasks').update({ completed }).eq('id', task.id)
     setDb(p => ({ ...p, tasks: p.tasks.map(t => t.id === task.id ? { ...t, completed } : t) }))
+    const { error } = await supabase.from('tasks').update({ completed }).eq('id', task.id)
+    if (error) {
+      setDb(p => ({ ...p, tasks: p.tasks.map(t => t.id === task.id ? { ...t, completed: !completed } : t) }))
+      pushToast(error.message, 'error'); return
+    }
     pushToast(completed ? 'Task completed! ✓' : 'Task reopened')
   }, [setDb])
 
   const del = useCallback(async (id) => {
-    await supabase.from('tasks').delete().eq('id', id)
+    const { error } = await supabase.from('tasks').delete().eq('id', id)
+    if (error) { pushToast(error.message, 'error'); setConfirm(null); return }
     pushToast('Task deleted', 'info')
     setConfirm(null); reload()
   }, [reload])
+
+  const hasFilters = !!(filterPriority || filterType)
+  const clearFilters = () => { setFilterPriority(''); setFilterType('') }
 
   const handleEdit   = useCallback((task) => { setEditing(task); setDrawer(true) }, [])
   const handleDelete = useCallback((id)   => setConfirm(id), [])
@@ -197,6 +208,14 @@ export default function TasksPage({ db, setDb, activeAgent }) {
         <button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Task</button>
       </div>
 
+      {loadError && (
+        <div style={{ margin:'0 0 12px', padding:'10px 16px', background:'var(--gw-red-light)', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)', fontSize:13, color:'var(--gw-red)', display:'flex', alignItems:'center', gap:10 }}>
+          <Icon name="alert" size={14} />
+          <span>Failed to load tasks: {loadError}</span>
+          <button className="btn btn--ghost btn--sm" style={{ marginLeft:'auto', color:'var(--gw-red)' }} onClick={reload}>Retry</button>
+        </div>
+      )}
+
       <div className="filters-bar">
         <select className="filter-select" value={filterPriority} onChange={e=>setFilterPriority(e.target.value)}><option value="">All Priorities</option>{['high','medium','low'].map(p=><option key={p} value={p}>{p.charAt(0).toUpperCase()+p.slice(1)}</option>)}</select>
         <select className="filter-select" value={filterType} onChange={e=>setFilterType(e.target.value)}><option value="">All Types</option>{['call','email','showing','follow-up','document','other'].map(t=><option key={t} value={t}>{t.charAt(0).toUpperCase()+t.slice(1)}</option>)}</select>
@@ -204,10 +223,15 @@ export default function TasksPage({ db, setDb, activeAgent }) {
           <input type="checkbox" checked={showCompleted} onChange={e=>setShowCompleted(e.target.checked)} />
           Show completed
         </label>
+        {hasFilters && (
+          <button className="btn btn--ghost btn--sm" style={{ fontSize:12, color:'var(--gw-mist)' }} onClick={clearFilters}>Clear filters</button>
+        )}
       </div>
 
-      {filtered.length === 0 ? (
-        <EmptyState icon="tasks" title="No tasks" message="Add tasks to track follow-ups, showings, and reminders." action={<button className="btn btn--primary" onClick={() => setDrawer(true)}><Icon name="plus" size={14} /> Add Task</button>} />
+      {tasks.length === 0 ? (
+        <EmptyState icon="tasks" title="No tasks yet" message="Add tasks to track follow-ups, showings, and reminders." action={<button className="btn btn--primary" onClick={() => setDrawer(true)}><Icon name="plus" size={14} /> Add Task</button>} />
+      ) : filtered.length === 0 ? (
+        <EmptyState icon="tasks" title="No tasks match your filters" message="Try clearing your priority or type filter." action={<button className="btn btn--secondary" onClick={clearFilters}>Clear Filters</button>} />
       ) : (
         <>
           <TaskGroup label="Overdue"          items={overdue}        color="var(--gw-red)"   contactMap={contactMap} agentMap={agentMap} onToggle={toggle} onEdit={handleEdit} onDelete={handleDelete} />
