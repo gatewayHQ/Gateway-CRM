@@ -50,11 +50,36 @@ export default async function handler(req, res) {
     }
 
     if (action === 'create_campaign') {
-      const { name, description, property_types, status, agent_id, flyer_url, frequency_cap, frequency_days } = req.body
+      const {
+        name, description, property_types, status, flyer_url, frequency_cap, frequency_days,
+        flyer_template, landing_mode, landing_url, landing_headline, landing_tagline, landing_cta,
+        date_sent, date_completed, cost_per_piece, fixed_cost,
+      } = req.body
+      const agent_id = req.body.agent_id || null
       if (!name) return res.status(400).json({ error: 'name is required' })
+      // Generate unique 8-char tracking code
+      const code = [...Array(8)].map(() => 'abcdefghjkmnpqrstuvwxyz23456789'[Math.floor(Math.random()*31)]).join('')
       const { data, error } = await supabase
         .from('mail_campaigns')
-        .insert([{ name, description, property_types, status: status || 'active', agent_id, flyer_url, frequency_cap: frequency_cap || 0, frequency_days: frequency_days || 30 }])
+        .insert([{
+          name, description, property_types,
+          status:         status         || 'active',
+          agent_id,
+          flyer_url,
+          frequency_cap:  frequency_cap  || 0,
+          frequency_days: frequency_days || 30,
+          tracking_code:  code,
+          flyer_template: flyer_template || null,
+          landing_mode:   landing_mode   || 'external',
+          landing_url:    landing_url    || null,
+          landing_headline: landing_headline || null,
+          landing_tagline:  landing_tagline  || null,
+          landing_cta:      landing_cta      || 'Schedule a Call',
+          date_sent:        date_sent        || null,
+          date_completed:   date_completed   || null,
+          cost_per_piece:   cost_per_piece   || 0,
+          fixed_cost:       fixed_cost       || 0,
+        }])
         .select()
         .single()
       if (error) throw error
@@ -98,7 +123,8 @@ export default async function handler(req, res) {
     if (action === 'log_send') {
       const { campaign_id, contact_id, cold_lead_id, recipient_name, recipient_address,
               recipient_city, recipient_state, recipient_zip,
-              channel, sent_at, agent_id, response, notes } = req.body
+              channel, sent_at, response, notes } = req.body
+      const agent_id = req.body.agent_id || null
       if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
 
       // Suppression check
@@ -234,7 +260,8 @@ export default async function handler(req, res) {
     }
 
     if (action === 'add_suppression') {
-      const { address, email, phone, full_name, reason, contact_id, agent_id, notes } = req.body
+      const { address, email, phone, full_name, reason, contact_id, notes } = req.body
+      const agent_id = req.body.agent_id || null
       const { data, error } = await supabase
         .from('mail_suppressions')
         .insert([{ address, email, phone, full_name, reason: reason || 'dnc', contact_id, agent_id, notes }])

@@ -34,6 +34,394 @@ const PROPERTY_TYPES = ['residential','rental','multifamily','office','land','re
 const CHANNEL_OPTS   = Object.entries(CHANNEL_CONFIG).map(([v, c]) => ({ value: v, label: c.label }))
 const RESPONSE_OPTS  = Object.entries(RESPONSE_CONFIG).map(([v, c]) => ({ value: v, label: c.label }))
 
+const CAMPAIGN_TEMPLATES = [
+  { id: 'just_listed',     label: 'Just Listed',          emoji: '🏠' },
+  { id: 'just_sold',       label: 'Just Sold',            emoji: '✅' },
+  { id: 'buyers_waiting',  label: 'Buyers Waiting',       emoji: '🔍' },
+  { id: 'exclusive_offer', label: 'Exclusive Off-Market', emoji: '⭐' },
+  { id: 'market_update',   label: 'Market Update',        emoji: '📊' },
+  { id: 'sellers_wanted',  label: 'Sellers Wanted',       emoji: '🎯' },
+]
+
+function generateTrackingCode() {
+  const chars = 'abcdefghjkmnpqrstuvwxyz23456789'
+  return Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
+}
+
+// ── QR Panel ──────────────────────────────────────────────────────────────────
+function QRPanel({ campaign, onUpdate, onScanCountLoad }) {
+  const [scans,     setScans]     = useState([])
+  const [scanCount, setScanCount] = useState(null)
+  const [loading,   setLoading]   = useState(true)
+  const [copied,    setCopied]    = useState(false)
+  const [genLoading,setGenLoading]= useState(false)
+
+  const trackingUrl = campaign.tracking_code
+    ? `${window.location.origin}/r/${campaign.tracking_code}`
+    : null
+
+  const qrUrl = trackingUrl
+    ? `https://api.qrserver.com/v1/create-qr-code/?size=400x400&format=png&data=${encodeURIComponent(trackingUrl)}`
+    : null
+
+  useEffect(() => {
+    if (!campaign.id) return
+    setLoading(true)
+    supabase
+      .from('campaign_scans')
+      .select('id, device_type, scanned_at', { count: 'exact' })
+      .eq('campaign_id', campaign.id)
+      .order('scanned_at', { ascending: false })
+      .limit(30)
+      .then(({ data, count, error }) => {
+        if (!error) {
+          setScans(data || [])
+          setScanCount(count || 0)
+          if (onScanCountLoad) onScanCountLoad(count || 0)
+        }
+        setLoading(false)
+      })
+  }, [campaign.id])
+
+  const copyLink = () => {
+    if (!trackingUrl) return
+    navigator.clipboard.writeText(trackingUrl).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  const downloadQR = () => {
+    if (!qrUrl) return
+    const a = document.createElement('a')
+    a.href = qrUrl
+    a.download = `qr-${campaign.name.toLowerCase().replace(/\s+/g, '-')}.png`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+  }
+
+  const generateCode = async () => {
+    setGenLoading(true)
+    try {
+      const code = generateTrackingCode()
+      const res  = await fetch('/api/campaigns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'update_campaign', id: campaign.id, tracking_code: code }),
+      })
+      const data = await res.json()
+      if (!res.ok) { pushToast(data.error || 'Failed to generate code', 'error'); return }
+      if (onUpdate) onUpdate(data.campaign)
+      pushToast('Tracking code generated')
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setGenLoading(false)
+    }
+  }
+
+  // Device breakdown
+  const deviceCounts = { mobile: 0, tablet: 0, desktop: 0 }
+  scans.forEach(s => { if (s.device_type) deviceCounts[s.device_type] = (deviceCounts[s.device_type] || 0) + 1 })
+  const total = scans.length
+
+  if (!campaign.tracking_code) {
+    return (
+      <div style={{ display:'flex', flexDirection:'column', gap:16, padding:'8px 0' }}>
+        <div style={{ background:'#fef9c3', border:'1px solid #fde047', borderRadius:8, padding:'12px 16px', fontSize:13, color:'#713f12' }}>
+          This campaign does not have a tracking code yet. Generate one to enable QR scan tracking.
+        </div>
+        <button className="btn btn--primary btn--sm" onClick={generateCode} disabled={genLoading} style={{ alignSelf:'flex-start' }}>
+          {genLoading ? 'Generating…' : 'Generate Tracking Code'}
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:20, padding:'8px 0' }}>
+      {/* Scan count */}
+      <div style={{ display:'flex', gap:12, alignItems:'stretch', flexWrap:'wrap' }}>
+        <div style={{ background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'14px 20px', minWidth:120, flex:1 }}>
+          <div style={{ fontSize:36, fontWeight:800, color:'var(--gw-azure)', lineHeight:1, fontFamily:'var(--font-display)' }}>
+            {loading ? '…' : scanCount ?? 0}
+          </div>
+          <div style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)', marginTop:4 }}>Total QR Scans</div>
+        </div>
+        {/* Device breakdown */}
+        {!loading && total > 0 && (
+          <div style={{ background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'14px 20px', flex:2, minWidth:200 }}>
+            <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:8, textTransform:'uppercase', letterSpacing:'0.05em' }}>Device Breakdown</div>
+            {Object.entries(deviceCounts).filter(([,n]) => n > 0).map(([dev, n]) => (
+              <div key={dev} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5 }}>
+                <span style={{ fontSize:11, fontWeight:700, minWidth:54, color:'var(--gw-ink)', textTransform:'capitalize' }}>{dev}</span>
+                <div style={{ flex:1, height:6, background:'var(--gw-bone)', borderRadius:4, overflow:'hidden' }}>
+                  <div style={{ width:`${Math.round(n/total*100)}%`, height:'100%', background:'var(--gw-azure)', borderRadius:4 }}/>
+                </div>
+                <span style={{ fontSize:11, color:'var(--gw-mist)', minWidth:30, textAlign:'right' }}>{Math.round(n/total*100)}%</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Tracking URL */}
+      <div>
+        <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:6, textTransform:'uppercase', letterSpacing:'0.05em' }}>Tracking URL</div>
+        <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+          <code style={{ flex:1, padding:'8px 12px', background:'var(--gw-bone)', borderRadius:8, fontSize:12, color:'var(--gw-ink)', wordBreak:'break-all' }}>
+            {trackingUrl}
+          </code>
+          <button className="btn btn--ghost btn--sm" onClick={copyLink} style={{ flexShrink:0 }}>
+            {copied ? '✓ Copied!' : 'Copy'}
+          </button>
+        </div>
+      </div>
+
+      {/* QR Code */}
+      <div>
+        <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:8, textTransform:'uppercase', letterSpacing:'0.05em' }}>QR Code</div>
+        <div style={{ display:'flex', gap:16, alignItems:'flex-start', flexWrap:'wrap' }}>
+          <img
+            src={qrUrl}
+            alt="QR Code"
+            style={{ width:140, height:140, borderRadius:10, border:'1px solid var(--gw-border)', background:'#fff', padding:6 }}
+          />
+          <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+            <button className="btn btn--primary btn--sm" onClick={downloadQR}>
+              Download QR (.png)
+            </button>
+            {campaign.landing_mode === 'landing' && (
+              <a
+                href={`/campaign/${campaign.tracking_code}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn btn--ghost btn--sm">
+                Preview Landing Page
+              </a>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Landing destination */}
+      <div style={{ background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:'12px 14px', fontSize:13 }}>
+        <span style={{ fontWeight:700 }}>Redirect: </span>
+        {campaign.landing_mode === 'external' && campaign.landing_url
+          ? <a href={campaign.landing_url} target="_blank" rel="noopener noreferrer" style={{ color:'var(--gw-azure)' }}>
+              {campaign.landing_url}
+            </a>
+          : campaign.landing_mode === 'landing'
+            ? <span style={{ color:'var(--gw-green)' }}>CRM Landing Page (/campaign/{campaign.tracking_code})</span>
+            : <span style={{ color:'var(--gw-mist)' }}>No destination set — edit campaign to configure</span>
+        }
+      </div>
+
+      {!loading && scanCount === 0 && (
+        <EmptyState icon="bar-chart-2" title="No scans yet" message="Print the QR code on your flyer and distribute it to start tracking scans."/>
+      )}
+    </div>
+  )
+}
+
+// ── Flyer / AI Copy Tab ───────────────────────────────────────────────────────
+function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
+  const [selectedTemplate, setSelectedTemplate] = useState(campaign.flyer_template || '')
+  const [generatedCopy,    setGeneratedCopy]    = useState(null)
+  const [generating,       setGenerating]       = useState(false)
+  const [copied,           setCopied]           = useState(false)
+  const [saving,           setSaving]           = useState(false)
+  const [canvaUrl,         setCanvaUrl]         = useState(campaign.canva_design_url || '')
+  const [savingCanva,      setSavingCanva]      = useState(false)
+
+  const agentObj = agents?.find(a => a.id === campaign.agent_id)
+
+  const generateCopy = async () => {
+    if (!selectedTemplate) { pushToast('Select a template first', 'error'); return }
+    setGenerating(true)
+    try {
+      const res  = await fetch('/api/generate-flyer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          template:       selectedTemplate,
+          campaign_name:  campaign.name,
+          property_types: campaign.property_types,
+          agent_name:     agentObj?.name || activeAgent?.name || '',
+          target_area:    '',
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) { pushToast(data.error || 'Failed to generate copy', 'error'); return }
+      setGeneratedCopy(data.copy)
+      pushToast('Copy generated!')
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  const copyAllText = () => {
+    if (!generatedCopy) return
+    const text = [
+      generatedCopy.headline,
+      generatedCopy.subheadline,
+      '',
+      generatedCopy.tagline,
+      '',
+      ...(generatedCopy.bullets || []).map(b => `• ${b}`),
+      '',
+      `CTA: ${generatedCopy.cta}`,
+    ].join('\n')
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  const saveToCampaign = async () => {
+    if (!generatedCopy) return
+    setSaving(true)
+    try {
+      const res  = await fetch('/api/campaigns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action:           'update_campaign',
+          id:               campaign.id,
+          landing_headline: generatedCopy.headline,
+          landing_tagline:  generatedCopy.tagline,
+          landing_cta:      generatedCopy.cta,
+          flyer_template:   selectedTemplate,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) { pushToast(data.error || 'Failed to save', 'error'); return }
+      if (onUpdate) onUpdate(data.campaign)
+      pushToast('Saved to campaign')
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const saveCanvaUrl = async () => {
+    if (!canvaUrl.trim()) return
+    setSavingCanva(true)
+    try {
+      const res  = await fetch('/api/campaigns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'update_campaign', id: campaign.id, canva_design_url: canvaUrl.trim() }),
+      })
+      const data = await res.json()
+      if (!res.ok) { pushToast(data.error || 'Failed to save Canva URL', 'error'); return }
+      if (onUpdate) onUpdate(data.campaign)
+      pushToast('Canva design URL saved')
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setSavingCanva(false)
+    }
+  }
+
+  const canvaSearchUrl = `https://www.canva.com/templates/?query=${encodeURIComponent('real estate ' + (CAMPAIGN_TEMPLATES.find(t => t.id === selectedTemplate)?.label || 'postcard') + ' postcard')}`
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:20, padding:'8px 0' }}>
+      {/* Template picker */}
+      <div>
+        <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:8, textTransform:'uppercase', letterSpacing:'0.05em' }}>Campaign Type</div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
+          {CAMPAIGN_TEMPLATES.map(t => (
+            <button key={t.id} onClick={() => setSelectedTemplate(t.id)}
+              style={{
+                display:'flex', alignItems:'center', gap:8,
+                padding:'9px 12px', borderRadius:10, fontSize:13, fontWeight:700, cursor:'pointer',
+                border:`2px solid ${selectedTemplate === t.id ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+                background: selectedTemplate === t.id ? '#dbeafe' : '#fff',
+                color:      selectedTemplate === t.id ? '#1d4ed8' : 'var(--gw-ink)',
+                textAlign:'left',
+              }}>
+              <span style={{ fontSize:16 }}>{t.emoji}</span>
+              <span>{t.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Generate button */}
+      <button className="btn btn--primary" onClick={generateCopy} disabled={generating || !selectedTemplate}>
+        {generating ? 'Generating…' : 'Generate Copy with AI'}
+      </button>
+
+      {/* Generated copy preview */}
+      {generatedCopy && (
+        <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
+          <div style={{ padding:'14px 16px', background:'var(--gw-bone)', borderBottom:'1px solid var(--gw-border)' }}>
+            <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:'0.05em' }}>Generated Copy Preview</div>
+          </div>
+          <div style={{ padding:'16px', display:'flex', flexDirection:'column', gap:10 }}>
+            <div style={{ fontSize:18, fontWeight:800, letterSpacing:'0.04em', color:'var(--gw-ink)', textTransform:'uppercase', lineHeight:1.2 }}>
+              {generatedCopy.headline}
+            </div>
+            <div style={{ fontSize:14, fontWeight:700, color:'#374151' }}>
+              {generatedCopy.subheadline}
+            </div>
+            <p style={{ fontSize:13, color:'#4b5563', lineHeight:1.7, margin:0 }}>
+              {generatedCopy.tagline}
+            </p>
+            {generatedCopy.bullets?.length > 0 && (
+              <ul style={{ margin:0, paddingLeft:18, fontSize:13, color:'var(--gw-ink)', display:'flex', flexDirection:'column', gap:4 }}>
+                {generatedCopy.bullets.map((b, i) => <li key={i}>{b}</li>)}
+              </ul>
+            )}
+            <div style={{ display:'inline-block', background:'var(--gw-azure)', color:'#fff', padding:'8px 16px', borderRadius:8, fontSize:13, fontWeight:700, alignSelf:'flex-start' }}>
+              {generatedCopy.cta}
+            </div>
+          </div>
+          <div style={{ padding:'10px 16px', borderTop:'1px solid var(--gw-border)', display:'flex', gap:8 }}>
+            <button className="btn btn--ghost btn--sm" onClick={copyAllText}>{copied ? '✓ Copied!' : 'Copy All Copy'}</button>
+            <button className="btn btn--primary btn--sm" onClick={saveToCampaign} disabled={saving}>{saving ? 'Saving…' : 'Save to Campaign'}</button>
+          </div>
+        </div>
+      )}
+
+      {/* Divider */}
+      <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:16 }}>
+        <div style={{ fontSize:13, fontWeight:700, color:'var(--gw-ink)', marginBottom:4 }}>Design in Canva</div>
+        <div style={{ fontSize:12, color:'var(--gw-mist)', marginBottom:10 }}>
+          1. Click below to open Canva templates · 2. Apply your generated copy · 3. Paste your Canva share URL below
+        </div>
+        <a href={canvaSearchUrl} target="_blank" rel="noopener noreferrer" className="btn btn--ghost btn--sm"
+          style={{ display:'inline-block', marginBottom:12, background:'#dbeafe', borderColor:'#93c5fd', color:'#1d4ed8' }}>
+          Open Canva Templates →
+        </a>
+        <div style={{ display:'flex', gap:8, marginBottom:8 }}>
+          <input
+            className="form-control"
+            placeholder="Paste Canva design URL here…"
+            value={canvaUrl}
+            onChange={e => setCanvaUrl(e.target.value)}
+            style={{ flex:1 }}
+          />
+          <button className="btn btn--ghost btn--sm" onClick={saveCanvaUrl} disabled={savingCanva || !canvaUrl.trim()}>
+            {savingCanva ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+        {campaign.canva_design_url && (
+          <a href={campaign.canva_design_url} target="_blank" rel="noopener noreferrer" style={{ fontSize:12, color:'var(--gw-azure)' }}>
+            Open Design →
+          </a>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function StatusBadge({ status }) {
   const c = STATUS_CONFIG[status] || STATUS_CONFIG.draft
   return <span style={{ padding:'2px 9px', borderRadius:10, fontSize:11, fontWeight:700, background:c.bg, color:c.color, whiteSpace:'nowrap' }}>{c.label}</span>
@@ -66,6 +454,9 @@ function CampaignForm({ initial, agents, activeAgent, onSave, onCancel, saving }
     property_types: [], flyer_url: '',
     frequency_cap: 0, frequency_days: 30,
     agent_id: activeAgent?.id || '',
+    flyer_template: '', landing_mode: 'external', landing_url: '',
+    landing_headline: '', landing_tagline: '', landing_cta: 'Schedule a Call',
+    date_sent: '', date_completed: '', cost_per_piece: 0, fixed_cost: 0,
     ...initial,
   })
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }))
@@ -116,6 +507,26 @@ function CampaignForm({ initial, agents, activeAgent, onSave, onCancel, saving }
         <label className="form-label">Flyer / Asset URL <span style={{fontWeight:400,color:'var(--gw-mist)',fontSize:11}}>— link to Canva, Google Drive, PDF…</span></label>
         <input className="form-control" placeholder="https://…" value={form.flyer_url || ''} onChange={e => set('flyer_url', e.target.value)}/>
       </div>
+
+      {/* Campaign Type */}
+      <div className="form-group">
+        <label className="form-label">Campaign Type</label>
+        <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginTop:4 }}>
+          {CAMPAIGN_TEMPLATES.map(t => (
+            <button key={t.id} type="button" onClick={() => set('flyer_template', form.flyer_template === t.id ? '' : t.id)}
+              style={{
+                display:'flex', alignItems:'center', gap:5,
+                padding:'4px 10px', borderRadius:10, fontSize:12, fontWeight:700, cursor:'pointer',
+                border:`1.5px solid ${form.flyer_template === t.id ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+                background: form.flyer_template === t.id ? '#dbeafe' : '#fff',
+                color:      form.flyer_template === t.id ? '#1d4ed8' : 'var(--gw-mist)',
+              }}>
+              <span>{t.emoji}</span><span>{t.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div style={{ background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:'12px 14px' }}>
         <div style={{ fontSize:12, fontWeight:700, marginBottom:8 }}>Frequency Cap <span style={{fontWeight:400,color:'var(--gw-mist)'}}>— prevent over-mailing the same contact</span></div>
         <div style={{ display:'flex', alignItems:'center', gap:10, fontSize:13 }}>
@@ -128,6 +539,76 @@ function CampaignForm({ initial, agents, activeAgent, onSave, onCancel, saving }
           <span>days <span style={{color:'var(--gw-mist)',fontSize:11}}>(0 = no cap)</span></span>
         </div>
       </div>
+
+      {/* Tracking & Landing */}
+      <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'12px 14px', display:'flex', flexDirection:'column', gap:10 }}>
+        <div style={{ fontSize:12, fontWeight:700, marginBottom:2 }}>Tracking &amp; Landing</div>
+        <div>
+          <label className="form-label" style={{ marginBottom:4 }}>Landing Mode</label>
+          <div style={{ display:'flex', gap:0, borderRadius:'var(--radius)', border:'1px solid var(--gw-border)', overflow:'hidden' }}>
+            {[['external','External URL'],['landing','CRM Landing Page']].map(([v,l]) => (
+              <button key={v} type="button" onClick={() => set('landing_mode', v)}
+                style={{ flex:1, padding:'7px 0', fontSize:12, fontWeight:700, cursor:'pointer', border:'none',
+                  background: form.landing_mode === v ? 'var(--gw-azure)' : '#fff',
+                  color: form.landing_mode === v ? '#fff' : 'var(--gw-mist)' }}>{l}</button>
+            ))}
+          </div>
+        </div>
+        {form.landing_mode === 'external' ? (
+          <div className="form-group" style={{ margin:0 }}>
+            <label className="form-label">External URL</label>
+            <input className="form-control" placeholder="https://www.gatewayreadvisors.com/agents/…" value={form.landing_url || ''} onChange={e => set('landing_url', e.target.value)}/>
+          </div>
+        ) : (
+          <>
+            <div className="form-group" style={{ margin:0 }}>
+              <label className="form-label">Landing Headline</label>
+              <input className="form-control" placeholder="Your compelling headline…" value={form.landing_headline || ''} onChange={e => set('landing_headline', e.target.value)}/>
+            </div>
+            <div className="form-group" style={{ margin:0 }}>
+              <label className="form-label">Landing Tagline</label>
+              <textarea className="form-control" rows={2} placeholder="A few sentences about your campaign…" value={form.landing_tagline || ''} onChange={e => set('landing_tagline', e.target.value)}/>
+            </div>
+            <div className="form-group" style={{ margin:0 }}>
+              <label className="form-label">CTA Button Text</label>
+              <input className="form-control" placeholder="Schedule a Call" value={form.landing_cta || ''} onChange={e => set('landing_cta', e.target.value)}/>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Dates & Cost */}
+      <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'12px 14px', display:'flex', flexDirection:'column', gap:10 }}>
+        <div style={{ fontSize:12, fontWeight:700 }}>Dates &amp; Cost</div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+          <div className="form-group" style={{ margin:0 }}>
+            <label className="form-label">Date Sent</label>
+            <input type="date" className="form-control" value={form.date_sent || ''} onChange={e => set('date_sent', e.target.value)}/>
+          </div>
+          <div className="form-group" style={{ margin:0 }}>
+            <label className="form-label">Date Completed</label>
+            <input type="date" className="form-control" value={form.date_completed || ''} onChange={e => set('date_completed', e.target.value)}/>
+          </div>
+        </div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+          <div className="form-group" style={{ margin:0 }}>
+            <label className="form-label">Cost / Piece ($)</label>
+            <input type="number" min={0} step="0.01" className="form-control"
+              value={form.cost_per_piece || 0} onChange={e => set('cost_per_piece', parseFloat(e.target.value)||0)}/>
+          </div>
+          <div className="form-group" style={{ margin:0 }}>
+            <label className="form-label">Fixed Costs ($)</label>
+            <input type="number" min={0} step="0.01" className="form-control"
+              value={form.fixed_cost || 0} onChange={e => set('fixed_cost', parseFloat(e.target.value)||0)}/>
+          </div>
+        </div>
+        {form.cost_per_piece > 0 && (
+          <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
+            Estimated spend: $— (enter recipient count to calculate)
+          </div>
+        )}
+      </div>
+
       <div style={{ display:'flex', gap:8, justifyContent:'flex-end', paddingTop:4 }}>
         <button className="btn btn--ghost" onClick={onCancel}>Cancel</button>
         <button className="btn btn--primary" onClick={() => onSave(form)} disabled={saving || !form.name.trim()}>
@@ -340,6 +821,7 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
   const [addSupp,      setAddSupp]      = useState(false)
   const [suppForm,     setSuppForm]     = useState({ full_name:'', address:'', reason:'dnc', notes:'' })
   const [confirmDel,   setConfirmDel]   = useState(null)
+  const [scanCount,    setScanCount]    = useState(null)
 
   useEffect(() => { loadSends(); loadAnalytics() }, [campaign.id])
   useEffect(() => { if (tab === 'suppression') loadSuppressions() }, [tab])
@@ -462,13 +944,14 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
           <StatCard value={`${responseRate}%`}   label="Response Rate" sub="industry avg ~12%" color={responseRate > 12 ? 'var(--gw-green)' : undefined}/>
           <StatCard value={`${conversionRate}%`} label="Conversion" color={conversionRate > 0 ? '#7c3aed' : undefined}/>
           <StatCard value={analytics?.converted  ?? 0}             label="Deals"/>
+          <StatCard value={scanCount ?? '—'}                       label="QR Scans" color={scanCount > 0 ? 'var(--gw-azure)' : undefined}/>
         </div>
 
         {/* Tabs */}
-        <div style={{ display:'flex', gap:0, borderBottom:'1px solid var(--gw-border)', marginTop:0 }}>
-          {[['sends','Send Log'],['analytics','Analytics'],['suppression','Suppression']].map(([v,l]) => (
+        <div style={{ display:'flex', gap:0, borderBottom:'1px solid var(--gw-border)', marginTop:0, overflowX:'auto' }}>
+          {[['sends','Send Log'],['analytics','Analytics'],['qr','QR Code'],['flyer','Flyer & AI'],['suppression','Suppression']].map(([v,l]) => (
             <button key={v} onClick={() => setTab(v)}
-              style={{ padding:'8px 16px', fontSize:13, fontWeight:600, cursor:'pointer', border:'none', background:'transparent',
+              style={{ padding:'8px 14px', fontSize:13, fontWeight:600, cursor:'pointer', border:'none', background:'transparent', whiteSpace:'nowrap',
                 borderBottom: tab === v ? '2.5px solid var(--gw-azure)' : '2.5px solid transparent',
                 color: tab === v ? 'var(--gw-azure)' : 'var(--gw-mist)' }}>{l}</button>
           ))}
@@ -593,6 +1076,16 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
               </div>
             )
             : <div style={{ textAlign:'center', color:'var(--gw-mist)', padding:40, fontSize:13 }}>No data yet — log some sends first.</div>
+        )}
+
+        {/* ── QR Code ── */}
+        {tab === 'qr' && (
+          <QRPanel campaign={campaign} onUpdate={onUpdate} onScanCountLoad={setScanCount} />
+        )}
+
+        {/* ── Flyer & AI ── */}
+        {tab === 'flyer' && (
+          <FlyerTab campaign={campaign} agents={agents} activeAgent={activeAgent} onUpdate={onUpdate} />
         )}
 
         {/* ── Suppression List ── */}

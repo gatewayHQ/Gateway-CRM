@@ -4,8 +4,9 @@
   "installCommand": "npm install",
   "framework": "vite",
   "rewrites": [
+    { "source": "/r/:code", "destination": "/api/track?c=:code" },
     { "source": "/share/:id", "destination": "/api/share?id=:id" },
-    { "source": "/((?!api/)(?!share/).*)", "destination": "/index.html" }
+    { "source": "/((?!api/)(?!share/)(?!r/).*)", "destination": "/index.html" }
   ],
   "functions": {
     "api/docusign-webhook.js": { "maxDuration": 30 }
