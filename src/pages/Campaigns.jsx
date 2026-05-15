@@ -241,7 +241,7 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
     if (!selectedTemplate) { pushToast('Select a template first', 'error'); return }
     setGenerating(true)
     try {
-      const res  = await fetch('/api/generate-flyer', {
+      const res  = await fetch('/api/claude', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -9,11 +9,54 @@ function esc(str) {
 }
 
 export default async function handler(req, res) {
-  const id = req.query.id || req.url?.split('/').pop()?.split('?')[0]
-  if (!id || !/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).send('Invalid property ID')
-
   const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
   const ANON_KEY     = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR3Z3dlbWtpaHB3bGdsaWZ0YWdnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNjkzMjAsImV4cCI6MjA5MjY0NTMyMH0.YRaCsDpExXjuPyrssFyzXP9RQktFAW7GTuEMgQq8sZU'
+  const dbHeaders    = { apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}`, 'Content-Type': 'application/json' }
+
+  // ── Campaign landing data (formerly /api/campaign-landing) ────────────────
+  if (req.query.c) {
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    if (req.method === 'OPTIONS') return res.status(200).end()
+    if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' })
+
+    const code = req.query.c.trim()
+    if (!code || !/^[a-z0-9]{6,12}$/i.test(code)) {
+      return res.status(400).json({ error: 'Invalid or missing campaign code' })
+    }
+
+    try {
+      const campFields = 'id,name,description,flyer_template,property_types,landing_headline,landing_tagline,landing_cta,landing_url,landing_mode,agent_id,tracking_code'
+      const campRes    = await fetch(
+        `${SUPABASE_URL}/rest/v1/mail_campaigns?tracking_code=eq.${encodeURIComponent(code)}&select=${campFields}&limit=1`,
+        { headers: dbHeaders }
+      )
+      if (!campRes.ok) return res.status(500).json({ error: 'Failed to fetch campaign data' })
+
+      const campData = await campRes.json()
+      if (!campData?.length) return res.status(404).json({ error: 'Campaign not found' })
+
+      const campaign = campData[0]
+      let agent = null
+      if (campaign.agent_id) {
+        const agentRes = await fetch(
+          `${SUPABASE_URL}/rest/v1/agents?id=eq.${encodeURIComponent(campaign.agent_id)}&select=id,name,initials,color,email,phone,role&limit=1`,
+          { headers: dbHeaders }
+        )
+        if (agentRes.ok) agent = (await agentRes.json())?.[0] || null
+      }
+
+      res.setHeader('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=3600')
+      return res.status(200).json({ campaign, agent })
+    } catch (err) {
+      return res.status(500).json({ error: err.message })
+    }
+  }
+
+  // ── Property share / OG redirect (original /api/share) ───────────────────
+  const id = req.query.id || req.url?.split('/').pop()?.split('?')[0]
+  if (!id || !/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).send('Invalid property ID')
 
   const r = await fetch(
     `${SUPABASE_URL}/rest/v1/properties?id=eq.${id}&select=address,city,state,zip,type,status,list_price,beds,baths,sqft,details,notes&limit=1`,
@@ -44,7 +87,6 @@ export default async function handler(req, res) {
     : specs
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8')
-  // Cache 1 hour on CDN, serve stale up to 24h while revalidating
   res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=86400')
 
   return res.send(`<!DOCTYPE html>
@@ -54,8 +96,6 @@ export default async function handler(req, res) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${esc(title)} — Gateway Real Estate</title>
   <meta name="description" content="${esc(desc)}">
-
-  <!-- ── Open Graph (Facebook · LinkedIn · WhatsApp · iMessage · Slack · Discord) -->
   <meta property="og:type"        content="website">
   <meta property="og:url"         content="${esc(listingUrl)}">
   <meta property="og:title"       content="${esc(title)}">
@@ -65,14 +105,10 @@ export default async function handler(req, res) {
   <meta property="og:image:width"  content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt"    content="${esc(title)}">` : ''}
-
-  <!-- ── Twitter / X Card -->
   <meta name="twitter:card"        content="${heroPhoto ? 'summary_large_image' : 'summary'}">
   <meta name="twitter:title"       content="${esc(title)}">
   <meta name="twitter:description" content="${esc(desc)}">
   ${heroPhoto ? `<meta name="twitter:image" content="${esc(heroPhoto)}">` : ''}
-
-  <!-- ── Redirect real users instantly to the full listing page -->
   <meta http-equiv="refresh" content="0;url=${esc(listingUrl)}">
   <script>window.location.replace(${JSON.stringify(listingUrl)})</script>
 </head>

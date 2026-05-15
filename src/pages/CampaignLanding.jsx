@@ -49,7 +49,7 @@ export default function CampaignLandingPage({ code }) {
 
   useEffect(() => {
     if (!code) { setError(true); setLoading(false); return }
-    fetch(`/api/campaign-landing?c=${encodeURIComponent(code)}`)
+    fetch(`/api/share?c=${encodeURIComponent(code)}`)
       .then(res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         return res.json()
