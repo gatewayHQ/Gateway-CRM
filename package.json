@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lint": "npx eslint src/ --ext .js,.jsx --max-warnings 0 --no-eslintrc --rule 'no-unused-vars: warn' --rule 'no-undef: error' --env browser,es2022",
+    "check": "npm run build && node -e \"const n=require('fs').readdirSync('api').filter(f=>f.endsWith('.js')).length; console.log('API functions:',n); if(n>12){console.error('ERROR: exceeds 12');process.exit(1)}\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",

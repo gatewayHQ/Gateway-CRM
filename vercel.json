@@ -9,9 +9,24 @@
     { "source": "/((?!api/)(?!share/)(?!r/).*)", "destination": "/index.html" }
   ],
   "functions": {
-    "api/docusign-webhook.js": { "maxDuration": 30 }
+    "api/docusign-webhook.js": { "maxDuration": 30 },
+    "api/campaigns.js":        { "maxDuration": 10 },
+    "api/claude.js":           { "maxDuration": 30 },
+    "api/track.js":            { "maxDuration": 5  },
+    "api/share.js":            { "maxDuration": 5  },
+    "api/twilio-send.js":      { "maxDuration": 10 }
   },
   "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Frame-Options",           "value": "DENY" },
+        { "key": "X-Content-Type-Options",    "value": "nosniff" },
+        { "key": "Referrer-Policy",           "value": "strict-origin-when-cross-origin" },
+        { "key": "Permissions-Policy",        "value": "camera=(), microphone=(), geolocation=()" },
+        { "key": "X-XSS-Protection",          "value": "1; mode=block" }
+      ]
+    },
     {
       "source": "/index.html",
       "headers": [
