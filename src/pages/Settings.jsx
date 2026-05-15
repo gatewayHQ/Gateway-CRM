@@ -54,7 +54,7 @@ create policy "Public insert" on lead_captures for insert with check (true);
 create policy "Auth read" on lead_captures for select using (auth.role() = 'authenticated');`
 
 export default function SettingsPage({ db, setDb, activeAgent, websiteEnabled, setWebsiteEnabled }) {
-  const [companyName, setCompanyName] = useState('Gateway Real Estate Advisors')
+  const [companyName, setCompanyName] = useState(() => localStorage.getItem('gw_company_name') || 'Gateway Real Estate Advisors')
   const [clearing, setClearing] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const [copied, setCopied] = useState(null)
@@ -96,7 +96,8 @@ export default function SettingsPage({ db, setDb, activeAgent, websiteEnabled, s
   }, [])
 
   const saveAiKey = async () => {
-    await supabase.auth.updateUser({ data: { anthropic_key: aiKey.trim() } })
+    const { error } = await supabase.auth.updateUser({ data: { anthropic_key: aiKey.trim() } })
+    if (error) { pushToast(error.message, 'error'); return }
     localStorage.setItem('gw_anthropic_key', aiKey.trim())
     setAiKeySaved(true)
     setTimeout(() => setAiKeySaved(false), 2000)
@@ -104,7 +105,8 @@ export default function SettingsPage({ db, setDb, activeAgent, websiteEnabled, s
   }
 
   const saveResendKey = async () => {
-    await supabase.auth.updateUser({ data: { resend_key: resendKey.trim(), resend_from: resendFrom.trim() } })
+    const { error } = await supabase.auth.updateUser({ data: { resend_key: resendKey.trim(), resend_from: resendFrom.trim() } })
+    if (error) { pushToast(error.message, 'error'); return }
     localStorage.setItem('gw_resend_key', resendKey.trim())
     localStorage.setItem('gw_resend_from', resendFrom.trim())
     setResendKeySaved(true)
@@ -151,15 +153,18 @@ export default function SettingsPage({ db, setDb, activeAgent, websiteEnabled, s
 
   const clearAll = async () => {
     setClearing(true)
-    await Promise.all([
+    const results = await Promise.all([
       supabase.from('tasks').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
       supabase.from('deals').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
       supabase.from('properties').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
       supabase.from('templates').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
       supabase.from('contacts').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
     ])
+    setClearing(false)
+    const failed = results.filter(r => r.error)
+    if (failed.length) { pushToast(`${failed.length} table(s) failed to clear`, 'error'); setConfirmClear(false); return }
     setDb(p => ({ ...p, contacts:[], properties:[], deals:[], tasks:[], templates:[] }))
-    setClearing(false); setConfirmClear(false)
+    setConfirmClear(false)
     pushToast('All data cleared', 'info')
   }
 
@@ -191,7 +196,7 @@ export default function SettingsPage({ db, setDb, activeAgent, websiteEnabled, s
           <label className="form-label">Company Name</label>
           <input className="form-control" value={companyName} onChange={e=>setCompanyName(e.target.value)} />
         </div>
-        <button className="btn btn--primary btn--sm" onClick={() => pushToast('Settings saved')}>Save Changes</button>
+        <button className="btn btn--primary btn--sm" onClick={() => { localStorage.setItem('gw_company_name', companyName.trim()); pushToast('Company name saved') }}>Save Changes</button>
       </div>
 
       <div className="settings-section">
