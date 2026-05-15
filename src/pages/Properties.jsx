@@ -920,6 +920,8 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
   const [editing, setEditing]         = useState(null)
   const [confirm, setConfirm]         = useState(null)
   const [radiusProp, setRadiusProp]   = useState(null)
+  const [loading, setLoading]         = useState(false)
+  const [loadError, setLoadError]     = useState(null)
 
   const properties = db.properties || []
   const agents     = db.agents     || []
@@ -938,11 +940,18 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
 
   const reload = async () => {
     if (!visibleAgentIds?.length) return
+    setLoading(true)
+    setLoadError(null)
     const { data, error } = await supabase.from('properties').select('*')
       .in('assigned_agent_id', visibleAgentIds)
       .order('created_at', { ascending: false })
-    if (!error && data) setDb(p => ({ ...p, properties: data }))
+    setLoading(false)
+    if (error) { setLoadError(error.message); return }
+    setDb(p => ({ ...p, properties: data || [] }))
   }
+
+  const hasFilters = !!(search || filterType || filterStatus || filterCounty)
+  const clearFilters = () => { setSearch(''); setFilterType(''); setFilterStatus(''); setFilterCounty('') }
 
   const handleSave = (savedProp) => {
     if (savedProp) {
@@ -960,7 +969,8 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
   }
 
   const del = async (id) => {
-    await supabase.from('properties').delete().eq('id', id)
+    const { error } = await supabase.from('properties').delete().eq('id', id)
+    if (error) { pushToast(error.message, 'error'); setConfirm(null); return }
     pushToast('Property deleted', 'info')
     setConfirm(null); reload()
   }
@@ -968,7 +978,12 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
   return (
     <div className="page-content">
       <div className="page-header">
-        <div><div className="page-title">Properties</div><div className="page-sub">{properties.length} listings</div></div>
+        <div>
+          <div className="page-title">Properties</div>
+          <div className="page-sub">
+            {loading ? 'Loading…' : hasFilters ? `${filtered.length} of ${properties.length} listings` : `${properties.length} listing${properties.length !== 1 ? 's' : ''}`}
+          </div>
+        </div>
         <div style={{ display:'flex', gap:8 }}>
           <div style={{ display:'flex', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
             {['grid','list'].map(v => <button key={v} className={`btn btn--${view===v?'primary':'secondary'}`} style={{ borderRadius:0, border:'none' }} onClick={() => setView(v)}><Icon name={v==='grid'?'dashboard':'pipeline'} size={14} /></button>)}
@@ -977,10 +992,18 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
         </div>
       </div>
 
+      {loadError && (
+        <div style={{ margin:'0 0 12px', padding:'10px 16px', background:'var(--gw-red-light)', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)', fontSize:13, color:'var(--gw-red)', display:'flex', alignItems:'center', gap:10 }}>
+          <Icon name="alert" size={14} />
+          <span>Failed to load properties: {loadError}</span>
+          <button className="btn btn--ghost btn--sm" style={{ marginLeft:'auto', color:'var(--gw-red)' }} onClick={reload}>Retry</button>
+        </div>
+      )}
       <div className="filters-bar">
         <div style={{ display:'flex', alignItems:'center', gap:8, background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'0 10px', height:34, flex:1, maxWidth:300 }}>
           <Icon name="search" size={14} style={{ color:'var(--gw-mist)' }} />
           <input style={{ border:'none', outline:'none', fontSize:13, flex:1 }} placeholder="Search properties…" value={search} onChange={e=>setSearch(e.target.value)} />
+          {search && <button onClick={() => setSearch('')} style={{ background:'none', border:'none', cursor:'pointer', color:'var(--gw-mist)', padding:'0 2px', fontSize:14, lineHeight:1 }}>×</button>}
         </div>
         <select className="filter-select" value={filterType} onChange={e=>setFilterType(e.target.value)}>
           <option value="">All Types</option>
@@ -997,11 +1020,19 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
             {counties.map(c=><option key={c} value={c}>{c}</option>)}
           </select>
         )}
+        {hasFilters && (
+          <button className="btn btn--ghost btn--sm" style={{ fontSize:12, color:'var(--gw-mist)' }} onClick={clearFilters}>
+            Clear filters
+          </button>
+        )}
       </div>
 
-      {filtered.length === 0 ? (
+      {properties.length === 0 ? (
         <EmptyState icon="building" title="No properties yet" message="Add your first property listing to get started."
           action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Property</button>} />
+      ) : filtered.length === 0 ? (
+        <EmptyState icon="building" title="No properties match your filters" message="Try adjusting or clearing your search and filters."
+          action={<button className="btn btn--secondary" onClick={clearFilters}>Clear Filters</button>} />
       ) : view === 'grid' ? (
         <div className="property-grid">
           {filtered.map(p => {
