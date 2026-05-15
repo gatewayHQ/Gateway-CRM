@@ -1598,6 +1598,8 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const [dragging, setDragging] = useState(null)
   const [dragOver, setDragOver] = useState(null)
   const [agentFilter, setAgentFilter] = useState('all')
+  const [loading, setLoading]   = useState(false)
+  const [loadError, setLoadError] = useState(null)
 
   const deals      = db.deals      || []
   const agents     = db.agents     || []
@@ -1631,9 +1633,13 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   }, [visibleDeals])
 
   const reload = useCallback(async () => {
+    setLoading(true)
+    setLoadError(null)
     let q = supabase.from('deals').select('*').order('created_at', { ascending: false })
     if (!isAdmin && dealAgentIds?.length) q = q.in('agent_id', dealAgentIds)
-    const { data } = await q
+    const { data, error } = await q
+    setLoading(false)
+    if (error) { setLoadError(error.message); return }
     setDb(p => ({ ...p, deals: data || [] }))
   }, [setDb, isAdmin, dealAgentIds])
 
@@ -1648,8 +1654,14 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
   // updated_at omitted — handled by DB trigger
   const moveStage = useCallback(async (dealId, newStage) => {
-    await supabase.from('deals').update({ stage: newStage }).eq('id', dealId)
+    const prevDeals = deals
     setDb(p => ({ ...p, deals: p.deals.map(d => d.id === dealId ? { ...d, stage: newStage } : d) }))
+    const { error } = await supabase.from('deals').update({ stage: newStage }).eq('id', dealId)
+    if (error) {
+      setDb(p => ({ ...p, deals: prevDeals }))
+      pushToast(`Failed to move deal: ${error.message}`, 'error')
+      return
+    }
     pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
 
     const auto = AUTO_TASKS[newStage]
@@ -1702,8 +1714,17 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
         </div>
       </div>
 
+      {loadError && (
+        <div style={{ margin:'12px 0', padding:'10px 16px', background:'var(--gw-red-light)', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)', fontSize:13, color:'var(--gw-red)', display:'flex', alignItems:'center', gap:10 }}>
+          <Icon name="alert" size={14} />
+          <span>Failed to load deals: {loadError}</span>
+          <button className="btn btn--ghost btn--sm" style={{ marginLeft:'auto', color:'var(--gw-red)' }} onClick={reload}>Retry</button>
+        </div>
+      )}
       {deals.length === 0 ? (
-        <EmptyState icon="pipeline" title="No deals yet" message="Add your first deal to start tracking your pipeline." action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Deal</button>} />
+        <EmptyState icon="pipeline" title="No deals yet" message="Add your first deal to start tracking your pipeline." action={!isAdmin && <button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Deal</button>} />
+      ) : visibleDeals.length === 0 ? (
+        <EmptyState icon="pipeline" title="No deals for this agent" message="This agent has no deals yet." />
       ) : (
         <div className="kanban-board">
           {STAGE_ORDER.map(stage => (
