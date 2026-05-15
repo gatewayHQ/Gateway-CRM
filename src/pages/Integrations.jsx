@@ -333,16 +333,24 @@ function WebhooksSection() {
 
   useEffect(() => {
     supabase.from('webhook_configs').select('*').order('created_at', { ascending: true })
-      .then(({ data }) => { setWebhooks(data || []); setLoading(false) })
+      .then(({ data, error }) => {
+        setLoading(false)
+        if (!error) setWebhooks(data || [])
+      })
   }, [])
 
   const toggle = useCallback(async (wh) => {
-    await supabase.from('webhook_configs').update({ active: !wh.active }).eq('id', wh.id)
     setWebhooks(p => p.map(w => w.id === wh.id ? { ...w, active: !wh.active } : w))
+    const { error } = await supabase.from('webhook_configs').update({ active: !wh.active }).eq('id', wh.id)
+    if (error) {
+      setWebhooks(p => p.map(w => w.id === wh.id ? { ...w, active: wh.active } : w))
+      pushToast(error.message, 'error')
+    }
   }, [])
 
   const del = useCallback(async (id) => {
-    await supabase.from('webhook_configs').delete().eq('id', id)
+    const { error } = await supabase.from('webhook_configs').delete().eq('id', id)
+    if (error) { pushToast(error.message, 'error'); return }
     setWebhooks(p => p.filter(w => w.id !== id))
     pushToast('Webhook deleted', 'info')
   }, [])
