@@ -193,12 +193,14 @@ export default function SequencesPage({ db, setDb, activeAgent }) {
   const saveSequence = async () => {
     if (!selected) return
     setSaving(true)
-    await supabase.from('sequences').update({ name: seqName.trim(), description: seqDesc }).eq('id', selected.id)
+    const { error: updErr } = await supabase.from('sequences').update({ name: seqName.trim(), description: seqDesc }).eq('id', selected.id)
+    if (updErr) { setSaving(false); pushToast(updErr.message, 'error'); return }
     await supabase.from('sequence_steps').delete().eq('sequence_id', selected.id)
     if (steps.length > 0) {
-      await supabase.from('sequence_steps').insert(
+      const { error: stepsErr } = await supabase.from('sequence_steps').insert(
         steps.map((s, i) => ({ sequence_id: selected.id, subject: s.subject, body: s.body, delay_days: s.delay_days || 0, sort_order: i }))
       )
+      if (stepsErr) { setSaving(false); pushToast(stepsErr.message, 'error'); return }
     }
     setSaving(false)
     pushToast('Sequence saved')
@@ -206,7 +208,8 @@ export default function SequencesPage({ db, setDb, activeAgent }) {
   }
 
   const deleteSequence = async () => {
-    await supabase.from('sequences').delete().eq('id', selected.id)
+    const { error } = await supabase.from('sequences').delete().eq('id', selected.id)
+    if (error) { pushToast(error.message, 'error'); setConfirm(null); return }
     pushToast('Sequence deleted', 'info')
     setConfirm(null)
     setSelected(null)
@@ -219,7 +222,8 @@ export default function SequencesPage({ db, setDb, activeAgent }) {
   const removeStep = (i) => setSteps(p => p.filter((_, idx) => idx !== i))
 
   const changeEnrollStatus = async (enrollId, status) => {
-    await supabase.from('contact_sequences').update({ status }).eq('id', enrollId)
+    const { error } = await supabase.from('contact_sequences').update({ status }).eq('id', enrollId)
+    if (error) { pushToast(error.message, 'error'); return }
     setEnrollments(p => p.map(e => e.id === enrollId ? { ...e, status } : e))
     pushToast(`Status updated to ${status}`)
   }
