@@ -363,21 +363,34 @@ end $$;
 -- MAIL CAMPAIGNS  (outreach campaigns — mail flyers, cold call, email blasts)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists mail_campaigns (
-  id              uuid primary key default uuid_generate_v4(),
-  name            text not null,
-  description     text,
-  property_types  text[] default '{}',   -- target property types (multifamily, office…)
-  status          text check (status in ('draft','active','paused','completed')) default 'draft',
-  agent_id        uuid references agents(id) on delete set null,
-  flyer_url       text,                  -- link to flyer asset (Canva, PDF URL, etc.)
-  tracking_url    text,                  -- Bitly short URL for QR tracking
-  qr_code_url     text,                  -- Bitly QR code image URL
-  bitly_id        text,                  -- Bitly link ID for analytics
-  frequency_cap   integer default 0,     -- 0 = no cap; >0 = max sends per contact
-  frequency_days  integer default 30,    -- rolling window for frequency cap
-  total_sends     integer default 0,     -- denormalised counter (updated by trigger/app)
-  total_responses integer default 0,
-  created_at      timestamptz default now()
+  id               uuid primary key default uuid_generate_v4(),
+  name             text not null,
+  description      text,
+  property_types   text[] default '{}',
+  status           text check (status in ('draft','active','paused','completed')) default 'draft',
+  agent_id         uuid references agents(id) on delete set null,
+  flyer_url        text,
+  tracking_url     text,
+  qr_code_url      text,
+  bitly_id         text,
+  frequency_cap    integer default 0,
+  frequency_days   integer default 30,
+  total_sends      integer default 0,
+  total_responses  integer default 0,
+  -- QR / landing page tracking
+  tracking_code    text unique,
+  landing_mode     text default 'external',  -- 'external' | 'crm'
+  landing_url      text,
+  landing_headline text,
+  landing_tagline  text,
+  landing_cta      text default 'Schedule a Call',
+  flyer_template   text,
+  canva_design_url text,
+  date_sent        date,
+  date_completed   date,
+  cost_per_piece   numeric default 0,
+  fixed_cost       numeric default 0,
+  created_at       timestamptz default now()
 );
 
 alter table mail_campaigns enable row level security;
@@ -393,35 +406,53 @@ end $$;
 create table if not exists mail_sends (
   id                uuid primary key default uuid_generate_v4(),
   campaign_id       uuid references mail_campaigns(id) on delete cascade,
-  -- Recipient link (at least one must be set, or use raw fields below)
   contact_id        uuid references contacts(id) on delete set null,
-  cold_lead_id      uuid references cold_call_leads(id) on delete set null,
-  -- Raw recipient details (used when no contact record exists yet)
+  cold_lead_id      uuid,   -- plain uuid; FK added later when cold_call_leads table exists
   recipient_name    text,
   recipient_address text,
   recipient_city    text,
   recipient_state   text,
   recipient_zip     text,
-  -- Event metadata
   channel           text check (channel in ('mail','cold-call','email')) default 'mail',
   sent_at           timestamptz default now(),
   agent_id          uuid references agents(id) on delete set null,
-  -- Response tracking
   response          text check (response in ('no-response','callback','interested','dnc','converted')) default 'no-response',
   responded_at      timestamptz,
-  deal_id           uuid references deals(id) on delete set null,  -- deal attributed to this send
+  deal_id           uuid references deals(id) on delete set null,
   notes             text,
   created_at        timestamptz default now()
 );
 
 create index if not exists mail_sends_campaign_id_idx on mail_sends(campaign_id);
 create index if not exists mail_sends_contact_id_idx  on mail_sends(contact_id);
-create index if not exists mail_sends_cold_lead_idx   on mail_sends(cold_lead_id);
 
 alter table mail_sends enable row level security;
 do $$ begin
   if not exists (select 1 from pg_policies where tablename='mail_sends' and policyname='allow_all') then
     create policy "allow_all" on mail_sends for all using (true) with check (true);
+  end if;
+end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CAMPAIGN SCANS  (QR code scan events)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists campaign_scans (
+  id          uuid primary key default uuid_generate_v4(),
+  campaign_id uuid references mail_campaigns(id) on delete cascade,
+  scanned_at  timestamptz default now(),
+  ip_address  text,
+  user_agent  text,
+  device_type text check (device_type in ('mobile','tablet','desktop')),
+  referrer    text
+);
+
+create index if not exists campaign_scans_campaign_id_idx on campaign_scans(campaign_id);
+create index if not exists campaign_scans_scanned_at_idx  on campaign_scans(scanned_at);
+
+alter table campaign_scans enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='campaign_scans' and policyname='allow_all') then
+    create policy "allow_all" on campaign_scans for all using (true) with check (true);
   end if;
 end $$;
 
@@ -469,45 +500,43 @@ do $$ begin
 end $$;
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- MIGRATION  (run this block if upgrading an existing database)
+-- MIGRATION  (safe to run on an existing database — all guards in place)
 -- ─────────────────────────────────────────────────────────────────────────────
--- alter table agents      add column if not exists auth_id uuid unique;
--- alter table agents      add column if not exists team_id uuid;
--- alter table contacts    add column if not exists owner_address    text;
--- alter table contacts    add column if not exists owner_city       text;
--- alter table contacts    add column if not exists owner_state      text;
--- alter table contacts    add column if not exists owner_zip        text;
--- alter table contacts    add column if not exists birthday         date;
--- alter table contacts    add column if not exists anniversary_date date;
--- alter table properties  add column if not exists county  text;
--- alter table properties  add column if not exists garage  integer default 0;
--- alter table properties  add column if not exists details jsonb   default '{}';
--- alter table deals       add column if not exists prop_category text;
--- alter table deals       add column if not exists prop_subtype  text;
--- alter table deals       add column if not exists comp_data     jsonb default '{}';
--- alter table teams       add column if not exists type text check (type in ('collaboration','split')) default 'collaboration';
--- alter table teams       add column if not exists description text;
--- -- Fix properties type constraint to include full set
--- alter table properties drop constraint if exists properties_type_check;
--- alter table properties add  constraint properties_type_check
---   check (type in ('residential','rental','multifamily','office','land','retail','industrial','mixed-use','commercial'));
--- -- Fix properties status constraint to include 'leased'
--- alter table properties drop constraint if exists properties_status_check;
--- alter table properties add  constraint properties_status_check
---   check (status in ('active','pending','sold','off-market','leased'));
--- -- Fix contacts source constraint to include 'cold call'
--- alter table contacts drop constraint if exists contacts_source_check;
--- alter table contacts add  constraint contacts_source_check
---   check (source in ('referral','website','open house','social','cold call','other'));
--- -- Team sharing flags: run after deploying Team refactor (2026-05)
--- alter table team_splits add column if not exists share_contacts   boolean default true;
--- alter table team_splits add column if not exists share_properties boolean default true;
--- alter table team_splits add column if not exists share_deals      boolean default true;
--- -- Remove legacy team column from agents (no longer used for membership)
--- alter table agents drop column if exists team_id;
--- -- Buyer/investor search criteria (for buyer matching feature)
--- alter table contacts add column if not exists submarket   text;
--- alter table contacts add column if not exists asset_types text[];
--- alter table contacts add column if not exists size_min    numeric;
--- alter table contacts add column if not exists size_max    numeric;
--- alter table contacts add column if not exists size_unit   text default 'sqft';
+alter table agents      add column if not exists auth_id uuid unique;
+alter table contacts    add column if not exists owner_address    text;
+alter table contacts    add column if not exists owner_city       text;
+alter table contacts    add column if not exists owner_state      text;
+alter table contacts    add column if not exists owner_zip        text;
+alter table contacts    add column if not exists birthday         date;
+alter table contacts    add column if not exists anniversary_date date;
+alter table contacts    add column if not exists submarket        text;
+alter table contacts    add column if not exists asset_types      text[];
+alter table contacts    add column if not exists size_min         numeric;
+alter table contacts    add column if not exists size_max         numeric;
+alter table contacts    add column if not exists size_unit        text default 'sqft';
+alter table properties  add column if not exists county           text;
+alter table properties  add column if not exists garage           integer default 0;
+alter table properties  add column if not exists details          jsonb default '{}';
+alter table properties  add column if not exists lat              numeric;
+alter table properties  add column if not exists lng              numeric;
+alter table deals       add column if not exists prop_category    text;
+alter table deals       add column if not exists prop_subtype     text;
+alter table deals       add column if not exists comp_data        jsonb default '{}';
+alter table teams       add column if not exists type             text check (type in ('collaboration','split')) default 'collaboration';
+alter table teams       add column if not exists description      text;
+alter table team_splits add column if not exists share_contacts   boolean default true;
+alter table team_splits add column if not exists share_properties boolean default true;
+alter table team_splits add column if not exists share_deals      boolean default true;
+
+-- Fix constraint: properties type (include full set)
+alter table properties drop constraint if exists properties_type_check;
+alter table properties add  constraint properties_type_check
+  check (type in ('residential','rental','multifamily','office','land','retail','industrial','mixed-use','commercial'));
+-- Fix constraint: properties status (include 'leased')
+alter table properties drop constraint if exists properties_status_check;
+alter table properties add  constraint properties_status_check
+  check (status in ('active','pending','sold','off-market','leased'));
+-- Fix constraint: contacts source (include 'cold call')
+alter table contacts drop constraint if exists contacts_source_check;
+alter table contacts add  constraint contacts_source_check
+  check (source in ('referral','website','open house','social','cold call','other'));
