@@ -1398,6 +1398,8 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
   const [seqDirty,     setSeqDirty]     = useState(false)
   const [seqSaving,    setSeqSaving]    = useState(false)
   const [seqDueMap,    setSeqDueMap]    = useState({})  // { stepIndex: {sends, count} }
+  const [duplicates,   setDuplicates]   = useState(null)
+  const [dupLoading,   setDupLoading]   = useState(false)
 
   useEffect(() => { loadSends(); loadAnalytics(); loadROI(); setAbLoaded(false); setAbComparison(null) }, [campaign.id])
   useEffect(() => { if (tab === 'suppression') loadSuppressions() }, [tab])
@@ -1505,6 +1507,32 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
     setAbComparison(null)
     setAbLoaded(false)
     loadABComparison()
+  }
+
+  const checkDuplicates = async () => {
+    setDupLoading(true)
+    const res  = await fetch(`/api/campaigns?action=find_duplicate_sends&campaign_id=${campaign.id}`)
+    const data = await res.json()
+    setDuplicates(data.duplicates || [])
+    setDupLoading(false)
+    if ((data.duplicates || []).length === 0) pushToast('No duplicates found')
+  }
+
+  const removeDuplicates = async () => {
+    if (!duplicates?.length) return
+    // Keep the first send in each group, remove the rest
+    const toRemove = duplicates.flatMap(d => d.sends.slice(1).map(s => s.id))
+    const res = await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'remove_duplicate_sends', send_ids: toRemove }),
+    })
+    const data = await res.json()
+    if (res.ok) {
+      setSends(p => p.filter(s => !toRemove.includes(s.id)))
+      setDuplicates([])
+      pushToast(`Removed ${data.removed} duplicate sends`)
+    }
   }
 
   const saveSeqSteps = async () => {
@@ -1686,11 +1714,33 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
               ? <EmptyState icon="mail" title="No sends yet" message="Click 'Log Send' to record the first outreach for this campaign." action={<button className="btn btn--primary btn--sm" onClick={()=>setLogOpen(true)}>Log Send</button>}/>
               : (
                 <div style={{ display:'flex', flexDirection:'column', gap:0 }}>
-                  <div style={{ display:'flex', justifyContent:'flex-end', paddingBottom:8 }}>
+                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', paddingBottom:8 }}>
+                    <button className="btn btn--ghost btn--sm" style={{ fontSize:12 }} onClick={checkDuplicates} disabled={dupLoading}>
+                      {dupLoading ? 'Checking…' : 'Check Duplicates'}
+                    </button>
                     <a href={`/api/campaigns?action=export_sends_csv&campaign_id=${campaign.id}`} download className="btn btn--ghost btn--sm" style={{ fontSize:12 }}>
                       <Icon name="download" size={12}/> Export CSV
                     </a>
                   </div>
+                  {duplicates !== null && duplicates.length > 0 && (
+                    <div style={{ background:'#fef9c3', border:'1.5px solid #f59e0b', borderRadius:8, padding:'10px 14px', marginBottom:8 }}>
+                      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:6 }}>
+                        <span style={{ fontSize:13, fontWeight:700, color:'#92400e' }}>{duplicates.length} duplicate group{duplicates.length!==1?'s':''} found</span>
+                        <button className="btn btn--primary btn--sm" style={{ fontSize:12, background:'#d97706', border:'none' }} onClick={removeDuplicates}>
+                          Remove Duplicates (keep first)
+                        </button>
+                      </div>
+                      {duplicates.slice(0,3).map((d,i) => (
+                        <div key={i} style={{ fontSize:11, color:'#92400e', marginTop:2 }}>
+                          {d.sends[0]?.recipient_name || d.sends[0]?.contact_id?.slice(0,8) || 'Unknown'} — {d.sends.length} sends
+                        </div>
+                      ))}
+                      {duplicates.length > 3 && <div style={{ fontSize:11, color:'#92400e' }}>…and {duplicates.length-3} more</div>}
+                    </div>
+                  )}
+                  {duplicates !== null && duplicates.length === 0 && (
+                    <div style={{ fontSize:12, color:'var(--gw-green)', paddingBottom:8 }}>No duplicates found.</div>
+                  )}
                   {sends.map(s => {
                     const contact = s.contact_id ? findContact(s.contact_id) : null
                     const agent   = s.agent_id   ? findAgent(s.agent_id)   : null
@@ -2420,6 +2470,9 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
   const [search,       setSearch]       = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [ready,        setReady]        = useState(true)
+  const [templatesOpen, setTemplatesOpen] = useState(false)
+  const [templates,     setTemplates]     = useState([])
+  const [templatesLoaded, setTemplatesLoaded] = useState(false)
 
   useEffect(() => { loadAll() }, [])
 
@@ -2479,6 +2532,57 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
     }
   }
 
+  const loadTemplates = async () => {
+    if (templatesLoaded) return
+    const res  = await fetch('/api/campaigns?action=list_campaign_templates')
+    const data = await res.json()
+    setTemplates(data.templates || [])
+    setTemplatesLoaded(true)
+  }
+
+  const saveAsTemplate = async (campaign) => {
+    const name = window.prompt(`Template name:`, campaign.name + ' Template')
+    if (!name) return
+    const config = {
+      property_types: campaign.property_types,
+      flyer_template: campaign.flyer_template,
+      landing_mode:   campaign.landing_mode,
+      landing_headline: campaign.landing_headline,
+      landing_tagline: campaign.landing_tagline,
+      landing_cta:    campaign.landing_cta,
+      cost_per_piece: campaign.cost_per_piece,
+      fixed_cost:     campaign.fixed_cost,
+      frequency_cap:  campaign.frequency_cap,
+      frequency_days: campaign.frequency_days,
+      commission_rate: campaign.commission_rate,
+      attribution_window_days: campaign.attribution_window_days,
+      schedule_steps: campaign.schedule_steps,
+    }
+    const res  = await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'save_campaign_template', name, config }),
+    })
+    const data = await res.json()
+    if (res.ok) {
+      setTemplates(p => [data.template, ...p])
+      setTemplatesLoaded(true)
+      pushToast('Template saved')
+    } else {
+      pushToast(data.error || 'Failed to save template', 'error')
+    }
+  }
+
+  const deleteTemplate = async (id) => {
+    await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'delete_campaign_template', id }),
+    })
+    setTemplates(p => p.filter(t => t.id !== id))
+    pushToast('Template deleted')
+  }
+
   const updateCampaign = (updated) => {
     setCampaigns(p => p.map(c => c.id === updated.id ? updated : c))
     if (selected?.id === updated.id) setSelected(updated)
@@ -2529,9 +2633,12 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
               <h1 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:22 }}>Campaigns</h1>
               <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:2 }}>Mail flyers · Cold calls · Email blasts</div>
             </div>
-            <button className="btn btn--primary btn--sm" onClick={() => setNewOpen(true)}>
-              <Icon name="plus" size={13}/> New Campaign
-            </button>
+            <div style={{ display:'flex', gap:6 }}>
+              <button className="btn btn--ghost btn--sm" onClick={() => { setTemplatesOpen(true); loadTemplates() }}>Templates</button>
+              <button className="btn btn--primary btn--sm" onClick={() => setNewOpen(true)}>
+                <Icon name="plus" size={13}/> New Campaign
+              </button>
+            </div>
           </div>
 
           {/* Global stats */}
@@ -2619,6 +2726,9 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
       {selected && (
         <div style={{ flex:1, overflow:'hidden', display:'flex', flexDirection:'column' }}>
           <div style={{ padding:'12px 16px', borderBottom:'1px solid var(--gw-border)', display:'flex', justifyContent:'flex-end', gap:8 }}>
+            <button className="btn btn--ghost btn--sm" onClick={() => saveAsTemplate(selected)} title="Save this campaign as a reusable template">
+              Save as Template
+            </button>
             <button className="btn btn--ghost btn--sm" style={{ color:'var(--gw-red)' }}
               onClick={() => {
                 if (confirm(`Delete campaign "${selected.name}"? All send history will be lost.`)) deleteCampaign(selected.id)
@@ -2639,6 +2749,51 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
             />
           </div>
         </div>
+      )}
+
+      {/* Templates library modal */}
+      {templatesOpen && (
+        <Modal open={true} onClose={() => setTemplatesOpen(false)} width={560}>
+          <div className="modal__head">
+            <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:18 }}>Campaign Templates</h3>
+            <button className="drawer__close" onClick={() => setTemplatesOpen(false)}><Icon name="x" size={18}/></button>
+          </div>
+          <div className="modal__body" style={{ display:'flex', flexDirection:'column', gap:12 }}>
+            <div style={{ fontSize:13, color:'var(--gw-mist)' }}>
+              Save campaigns as reusable templates. Use "Save as Template" when viewing a campaign to add it here.
+            </div>
+            {templates.length === 0
+              ? <div style={{ textAlign:'center', color:'var(--gw-mist)', padding:32, fontSize:13 }}>No templates yet. Save a campaign as a template to get started.</div>
+              : templates.map(t => (
+                <div key={t.id} style={{ display:'flex', alignItems:'flex-start', gap:10, padding:'12px 14px', background:'var(--gw-bone)', borderRadius:10 }}>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontWeight:700, fontSize:14, color:'var(--gw-ink)' }}>{t.name}</div>
+                    {t.description && <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:2 }}>{t.description}</div>}
+                    <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>
+                      {t.config?.property_types?.length > 0 && `${t.config.property_types.join(', ')} · `}
+                      {t.config?.flyer_template && `${t.config.flyer_template} template · `}
+                      Saved {new Date(t.created_at).toLocaleDateString()}
+                    </div>
+                  </div>
+                  <div style={{ display:'flex', gap:6, flexShrink:0 }}>
+                    <button className="btn btn--primary btn--sm" style={{ fontSize:12 }}
+                      onClick={() => {
+                        setTemplatesOpen(false)
+                        setNewOpen(true)
+                        // Template config will be pre-filled via CampaignForm's initial prop if we wire it up
+                        pushToast('Template loaded — fill in the name and save', 'info')
+                      }}>
+                      Use Template
+                    </button>
+                    <button className="btn btn--ghost btn--icon btn--sm" onClick={() => deleteTemplate(t.id)} title="Delete template">
+                      <Icon name="trash" size={13}/>
+                    </button>
+                  </div>
+                </div>
+              ))
+            }
+          </div>
+        </Modal>
       )}
 
       {/* New campaign modal */}

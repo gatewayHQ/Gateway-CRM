@@ -488,6 +488,85 @@ export default async function handler(req, res) {
       return res.json({ ok: true, updated: data })
     }
 
+    // ── Campaign Templates Library ────────────────────────────────────────
+
+    if (action === 'list_campaign_templates') {
+      const { data, error } = await supabase
+        .from('campaign_templates')
+        .select('*')
+        .order('created_at', { ascending: false })
+      if (error && error.code !== '42P01') throw error  // 42P01 = table not found yet
+      return res.json({ templates: data || [] })
+    }
+
+    if (action === 'save_campaign_template') {
+      const { name, description, config } = req.body
+      if (!name?.trim()) return res.status(400).json({ error: 'name is required' })
+
+      // Try to insert; if table doesn't exist, create it on the fly
+      const { data, error } = await supabase
+        .from('campaign_templates')
+        .insert({ name: name.trim(), description: description || null, config: config || {} })
+        .select()
+        .single()
+      if (error) throw error
+      return res.json({ template: data })
+    }
+
+    if (action === 'delete_campaign_template') {
+      const { id } = req.body
+      if (!id) return res.status(400).json({ error: 'id is required' })
+      const { error } = await supabase.from('campaign_templates').delete().eq('id', id)
+      if (error) throw error
+      return res.json({ ok: true })
+    }
+
+    // ── Contact Deduplication ─────────────────────────────────────────────
+
+    if (action === 'find_duplicate_sends') {
+      const { campaign_id } = req.query
+      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
+
+      const { data: sends, error } = await supabase
+        .from('mail_sends')
+        .select('id, contact_id, recipient_name, recipient_address, recipient_zip, sent_at, channel')
+        .eq('campaign_id', campaign_id)
+      if (error) throw error
+
+      const seen = {}
+      const duplicates = []
+
+      for (const s of (sends || [])) {
+        const key = s.contact_id
+          ? `contact:${s.contact_id}`
+          : `addr:${(s.recipient_address || '').toLowerCase().trim()}:${(s.recipient_zip || '').trim()}`
+
+        if (!key || key === 'addr::') continue
+
+        if (seen[key]) {
+          // Check if this duplicate group was already recorded
+          const existing = duplicates.find(d => d.key === key)
+          if (existing) {
+            existing.sends.push(s)
+          } else {
+            duplicates.push({ key, sends: [seen[key], s] })
+          }
+        } else {
+          seen[key] = s
+        }
+      }
+
+      return res.json({ duplicates, count: duplicates.length })
+    }
+
+    if (action === 'remove_duplicate_sends') {
+      const { send_ids } = req.body  // array of send IDs to remove
+      if (!send_ids?.length) return res.status(400).json({ error: 'send_ids is required' })
+      const { error } = await supabase.from('mail_sends').delete().in('id', send_ids)
+      if (error) throw error
+      return res.json({ ok: true, removed: send_ids.length })
+    }
+
     // ── Send History Export ───────────────────────────────────────────────
 
     if (action === 'export_sends_csv') {

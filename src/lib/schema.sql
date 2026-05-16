@@ -619,6 +619,25 @@ end $$;
 -- ── Implementation #5: Smart Audience Builder ────────────────────────────────
 -- (no schema changes — uses existing contacts table fields)
 
+-- ── Implementation #12: Contact Deduplication ──────────────────────────────
+-- (no schema changes — computed at query time from mail_sends)
+
+-- ── Implementation #16: Campaign Templates Library ───────────────────────────
+create table if not exists campaign_templates (
+  id          uuid primary key default uuid_generate_v4(),
+  name        text not null,
+  description text,
+  config      jsonb default '{}',  -- stores campaign fields: property_types, flyer_template, channel, cost_per_piece, etc.
+  created_at  timestamptz default now()
+);
+create index if not exists campaign_templates_created_idx on campaign_templates(created_at);
+alter table campaign_templates enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='campaign_templates' and policyname='allow_all') then
+    create policy "allow_all" on campaign_templates for all using (true) with check (true);
+  end if;
+end $$;
+
 -- ── Implementation #13: Sequence Scheduler ───────────────────────────────────
 alter table mail_campaigns add column if not exists schedule_steps jsonb default '[]';
 -- Example step shape: { step: 1, name: 'Initial Send', delay_days: 0, channel: 'direct-mail', filter_response: null, last_executed_at: null }
