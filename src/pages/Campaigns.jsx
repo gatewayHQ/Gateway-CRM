@@ -417,6 +417,14 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
   const [canvaUrl,         setCanvaUrl]         = useState(campaign.canva_design_url || '')
   const [savingCanva,      setSavingCanva]      = useState(false)
   const [canvaPreview,     setCanvaPreview]     = useState(!!campaign.canva_design_url)
+  // Canva Connect API integration (#10)
+  const [canvaStatus,      setCanvaStatus]      = useState(null)   // { connected, expired, connection }
+  const [canvaConnecting,  setCanvaConnecting]  = useState(false)
+  const [canvaTemplates,   setCanvaTemplates]   = useState(null)
+  const [canvaTplLoading,  setCanvaTplLoading]  = useState(false)
+  const [canvaTplId,       setCanvaTplId]       = useState('')
+  const [canvaGenerating,  setCanvaGenerating]  = useState(false)
+  const [canvaSetupSql,    setCanvaSetupSql]    = useState(null)
   // Personalization Engine (#6)
   const [persTarget,       setPersTarget]       = useState('')  // contact_type
   const [persTone,         setPersTone]         = useState('')  // urgent/warm/luxury/data
@@ -501,6 +509,110 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
   const effectivePhotoUrl     = selectedPhotoUrl || campaign.flyer_photo_urls?.[0] || ''
   const effectivePhotoCaption = photoCaption || campaign.flyer_photo_caption || ''
   const activeCopy            = editingCopy ?? generatedCopy
+
+  // ── Canva Connect API helpers (#10) ─────────────────────────────────────
+  const loadCanvaStatus = useCallback(async () => {
+    if (!activeAgent?.id) return
+    try {
+      const res  = await fetch(`/api/campaigns?action=canva_status&agent_id=${activeAgent.id}`)
+      const data = await res.json()
+      if (data.migration_required) { setCanvaSetupSql(data.migration_sql); return }
+      setCanvaStatus(data)
+    } catch (_) {}
+  }, [activeAgent?.id])
+
+  useEffect(() => { loadCanvaStatus() }, [loadCanvaStatus])
+
+  const connectCanva = async () => {
+    if (!activeAgent?.id) { pushToast('Sign in as an agent first', 'error'); return }
+    setCanvaConnecting(true)
+    try {
+      const res  = await fetch('/api/campaigns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action:           'canva_oauth_init',
+          agent_id:         activeAgent.id,
+          redirect_origin:  window.location.origin,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) { pushToast(data.error || 'Failed to start Canva OAuth', 'error'); setCanvaConnecting(false); return }
+      window.location.href = data.auth_url
+    } catch (err) {
+      pushToast(err.message, 'error')
+      setCanvaConnecting(false)
+    }
+  }
+
+  const disconnectCanva = async () => {
+    if (!activeAgent?.id) return
+    await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'canva_disconnect', agent_id: activeAgent.id }),
+    })
+    setCanvaStatus({ connected: false })
+    setCanvaTemplates(null)
+    setCanvaTplId('')
+    pushToast('Canva disconnected')
+  }
+
+  const loadCanvaTemplates = async () => {
+    if (!activeAgent?.id) return
+    setCanvaTplLoading(true)
+    try {
+      const res  = await fetch(`/api/campaigns?action=canva_list_templates&agent_id=${activeAgent.id}`)
+      const data = await res.json()
+      if (!res.ok) {
+        if (data.not_connected || data.reconnect_required) { setCanvaStatus({ connected: false }) }
+        pushToast(data.error || 'Failed to load Canva templates', 'error')
+        return
+      }
+      setCanvaTemplates(data.templates || [])
+      setCanvaTplId(prev => prev || data.templates?.[0]?.id || '')
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setCanvaTplLoading(false)
+    }
+  }
+
+  const generateInCanva = async () => {
+    if (!activeAgent?.id || !canvaTplId) { pushToast('Pick a Canva template first', 'error'); return }
+    setCanvaGenerating(true)
+    try {
+      const res  = await fetch('/api/campaigns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action:      'canva_autofill',
+          agent_id:    activeAgent.id,
+          campaign_id: campaign.id,
+          template_id: canvaTplId,
+          photo_url:   effectivePhotoUrl || null,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        pushToast(data.error || 'Canva generation failed', 'error')
+        if (data.hint) pushToast(data.hint, 'info')
+        return
+      }
+      if (data.pending) {
+        pushToast('Canva is still generating your design — refresh in a moment.', 'info')
+        return
+      }
+      setCanvaUrl(data.design_url)
+      setCanvaPreview(true)
+      if (onUpdate) onUpdate({ ...campaign, canva_design_url: data.design_url, canva_design_id: data.design_id })
+      pushToast('Design generated! Opening Canva preview…')
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setCanvaGenerating(false)
+    }
+  }
 
   const flyerQrUrl = campaign.tracking_code
     ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(
@@ -892,9 +1004,88 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
 
       {/* Divider */}
       <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:16 }}>
-        <div style={{ fontSize:13, fontWeight:700, color:'var(--gw-ink)', marginBottom:4 }}>Design in Canva</div>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6 }}>
+          <div style={{ fontSize:13, fontWeight:700, color:'var(--gw-ink)' }}>Design in Canva</div>
+          {canvaStatus?.connected && (
+            <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+              <span style={{ fontSize:11, fontWeight:700, color:'var(--gw-green)', background:'var(--gw-green-light)', padding:'2px 8px', borderRadius:10 }}>
+                ✓ Connected{canvaStatus.connection?.display_name ? ` · ${canvaStatus.connection.display_name}` : ''}
+              </span>
+              <button className="btn btn--ghost btn--sm" style={{ fontSize:10, padding:'1px 8px' }} onClick={disconnectCanva}>Disconnect</button>
+            </div>
+          )}
+        </div>
+
+        {/* ── One-click Canva Connect API integration (#10) ── */}
+        {canvaSetupSql ? (
+          <div style={{ padding:'12px 14px', background:'#fef2f2', border:'1px solid #fca5a5', borderRadius:10, marginBottom:12 }}>
+            <div style={{ fontSize:13, fontWeight:700, color:'#dc2626', marginBottom:6 }}>Database migration required for Canva integration</div>
+            <div style={{ fontSize:12, color:'#7f1d1d', marginBottom:6 }}>
+              Run this SQL in your <a href="https://supabase.com/dashboard" target="_blank" rel="noopener noreferrer" style={{ color:'#dc2626', fontWeight:700 }}>Supabase SQL Editor</a>, then refresh:
+            </div>
+            <pre style={{ fontSize:10, background:'#fff', padding:'10px 12px', borderRadius:8, border:'1px solid #fca5a5', overflowX:'auto', lineHeight:1.5, color:'#374151', maxHeight:160 }}>
+              {canvaSetupSql}
+            </pre>
+            <div style={{ display:'flex', gap:6, marginTop:6 }}>
+              <button className="btn btn--ghost btn--sm" style={{ fontSize:11 }}
+                onClick={() => { navigator.clipboard.writeText(canvaSetupSql); pushToast('SQL copied') }}>Copy SQL</button>
+              <button className="btn btn--ghost btn--sm" style={{ fontSize:11 }} onClick={() => { setCanvaSetupSql(null); loadCanvaStatus() }}>Refresh</button>
+            </div>
+          </div>
+        ) : canvaStatus?.connected ? (
+          <div style={{ background:'linear-gradient(135deg, #f0fdfa 0%, #ecfeff 100%)', border:'1.5px solid #99f6e4', borderRadius:10, padding:'14px 16px', marginBottom:12 }}>
+            <div style={{ fontSize:12, fontWeight:700, color:'#0f766e', marginBottom:8 }}>
+              ⚡ One-click generation — populate a Canva brand template with this campaign's copy + photo
+            </div>
+            <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+              <select
+                className="form-control"
+                style={{ fontSize:12, flex:1, minWidth:220 }}
+                value={canvaTplId}
+                onChange={e => setCanvaTplId(e.target.value)}
+                onFocus={() => { if (!canvaTemplates) loadCanvaTemplates() }}
+              >
+                <option value="">
+                  {canvaTplLoading ? 'Loading templates…' : canvaTemplates ? (canvaTemplates.length ? 'Select a brand template…' : 'No brand templates found in your Canva account') : 'Click to load brand templates…'}
+                </option>
+                {canvaTemplates?.map(t => (
+                  <option key={t.id} value={t.id}>{t.title || t.id.slice(0,8)}</option>
+                ))}
+              </select>
+              <button className="btn btn--primary btn--sm" onClick={generateInCanva} disabled={canvaGenerating || !canvaTplId}
+                style={{ background:'#0f766e', borderColor:'#0f766e' }}>
+                {canvaGenerating ? 'Generating…' : '✦ Generate in Canva'}
+              </button>
+            </div>
+            {canvaTemplates && canvaTemplates.length === 0 && (
+              <div style={{ fontSize:11, color:'#0f766e', marginTop:6 }}>
+                Create a brand template in <a href="https://www.canva.com/brand/templates" target="_blank" rel="noopener noreferrer" style={{ color:'#0f766e', fontWeight:700 }}>Canva Brand Templates</a> with placeholders named: <code>headline</code>, <code>subheadline</code>, <code>cta</code>, <code>agent_name</code>, and an image placeholder named <code>photo</code>.
+              </div>
+            )}
+            {canvaTemplates && canvaTemplates.length > 0 && (
+              <div style={{ fontSize:11, color:'#0f766e', marginTop:6 }}>
+                Tip: name your template placeholders <code>headline</code>, <code>subheadline</code>, <code>cta</code>, <code>agent_name</code>, <code>photo</code> for auto-population.
+              </div>
+            )}
+          </div>
+        ) : (
+          <div style={{ background:'#f0f9ff', border:'1.5px solid #bae6fd', borderRadius:10, padding:'14px 16px', marginBottom:12 }}>
+            <div style={{ fontSize:12, fontWeight:700, color:'#0369a1', marginBottom:4 }}>
+              ⚡ Connect Canva for one-click flyer generation
+            </div>
+            <div style={{ fontSize:11, color:'#075985', marginBottom:8 }}>
+              Auto-populate your Canva brand templates with this campaign's headline, subheadline, CTA, agent details, and property photo — no copy/paste.
+            </div>
+            <button className="btn btn--primary btn--sm" onClick={connectCanva} disabled={canvaConnecting}
+              style={{ background:'#0369a1', borderColor:'#0369a1' }}>
+              {canvaConnecting ? 'Redirecting…' : 'Connect Canva Account'}
+            </button>
+          </div>
+        )}
+
+        <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:8, fontWeight:600, textTransform:'uppercase', letterSpacing:'0.05em' }}>Or design manually</div>
         <div style={{ fontSize:12, color:'var(--gw-mist)', marginBottom:10 }}>
-          1. Click below to open Canva templates · 2. Apply your generated copy · 3. Paste your Canva share URL below
+          1. Open Canva templates · 2. Apply your generated copy · 3. Paste your Canva share URL below
         </div>
         <a href={canvaSearchUrl} target="_blank" rel="noopener noreferrer" className="btn btn--ghost btn--sm"
           style={{ display:'inline-block', marginBottom:12, background:'#dbeafe', borderColor:'#93c5fd', color:'#1d4ed8' }}>

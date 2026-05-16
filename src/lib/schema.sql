@@ -644,3 +644,33 @@ alter table mail_campaigns add column if not exists schedule_steps jsonb default
 
 -- ── Implementation #18: Industry Benchmarks ──────────────────────────────────
 -- (no schema changes — computed at query time from sends/costs)
+
+-- ── Canva Direct API Integration ─────────────────────────────────────────────
+-- Per-agent OAuth tokens for Canva Connect API. Allows agents to push campaign
+-- copy + property photos into Canva brand templates with one click.
+create table if not exists canva_connections (
+  id              uuid primary key default uuid_generate_v4(),
+  agent_id        uuid references agents(id) on delete cascade,
+  canva_user_id   text,
+  canva_team_id   text,
+  display_name    text,
+  access_token    text not null,
+  refresh_token   text,
+  expires_at      timestamptz,
+  scope           text,
+  created_at      timestamptz default now(),
+  updated_at      timestamptz default now(),
+  unique (agent_id)
+);
+create index if not exists canva_connections_agent_idx on canva_connections(agent_id);
+alter table canva_connections enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='canva_connections' and policyname='allow_all') then
+    create policy "allow_all" on canva_connections for all using (true) with check (true);
+  end if;
+end $$;
+
+-- Track which Canva design (if any) is bound to which campaign
+alter table mail_campaigns add column if not exists canva_design_id   text;
+alter table mail_campaigns add column if not exists canva_template_id text;
+alter table mail_campaigns add column if not exists canva_thumbnail   text;

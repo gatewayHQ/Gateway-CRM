@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import crypto from 'node:crypto'
 
 const _rawUrl      = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
 // Strip accidental /rest/v1 suffix or trailing slashes (avoids PGRST107 double-path)
@@ -990,9 +991,477 @@ export default async function handler(req, res) {
       })
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Canva Direct API Integration (#10)
+    // ─────────────────────────────────────────────────────────────────────
+
+    if (action === 'canva_oauth_init') {
+      const { agent_id, redirect_origin } = req.body
+      if (!agent_id)        return res.status(400).json({ error: 'agent_id is required' })
+      if (!redirect_origin) return res.status(400).json({ error: 'redirect_origin is required' })
+      if (!process.env.CANVA_CLIENT_ID || !process.env.CANVA_CLIENT_SECRET) {
+        return res.status(400).json({
+          error: 'CANVA_CLIENT_ID and CANVA_CLIENT_SECRET environment variables are not set',
+          setup_help: 'Add CANVA_CLIENT_ID and CANVA_CLIENT_SECRET to your Vercel project Settings → Environment Variables. Get credentials at https://www.canva.com/developers/',
+        })
+      }
+      // Validate redirect_origin matches request origin (prevents open redirect)
+      const reqOrigin = `${req.headers['x-forwarded-proto'] || 'https'}://${req.headers['x-forwarded-host'] || req.headers.host}`
+      if (redirect_origin !== reqOrigin) {
+        return res.status(400).json({ error: `redirect_origin mismatch (expected ${reqOrigin})` })
+      }
+      // HMAC-signed state prevents agent_id forgery / CSRF
+      const state        = signState({ a: agent_id, n: crypto.randomBytes(8).toString('hex'), o: redirect_origin, t: Date.now() })
+      const redirect_uri = `${redirect_origin}/api/campaigns?action=canva_oauth_callback`
+      const scopes       = [
+        'design:content:read', 'design:content:write', 'design:meta:read',
+        'brandtemplate:meta:read', 'brandtemplate:content:read',
+        'asset:read', 'asset:write',
+        'profile:read',
+      ].join(' ')
+      const authUrl = `https://www.canva.com/api/oauth/authorize?` + new URLSearchParams({
+        client_id:     process.env.CANVA_CLIENT_ID,
+        response_type: 'code',
+        redirect_uri,
+        scope:         scopes,
+        state,
+      }).toString()
+      return res.json({ auth_url: authUrl })
+    }
+
+    if (action === 'canva_oauth_callback') {
+      const { code, state, error: cbError } = req.query
+      const reqOrigin = `${req.headers['x-forwarded-proto'] || 'https'}://${req.headers['x-forwarded-host'] || req.headers.host}`
+      if (cbError) return res.redirect(302, `${reqOrigin}/?canva_error=${encodeURIComponent(cbError)}`)
+      if (!code || !state) return res.redirect(302, `${reqOrigin}/?canva_error=missing_code`)
+
+      const parsedState = verifyState(state)
+      if (!parsedState) return res.redirect(302, `${reqOrigin}/?canva_error=invalid_state`)
+
+      const { a: agent_id, o: origin, t: issuedAt } = parsedState
+      // Reject states older than 10 minutes (replay protection)
+      if (!agent_id || !origin || !issuedAt || Date.now() - issuedAt > 600_000) {
+        return res.redirect(302, `${reqOrigin}/?canva_error=state_expired`)
+      }
+      // Origin must match the request's actual origin (prevents open redirect)
+      if (origin !== reqOrigin) return res.redirect(302, `${reqOrigin}/?canva_error=origin_mismatch`)
+
+      const redirect_uri = `${origin}/api/campaigns?action=canva_oauth_callback`
+      const tokenRes     = await fetch('https://api.canva.com/rest/v1/oauth/token', {
+        method:  'POST',
+        headers: {
+          'Content-Type':  'application/x-www-form-urlencoded',
+          'Authorization': 'Basic ' + Buffer.from(`${process.env.CANVA_CLIENT_ID}:${process.env.CANVA_CLIENT_SECRET}`).toString('base64'),
+        },
+        body: new URLSearchParams({
+          grant_type:   'authorization_code',
+          code,
+          redirect_uri,
+        }).toString(),
+      })
+      const tokens = await tokenRes.json()
+      if (!tokenRes.ok) {
+        console.error('[canva] token exchange failed', tokens)
+        return res.redirect(302, `${origin}/?canva_error=${encodeURIComponent(tokens.error || 'token_exchange_failed')}`)
+      }
+
+      // Fetch user profile for display
+      let profile = {}
+      try {
+        const meRes = await fetch('https://api.canva.com/rest/v1/users/me/profile', {
+          headers: { Authorization: `Bearer ${tokens.access_token}` },
+        })
+        if (meRes.ok) profile = (await meRes.json()).profile || {}
+      } catch (_) {}
+
+      const expiresAt = tokens.expires_in
+        ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
+        : null
+
+      // Upsert connection (one per agent)
+      const { error: upsertErr } = await supabase
+        .from('canva_connections')
+        .upsert({
+          agent_id,
+          access_token:  tokens.access_token,
+          refresh_token: tokens.refresh_token || null,
+          expires_at:    expiresAt,
+          scope:         tokens.scope || null,
+          display_name:  profile.display_name || null,
+          canva_user_id: profile.user_id || null,
+          canva_team_id: profile.team_user_id || null,
+          updated_at:    new Date().toISOString(),
+        }, { onConflict: 'agent_id' })
+
+      if (upsertErr) {
+        console.error('[canva] db upsert failed', upsertErr)
+        // Common cause: schema cache missing canva_connections table
+        const isMissing = /canva_connections|schema cache/i.test(upsertErr.message || '')
+        return res.redirect(302, `${origin}/?canva_error=${encodeURIComponent(isMissing ? 'migration_required' : (upsertErr.message || 'db_error'))}`)
+      }
+
+      return res.redirect(302, `${origin}/?canva_connected=1`)
+    }
+
+    if (action === 'canva_status') {
+      const { agent_id } = req.query
+      if (!agent_id) return res.status(400).json({ error: 'agent_id is required' })
+      const { data, error } = await supabase
+        .from('canva_connections')
+        .select('agent_id, display_name, canva_user_id, expires_at, scope, updated_at')
+        .eq('agent_id', agent_id)
+        .maybeSingle()
+      if (error) {
+        if (/canva_connections|schema cache/i.test(error.message || '')) {
+          return res.status(400).json({
+            error:              'Database migration required for Canva integration',
+            migration_required: true,
+            migration_sql:      `create table if not exists canva_connections (
+  id              uuid primary key default uuid_generate_v4(),
+  agent_id        uuid references agents(id) on delete cascade,
+  canva_user_id   text,
+  canva_team_id   text,
+  display_name    text,
+  access_token    text not null,
+  refresh_token   text,
+  expires_at      timestamptz,
+  scope           text,
+  created_at      timestamptz default now(),
+  updated_at      timestamptz default now(),
+  unique (agent_id)
+);
+alter table canva_connections enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='canva_connections' and policyname='allow_all') then
+    create policy "allow_all" on canva_connections for all using (true) with check (true);
+  end if;
+end $$;
+alter table mail_campaigns add column if not exists canva_design_id   text;
+alter table mail_campaigns add column if not exists canva_template_id text;
+alter table mail_campaigns add column if not exists canva_thumbnail   text;`,
+          })
+        }
+        throw error
+      }
+      const connected = !!data
+      const expired   = data?.expires_at ? new Date(data.expires_at) < new Date() : false
+      return res.json({ connected, expired, connection: data })
+    }
+
+    if (action === 'canva_disconnect') {
+      const { agent_id } = req.body
+      if (!agent_id) return res.status(400).json({ error: 'agent_id is required' })
+      await supabase.from('canva_connections').delete().eq('agent_id', agent_id)
+      return res.json({ ok: true })
+    }
+
+    if (action === 'canva_list_templates') {
+      const { agent_id } = req.query
+      if (!agent_id) return res.status(400).json({ error: 'agent_id is required' })
+      const token = await getCanvaAccessToken(supabase, agent_id)
+      if (!token.ok) return res.status(token.status || 400).json({ error: token.error, ...token.extra })
+
+      const tplRes = await fetch('https://api.canva.com/rest/v1/brand-templates?limit=50', {
+        headers: { Authorization: `Bearer ${token.access_token}` },
+      })
+      const tplData = await tplRes.json()
+      if (!tplRes.ok) return res.status(tplRes.status).json({ error: tplData.message || 'Failed to list templates', detail: tplData })
+      return res.json({ templates: tplData.items || [] })
+    }
+
+    if (action === 'canva_template_dataset') {
+      const { agent_id, template_id } = req.query
+      if (!agent_id || !template_id) return res.status(400).json({ error: 'agent_id and template_id are required' })
+      const token = await getCanvaAccessToken(supabase, agent_id)
+      if (!token.ok) return res.status(token.status || 400).json({ error: token.error })
+
+      const dsRes = await fetch(`https://api.canva.com/rest/v1/brand-templates/${template_id}/dataset`, {
+        headers: { Authorization: `Bearer ${token.access_token}` },
+      })
+      const dsData = await dsRes.json()
+      if (!dsRes.ok) return res.status(dsRes.status).json({ error: dsData.message || 'Failed to load template dataset', detail: dsData })
+      return res.json({ dataset: dsData.dataset || {} })
+    }
+
+    if (action === 'canva_autofill') {
+      const { agent_id, campaign_id, template_id, photo_url } = req.body
+      if (!agent_id || !campaign_id || !template_id) {
+        return res.status(400).json({ error: 'agent_id, campaign_id, and template_id are required' })
+      }
+      const token = await getCanvaAccessToken(supabase, agent_id)
+      if (!token.ok) return res.status(token.status || 400).json({ error: token.error })
+
+      // Load campaign for autofill data
+      const { data: campaign, error: cErr } = await supabase
+        .from('mail_campaigns').select('*').eq('id', campaign_id).single()
+      if (cErr || !campaign) return res.status(404).json({ error: 'Campaign not found' })
+
+      const { data: agent } = await supabase
+        .from('agents').select('name, role, email').eq('id', agent_id).maybeSingle()
+
+      // Optional: upload property photo to Canva and reference it in autofill
+      let assetId = null
+      const effectivePhotoUrl = photo_url || campaign.flyer_photo_urls?.[0] || null
+      if (effectivePhotoUrl) {
+        try {
+          assetId = await uploadCanvaAsset(token.access_token, effectivePhotoUrl, `campaign-${campaign_id}-${Date.now()}.jpg`)
+        } catch (e) {
+          console.warn('[canva] asset upload failed, continuing without image:', e.message)
+        }
+      }
+
+      // Build autofill data map. Common placeholder names — admin should
+      // name their brand template placeholders to match these for best results.
+      const data = {}
+      const addText  = (k, v) => { if (v) data[k] = { type: 'text',  text:     String(v) } }
+      const addImage = (k, v) => { if (v) data[k] = { type: 'image', asset_id: v } }
+
+      addText('headline',     campaign.landing_headline)
+      addText('subheadline',  campaign.landing_tagline)
+      addText('tagline',      campaign.landing_tagline)
+      addText('cta',          campaign.landing_cta)
+      addText('agent_name',   agent?.name)
+      addText('agent_role',   agent?.role)
+      addText('agent_email',  agent?.email)
+      addText('campaign_name', campaign.name)
+      addText('photo_caption', campaign.flyer_photo_caption)
+      if (assetId) {
+        addImage('photo',         assetId)
+        addImage('property_image', assetId)
+        addImage('hero_image',     assetId)
+      }
+
+      const fillRes = await fetch('https://api.canva.com/rest/v1/autofills', {
+        method:  'POST',
+        headers: {
+          Authorization:  `Bearer ${token.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          brand_template_id: template_id,
+          title:             `${campaign.name} — Canva Design`,
+          data,
+        }),
+      })
+      const fillData = await fillRes.json()
+      if (!fillRes.ok) {
+        return res.status(fillRes.status).json({
+          error: fillData.message || 'Canva autofill failed',
+          detail: fillData,
+          hint: 'Ensure your Canva brand template has placeholders named: headline, subheadline, cta, agent_name, photo (image).',
+        })
+      }
+
+      // Autofill jobs are async — poll briefly for completion
+      let jobId      = fillData.job?.id
+      let designId   = fillData.job?.result?.design?.id
+      let designUrl  = fillData.job?.result?.design?.url
+      let thumbnail  = fillData.job?.result?.design?.thumbnail?.url
+
+      if (!designId && jobId) {
+        for (let i = 0; i < 8 && !designId; i++) {
+          await new Promise(r => setTimeout(r, 1200))
+          const poll = await fetch(`https://api.canva.com/rest/v1/autofills/${jobId}`, {
+            headers: { Authorization: `Bearer ${token.access_token}` },
+          })
+          const pollData = await poll.json()
+          if (poll.ok && pollData.job?.status === 'success') {
+            designId  = pollData.job.result?.design?.id
+            designUrl = pollData.job.result?.design?.url
+            thumbnail = pollData.job.result?.design?.thumbnail?.url
+            break
+          }
+          if (poll.ok && pollData.job?.status === 'failed') {
+            return res.status(500).json({ error: 'Canva autofill job failed', detail: pollData.job })
+          }
+        }
+      }
+
+      if (!designId) {
+        return res.status(202).json({
+          pending: true,
+          job_id:  jobId,
+          message: 'Autofill job submitted but not yet complete. Try refreshing in a moment.',
+        })
+      }
+
+      // Save design URL back to campaign
+      await supabase.from('mail_campaigns').update({
+        canva_design_url:  designUrl,
+        canva_design_id:   designId,
+        canva_template_id: template_id,
+        canva_thumbnail:   thumbnail || null,
+      }).eq('id', campaign_id)
+
+      return res.json({
+        design_id:  designId,
+        design_url: designUrl,
+        thumbnail,
+      })
+    }
+
+    if (action === 'canva_export') {
+      const { agent_id, design_id, format = 'pdf' } = req.body
+      if (!agent_id || !design_id) return res.status(400).json({ error: 'agent_id and design_id are required' })
+      const token = await getCanvaAccessToken(supabase, agent_id)
+      if (!token.ok) return res.status(token.status || 400).json({ error: token.error })
+
+      const expRes = await fetch('https://api.canva.com/rest/v1/exports', {
+        method:  'POST',
+        headers: {
+          Authorization:  `Bearer ${token.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          design_id,
+          format: { type: format === 'png' ? 'png' : 'pdf' },
+        }),
+      })
+      const expData = await expRes.json()
+      if (!expRes.ok) return res.status(expRes.status).json({ error: expData.message || 'Export failed', detail: expData })
+
+      // Poll for export completion
+      let jobId = expData.job?.id
+      let urls  = expData.job?.urls
+      for (let i = 0; i < 10 && !urls; i++) {
+        await new Promise(r => setTimeout(r, 1500))
+        const poll = await fetch(`https://api.canva.com/rest/v1/exports/${jobId}`, {
+          headers: { Authorization: `Bearer ${token.access_token}` },
+        })
+        const pollData = await poll.json()
+        if (poll.ok && pollData.job?.status === 'success') { urls = pollData.job.urls; break }
+        if (poll.ok && pollData.job?.status === 'failed')  { return res.status(500).json({ error: 'Export failed', detail: pollData.job }) }
+      }
+      if (!urls) return res.status(202).json({ pending: true, job_id: jobId })
+      return res.json({ urls })
+    }
+
     return res.status(400).json({ error: `Unknown action: ${action}` })
   } catch (err) {
     console.error('[campaigns]', err)
     return res.status(500).json({ error: err.message })
   }
+}
+
+// ── Canva asset upload (with size guard + robust polling) ──────────────────
+const MAX_CANVA_UPLOAD_BYTES = 25 * 1024 * 1024  // 25 MB Canva limit
+
+async function uploadCanvaAsset(accessToken, photoUrl, filename) {
+  const imgRes = await fetch(photoUrl)
+  if (!imgRes.ok) throw new Error(`fetch ${imgRes.status}`)
+  const lengthHeader = parseInt(imgRes.headers.get('content-length') || '0', 10)
+  if (lengthHeader && lengthHeader > MAX_CANVA_UPLOAD_BYTES) throw new Error(`asset too large: ${lengthHeader} bytes`)
+
+  const buf = Buffer.from(await imgRes.arrayBuffer())
+  if (buf.length > MAX_CANVA_UPLOAD_BYTES) throw new Error(`asset too large: ${buf.length} bytes`)
+
+  const meta = Buffer.from(JSON.stringify({ name_base64: Buffer.from(filename).toString('base64') })).toString('base64')
+  const uploadRes = await fetch('https://api.canva.com/rest/v1/asset-uploads', {
+    method:  'POST',
+    headers: {
+      'Authorization':         `Bearer ${accessToken}`,
+      'Content-Type':          'application/octet-stream',
+      'Asset-Upload-Metadata': meta,
+    },
+    body: buf,
+  })
+  const uploadData = await uploadRes.json()
+  if (!uploadRes.ok) throw new Error(uploadData.message || `upload failed (${uploadRes.status})`)
+
+  if (uploadData.job?.asset?.id) return uploadData.job.asset.id
+
+  const jobId = uploadData.job?.id
+  if (!jobId) throw new Error('no job id in upload response')
+
+  // Poll up to ~12s with exponential backoff
+  let delay = 800
+  for (let i = 0; i < 6; i++) {
+    await new Promise(r => setTimeout(r, delay))
+    const poll = await fetch(`https://api.canva.com/rest/v1/asset-uploads/${jobId}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+    const pollData = await poll.json()
+    if (poll.ok && pollData.job?.status === 'success' && pollData.job.asset?.id) return pollData.job.asset.id
+    if (poll.ok && pollData.job?.status === 'failed')                              throw new Error('upload job failed')
+    delay = Math.min(delay * 1.5, 3000)
+  }
+  throw new Error('upload polling timeout')
+}
+
+// ── Canva OAuth state signing (HMAC-SHA256) ────────────────────────────────
+// Uses CANVA_STATE_SECRET if set, else derives from CANVA_CLIENT_SECRET.
+// State format: base64url(payload).base64url(hmac)
+function stateSecret() {
+  return process.env.CANVA_STATE_SECRET || process.env.CANVA_CLIENT_SECRET || ''
+}
+
+function signState(payload) {
+  const json = Buffer.from(JSON.stringify(payload)).toString('base64url')
+  const sig  = crypto.createHmac('sha256', stateSecret()).update(json).digest('base64url')
+  return `${json}.${sig}`
+}
+
+function verifyState(state) {
+  if (typeof state !== 'string' || !state.includes('.')) return null
+  const [json, sig] = state.split('.')
+  if (!json || !sig) return null
+  const expected = crypto.createHmac('sha256', stateSecret()).update(json).digest('base64url')
+  // Constant-time compare
+  const a = Buffer.from(sig)
+  const b = Buffer.from(expected)
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null
+  try { return JSON.parse(Buffer.from(json, 'base64url').toString('utf8')) }
+  catch (_) { return null }
+}
+
+// ── Canva token helper ─────────────────────────────────────────────────────
+// Reads stored token, refreshes if within 60s of expiry, returns { ok, access_token } or error
+async function getCanvaAccessToken(supabase, agent_id) {
+  const { data: conn, error } = await supabase
+    .from('canva_connections')
+    .select('*')
+    .eq('agent_id', agent_id)
+    .maybeSingle()
+  if (error) {
+    if (/canva_connections|schema cache/i.test(error.message || '')) {
+      return { ok: false, status: 400, error: 'Database migration required for Canva integration. Run the migration SQL from src/lib/schema.sql.' }
+    }
+    return { ok: false, status: 500, error: error.message }
+  }
+  if (!conn) return { ok: false, status: 401, error: 'Canva not connected for this agent', extra: { not_connected: true } }
+
+  const willExpireSoon = conn.expires_at && new Date(conn.expires_at).getTime() - Date.now() < 60_000
+
+  if (!willExpireSoon) return { ok: true, access_token: conn.access_token }
+
+  if (!conn.refresh_token) {
+    return { ok: false, status: 401, error: 'Canva token expired — please reconnect', extra: { reconnect_required: true } }
+  }
+
+  // Refresh
+  const refreshRes = await fetch('https://api.canva.com/rest/v1/oauth/token', {
+    method:  'POST',
+    headers: {
+      'Content-Type':  'application/x-www-form-urlencoded',
+      'Authorization': 'Basic ' + Buffer.from(`${process.env.CANVA_CLIENT_ID}:${process.env.CANVA_CLIENT_SECRET}`).toString('base64'),
+    },
+    body: new URLSearchParams({
+      grant_type:    'refresh_token',
+      refresh_token: conn.refresh_token,
+    }).toString(),
+  })
+  const tokens = await refreshRes.json()
+  if (!refreshRes.ok) {
+    return { ok: false, status: 401, error: 'Canva token refresh failed — please reconnect', extra: { reconnect_required: true } }
+  }
+
+  const expiresAt = tokens.expires_in ? new Date(Date.now() + tokens.expires_in * 1000).toISOString() : null
+  await supabase.from('canva_connections').update({
+    access_token:  tokens.access_token,
+    refresh_token: tokens.refresh_token || conn.refresh_token,
+    expires_at:    expiresAt,
+    updated_at:    new Date().toISOString(),
+  }).eq('agent_id', agent_id)
+
+  return { ok: true, access_token: tokens.access_token }
 }

@@ -181,7 +181,31 @@ export default function App() {
   const [session, setSession] = useState(null)
   const [db, setDb] = useState(EMPTY_DB)
   const [loading, setLoading] = useState(true)
-  const [route, setRoute] = useState('dashboard')
+  const [route, setRoute] = useState(() => {
+    const p = new URLSearchParams(window.location.search)
+    if (p.get('canva_connected') || p.get('canva_error')) return 'campaigns'
+    return 'dashboard'
+  })
+
+  // Handle Canva OAuth callback redirect (?canva_connected=1 or ?canva_error=...)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const ok     = params.get('canva_connected')
+    const err    = params.get('canva_error')
+    if (!ok && !err) return
+    if (ok)  pushToast('Canva connected successfully', 'success')
+    if (err) {
+      const msg = err === 'migration_required'
+        ? 'Canva: database migration required. Run the SQL from src/lib/schema.sql in Supabase.'
+        : `Canva connection failed: ${err}`
+      pushToast(msg, 'error')
+    }
+    const url = new URL(window.location.href)
+    url.searchParams.delete('canva_connected')
+    url.searchParams.delete('canva_error')
+    window.history.replaceState({}, '', url.pathname + (url.search ? '?' + url.searchParams.toString() : ''))
+  }, [])
+
   const [collapsed, setCollapsed] = useState(false)
   const [activeAgentId, setActiveAgentId] = useState(null)
   const [visibleAgentIds, setVisibleAgentIds] = useState([])
