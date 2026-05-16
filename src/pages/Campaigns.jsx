@@ -239,54 +239,68 @@ function QRPanel({ campaign, onUpdate, onScanCountLoad }) {
 }
 
 // ── Postcard visual renderer ──────────────────────────────────────────────────
-function PostcardPreview({ copy, template, agentObj }) {
+function PostcardPreview({ copy, template, agentObj, photoUrl, photoCaption }) {
   const d = TEMPLATE_DESIGNS[template] || TEMPLATE_DESIGNS.just_listed
   const badge = TEMPLATE_BADGE_LABELS[template] || 'Campaign'
+  const hasPhoto = !!photoUrl
   return (
     <div style={{ borderRadius:10, overflow:'hidden', boxShadow:'0 6px 28px rgba(0,0,0,0.22)', background:d.bg, display:'flex', flexDirection:'column' }}>
       {/* Header */}
-      <div style={{ background:d.headerBg, padding:'10px 16px', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+      <div style={{ background:d.headerBg, padding: hasPhoto ? '8px 14px' : '10px 16px', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
         <span style={{ background:d.accent, color:d.accentText, padding:'3px 12px', borderRadius:20, fontSize:10, fontWeight:800, letterSpacing:'0.07em', textTransform:'uppercase' }}>
           {badge}
         </span>
         {agentObj && (
-          <div style={{ width:32, height:32, borderRadius:'50%', background:agentObj.color||d.accent, display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontWeight:800, color:'#fff', boxShadow:'0 2px 8px rgba(0,0,0,0.25)', flexShrink:0 }}>
+          <div style={{ width:30, height:30, borderRadius:'50%', background:agentObj.color||d.accent, display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontWeight:800, color:'#fff', boxShadow:'0 2px 8px rgba(0,0,0,0.25)', flexShrink:0 }}>
             {agentObj.initials || agentObj.name?.[0] || '?'}
           </div>
         )}
       </div>
+      {/* Property photo */}
+      {hasPhoto && (
+        <div style={{ position:'relative', height:130, flexShrink:0, overflow:'hidden' }}>
+          <img src={photoUrl} alt="Property" style={{ width:'100%', height:'100%', objectFit:'cover' }} loading="lazy"/>
+          {photoCaption && (
+            <div style={{ position:'absolute', bottom:0, left:0, right:0, background:'rgba(0,0,0,0.58)', padding:'4px 10px', fontSize:9, color:'#fff', lineHeight:1.3 }}>
+              {photoCaption}
+            </div>
+          )}
+        </div>
+      )}
       {/* Body */}
-      <div style={{ padding:'14px 18px', display:'flex', flexDirection:'column', gap:8 }}>
-        <div style={{ fontSize:20, fontWeight:900, color:d.text, lineHeight:1.15, textTransform:'uppercase', letterSpacing:'0.02em', fontFamily:'var(--font-display)' }}>
+      <div style={{ padding: hasPhoto ? '8px 14px' : '14px 18px', display:'flex', flexDirection:'column', gap: hasPhoto ? 4 : 8, flex:1 }}>
+        <div style={{ fontSize: hasPhoto ? 15 : 20, fontWeight:900, color:d.text, lineHeight:1.15, textTransform:'uppercase', letterSpacing:'0.02em', fontFamily:'var(--font-display)' }}>
           {copy.headline}
         </div>
-        <div style={{ fontSize:13, fontWeight:700, color:d.accent, lineHeight:1.3 }}>
+        <div style={{ fontSize: hasPhoto ? 10 : 13, fontWeight:700, color:d.accent, lineHeight:1.3 }}>
           {copy.subheadline}
         </div>
-        <p style={{ fontSize:12, color:d.text, opacity:0.9, lineHeight:1.6, margin:0 }}>
-          {copy.tagline}
-        </p>
+        {!hasPhoto && (
+          <p style={{ fontSize:12, color:d.text, opacity:0.9, lineHeight:1.6, margin:0 }}>
+            {copy.tagline}
+          </p>
+        )}
         {copy.bullets?.length > 0 && (
-          <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+          <div style={{ display:'flex', flexWrap: hasPhoto ? 'wrap' : 'nowrap', flexDirection: hasPhoto ? 'row' : 'column', gap: hasPhoto ? '3px 10px' : 4 }}>
             {copy.bullets.map((b, i) => (
-              <div key={i} style={{ display:'flex', gap:8, alignItems:'flex-start', fontSize:12, color:d.text }}>
+              <div key={i} style={{ display:'flex', gap: hasPhoto ? 4 : 8, alignItems:'flex-start', fontSize: hasPhoto ? 9 : 12, color:d.text }}>
                 <span style={{ color:d.accent, fontWeight:800, flexShrink:0, lineHeight:1.5 }}>✓</span>
                 <span style={{ lineHeight:1.5 }}>{b}</span>
               </div>
             ))}
           </div>
         )}
-        <div style={{ alignSelf:'flex-start', background:d.accent, color:d.accentText, padding:'9px 20px', borderRadius:8, fontSize:12, fontWeight:800, letterSpacing:'0.03em', marginTop:2 }}>
+        <div style={{ alignSelf:'flex-start', background:d.accent, color:d.accentText, padding: hasPhoto ? '5px 14px' : '9px 20px', borderRadius:8, fontSize: hasPhoto ? 10 : 12, fontWeight:800, letterSpacing:'0.03em', marginTop:2 }}>
           {copy.cta}
         </div>
       </div>
       {/* Footer */}
       {agentObj?.name && (
-        <div style={{ borderTop:`1px solid ${d.headerBg}`, padding:'8px 18px', display:'flex', gap:10, alignItems:'center' }}>
-          <div style={{ width:22, height:22, borderRadius:'50%', background:agentObj.color||d.accent, display:'flex', alignItems:'center', justifyContent:'center', fontSize:9, fontWeight:800, color:'#fff', flexShrink:0 }}>
+        <div style={{ borderTop:`1px solid ${d.headerBg}`, padding:'6px 14px', display:'flex', gap:8, alignItems:'center' }}>
+          <div style={{ width:20, height:20, borderRadius:'50%', background:agentObj.color||d.accent, display:'flex', alignItems:'center', justifyContent:'center', fontSize:8, fontWeight:800, color:'#fff', flexShrink:0 }}>
             {agentObj.initials || agentObj.name?.[0] || '?'}
           </div>
-          <span style={{ fontSize:10, color:d.text, opacity:0.65 }}>
+          <span style={{ fontSize:9, color:d.text, opacity:0.65 }}>
             {[agentObj.name, agentObj.role, agentObj.email].filter(Boolean).join(' · ')}
           </span>
         </div>
@@ -295,15 +309,22 @@ function PostcardPreview({ copy, template, agentObj }) {
   )
 }
 
-function printFlyerWindow(copy, template, agentObj, campaignName) {
+function printFlyerWindow(copy, template, agentObj, campaignName, photoUrl = '', photoCaption = '') {
   const d = TEMPLATE_DESIGNS[template] || TEMPLATE_DESIGNS.just_listed
   const badge = TEMPLATE_BADGE_LABELS[template] || 'Campaign'
   const agentInitials = agentObj ? (agentObj.initials || agentObj.name?.[0] || '') : ''
   const agentColor    = agentObj?.color || d.accent
   const agentInfo     = agentObj ? [agentObj.name, agentObj.role, agentObj.email].filter(Boolean).join(' · ') : ''
+  const hasPhoto      = !!photoUrl
   const bulletsHtml   = (copy.bullets || []).map(b =>
     `<li><span style="color:${d.accent};font-weight:800;flex-shrink:0;">✓</span> ${b}</li>`
   ).join('')
+
+  const photoSection = hasPhoto ? `
+    <div class="photo-wrap">
+      <img src="${photoUrl}" class="photo-img" alt="Property"/>
+      ${photoCaption ? `<div class="photo-cap">${photoCaption}</div>` : ''}
+    </div>` : ''
 
   const w = window.open('', '_blank', 'width=960,height=700')
   if (!w) { pushToast('Allow pop-ups to print the flyer', 'error'); return }
@@ -313,18 +334,21 @@ function printFlyerWindow(copy, template, agentObj, campaignName) {
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: 6in; height: 4in; overflow: hidden; }
   body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background: ${d.bg}; display: flex; flex-direction: column; }
-  .hdr { background: ${d.headerBg}; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+  .hdr { background: ${d.headerBg}; padding: ${hasPhoto ? '8px 18px' : '12px 20px'}; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
   .badge { background: ${d.accent}; color: ${d.accentText}; padding: 4px 14px; border-radius: 20px; font-size: 10pt; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; }
-  .av { width: 40px; height: 40px; border-radius: 50%; background: ${agentColor}; display: flex; align-items: center; justify-content: center; font-size: 13pt; font-weight: 800; color: #fff; }
-  .body { flex: 1; padding: 16px 22px 10px; display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
-  .hl { font-size: 22pt; font-weight: 900; color: ${d.text}; line-height: 1.1; text-transform: uppercase; letter-spacing: 0.02em; }
-  .sub { font-size: 11pt; font-weight: 700; color: ${d.accent}; }
+  .av { width: ${hasPhoto ? '32px' : '40px'}; height: ${hasPhoto ? '32px' : '40px'}; border-radius: 50%; background: ${agentColor}; display: flex; align-items: center; justify-content: center; font-size: 11pt; font-weight: 800; color: #fff; }
+  .photo-wrap { position: relative; height: ${hasPhoto ? '1.6in' : '0'}; flex-shrink: 0; overflow: hidden; }
+  .photo-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .photo-cap { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.58); padding: 4px 12px; font-size: 8pt; color: #fff; }
+  .body { flex: 1; padding: ${hasPhoto ? '10px 20px 8px' : '16px 22px 10px'}; display: flex; flex-direction: column; gap: ${hasPhoto ? '5px' : '8px'}; overflow: hidden; }
+  .hl { font-size: ${hasPhoto ? '16pt' : '22pt'}; font-weight: 900; color: ${d.text}; line-height: 1.1; text-transform: uppercase; letter-spacing: 0.02em; }
+  .sub { font-size: ${hasPhoto ? '10pt' : '11pt'}; font-weight: 700; color: ${d.accent}; }
   .tag { font-size: 10pt; color: ${d.text}; opacity: 0.9; line-height: 1.5; }
-  ul { list-style: none; display: flex; flex-direction: column; gap: 5px; }
-  li { font-size: 10pt; color: ${d.text}; display: flex; gap: 8px; align-items: flex-start; }
-  .cta { display: inline-block; background: ${d.accent}; color: ${d.accentText}; padding: 9px 20px; border-radius: 8px; font-size: 10pt; font-weight: 800; letter-spacing: 0.03em; margin-top: 4px; }
-  .ftr { border-top: 1px solid ${d.headerBg}; padding: 8px 22px; display: flex; gap: 12px; align-items: center; flex-shrink: 0; }
-  .av-sm { width: 22px; height: 22px; border-radius: 50%; background: ${agentColor}; display: inline-flex; align-items: center; justify-content: center; font-size: 8pt; font-weight: 800; color: #fff; flex-shrink: 0; }
+  ul { list-style: none; display: flex; flex-direction: ${hasPhoto ? 'row' : 'column'}; flex-wrap: ${hasPhoto ? 'wrap' : 'nowrap'}; gap: ${hasPhoto ? '4px 14px' : '5px'}; }
+  li { font-size: ${hasPhoto ? '9pt' : '10pt'}; color: ${d.text}; display: flex; gap: 6px; align-items: flex-start; }
+  .cta { display: inline-block; background: ${d.accent}; color: ${d.accentText}; padding: ${hasPhoto ? '6px 16px' : '9px 20px'}; border-radius: 8px; font-size: ${hasPhoto ? '9pt' : '10pt'}; font-weight: 800; letter-spacing: 0.03em; margin-top: 4px; }
+  .ftr { border-top: 1px solid ${d.headerBg}; padding: 7px 20px; display: flex; gap: 10px; align-items: center; flex-shrink: 0; }
+  .av-sm { width: 20px; height: 20px; border-radius: 50%; background: ${agentColor}; display: inline-flex; align-items: center; justify-content: center; font-size: 7pt; font-weight: 800; color: #fff; flex-shrink: 0; }
   .ftr-txt { font-size: 9pt; color: ${d.text}; opacity: 0.65; }
 </style>
 </head><body>
@@ -332,10 +356,11 @@ function printFlyerWindow(copy, template, agentObj, campaignName) {
     <span class="badge">${badge}</span>
     ${agentInitials ? `<div class="av">${agentInitials}</div>` : ''}
   </div>
+  ${photoSection}
   <div class="body">
     <div class="hl">${copy.headline}</div>
     <div class="sub">${copy.subheadline}</div>
-    <div class="tag">${copy.tagline}</div>
+    ${!hasPhoto ? `<div class="tag">${copy.tagline}</div>` : ''}
     <ul>${bulletsHtml}</ul>
     <span class="cta">${copy.cta}</span>
   </div>
@@ -356,7 +381,84 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
   const [canvaUrl,         setCanvaUrl]         = useState(campaign.canva_design_url || '')
   const [savingCanva,      setSavingCanva]      = useState(false)
 
+  // ── Property photo states ──────────────────────────────────────────────────
+  const [properties,       setProperties]       = useState([])
+  const [propsLoaded,      setPropsLoaded]      = useState(false)
+  const [linkedProperty,   setLinkedProperty]   = useState(null)
+  const [propertyPhotos,   setPropertyPhotos]   = useState([])
+  const [selectedPhotoUrl, setSelectedPhotoUrl] = useState(campaign.flyer_photo_urls?.[0] || '')
+  const [photoCaption,     setPhotoCaption]     = useState(campaign.flyer_photo_caption || '')
+  const [savingProperty,   setSavingProperty]   = useState(false)
+
   const agentObj = agents?.find(a => a.id === campaign.agent_id)
+
+  // Load linked property on mount
+  useEffect(() => {
+    if (!campaign.property_id) return
+    fetch(`/api/campaigns?action=get_property_photos&property_id=${campaign.property_id}`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.property) setLinkedProperty(d.property)
+        if (d.photos)   setPropertyPhotos(d.photos)
+      })
+      .catch(() => {})
+  }, [campaign.property_id])
+
+  const loadProperties = async () => {
+    if (propsLoaded) return
+    const { data } = await supabase
+      .from('properties')
+      .select('id, address, city, state, zip, type, status, list_price, details')
+      .order('created_at', { ascending: false })
+      .limit(300)
+    setProperties(data || [])
+    setPropsLoaded(true)
+  }
+
+  const onSelectProperty = (id) => {
+    if (!id) {
+      setLinkedProperty(null)
+      setPropertyPhotos([])
+      setSelectedPhotoUrl('')
+      setPhotoCaption('')
+      return
+    }
+    const prop = properties.find(p => p.id === id)
+    if (!prop) return
+    setLinkedProperty(prop)
+    setPropertyPhotos(prop.details?.photos || [])
+    const pricePart = prop.list_price ? ` — Listed at $${Number(prop.list_price).toLocaleString()}` : ''
+    setPhotoCaption(`${prop.address}${prop.city ? `, ${prop.city}` : ''}${prop.state ? ` ${prop.state}` : ''}${pricePart}`)
+    setSelectedPhotoUrl('')
+  }
+
+  const savePropertyLink = async () => {
+    setSavingProperty(true)
+    try {
+      const res = await fetch('/api/campaigns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'update_campaign',
+          id: campaign.id,
+          property_id: linkedProperty?.id || null,
+          flyer_photo_urls: selectedPhotoUrl ? [selectedPhotoUrl] : [],
+          flyer_photo_caption: photoCaption || null,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) { pushToast(data.error || 'Failed to save property link', 'error'); return }
+      if (onUpdate) onUpdate(data.campaign)
+      pushToast('Property linked to campaign')
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setSavingProperty(false)
+    }
+  }
+
+  const effectivePhotoUrl     = selectedPhotoUrl || campaign.flyer_photo_urls?.[0] || ''
+  const effectivePhotoCaption = photoCaption || campaign.flyer_photo_caption || ''
 
   const generateCopy = async () => {
     if (!selectedTemplate) { pushToast('Select a campaign type first', 'error'); return }
@@ -502,15 +604,79 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
         </div>
       )}
 
+      {/* Property Photo Section */}
+      <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:16 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:4 }}>
+          <div style={{ fontSize:13, fontWeight:700, color:'var(--gw-ink)' }}>Property Photos</div>
+          {(campaign.property_id || linkedProperty) && (
+            <span style={{ fontSize:11, fontWeight:700, color:'var(--gw-green)', background:'var(--gw-green-light)', padding:'1px 8px', borderRadius:10 }}>✓ Linked</span>
+          )}
+        </div>
+        <div style={{ fontSize:12, color:'var(--gw-mist)', marginBottom:10 }}>Link a listing to show its photo on the flyer.</div>
+
+        <div onClick={loadProperties}>
+          <SearchDropdown
+            items={properties.map(p => ({
+              id: p.id,
+              name: `${p.address}${p.city ? `, ${p.city}` : ''}`,
+              sub: `${p.type} · ${p.status}${p.list_price ? ` · $${Number(p.list_price).toLocaleString()}` : ''}`,
+            }))}
+            value={linkedProperty?.id || campaign.property_id || ''}
+            onSelect={onSelectProperty}
+            placeholder="Search & link a property…"
+          />
+        </div>
+
+        {/* Photo grid */}
+        {propertyPhotos.length > 0 && (
+          <div style={{ marginTop:10 }}>
+            <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:6, textTransform:'uppercase', letterSpacing:'0.05em' }}>Select Flyer Photo</div>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:6 }}>
+              {propertyPhotos.slice(0, 6).map((url, i) => (
+                <div key={url}
+                  onClick={() => setSelectedPhotoUrl(selectedPhotoUrl === url ? '' : url)}
+                  style={{ height:64, borderRadius:8, overflow:'hidden', cursor:'pointer', border:`3px solid ${selectedPhotoUrl === url ? 'var(--gw-azure)' : 'transparent'}`, position:'relative', background:'var(--gw-bone)' }}>
+                  <img src={url} alt={`Photo ${i+1}`} style={{ width:'100%', height:'100%', objectFit:'cover' }} loading="lazy"/>
+                  {selectedPhotoUrl === url && (
+                    <div style={{ position:'absolute', top:3, right:3, background:'var(--gw-azure)', color:'#fff', borderRadius:'50%', width:16, height:16, display:'flex', alignItems:'center', justifyContent:'center', fontSize:9, fontWeight:800 }}>✓</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {linkedProperty && propertyPhotos.length === 0 && (
+          <div style={{ marginTop:8, fontSize:12, color:'var(--gw-mist)', padding:'8px 12px', background:'var(--gw-bone)', borderRadius:8 }}>
+            No photos on this listing yet — add photos in the Properties tab.
+          </div>
+        )}
+
+        {/* Caption */}
+        {(selectedPhotoUrl || effectivePhotoUrl) && (
+          <div style={{ marginTop:8 }}>
+            <input className="form-control" placeholder="Photo caption on flyer…" value={photoCaption} onChange={e => setPhotoCaption(e.target.value)}/>
+          </div>
+        )}
+
+        {linkedProperty && (
+          <button className="btn btn--ghost btn--sm" onClick={savePropertyLink} disabled={savingProperty} style={{ marginTop:8 }}>
+            {savingProperty ? 'Saving…' : 'Save Property Link'}
+          </button>
+        )}
+      </div>
+
       {/* Visual postcard preview */}
       {generatedCopy && (
         <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
           <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:'0.05em' }}>Flyer Preview</div>
-          <PostcardPreview copy={generatedCopy} template={selectedTemplate} agentObj={agentObj} />
+          <PostcardPreview copy={generatedCopy} template={selectedTemplate} agentObj={agentObj}
+            photoUrl={effectivePhotoUrl} photoCaption={effectivePhotoCaption} />
           <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
             <button className="btn btn--ghost btn--sm" onClick={copyAllText}>{copied ? '✓ Copied!' : 'Copy Text'}</button>
             <button className="btn btn--primary btn--sm" onClick={saveToCampaign} disabled={saving}>{saving ? 'Saving…' : 'Save to Campaign'}</button>
-            <button className="btn btn--ghost btn--sm" onClick={() => printFlyerWindow(generatedCopy, selectedTemplate, agentObj, campaign.name)}
+            <button className="btn btn--ghost btn--sm"
+              onClick={() => printFlyerWindow(generatedCopy, selectedTemplate, agentObj, campaign.name, effectivePhotoUrl, effectivePhotoCaption)}
               style={{ background:'#f0f7ff', borderColor:'#bfdbfe', color:'#1d4ed8' }}>
               Print / Download
             </button>

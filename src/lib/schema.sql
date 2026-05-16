@@ -579,3 +579,39 @@ alter table properties add  constraint properties_status_check
 alter table contacts drop constraint if exists contacts_source_check;
 alter table contacts add  constraint contacts_source_check
   check (source in ('referral','website','open house','social','cold call','other'));
+
+-- ── Implementation #2: Property Photo Integration ─────────────────────────────
+alter table mail_campaigns add column if not exists property_id          uuid references properties(id) on delete set null;
+alter table mail_campaigns add column if not exists flyer_photo_urls     text[]  default '{}';
+alter table mail_campaigns add column if not exists flyer_photo_caption  text;
+
+-- ── Implementation #4: ROI Close-The-Loop ────────────────────────────────────
+alter table mail_campaigns add column if not exists attribution_window_days  int     default 180;
+alter table mail_campaigns add column if not exists commission_rate          numeric default 0.025;
+
+-- ── Implementation #7: A/B Testing ──────────────────────────────────────────
+alter table mail_campaigns add column if not exists is_ab_test               boolean default false;
+alter table mail_campaigns add column if not exists ab_variant               char(1);
+alter table mail_campaigns add column if not exists ab_parent_campaign_id    uuid    references mail_campaigns(id) on delete set null;
+alter table mail_campaigns add column if not exists ab_winning_variant       char(1);
+alter table mail_campaigns add column if not exists ab_concluded_at          timestamptz;
+alter table mail_sends     add column if not exists variant                  char(1);
+
+-- ── Implementation #14: Budget & Cost Dashboard ──────────────────────────────
+create table if not exists campaign_cost_items (
+  id           uuid primary key default uuid_generate_v4(),
+  campaign_id  uuid references mail_campaigns(id) on delete cascade not null,
+  category     text check (category in ('printing','postage','design','vendor','other')) default 'other',
+  description  text,
+  unit_cost    numeric not null default 0,
+  quantity     int     not null default 1,
+  date_incurred date,
+  created_at   timestamptz default now()
+);
+create index if not exists cost_items_campaign_idx on campaign_cost_items(campaign_id);
+alter table campaign_cost_items enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='campaign_cost_items' and policyname='allow_all') then
+    create policy "allow_all" on campaign_cost_items for all using (true) with check (true);
+  end if;
+end $$;

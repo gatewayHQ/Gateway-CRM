@@ -56,6 +56,7 @@ export default async function handler(req, res) {
         name, description, property_types, status, flyer_url, frequency_cap, frequency_days,
         flyer_template, landing_mode, landing_url, landing_headline, landing_tagline, landing_cta,
         date_sent, date_completed, cost_per_piece, fixed_cost,
+        property_id, flyer_photo_urls, flyer_photo_caption,
       } = req.body
       const agent_id = req.body.agent_id || null
       if (!name) return res.status(400).json({ error: 'name is required' })
@@ -81,6 +82,9 @@ export default async function handler(req, res) {
           date_completed:   date_completed   || null,
           cost_per_piece:   cost_per_piece   || 0,
           fixed_cost:       fixed_cost       || 0,
+          property_id:      property_id      || null,
+          flyer_photo_urls: Array.isArray(flyer_photo_urls) ? flyer_photo_urls : [],
+          flyer_photo_caption: flyer_photo_caption || null,
         }])
         .select()
         .single()
@@ -105,6 +109,11 @@ export default async function handler(req, res) {
       if (patch.landing_cta      === '') patch.landing_cta      = null
       if (patch.flyer_url        === '') patch.flyer_url        = null
       if (patch.canva_design_url === '') patch.canva_design_url = null
+      if (patch.property_id      === '') patch.property_id      = null
+      if (patch.flyer_photo_caption === '') patch.flyer_photo_caption = null
+      if (!Array.isArray(patch.flyer_photo_urls) && patch.flyer_photo_urls !== undefined) {
+        patch.flyer_photo_urls = []
+      }
       const { data, error } = await supabase
         .from('mail_campaigns')
         .update(patch)
@@ -121,6 +130,22 @@ export default async function handler(req, res) {
       const { error } = await supabase.from('mail_campaigns').delete().eq('id', id)
       if (error) throw error
       return res.json({ ok: true })
+    }
+
+    // ── Property Photos (Implementation #2) ───────────────────────────────
+
+    if (action === 'get_property_photos') {
+      const { property_id } = req.query
+      if (!property_id) return res.status(400).json({ error: 'property_id is required' })
+      const { data, error } = await supabase
+        .from('properties')
+        .select('id, address, city, state, zip, type, status, list_price, details')
+        .eq('id', property_id)
+        .single()
+      if (error) throw error
+      if (!data) return res.status(404).json({ error: 'Property not found' })
+      const photos = data.details?.photos || []
+      return res.json({ property: data, photos })
     }
 
     // ── Sends ──────────────────────────────────────────────────────────────
