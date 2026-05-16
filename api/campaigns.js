@@ -402,6 +402,92 @@ export default async function handler(req, res) {
       return res.json({ send: data })
     }
 
+    // ── A/B Testing ────────────────────────────────────────────────────────
+
+    if (action === 'create_ab_variant') {
+      const { campaign_id } = req.body
+      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
+
+      const { data: orig, error: fetchErr } = await supabase
+        .from('mail_campaigns')
+        .select('*')
+        .eq('id', campaign_id)
+        .single()
+      if (fetchErr || !orig) return res.status(404).json({ error: 'Campaign not found' })
+
+      // Mark original as A
+      await supabase.from('mail_campaigns')
+        .update({ is_ab_test: true, ab_variant: 'A' })
+        .eq('id', campaign_id)
+
+      // Clone as B
+      const { id: _id, created_at: _ca, ab_winning_variant: _awv, ab_concluded_at: _aca, ...cloneFields } = orig
+      const { data: variant, error: cloneErr } = await supabase
+        .from('mail_campaigns')
+        .insert({
+          ...cloneFields,
+          name:                 `${orig.name} — Variant B`,
+          is_ab_test:           true,
+          ab_variant:           'B',
+          ab_parent_campaign_id: campaign_id,
+          status:               'draft',
+        })
+        .select()
+        .single()
+      if (cloneErr) throw cloneErr
+      return res.json({ variant })
+    }
+
+    if (action === 'get_ab_comparison') {
+      const { campaign_id } = req.query
+      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
+
+      const { data: campaign } = await supabase.from('mail_campaigns').select('*').eq('id', campaign_id).single()
+      if (!campaign) return res.status(404).json({ error: 'Campaign not found' })
+
+      // Determine parent and variant IDs
+      const parentId  = campaign.ab_parent_campaign_id || campaign.id
+      const variantId = campaign.ab_parent_campaign_id ? campaign.id : null
+
+      const { data: allCampaigns } = await supabase
+        .from('mail_campaigns').select('*')
+        .or(`id.eq.${parentId}${variantId ? `,id.eq.${variantId}` : `,ab_parent_campaign_id.eq.${parentId}`}`)
+
+      const ids = (allCampaigns || []).map(c => c.id)
+      const { data: sends } = await supabase
+        .from('mail_sends').select('campaign_id, response').in('campaign_id', ids)
+
+      const stats = {}
+      for (const c of (allCampaigns || [])) {
+        const cs = (sends || []).filter(s => s.campaign_id === c.id)
+        const total     = cs.length
+        const responded = cs.filter(s => s.response !== 'no-response').length
+        const converted = cs.filter(s => s.response === 'converted').length
+        stats[c.ab_variant || (c.id === parentId ? 'A' : 'B')] = {
+          campaign: c,
+          total,
+          responded,
+          converted,
+          response_rate:   total > 0 ? Math.round(responded / total * 100) : 0,
+          conversion_rate: total > 0 ? Math.round(converted / total * 100) : 0,
+        }
+      }
+      return res.json({ comparison: stats, parent_id: parentId })
+    }
+
+    if (action === 'declare_ab_winner') {
+      const { campaign_id, winner } = req.body
+      if (!campaign_id || !winner) return res.status(400).json({ error: 'campaign_id and winner (A|B) are required' })
+
+      const { data, error } = await supabase
+        .from('mail_campaigns')
+        .update({ ab_winning_variant: winner, ab_concluded_at: new Date().toISOString() })
+        .or(`id.eq.${campaign_id},ab_parent_campaign_id.eq.${campaign_id}`)
+        .select()
+      if (error) throw error
+      return res.json({ ok: true, updated: data })
+    }
+
     // ── Smart Audience Builder ────────────────────────────────────────────
 
     if (action === 'audience_preview') {

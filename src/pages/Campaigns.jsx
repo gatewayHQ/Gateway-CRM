@@ -1330,8 +1330,11 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
   const [addingCost,   setAddingCost]   = useState(false)
   const [costForm,     setCostForm]     = useState({ category:'postage', description:'', unit_cost:'', quantity:'1', date_incurred:'' })
   const [savingCost,   setSavingCost]   = useState(false)
+  const [abComparison, setAbComparison] = useState(null)
+  const [abLoaded,     setAbLoaded]     = useState(false)
+  const [creatingVariant, setCreatingVariant] = useState(false)
 
-  useEffect(() => { loadSends(); loadAnalytics(); loadROI() }, [campaign.id])
+  useEffect(() => { loadSends(); loadAnalytics(); loadROI(); setAbLoaded(false); setAbComparison(null) }, [campaign.id])
   useEffect(() => { if (tab === 'suppression') loadSuppressions() }, [tab])
 
   const loadSends = async () => {
@@ -1397,6 +1400,46 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
     })
     setCostItems(p => p.filter(i => i.id !== id))
     pushToast('Cost item removed')
+  }
+
+  const loadABComparison = async () => {
+    if (abLoaded) return
+    setAbLoaded(true)
+    const res  = await fetch(`/api/campaigns?action=get_ab_comparison&campaign_id=${campaign.id}`)
+    const data = await res.json()
+    setAbComparison(data.comparison || null)
+  }
+
+  const createVariantB = async () => {
+    setCreatingVariant(true)
+    const res  = await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'create_ab_variant', campaign_id: campaign.id }),
+    })
+    const data = await res.json()
+    setCreatingVariant(false)
+    if (res.ok) {
+      pushToast(`Variant B created: "${data.variant?.name}"`)
+      // Reload parent with updated is_ab_test flag
+      onUpdate({ ...campaign, is_ab_test: true, ab_variant: 'A' })
+    } else {
+      pushToast(data.error || 'Failed to create variant', 'error')
+    }
+  }
+
+  const declareWinner = async (winner) => {
+    const parentId = campaign.ab_parent_campaign_id || campaign.id
+    await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'declare_ab_winner', campaign_id: parentId, winner }),
+    })
+    onUpdate({ ...campaign, ab_winning_variant: winner })
+    pushToast(`Variant ${winner} declared winner`)
+    setAbComparison(null)
+    setAbLoaded(false)
+    loadABComparison()
   }
 
   const linkDeal = async (sendId, dealId) => {
@@ -1500,7 +1543,22 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
                 <Icon name="download" size={13}/> Flyer
               </a>
             )}
+            {campaign.is_ab_test && campaign.ab_variant && (
+              <span style={{ padding:'2px 10px', borderRadius:20, fontSize:11, fontWeight:700, background:'#fef9c3', color:'#92400e', border:'1.5px solid #f59e0b' }}>
+                Variant {campaign.ab_variant}
+              </span>
+            )}
+            {campaign.ab_winning_variant && (
+              <span style={{ padding:'2px 10px', borderRadius:20, fontSize:11, fontWeight:700, background:'#d1fae5', color:'#065f46' }}>
+                Winner: {campaign.ab_winning_variant}
+              </span>
+            )}
             <button className="btn btn--ghost btn--sm" onClick={() => setEditOpen(true)}>Edit</button>
+            {!campaign.is_ab_test && (
+              <button className="btn btn--ghost btn--sm" onClick={createVariantB} disabled={creatingVariant} title="Duplicate as Variant B for A/B testing">
+                {creatingVariant ? 'Creating…' : 'A/B Test'}
+              </button>
+            )}
             <button className="btn btn--ghost btn--sm" onClick={() => setAudienceOpen(true)} title="Build a targeted audience and log batch sends">
               <Icon name="users" size={13}/> Batch Send
             </button>
@@ -1787,6 +1845,65 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
                     </div>
                   )}
                 </div>
+                {/* ── A/B Test Comparison ── */}
+                {campaign.is_ab_test && (() => {
+                  if (!abLoaded) loadABComparison()
+                  const variants = abComparison ? Object.entries(abComparison) : []
+                  const winner   = campaign.ab_winning_variant
+                  const metrics  = ['total','response_rate','conversion_rate']
+                  const labels   = { total:'Total Sends', response_rate:'Response Rate', conversion_rate:'Conversion Rate' }
+                  return (
+                    <div>
+                      <div className="eyebrow-label" style={{ marginBottom:10 }}>A/B Test Comparison</div>
+                      {variants.length < 2
+                        ? <div style={{ fontSize:12, color:'var(--gw-mist)' }}>Variant B sends will appear here once logged.</div>
+                        : (
+                          <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+                            {metrics.map(m => {
+                              const best = variants.reduce((b, [, v]) => Math.max(b, v[m] || 0), 0)
+                              return (
+                                <div key={m}>
+                                  <div style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)', marginBottom:6 }}>{labels[m]}</div>
+                                  <div style={{ display:'flex', gap:10 }}>
+                                    {variants.map(([label, v]) => {
+                                      const val    = v[m] || 0
+                                      const isBest = val === best && best > 0
+                                      const isWon  = winner === label
+                                      return (
+                                        <div key={label} style={{ flex:1, background: isWon ? '#f0fdf4' : isBest ? '#eff6ff' : 'var(--gw-bone)',
+                                          border: isWon ? '2px solid #16a34a' : isBest ? '2px solid var(--gw-azure)' : '2px solid transparent',
+                                          borderRadius:10, padding:'10px 14px', textAlign:'center' }}>
+                                          <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:4 }}>Variant {label}</div>
+                                          <div style={{ fontSize:20, fontWeight:800, color: isWon ? '#16a34a' : isBest ? 'var(--gw-azure)' : 'var(--gw-ink)' }}>
+                                            {m === 'total' ? val : `${val}%`}
+                                          </div>
+                                          {isBest && !isWon && <div style={{ fontSize:10, color:'var(--gw-azure)', marginTop:2 }}>Leading</div>}
+                                          {isWon && <div style={{ fontSize:10, color:'#16a34a', fontWeight:700, marginTop:2 }}>Winner</div>}
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                </div>
+                              )
+                            })}
+                            {!winner && (
+                              <div style={{ display:'flex', gap:8, paddingTop:8, borderTop:'1px solid var(--gw-border)' }}>
+                                <span style={{ fontSize:12, color:'var(--gw-mist)', flex:1, alignSelf:'center' }}>Declare winner when ready:</span>
+                                {variants.map(([label]) => (
+                                  <button key={label} className="btn btn--ghost btn--sm"
+                                    onClick={() => declareWinner(label)}
+                                    style={{ fontWeight:700 }}>
+                                    Variant {label} wins
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      }
+                    </div>
+                  )
+                })()}
               </div>
             )
             : <div style={{ textAlign:'center', color:'var(--gw-mist)', padding:40, fontSize:13 }}>No data yet — log some sends first.</div>
