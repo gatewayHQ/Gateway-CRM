@@ -736,6 +736,37 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
         </div>
       )}
 
+      {/* Print-on-Demand (#20) */}
+      {generatedCopy && (
+        <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:16 }}>
+          <div style={{ fontSize:13, fontWeight:700, color:'var(--gw-ink)', marginBottom:4 }}>Print-on-Demand</div>
+          <div style={{ fontSize:12, color:'var(--gw-mist)', marginBottom:10 }}>
+            Send your flyer design to a print vendor. Copy your generated text and use with these services:
+          </div>
+          <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+            {[
+              { name:'USPS EDDM', url:'https://eddm.usps.com', color:'#1d4ed8', bg:'#dbeafe' },
+              { name:'Vistaprint', url:'https://www.vistaprint.com/postcards', color:'#7c3aed', bg:'#ede9fe' },
+              { name:'Canva Print', url:'https://www.canva.com/print/postcards', color:'#0f766e', bg:'#ccfbf1' },
+              { name:'GotPrint', url:'https://www.gotprint.com/postcards', color:'#92400e', bg:'#fef3c7' },
+            ].map(v => (
+              <a key={v.name} href={v.url} target="_blank" rel="noopener noreferrer"
+                style={{ padding:'6px 14px', borderRadius:20, fontSize:12, fontWeight:700, cursor:'pointer', border:'1.5px solid', textDecoration:'none',
+                  background:v.bg, color:v.color, borderColor:v.color+'44' }}>
+                {v.name} →
+              </a>
+            ))}
+          </div>
+          <div style={{ marginTop:10, padding:'8px 12px', background:'var(--gw-bone)', borderRadius:8, fontSize:12, color:'var(--gw-mist)' }}>
+            <strong>Quick-copy for vendor:</strong> {generatedCopy.headline} · {generatedCopy.subheadline} · {generatedCopy.cta}
+            <button className="btn btn--ghost btn--sm" style={{ marginLeft:8, fontSize:11 }} onClick={() => {
+              navigator.clipboard.writeText(`${generatedCopy.headline}\n${generatedCopy.subheadline}\n\n${generatedCopy.tagline}\n\n${generatedCopy.bullets?.join('\n')}\n\n${generatedCopy.cta}`)
+              pushToast('Copied to clipboard')
+            }}>Copy All</button>
+          </div>
+        </div>
+      )}
+
       {/* Divider */}
       <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:16 }}>
         <div style={{ fontSize:13, fontWeight:700, color:'var(--gw-ink)', marginBottom:4 }}>Design in Canva</div>
@@ -2274,6 +2305,134 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
                           </div>
                         )
                       }
+                    </div>
+                  )
+                })()}
+
+                {/* ── Competitive Intelligence (#15) ── */}
+                {(() => {
+                  const [intel, setIntel] = useState(null)
+                  const [intelLoading, setIntelLoading] = useState(false)
+
+                  const loadIntel = async () => {
+                    setIntelLoading(true)
+                    const res  = await fetch('/api/claude', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        action:                'competitive_intelligence',
+                        property_types:        campaign.property_types,
+                        flyer_template:        campaign.flyer_template,
+                        campaign_sends:        analytics.total,
+                        campaign_response_rate: analytics.response_rate,
+                        top_zip_codes:         Object.keys(analytics.by_zip || {}).slice(0,5).join(', '),
+                      }),
+                    })
+                    const data = await res.json()
+                    setIntel(data.insights || null)
+                    setIntelLoading(false)
+                  }
+
+                  return (
+                    <div>
+                      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+                        <div className="eyebrow-label">Competitive Intelligence</div>
+                        <button className="btn btn--ghost btn--sm" style={{ fontSize:12 }} onClick={loadIntel} disabled={intelLoading}>
+                          {intelLoading ? 'Analyzing…' : intel ? 'Refresh' : '✦ Get Insights'}
+                        </button>
+                      </div>
+                      {intel ? (
+                        <div style={{ display:'flex', flexDirection:'column', gap:10, fontSize:12 }}>
+                          {intel.response_rate_context && (
+                            <div style={{ padding:'8px 12px', background:'#eff6ff', borderRadius:8, color:'#1d4ed8', borderLeft:'3px solid #2563eb' }}>
+                              {intel.response_rate_context}
+                            </div>
+                          )}
+                          {intel.market_insights?.length > 0 && (
+                            <div>
+                              <div style={{ fontWeight:700, color:'var(--gw-ink)', marginBottom:4 }}>What top agents do:</div>
+                              {intel.market_insights.map((tip, i) => <div key={i} style={{ color:'var(--gw-mist)', marginBottom:3 }}>• {tip}</div>)}
+                            </div>
+                          )}
+                          {intel.positioning_tips?.length > 0 && (
+                            <div>
+                              <div style={{ fontWeight:700, color:'var(--gw-ink)', marginBottom:4 }}>Differentiate your campaign:</div>
+                              {intel.positioning_tips.map((tip, i) => <div key={i} style={{ color:'var(--gw-mist)', marginBottom:3 }}>• {tip}</div>)}
+                            </div>
+                          )}
+                          {intel.timing_recommendations && (
+                            <div style={{ padding:'8px 12px', background:'var(--gw-bone)', borderRadius:8 }}>
+                              <strong>Timing:</strong> {intel.timing_recommendations}
+                            </div>
+                          )}
+                        </div>
+                      ) : !intelLoading && (
+                        <div style={{ fontSize:12, color:'var(--gw-mist)' }}>Click "Get Insights" for AI-powered competitive intelligence.</div>
+                      )}
+                    </div>
+                  )
+                })()}
+
+                {/* ── Predictive List Optimization (#19) ── */}
+                {(() => {
+                  const [preds, setPreds] = useState(null)
+                  const [predLoading, setPredLoading] = useState(false)
+
+                  const loadPredictions = async () => {
+                    setPredLoading(true)
+                    const res  = await fetch('/api/claude', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        action:        'predict_best_segments',
+                        zip_detail:    analytics.by_zip_detail,
+                        by_channel:    analytics.by_channel,
+                        by_month:      analytics.by_month,
+                        total_sends:   analytics.total,
+                        response_rate: analytics.response_rate,
+                      }),
+                    })
+                    const data = await res.json()
+                    setPreds(data.predictions || null)
+                    setPredLoading(false)
+                  }
+
+                  return (
+                    <div>
+                      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+                        <div className="eyebrow-label">Predictive List Optimization</div>
+                        <button className="btn btn--ghost btn--sm" style={{ fontSize:12 }} onClick={loadPredictions} disabled={predLoading}>
+                          {predLoading ? 'Predicting…' : preds ? 'Refresh' : '✦ Optimize List'}
+                        </button>
+                      </div>
+                      {preds ? (
+                        <div style={{ display:'flex', flexDirection:'column', gap:10, fontSize:12 }}>
+                          {preds.top_segments?.length > 0 && (
+                            <div style={{ padding:'8px 12px', background:'#f0fdf4', border:'1px solid #86efac', borderRadius:8 }}>
+                              <div style={{ fontWeight:700, color:'#166534', marginBottom:4 }}>Double down on:</div>
+                              {preds.top_segments.map((s, i) => <div key={i} style={{ color:'#166534' }}>• {s}</div>)}
+                            </div>
+                          )}
+                          {preds.drop_segments?.length > 0 && (
+                            <div style={{ padding:'8px 12px', background:'#fef2f2', border:'1px solid #fca5a5', borderRadius:8 }}>
+                              <div style={{ fontWeight:700, color:'#991b1b', marginBottom:4 }}>Stop mailing:</div>
+                              {preds.drop_segments.map((s, i) => <div key={i} style={{ color:'#991b1b' }}>• {s}</div>)}
+                            </div>
+                          )}
+                          {preds.next_send_strategy && (
+                            <div style={{ padding:'8px 12px', background:'var(--gw-bone)', borderRadius:8 }}>
+                              <strong>Next send strategy:</strong> {preds.next_send_strategy}
+                            </div>
+                          )}
+                          {preds.predicted_roi_improvement && (
+                            <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
+                              Predicted improvement: {preds.predicted_roi_improvement}
+                            </div>
+                          )}
+                        </div>
+                      ) : !predLoading && (
+                        <div style={{ fontSize:12, color:'var(--gw-mist)' }}>Click "Optimize List" for AI predictions on your best-performing segments.</div>
+                      )}
                     </div>
                   )
                 })()}

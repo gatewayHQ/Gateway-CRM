@@ -143,6 +143,103 @@ Rules:
     }
   }
 
+  // ── Competitive Intelligence (#15) ──────────────────────────────────────────
+  if (req.body?.action === 'competitive_intelligence') {
+    const {
+      property_types, target_area, campaign_response_rate, campaign_sends,
+      flyer_template, top_zip_codes,
+    } = req.body || {}
+
+    const propStr = Array.isArray(property_types) ? property_types.join(', ') : (property_types || 'real estate')
+
+    const prompt = `You are a real estate market intelligence analyst specializing in direct mail marketing strategy.
+
+Provide competitive intelligence and positioning advice for an agent running a ${propStr} direct mail campaign${target_area ? ` in ${target_area}` : ''}.
+
+Campaign Context:
+${flyer_template  ? `Campaign Type: ${flyer_template}` : ''}
+${campaign_sends  ? `Total Sends: ${campaign_sends}` : ''}
+${campaign_response_rate ? `Response Rate: ${campaign_response_rate}%` : ''}
+${top_zip_codes   ? `Top Zip Codes: ${top_zip_codes}` : ''}
+
+Return a JSON object with:
+{
+  "market_insights": ["3-4 bullet points about what top-performing agents do in direct mail"],
+  "competitive_gaps": ["2-3 common weaknesses agents have in their mailer campaigns"],
+  "positioning_tips": ["3 specific ways to differentiate this campaign from competitors"],
+  "best_practices": ["3-4 proven best practices for ${propStr} direct mail"],
+  "timing_recommendations": "1-2 sentences on optimal send timing and frequency",
+  "response_rate_context": "1 sentence contextualizing the current response rate vs market"
+}
+
+Be specific, data-driven, and actionable. Focus on real estate direct mail best practices.
+Return only the JSON object, no commentary.`
+
+    try {
+      const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 800, messages: [{ role: 'user', content: prompt }] }),
+      })
+      const responseData = await anthropicRes.json()
+      const rawText = responseData?.content?.[0]?.text || ''
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/)
+      if (!jsonMatch) return res.status(500).json({ error: 'Failed to parse AI response', raw: rawText })
+      const insights = JSON.parse(jsonMatch[0])
+      return res.status(200).json({ insights })
+    } catch (err) {
+      return res.status(500).json({ error: err.message })
+    }
+  }
+
+  // ── Predictive List Optimization (#19) ───────────────────────────────────────
+  if (req.body?.action === 'predict_best_segments') {
+    const { zip_detail, by_channel, by_month, total_sends, response_rate } = req.body || {}
+
+    const zipInsights = zip_detail
+      ? Object.entries(zip_detail)
+          .map(([z, v]) => `${z}: ${v.sends} sends, ${v.responses} responses (${v.sends>0?Math.round(v.responses/v.sends*100):0}%)`)
+          .join('\n')
+      : ''
+
+    const prompt = `You are a predictive analytics expert for real estate direct mail.
+
+Based on this campaign's performance data, identify which segments to prioritize and which to drop.
+
+Performance Data:
+Total Sends: ${total_sends || 0}
+Overall Response Rate: ${response_rate || 0}%
+${zipInsights ? `\nPer-Zip Performance:\n${zipInsights}` : ''}
+${by_channel ? `\nChannel Mix:\n${JSON.stringify(by_channel)}` : ''}
+
+Return a JSON object with:
+{
+  "top_segments": ["zip codes or segments to double down on, with brief reason"],
+  "drop_segments": ["underperforming segments to stop mailing"],
+  "recommended_budget_shift": "where to reallocate spend",
+  "predicted_roi_improvement": "estimated improvement if recommendations are followed",
+  "next_send_strategy": "2-3 sentences on the ideal next campaign strategy"
+}
+
+Be specific. Return only the JSON object.`
+
+    try {
+      const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 600, messages: [{ role: 'user', content: prompt }] }),
+      })
+      const responseData = await anthropicRes.json()
+      const rawText = responseData?.content?.[0]?.text || ''
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/)
+      if (!jsonMatch) return res.status(500).json({ error: 'Failed to parse AI response' })
+      const predictions = JSON.parse(jsonMatch[0])
+      return res.status(200).json({ predictions })
+    } catch (err) {
+      return res.status(500).json({ error: err.message })
+    }
+  }
+
   // ── General Claude message proxy (email generation, AI suggestions) ────────
   const { system, messages, max_tokens = 1024 } = req.body
   if (!Array.isArray(messages) || messages.length === 0) {
