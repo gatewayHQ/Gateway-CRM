@@ -488,6 +488,39 @@ export default async function handler(req, res) {
       return res.json({ ok: true, updated: data })
     }
 
+    // ── Send History Export ───────────────────────────────────────────────
+
+    if (action === 'export_sends_csv') {
+      const { campaign_id } = req.query
+      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
+
+      const { data: sends, error } = await supabase
+        .from('mail_sends')
+        .select('id, recipient_name, recipient_address, recipient_city, recipient_state, recipient_zip, channel, response, sent_at, notes, agent_id, deal_id')
+        .eq('campaign_id', campaign_id)
+        .order('sent_at', { ascending: false })
+      if (error) throw error
+
+      const header = ['Name','Address','City','State','Zip','Channel','Response','Sent Date','Notes','Deal Linked']
+      const rows   = (sends || []).map(s => [
+        s.recipient_name || '',
+        s.recipient_address || '',
+        s.recipient_city || '',
+        s.recipient_state || '',
+        s.recipient_zip || '',
+        s.channel || '',
+        s.response || '',
+        s.sent_at ? new Date(s.sent_at).toLocaleDateString() : '',
+        (s.notes || '').replace(/,/g, ';'),
+        s.deal_id ? 'Yes' : 'No',
+      ])
+
+      const csv = [header, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n')
+      res.setHeader('Content-Type', 'text/csv')
+      res.setHeader('Content-Disposition', `attachment; filename="sends-${campaign_id.slice(0,8)}.csv"`)
+      return res.send(csv)
+    }
+
     // ── Contact Engagement Scoring ────────────────────────────────────────
 
     if (action === 'get_engagement_scores') {

@@ -1666,7 +1666,7 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
 
         {/* Tabs */}
         <div style={{ display:'flex', gap:0, borderBottom:'1px solid var(--gw-border)', marginTop:0, overflowX:'auto' }}>
-          {[['sends','Send Log'],['analytics','Analytics'],['budget','Budget'],['sequence','Sequence'],['qr','QR Code'],['flyer','Flyer & AI'],['suppression','Suppression']].map(([v,l]) => (
+          {[['sends','Send Log'],['timeline','Timeline'],['analytics','Analytics'],['budget','Budget'],['sequence','Sequence'],['qr','QR Code'],['flyer','Flyer & AI'],['suppression','Suppression']].map(([v,l]) => (
             <button key={v} onClick={() => setTab(v)}
               style={{ padding:'8px 14px', fontSize:13, fontWeight:600, cursor:'pointer', border:'none', background:'transparent', whiteSpace:'nowrap',
                 borderBottom: tab === v ? '2.5px solid var(--gw-azure)' : '2.5px solid transparent',
@@ -1686,6 +1686,11 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
               ? <EmptyState icon="mail" title="No sends yet" message="Click 'Log Send' to record the first outreach for this campaign." action={<button className="btn btn--primary btn--sm" onClick={()=>setLogOpen(true)}>Log Send</button>}/>
               : (
                 <div style={{ display:'flex', flexDirection:'column', gap:0 }}>
+                  <div style={{ display:'flex', justifyContent:'flex-end', paddingBottom:8 }}>
+                    <a href={`/api/campaigns?action=export_sends_csv&campaign_id=${campaign.id}`} download className="btn btn--ghost btn--sm" style={{ fontSize:12 }}>
+                      <Icon name="download" size={12}/> Export CSV
+                    </a>
+                  </div>
                   {sends.map(s => {
                     const contact = s.contact_id ? findContact(s.contact_id) : null
                     const agent   = s.agent_id   ? findAgent(s.agent_id)   : null
@@ -1755,6 +1760,79 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
                 </div>
               )
         )}
+
+        {/* ── Multi-Channel Timeline ── */}
+        {tab === 'timeline' && (() => {
+          const CHANNEL_DOT = {
+            'direct-mail': { color:'#2563eb', label:'Mail' },
+            mail:          { color:'#2563eb', label:'Mail' },
+            email:         { color:'#16a34a', label:'Email' },
+            text:          { color:'#7c3aed', label:'Text' },
+            'cold-call':   { color:'#d97706', label:'Call' },
+            'door-hanger': { color:'#0891b2', label:'Hanger' },
+          }
+          // Group sends by date
+          const byDate = {}
+          ;[...sends].sort((a,b) => new Date(a.sent_at) - new Date(b.sent_at)).forEach(s => {
+            const d = s.sent_at ? new Date(s.sent_at).toLocaleDateString() : 'Unknown'
+            if (!byDate[d]) byDate[d] = []
+            byDate[d].push(s)
+          })
+          const dates = Object.keys(byDate)
+          const channels = [...new Set(sends.map(s => s.channel).filter(Boolean))]
+          return (
+            <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+              {/* Channel legend */}
+              <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
+                {channels.map(ch => {
+                  const cfg = CHANNEL_DOT[ch] || { color:'#9ca3af', label:ch }
+                  const cnt = sends.filter(s => s.channel === ch).length
+                  return (
+                    <div key={ch} style={{ display:'flex', alignItems:'center', gap:6, padding:'4px 12px', borderRadius:20, background:'var(--gw-bone)' }}>
+                      <div style={{ width:10, height:10, borderRadius:'50%', background:cfg.color, flexShrink:0 }}/>
+                      <span style={{ fontSize:12, fontWeight:700 }}>{cfg.label}</span>
+                      <span style={{ fontSize:11, color:'var(--gw-mist)' }}>{cnt}</span>
+                    </div>
+                  )
+                })}
+              </div>
+              {/* Timeline */}
+              {dates.length === 0
+                ? <div style={{ textAlign:'center', color:'var(--gw-mist)', padding:32, fontSize:13 }}>No sends yet.</div>
+                : dates.map(date => {
+                  const daySends = byDate[date]
+                  const byChannel = {}
+                  daySends.forEach(s => { byChannel[s.channel] = (byChannel[s.channel]||0) + 1 })
+                  const responded = daySends.filter(s=>s.response!=='no-response').length
+                  return (
+                    <div key={date} style={{ display:'grid', gridTemplateColumns:'90px 1fr', gap:12, alignItems:'start' }}>
+                      <div style={{ textAlign:'right', paddingTop:4 }}>
+                        <div style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>{date}</div>
+                        <div style={{ fontSize:11, color:'var(--gw-mist)' }}>{daySends.length} sends</div>
+                      </div>
+                      <div style={{ borderLeft:'2px solid var(--gw-border)', paddingLeft:16, paddingBottom:8 }}>
+                        <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:4 }}>
+                          {Object.entries(byChannel).map(([ch, n]) => {
+                            const cfg = CHANNEL_DOT[ch] || { color:'#9ca3af', label:ch }
+                            return (
+                              <span key={ch} style={{ display:'flex', alignItems:'center', gap:5, padding:'2px 10px', borderRadius:12, fontSize:12, fontWeight:600, background: cfg.color+'18', color:cfg.color }}>
+                                <span style={{ width:6, height:6, borderRadius:'50%', background:cfg.color, display:'inline-block' }}/>
+                                {n} {cfg.label}
+                              </span>
+                            )
+                          })}
+                          {responded > 0 && (
+                            <span style={{ fontSize:12, color:'var(--gw-green)', fontWeight:700 }}>· {responded} response{responded!==1?'s':''}</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })
+              }
+            </div>
+          )
+        })()}
 
         {/* ── Analytics ── */}
         {tab === 'analytics' && (
