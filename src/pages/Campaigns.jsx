@@ -1114,6 +1114,8 @@ function AudienceBuilderModal({ campaign, agents, activeAgent, onSent, onClose }
   const [channel,  setChannel]  = useState('direct-mail')
   const [sending,  setSending]  = useState(false)
   const [sentAt,   setSentAt]   = useState(new Date().toISOString().slice(0,10))
+  const [scores,   setScores]   = useState(null)
+  const [scoresTab, setScoresTab] = useState('builder')  // 'builder' | 'scores'
 
   const setF = (k, v) => setFilters(p => ({ ...p, [k]: v }))
 
@@ -1168,6 +1170,13 @@ function AudienceBuilderModal({ campaign, agents, activeAgent, onSent, onClose }
     }
   }
 
+  const loadScores = async () => {
+    if (scores) return
+    const res  = await fetch('/api/campaigns?action=get_engagement_scores')
+    const data = await res.json()
+    setScores(data.scores || [])
+  }
+
   const allSelected = preview && selected.size === preview.length
   const toggleAll   = () => setSelected(allSelected ? new Set() : new Set(preview.map(c => c.id)))
   const toggleOne   = id => setSelected(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n })
@@ -1180,6 +1189,57 @@ function AudienceBuilderModal({ campaign, agents, activeAgent, onSent, onClose }
       </div>
       <div className="modal__body" style={{ display:'flex', flexDirection:'column', gap:16 }}>
 
+        {/* Sub-tabs */}
+        <div style={{ display:'flex', gap:0, borderBottom:'1px solid var(--gw-border)' }}>
+          {[['builder','Audience Builder'],['scores','Engagement Scores']].map(([v,l]) => (
+            <button key={v} onClick={() => { setScoresTab(v); if (v==='scores') loadScores() }}
+              style={{ padding:'6px 14px', fontSize:13, fontWeight:600, cursor:'pointer', border:'none', background:'transparent',
+                borderBottom: scoresTab===v ? '2.5px solid var(--gw-azure)' : '2.5px solid transparent',
+                color: scoresTab===v ? 'var(--gw-azure)' : 'var(--gw-mist)' }}>{l}</button>
+          ))}
+        </div>
+
+        {/* Engagement Scores Panel */}
+        {scoresTab === 'scores' && (
+          <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+            {scores === null
+              ? <div style={{ textAlign:'center', color:'var(--gw-mist)', padding:24 }}>Loading…</div>
+              : scores.length === 0
+              ? <div style={{ textAlign:'center', color:'var(--gw-mist)', padding:24, fontSize:13 }}>No scored contacts yet. Send some mailers first.</div>
+              : (
+                <div>
+                  <div style={{ display:'flex', gap:10, marginBottom:12 }}>
+                    {['hot','warm','cold'].map(tier => {
+                      const cnt = scores.filter(s=>s.tier===tier).length
+                      const cfg = { hot:{ bg:'#fef2f2', color:'#dc2626', label:'Hot' }, warm:{ bg:'#fef9c3', color:'#92400e', label:'Warm' }, cold:{ bg:'#eff6ff', color:'#1d4ed8', label:'Cold' } }[tier]
+                      return (
+                        <div key={tier} style={{ flex:1, background:cfg.bg, borderRadius:10, padding:'10px 14px', textAlign:'center' }}>
+                          <div style={{ fontSize:20, fontWeight:800, color:cfg.color }}>{cnt}</div>
+                          <div style={{ fontSize:11, color:cfg.color, marginTop:2 }}>{cfg.label} Contacts</div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <div style={{ maxHeight:320, overflowY:'auto', border:'1px solid var(--gw-border)', borderRadius:8 }}>
+                    {scores.slice(0,50).map(s => {
+                      const TIER = { hot:{ bg:'#fef2f2', color:'#dc2626' }, warm:{ bg:'#fef9c3', color:'#92400e' }, cold:{ bg:'#eff6ff', color:'#1d4ed8' } }[s.tier]
+                      return (
+                        <div key={s.contact_id} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 12px', borderBottom:'1px solid var(--gw-border)' }}>
+                          <span style={{ flex:1, fontSize:13, fontWeight:600, color:'var(--gw-ink)' }}>{s.contact_id?.slice(0,8)}</span>
+                          <span style={{ fontSize:11, color:'var(--gw-mist)' }}>{s.sends} sends · {s.responses} resp</span>
+                          <span style={{ fontSize:11, fontWeight:800, color:TIER.color, background:TIER.bg, padding:'1px 8px', borderRadius:8 }}>{s.score}pts</span>
+                          <span style={{ fontSize:10, fontWeight:700, padding:'1px 6px', borderRadius:8, background:TIER.bg, color:TIER.color, textTransform:'uppercase' }}>{s.tier}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            }
+          </div>
+        )}
+
+        {scoresTab === 'builder' && (<>
         {/* Filters */}
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
           <div>
@@ -1302,6 +1362,7 @@ function AudienceBuilderModal({ campaign, agents, activeAgent, onSent, onClose }
             </button>
           </div>
         )}
+        </>)}
       </div>
     </Modal>
   )

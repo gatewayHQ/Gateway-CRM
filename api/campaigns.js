@@ -488,6 +488,46 @@ export default async function handler(req, res) {
       return res.json({ ok: true, updated: data })
     }
 
+    // ── Contact Engagement Scoring ────────────────────────────────────────
+
+    if (action === 'get_engagement_scores') {
+      // Compute engagement scores for contacts that have been mailed
+      // Score: +10 per send, +20 callback, +30 interested, +50 converted, -5 dnc
+      // Recency bonus: sends in last 90d get double weight
+      const { agent_id } = req.query
+      const now = Date.now()
+      const ninetyDaysAgo = new Date(now - 90 * 86400000).toISOString()
+
+      const { data: sends, error } = await supabase
+        .from('mail_sends')
+        .select('contact_id, response, sent_at, campaign_id')
+        .not('contact_id', 'is', null)
+
+      if (error) throw error
+
+      const scoreMap = {}
+      for (const s of (sends || [])) {
+        if (!s.contact_id) continue
+        if (!scoreMap[s.contact_id]) scoreMap[s.contact_id] = { contact_id: s.contact_id, score: 0, sends: 0, responses: 0, conversions: 0, last_send: null }
+        const e = scoreMap[s.contact_id]
+        const isRecent = s.sent_at >= ninetyDaysAgo
+        const mult = isRecent ? 2 : 1
+        e.sends++
+        e.score += 10 * mult
+        if (s.response === 'callback')   { e.score += 20 * mult; e.responses++ }
+        if (s.response === 'interested') { e.score += 30 * mult; e.responses++ }
+        if (s.response === 'converted')  { e.score += 50 * mult; e.responses++; e.conversions++ }
+        if (s.response === 'dnc')        e.score -= 5
+        if (!e.last_send || s.sent_at > e.last_send) e.last_send = s.sent_at
+      }
+
+      const scores = Object.values(scoreMap)
+        .map(e => ({ ...e, score: Math.max(0, e.score), tier: e.score >= 100 ? 'hot' : e.score >= 40 ? 'warm' : 'cold' }))
+        .sort((a, b) => b.score - a.score)
+
+      return res.json({ scores, count: scores.length })
+    }
+
     // ── Sequence Scheduler ────────────────────────────────────────────────
 
     if (action === 'update_sequence_steps') {
