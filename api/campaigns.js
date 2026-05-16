@@ -837,12 +837,19 @@ export default async function handler(req, res) {
       const byChannel = {}
       const byResponse = {}
       const byZip = {}
+      const byZipDetail = {}  // { zip: { sends, responses, conversions } }
       const byMonth = {}
 
       for (const s of sends) {
         byChannel[s.channel]   = (byChannel[s.channel]   || 0) + 1
         byResponse[s.response] = (byResponse[s.response] || 0) + 1
-        if (s.recipient_zip) byZip[s.recipient_zip] = (byZip[s.recipient_zip] || 0) + 1
+        if (s.recipient_zip) {
+          byZip[s.recipient_zip] = (byZip[s.recipient_zip] || 0) + 1
+          if (!byZipDetail[s.recipient_zip]) byZipDetail[s.recipient_zip] = { sends:0, responses:0, conversions:0 }
+          byZipDetail[s.recipient_zip].sends++
+          if (s.response !== 'no-response') byZipDetail[s.recipient_zip].responses++
+          if (s.response === 'converted') byZipDetail[s.recipient_zip].conversions++
+        }
         const mo = s.sent_at?.slice(0, 7)
         if (mo) byMonth[mo] = (byMonth[mo] || 0) + 1
       }
@@ -858,10 +865,11 @@ export default async function handler(req, res) {
           converted,
           response_rate: total > 0 ? Math.round(responded / total * 100) : 0,
           conversion_rate: total > 0 ? Math.round(converted / total * 100) : 0,
-          by_channel:  byChannel,
-          by_response: byResponse,
-          by_zip:      byZip,
-          by_month:    byMonth,
+          by_channel:   byChannel,
+          by_response:  byResponse,
+          by_zip:       byZip,
+          by_zip_detail: byZipDetail,
+          by_month:     byMonth,
         },
       })
     }

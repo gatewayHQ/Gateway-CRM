@@ -1915,18 +1915,43 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
                 </div>
                 {Object.keys(analytics.by_zip || {}).length > 0 && (
                   <div>
-                    <div className="eyebrow-label" style={{ marginBottom:8 }}>Top Zip Codes</div>
-                    {Object.entries(analytics.by_zip || {})
-                      .sort((a,b) => b[1]-a[1]).slice(0,10)
-                      .map(([zip, n]) => (
-                        <div key={zip} style={{ display:'flex', alignItems:'center', gap:10, marginBottom:5 }}>
-                          <span style={{ fontSize:12, fontWeight:700, minWidth:55 }}>{zip}</span>
-                          <div style={{ flex:1, height:6, background:'var(--gw-bone)', borderRadius:4, overflow:'hidden' }}>
-                            <div style={{ width:`${n}px`, maxWidth:'100%', height:'100%', background:'var(--gw-azure)', borderRadius:4 }}/>
-                          </div>
-                          <span style={{ fontSize:12, color:'var(--gw-mist)', minWidth:20, textAlign:'right' }}>{n}</span>
-                        </div>
-                      ))}
+                    <div className="eyebrow-label" style={{ marginBottom:8 }}>Geographic Heatmap — Zip Code Performance</div>
+                    <div style={{ display:'grid', gridTemplateColumns:'auto 1fr auto auto auto', gap:'4px 12px', alignItems:'center', fontSize:12 }}>
+                      <span style={{ fontWeight:700, color:'var(--gw-mist)', fontSize:10 }}>ZIP</span>
+                      <span style={{ fontWeight:700, color:'var(--gw-mist)', fontSize:10 }}>VOLUME</span>
+                      <span style={{ fontWeight:700, color:'var(--gw-mist)', fontSize:10, textAlign:'right' }}>SENDS</span>
+                      <span style={{ fontWeight:700, color:'var(--gw-mist)', fontSize:10, textAlign:'right' }}>RESP</span>
+                      <span style={{ fontWeight:700, color:'var(--gw-mist)', fontSize:10, textAlign:'right' }}>RATE</span>
+                      {Object.entries(analytics.by_zip_detail || analytics.by_zip || {})
+                        .map(([zip, v]) => {
+                          const detail = analytics.by_zip_detail?.[zip] || { sends: typeof v === 'number' ? v : 0, responses: 0 }
+                          return { zip, ...detail }
+                        })
+                        .sort((a,b) => (b.responses/Math.max(b.sends,1)) - (a.responses/Math.max(a.sends,1)) || b.sends - a.sends)
+                        .slice(0,15)
+                        .map(({ zip, sends, responses }) => {
+                          const rate = sends > 0 ? Math.round(responses/sends*100) : 0
+                          const maxSends = Math.max(...Object.values(analytics.by_zip_detail || analytics.by_zip || {1:1}).map(v => typeof v === 'number' ? v : v.sends || 0))
+                          const heatColor = rate >= 15 ? '#16a34a' : rate >= 8 ? '#2563eb' : rate >= 3 ? '#d97706' : '#e5e7eb'
+                          return (
+                            <React.Fragment key={zip}>
+                              <span style={{ fontWeight:700, color:'var(--gw-ink)' }}>{zip}</span>
+                              <div style={{ height:8, background:'var(--gw-bone)', borderRadius:4, overflow:'hidden' }}>
+                                <div style={{ width:`${Math.round(sends/maxSends*100)}%`, height:'100%', background: heatColor, borderRadius:4 }}/>
+                              </div>
+                              <span style={{ color:'var(--gw-mist)', textAlign:'right' }}>{sends}</span>
+                              <span style={{ color:'var(--gw-mist)', textAlign:'right' }}>{responses}</span>
+                              <span style={{ fontWeight:700, color: heatColor, textAlign:'right' }}>{rate}%</span>
+                            </React.Fragment>
+                          )
+                        })}
+                    </div>
+                    <div style={{ display:'flex', gap:12, marginTop:8, fontSize:11, color:'var(--gw-mist)' }}>
+                      <span style={{ display:'flex', alignItems:'center', gap:4 }}><span style={{ width:8, height:8, borderRadius:'50%', background:'#16a34a', display:'inline-block' }}/> Top ≥15%</span>
+                      <span style={{ display:'flex', alignItems:'center', gap:4 }}><span style={{ width:8, height:8, borderRadius:'50%', background:'#2563eb', display:'inline-block' }}/> Good 8–14%</span>
+                      <span style={{ display:'flex', alignItems:'center', gap:4 }}><span style={{ width:8, height:8, borderRadius:'50%', background:'#d97706', display:'inline-block' }}/> Avg 3–7%</span>
+                      <span style={{ display:'flex', alignItems:'center', gap:4 }}><span style={{ width:8, height:8, borderRadius:'50%', background:'#e5e7eb', display:'inline-block' }}/> Low &lt;3%</span>
+                    </div>
                   </div>
                 )}
                 {Object.keys(analytics.by_month || {}).length > 0 && (
