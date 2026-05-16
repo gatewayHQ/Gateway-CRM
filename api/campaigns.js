@@ -15,7 +15,7 @@ export default async function handler(req, res) {
   Object.entries(CORS).forEach(([k, v]) => res.setHeader(k, v))
   if (req.method === 'OPTIONS') return res.status(200).end()
 
-  const { action } = req.body || req.query
+  const { action } = req.body?.action ? req.body : req.query
 
   try {
     // ── Campaigns ─────────────────────────────────────────────────────────
@@ -65,7 +65,7 @@ export default async function handler(req, res) {
           name, description, property_types,
           status:         status         || 'active',
           agent_id,
-          flyer_url,
+          flyer_url:      flyer_url      || null,
           frequency_cap:  frequency_cap  || 0,
           frequency_days: frequency_days || 30,
           tracking_code:  code,
@@ -87,9 +87,22 @@ export default async function handler(req, res) {
     }
 
     if (action === 'update_campaign') {
-      const { id, ...patch } = req.body
+      const { id, ...raw } = req.body
       if (!id) return res.status(400).json({ error: 'id is required' })
-      delete patch.action
+      // Strip action + read-only columns that must never be overwritten via patch
+      const { action: _a, tracking_code, qr_code_url, bitly_id,
+              total_sends, total_responses, created_at, ...patch } = raw
+      // Coerce empty strings to null for typed columns
+      if (patch.agent_id    === '') patch.agent_id    = null
+      if (patch.date_sent   === '') patch.date_sent   = null
+      if (patch.date_completed === '') patch.date_completed = null
+      if (patch.flyer_template  === '') patch.flyer_template  = null
+      if (patch.landing_url     === '') patch.landing_url     = null
+      if (patch.landing_headline === '') patch.landing_headline = null
+      if (patch.landing_tagline  === '') patch.landing_tagline  = null
+      if (patch.landing_cta      === '') patch.landing_cta      = null
+      if (patch.flyer_url        === '') patch.flyer_url        = null
+      if (patch.canva_design_url === '') patch.canva_design_url = null
       const { data, error } = await supabase
         .from('mail_campaigns')
         .update(patch)

@@ -1235,30 +1235,37 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
 
   const loadAll = async () => {
     setLoading(true)
-    const [campRes, agentsRes, contactsRes] = await Promise.all([
-      fetch('/api/campaigns?action=list_campaigns'),
-      supabase.from('agents').select('id, name, initials, color').order('name'),
-      supabase.from('contacts').select('id, first_name, last_name, email, phone, owner_address, owner_city, owner_state, owner_zip').order('last_name'),
-    ])
+    try {
+      const [campRes, agentsRes, contactsRes] = await Promise.all([
+        fetch('/api/campaigns?action=list_campaigns'),
+        supabase.from('agents').select('id, name, initials, color').order('name'),
+        supabase.from('contacts').select('id, first_name, last_name, email, phone, owner_address, owner_city, owner_state, owner_zip').order('last_name'),
+      ])
 
-    if (!campRes.ok) {
-      const err = await campRes.json()
-      if (err.error?.includes('does not exist') || err.error?.includes('relation')) setReady(false)
+      if (!campRes.ok) {
+        const err = await campRes.json().catch(() => ({}))
+        if (err.error?.includes('does not exist') || err.error?.includes('relation')) {
+          setReady(false)
+        } else {
+          pushToast(err.error || `Failed to load campaigns (HTTP ${campRes.status})`, 'error')
+        }
+        return
+      }
+
+      const campData = await campRes.json()
+      setCampaigns(campData.campaigns || [])
+      setAgents(agentsRes.data || [])
+      setContacts(contactsRes.data || [])
+
+      // Load cold call leads in background
+      supabase.from('cold_call_leads').select('id, owner_name, contact_name, property_address, list_id').limit(500).then(({ data }) => {
+        setColdLeads(data || [])
+      })
+    } catch (err) {
+      pushToast(err.message || 'Network error loading campaigns', 'error')
+    } finally {
       setLoading(false)
-      return
     }
-
-    const campData = await campRes.json()
-    setCampaigns(campData.campaigns || [])
-    setAgents(agentsRes.data || [])
-    setContacts(contactsRes.data || [])
-
-    // Load cold call leads in background
-    supabase.from('cold_call_leads').select('id, owner_name, contact_name, property_address, list_id').limit(500).then(({ data }) => {
-      setColdLeads(data || [])
-    })
-
-    setLoading(false)
   }
 
   const createCampaign = async (form) => {
