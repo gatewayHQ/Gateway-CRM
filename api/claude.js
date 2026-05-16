@@ -28,7 +28,14 @@ export default async function handler(req, res) {
 
   // ── Flyer copy generation (formerly /api/generate-flyer) ──────────────────
   if (req.body?.action === 'generate_flyer' || req.body?.template) {
-    const { template, campaign_name, property_types, agent_name, brokerage, target_area } = req.body || {}
+    const {
+      template, campaign_name, property_types, agent_name, brokerage, target_area,
+      // Personalization Engine (#6) extras:
+      property_address, property_price, property_beds, property_baths, property_sqft,
+      contact_name, contact_type, contact_zip, contact_city,
+      campaign_response_rate, campaign_sends, best_performing_zip,
+      photo_caption, personalization_tone,
+    } = req.body || {}
 
     if (!template || !TEMPLATE_PROMPTS[template]) {
       return res.status(400).json({ error: `Invalid template. Must be one of: ${Object.keys(TEMPLATE_PROMPTS).join(', ')}` })
@@ -38,16 +45,52 @@ export default async function handler(req, res) {
     const badge       = TEMPLATE_BADGES[template]
     const propTypesStr = Array.isArray(property_types) && property_types.length > 0 ? property_types.join(', ') : 'real estate'
 
-    const prompt = `You are a real estate marketing copywriter for direct mail postcards and flyers.
+    // Build a rich personalization context block
+    const propertyDetails = [
+      property_address && `Property: ${property_address}`,
+      property_price   && `List Price: $${Number(property_price).toLocaleString()}`,
+      (property_beds || property_baths) && `${property_beds||''}bd / ${property_baths||''}ba${property_sqft ? ` · ${Number(property_sqft).toLocaleString()} sqft` : ''}`,
+      photo_caption    && `Photo Caption: ${photo_caption}`,
+    ].filter(Boolean).join('\n')
 
-Write compelling marketing copy for a real estate postcard with this angle: ${angle}
+    const audienceDetails = [
+      contact_name  && `Recipient: ${contact_name}`,
+      contact_type  && `Audience Type: ${contact_type}`,
+      (contact_city || contact_zip) && `Recipient Area: ${contact_city || ''} ${contact_zip || ''}`.trim(),
+    ].filter(Boolean).join('\n')
 
-Context:
+    const campaignInsights = [
+      campaign_sends        && `Campaign Reach: ${campaign_sends} sends so far`,
+      campaign_response_rate && `Current Response Rate: ${campaign_response_rate}% (industry avg ~5%)`,
+      best_performing_zip   && `Best Performing Zip: ${best_performing_zip}`,
+    ].filter(Boolean).join('\n')
+
+    const toneInstruction = personalization_tone === 'urgent'  ? 'Use strong urgency language and FOMO.'
+                           : personalization_tone === 'warm'   ? 'Use warm, relationship-focused language. Reference the local community.'
+                           : personalization_tone === 'luxury' ? 'Use premium, aspirational language. Emphasize exclusivity and quality.'
+                           : personalization_tone === 'data'   ? 'Lead with data points and market statistics. Appeal to analytical buyers/sellers.'
+                           : 'Use confident, professional language with a clear value proposition.'
+
+    const prompt = `You are a senior real estate marketing copywriter specializing in high-converting direct mail.
+
+Write compelling postcard copy with this angle: ${angle}
+${toneInstruction}
+
+CAMPAIGN CONTEXT:
 ${campaign_name ? `Campaign: ${campaign_name}` : ''}
 Property Types: ${propTypesStr}
 ${agent_name  ? `Agent: ${agent_name}` : ''}
 ${brokerage   ? `Brokerage: ${brokerage}` : ''}
 ${target_area ? `Target Area: ${target_area}` : ''}
+${propertyDetails ? `\nPROPERTY DETAILS:\n${propertyDetails}` : ''}
+${audienceDetails ? `\nAUDIENCE:\n${audienceDetails}` : ''}
+${campaignInsights ? `\nCAMPAIGN PERFORMANCE:\n${campaignInsights}` : ''}
+
+PERSONALIZATION RULES:
+- If a property address is provided, mention it or its neighborhood naturally
+- If a recipient type is specified, tailor language to their perspective (buyer/seller/investor)
+- If campaign data is provided, use it to position the agent as knowledgeable and results-driven
+- Be hyper-local and specific — avoid generic real estate clichés
 
 Return ONLY valid JSON with exactly these fields:
 {

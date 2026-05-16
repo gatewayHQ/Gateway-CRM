@@ -380,6 +380,10 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
   const [saving,           setSaving]           = useState(false)
   const [canvaUrl,         setCanvaUrl]         = useState(campaign.canva_design_url || '')
   const [savingCanva,      setSavingCanva]      = useState(false)
+  // Personalization Engine (#6)
+  const [persTarget,       setPersTarget]       = useState('')  // contact_type
+  const [persTone,         setPersTone]         = useState('')  // urgent/warm/luxury/data
+  const [persArea,         setPersArea]         = useState('')  // target_area
 
   // ── Property photo states ──────────────────────────────────────────────────
   const [properties,       setProperties]       = useState([])
@@ -469,11 +473,22 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          template:       selectedTemplate,
-          campaign_name:  campaign.name,
-          property_types: campaign.property_types,
-          agent_name:     agentObj?.name || activeAgent?.name || '',
-          target_area:    '',
+          template:              selectedTemplate,
+          campaign_name:         campaign.name,
+          property_types:        campaign.property_types,
+          agent_name:            agentObj?.name || activeAgent?.name || '',
+          target_area:           persArea || '',
+          // Property personalization
+          property_address:      linkedProperty?.address || '',
+          property_price:        linkedProperty?.list_price || '',
+          property_beds:         linkedProperty?.beds || '',
+          property_baths:        linkedProperty?.baths || '',
+          property_sqft:         linkedProperty?.sqft || '',
+          photo_caption:         effectivePhotoCaption || '',
+          // Audience personalization
+          contact_type:          persTarget || '',
+          // Tone
+          personalization_tone:  persTone || '',
         }),
       })
       const data = await res.json()
@@ -584,9 +599,46 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
         </div>
       </div>
 
+      {/* Personalization Engine (#6) */}
+      <div style={{ background:'#eff6ff', border:'1.5px solid #bfdbfe', borderRadius:10, padding:'12px 14px' }}>
+        <div style={{ fontSize:12, fontWeight:700, color:'#1d4ed8', marginBottom:8 }}>Personalization Options</div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8 }}>
+          <div>
+            <label className="form-label" style={{ fontSize:11 }}>Target Audience</label>
+            <select className="form-control" style={{ fontSize:12 }} value={persTarget} onChange={e => setPersTarget(e.target.value)}>
+              <option value="">General</option>
+              <option value="buyer">Buyers</option>
+              <option value="seller">Sellers</option>
+              <option value="investor">Investors</option>
+              <option value="landlord">Landlords</option>
+              <option value="tenant">Tenants</option>
+            </select>
+          </div>
+          <div>
+            <label className="form-label" style={{ fontSize:11 }}>Copy Tone</label>
+            <select className="form-control" style={{ fontSize:12 }} value={persTone} onChange={e => setPersTone(e.target.value)}>
+              <option value="">Professional</option>
+              <option value="urgent">Urgent / FOMO</option>
+              <option value="warm">Warm / Community</option>
+              <option value="luxury">Luxury / Premium</option>
+              <option value="data">Data-Driven</option>
+            </select>
+          </div>
+          <div>
+            <label className="form-label" style={{ fontSize:11 }}>Target Area</label>
+            <input className="form-control" style={{ fontSize:12 }} placeholder="e.g. Buckhead, Atlanta" value={persArea} onChange={e => setPersArea(e.target.value)}/>
+          </div>
+        </div>
+        {linkedProperty && (
+          <div style={{ fontSize:11, color:'#1d4ed8', marginTop:8 }}>
+            Property details from {linkedProperty.address} will be included in the AI prompt.
+          </div>
+        )}
+      </div>
+
       {/* Generate button */}
       <button className="btn btn--primary" onClick={generateCopy} disabled={generating || !selectedTemplate}>
-        {generating ? 'Generating…' : '✨ Generate Copy with AI'}
+        {generating ? 'Generating…' : '✨ Generate Personalized Copy with AI'}
       </button>
       {!selectedTemplate && (
         <div style={{ fontSize:12, color:'var(--gw-mist)', textAlign:'center', marginTop:-12 }}>
