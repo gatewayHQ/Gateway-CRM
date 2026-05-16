@@ -615,3 +615,13 @@ do $$ begin
     create policy "allow_all" on campaign_cost_items for all using (true) with check (true);
   end if;
 end $$;
+
+-- ── Implementation #5: Smart Audience Builder ────────────────────────────────
+-- (no schema changes — uses existing contacts table fields)
+
+-- ── Implementation #13: Sequence Scheduler ───────────────────────────────────
+alter table mail_campaigns add column if not exists schedule_steps jsonb default '[]';
+-- Example step shape: { step: 1, name: 'Initial Send', delay_days: 0, channel: 'direct-mail', filter_response: null, last_executed_at: null }
+
+-- ── Implementation #18: Industry Benchmarks ──────────────────────────────────
+-- (no schema changes — computed at query time from sends/costs)

@@ -1333,6 +1333,10 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
   const [abComparison, setAbComparison] = useState(null)
   const [abLoaded,     setAbLoaded]     = useState(false)
   const [creatingVariant, setCreatingVariant] = useState(false)
+  const [seqSteps,     setSeqSteps]     = useState(() => campaign.schedule_steps || [])
+  const [seqDirty,     setSeqDirty]     = useState(false)
+  const [seqSaving,    setSeqSaving]    = useState(false)
+  const [seqDueMap,    setSeqDueMap]    = useState({})  // { stepIndex: {sends, count} }
 
   useEffect(() => { loadSends(); loadAnalytics(); loadROI(); setAbLoaded(false); setAbComparison(null) }, [campaign.id])
   useEffect(() => { if (tab === 'suppression') loadSuppressions() }, [tab])
@@ -1440,6 +1444,26 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
     setAbComparison(null)
     setAbLoaded(false)
     loadABComparison()
+  }
+
+  const saveSeqSteps = async () => {
+    setSeqSaving(true)
+    await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'update_sequence_steps', campaign_id: campaign.id, steps: seqSteps }),
+    })
+    setSeqSaving(false)
+    setSeqDirty(false)
+    pushToast('Sequence saved')
+  }
+
+  const loadSeqDue = async (stepIdx, delayDays, filterResponse) => {
+    const params = new URLSearchParams({ action:'get_sequence_due', campaign_id:campaign.id, step_delay_days:delayDays })
+    if (filterResponse && filterResponse !== 'all') params.set('filter_response', filterResponse)
+    const res  = await fetch(`/api/campaigns?${params}`)
+    const data = await res.json()
+    setSeqDueMap(p => ({ ...p, [stepIdx]: { sends: data.sends || [], count: data.count || 0 } }))
   }
 
   const linkDeal = async (sendId, dealId) => {
@@ -1581,7 +1605,7 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
 
         {/* Tabs */}
         <div style={{ display:'flex', gap:0, borderBottom:'1px solid var(--gw-border)', marginTop:0, overflowX:'auto' }}>
-          {[['sends','Send Log'],['analytics','Analytics'],['budget','Budget'],['qr','QR Code'],['flyer','Flyer & AI'],['suppression','Suppression']].map(([v,l]) => (
+          {[['sends','Send Log'],['analytics','Analytics'],['budget','Budget'],['sequence','Sequence'],['qr','QR Code'],['flyer','Flyer & AI'],['suppression','Suppression']].map(([v,l]) => (
             <button key={v} onClick={() => setTab(v)}
               style={{ padding:'8px 14px', fontSize:13, fontWeight:600, cursor:'pointer', border:'none', background:'transparent', whiteSpace:'nowrap',
                 borderBottom: tab === v ? '2.5px solid var(--gw-azure)' : '2.5px solid transparent',
@@ -2026,6 +2050,99 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
             </div>
           )
         })()}
+
+        {/* ── Sequence Scheduler ── */}
+        {tab === 'sequence' && (
+          <div style={{ display:'flex', flexDirection:'column', gap:18 }}>
+            <div style={{ fontSize:13, color:'var(--gw-mist)' }}>
+              Define a drip sequence of follow-up sends. Each step targets contacts from this campaign who meet the response filter after a set number of days.
+            </div>
+
+            {/* Steps */}
+            {seqSteps.map((step, i) => {
+              const due = seqDueMap[i]
+              return (
+                <div key={i} style={{ background:'var(--gw-bone)', borderRadius:12, padding:14, display:'flex', flexDirection:'column', gap:10 }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                    <span style={{ width:24, height:24, borderRadius:'50%', background:'var(--gw-azure)', color:'#fff', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, fontWeight:800, flexShrink:0 }}>{i+1}</span>
+                    <input className="form-control" style={{ flex:1, fontSize:13 }} placeholder="Step name" value={step.name} onChange={e => {
+                      const s = [...seqSteps]; s[i] = { ...s[i], name: e.target.value }; setSeqSteps(s); setSeqDirty(true)
+                    }}/>
+                    <button className="btn btn--ghost btn--icon btn--sm" onClick={() => { setSeqSteps(p => p.filter((_,j)=>j!==i)); setSeqDirty(true) }} title="Remove step">
+                      <Icon name="trash" size={13}/>
+                    </button>
+                  </div>
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8 }}>
+                    <div>
+                      <label className="form-label" style={{ fontSize:11 }}>Days after initial send</label>
+                      <input className="form-control" type="number" min="1" value={step.delay_days} onChange={e => {
+                        const s = [...seqSteps]; s[i] = { ...s[i], delay_days: parseInt(e.target.value)||0 }; setSeqSteps(s); setSeqDirty(true)
+                      }}/>
+                    </div>
+                    <div>
+                      <label className="form-label" style={{ fontSize:11 }}>Only contacts with response</label>
+                      <select className="form-control" value={step.filter_response || 'no-response'} onChange={e => {
+                        const s = [...seqSteps]; s[i] = { ...s[i], filter_response: e.target.value }; setSeqSteps(s); setSeqDirty(true)
+                      }}>
+                        <option value="all">All contacts</option>
+                        <option value="no-response">No Response only</option>
+                        <option value="callback">Callback only</option>
+                        <option value="interested">Interested only</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="form-label" style={{ fontSize:11 }}>Channel</label>
+                      <select className="form-control" value={step.channel || 'direct-mail'} onChange={e => {
+                        const s = [...seqSteps]; s[i] = { ...s[i], channel: e.target.value }; setSeqSteps(s); setSeqDirty(true)
+                      }}>
+                        <option value="direct-mail">Direct Mail</option>
+                        <option value="email">Email</option>
+                        <option value="text">Text</option>
+                        <option value="cold-call">Cold Call</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+                    <button className="btn btn--ghost btn--sm" style={{ fontSize:12 }}
+                      onClick={() => loadSeqDue(i, step.delay_days, step.filter_response)}>
+                      Check Who's Due
+                    </button>
+                    {due !== undefined && (
+                      <span style={{ fontSize:12, color: due.count > 0 ? '#d97706' : 'var(--gw-mist)', fontWeight: due.count > 0 ? 700 : 400 }}>
+                        {due.count} contact{due.count !== 1 ? 's' : ''} due
+                      </span>
+                    )}
+                    {due?.count > 0 && (
+                      <button className="btn btn--primary btn--sm" style={{ fontSize:12 }} onClick={() => setAudienceOpen(true)}>
+                        Execute via Batch Send
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+
+            <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+              <button className="btn btn--ghost btn--sm" onClick={() => {
+                setSeqSteps(p => [...p, { name:`Follow-up ${p.length+1}`, delay_days:30, filter_response:'no-response', channel:'direct-mail' }])
+                setSeqDirty(true)
+              }}>
+                <Icon name="plus" size={13}/> Add Step
+              </button>
+              {seqDirty && (
+                <button className="btn btn--primary btn--sm" onClick={saveSeqSteps} disabled={seqSaving}>
+                  {seqSaving ? 'Saving…' : 'Save Sequence'}
+                </button>
+              )}
+            </div>
+
+            {seqSteps.length === 0 && (
+              <div style={{ padding:'24px', textAlign:'center', color:'var(--gw-mist)', fontSize:13 }}>
+                No steps defined. Add a step to create your follow-up sequence.
+              </div>
+            )}
+          </div>
+        )}
 
         {/* ── QR Code ── */}
         {tab === 'qr' && (

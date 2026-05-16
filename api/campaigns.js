@@ -488,6 +488,44 @@ export default async function handler(req, res) {
       return res.json({ ok: true, updated: data })
     }
 
+    // ── Sequence Scheduler ────────────────────────────────────────────────
+
+    if (action === 'update_sequence_steps') {
+      const { campaign_id, steps } = req.body
+      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
+      const { data, error } = await supabase
+        .from('mail_campaigns')
+        .update({ schedule_steps: steps || [] })
+        .eq('id', campaign_id)
+        .select('id, schedule_steps')
+        .single()
+      if (error) throw error
+      return res.json({ campaign: data })
+    }
+
+    if (action === 'get_sequence_due') {
+      // Returns contacts that are due for a follow-up step, based on initial send date
+      const { campaign_id, step_delay_days, filter_response } = req.query
+      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
+
+      const delayDays = parseInt(step_delay_days) || 0
+      const cutoffDate = new Date(Date.now() - delayDays * 86400000).toISOString()
+
+      let query = supabase
+        .from('mail_sends')
+        .select('id, contact_id, recipient_name, recipient_address, recipient_city, recipient_state, recipient_zip, response, sent_at')
+        .eq('campaign_id', campaign_id)
+        .lte('sent_at', cutoffDate)
+
+      if (filter_response && filter_response !== 'all') {
+        query = query.eq('response', filter_response)
+      }
+
+      const { data: sends, error } = await query
+      if (error) throw error
+      return res.json({ sends: sends || [], count: (sends || []).length })
+    }
+
     // ── Smart Audience Builder ────────────────────────────────────────────
 
     if (action === 'audience_preview') {
