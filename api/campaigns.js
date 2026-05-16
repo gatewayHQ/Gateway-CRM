@@ -1,7 +1,9 @@
 import { createClient } from '@supabase/supabase-js'
 
-const SUPABASE_URL  = process.env.SUPABASE_URL  || process.env.VITE_SUPABASE_URL  || 'https://twgwemkihpwlgliftagg.supabase.co'
-const SERVICE_KEY   = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || ''
+const _rawUrl      = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
+// Strip accidental /rest/v1 suffix or trailing slashes (avoids PGRST107 double-path)
+const SUPABASE_URL = _rawUrl.replace(/\/rest\/v1\/?$/, '').replace(/\/+$/, '')
+const SERVICE_KEY  = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || ''
 
 const supabase = createClient(SUPABASE_URL, SERVICE_KEY)
 

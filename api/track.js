@@ -52,8 +52,8 @@ export default async function handler(req, res) {
   }
 
   const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_KEY
+    (process.env.SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co').replace(/\/rest\/v1\/?$/, '').replace(/\/+$/, ''),
+    process.env.SUPABASE_SERVICE_KEY || ''
   )
 
   // Look up campaign by tracking code

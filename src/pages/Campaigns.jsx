@@ -43,6 +43,19 @@ const CAMPAIGN_TEMPLATES = [
   { id: 'sellers_wanted',  label: 'Sellers Wanted',       emoji: '🎯' },
 ]
 
+const TEMPLATE_DESIGNS = {
+  just_listed:     { bg:'#1d4ed8', headerBg:'#1e3a8a', text:'#ffffff', accent:'#fbbf24', accentText:'#1e1b4b' },
+  just_sold:       { bg:'#166534', headerBg:'#14532d', text:'#ffffff', accent:'#86efac', accentText:'#14532d' },
+  buyers_waiting:  { bg:'#5b21b6', headerBg:'#4c1d95', text:'#ffffff', accent:'#fbbf24', accentText:'#3b0764' },
+  exclusive_offer: { bg:'#92400e', headerBg:'#78350f', text:'#ffffff', accent:'#fef3c7', accentText:'#78350f' },
+  market_update:   { bg:'#0f172a', headerBg:'#1e293b', text:'#ffffff', accent:'#38bdf8', accentText:'#0c4a6e' },
+  sellers_wanted:  { bg:'#b91c1c', headerBg:'#991b1b', text:'#ffffff', accent:'#fecaca', accentText:'#7f1d1d' },
+}
+const TEMPLATE_BADGE_LABELS = {
+  just_listed:'Just Listed', just_sold:'Just Sold', buyers_waiting:'Buyers Wanted',
+  exclusive_offer:'Exclusive Off-Market', market_update:'Market Update', sellers_wanted:'Sellers Wanted',
+}
+
 function generateTrackingCode() {
   const chars = 'abcdefghjkmnpqrstuvwxyz23456789'
   return Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
@@ -225,6 +238,113 @@ function QRPanel({ campaign, onUpdate, onScanCountLoad }) {
   )
 }
 
+// ── Postcard visual renderer ──────────────────────────────────────────────────
+function PostcardPreview({ copy, template, agentObj }) {
+  const d = TEMPLATE_DESIGNS[template] || TEMPLATE_DESIGNS.just_listed
+  const badge = TEMPLATE_BADGE_LABELS[template] || 'Campaign'
+  return (
+    <div style={{ borderRadius:10, overflow:'hidden', boxShadow:'0 6px 28px rgba(0,0,0,0.22)', background:d.bg, display:'flex', flexDirection:'column' }}>
+      {/* Header */}
+      <div style={{ background:d.headerBg, padding:'10px 16px', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+        <span style={{ background:d.accent, color:d.accentText, padding:'3px 12px', borderRadius:20, fontSize:10, fontWeight:800, letterSpacing:'0.07em', textTransform:'uppercase' }}>
+          {badge}
+        </span>
+        {agentObj && (
+          <div style={{ width:32, height:32, borderRadius:'50%', background:agentObj.color||d.accent, display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontWeight:800, color:'#fff', boxShadow:'0 2px 8px rgba(0,0,0,0.25)', flexShrink:0 }}>
+            {agentObj.initials || agentObj.name?.[0] || '?'}
+          </div>
+        )}
+      </div>
+      {/* Body */}
+      <div style={{ padding:'14px 18px', display:'flex', flexDirection:'column', gap:8 }}>
+        <div style={{ fontSize:20, fontWeight:900, color:d.text, lineHeight:1.15, textTransform:'uppercase', letterSpacing:'0.02em', fontFamily:'var(--font-display)' }}>
+          {copy.headline}
+        </div>
+        <div style={{ fontSize:13, fontWeight:700, color:d.accent, lineHeight:1.3 }}>
+          {copy.subheadline}
+        </div>
+        <p style={{ fontSize:12, color:d.text, opacity:0.9, lineHeight:1.6, margin:0 }}>
+          {copy.tagline}
+        </p>
+        {copy.bullets?.length > 0 && (
+          <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+            {copy.bullets.map((b, i) => (
+              <div key={i} style={{ display:'flex', gap:8, alignItems:'flex-start', fontSize:12, color:d.text }}>
+                <span style={{ color:d.accent, fontWeight:800, flexShrink:0, lineHeight:1.5 }}>✓</span>
+                <span style={{ lineHeight:1.5 }}>{b}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ alignSelf:'flex-start', background:d.accent, color:d.accentText, padding:'9px 20px', borderRadius:8, fontSize:12, fontWeight:800, letterSpacing:'0.03em', marginTop:2 }}>
+          {copy.cta}
+        </div>
+      </div>
+      {/* Footer */}
+      {agentObj?.name && (
+        <div style={{ borderTop:`1px solid ${d.headerBg}`, padding:'8px 18px', display:'flex', gap:10, alignItems:'center' }}>
+          <div style={{ width:22, height:22, borderRadius:'50%', background:agentObj.color||d.accent, display:'flex', alignItems:'center', justifyContent:'center', fontSize:9, fontWeight:800, color:'#fff', flexShrink:0 }}>
+            {agentObj.initials || agentObj.name?.[0] || '?'}
+          </div>
+          <span style={{ fontSize:10, color:d.text, opacity:0.65 }}>
+            {[agentObj.name, agentObj.role, agentObj.email].filter(Boolean).join(' · ')}
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function printFlyerWindow(copy, template, agentObj, campaignName) {
+  const d = TEMPLATE_DESIGNS[template] || TEMPLATE_DESIGNS.just_listed
+  const badge = TEMPLATE_BADGE_LABELS[template] || 'Campaign'
+  const agentInitials = agentObj ? (agentObj.initials || agentObj.name?.[0] || '') : ''
+  const agentColor    = agentObj?.color || d.accent
+  const agentInfo     = agentObj ? [agentObj.name, agentObj.role, agentObj.email].filter(Boolean).join(' · ') : ''
+  const bulletsHtml   = (copy.bullets || []).map(b =>
+    `<li><span style="color:${d.accent};font-weight:800;flex-shrink:0;">✓</span> ${b}</li>`
+  ).join('')
+
+  const w = window.open('', '_blank', 'width=960,height=700')
+  if (!w) { pushToast('Allow pop-ups to print the flyer', 'error'); return }
+  w.document.write(`<!DOCTYPE html><html><head><title>${campaignName} — Flyer</title>
+<style>
+  @page { size: 6in 4in; margin: 0; }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 6in; height: 4in; overflow: hidden; }
+  body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background: ${d.bg}; display: flex; flex-direction: column; }
+  .hdr { background: ${d.headerBg}; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+  .badge { background: ${d.accent}; color: ${d.accentText}; padding: 4px 14px; border-radius: 20px; font-size: 10pt; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; }
+  .av { width: 40px; height: 40px; border-radius: 50%; background: ${agentColor}; display: flex; align-items: center; justify-content: center; font-size: 13pt; font-weight: 800; color: #fff; }
+  .body { flex: 1; padding: 16px 22px 10px; display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
+  .hl { font-size: 22pt; font-weight: 900; color: ${d.text}; line-height: 1.1; text-transform: uppercase; letter-spacing: 0.02em; }
+  .sub { font-size: 11pt; font-weight: 700; color: ${d.accent}; }
+  .tag { font-size: 10pt; color: ${d.text}; opacity: 0.9; line-height: 1.5; }
+  ul { list-style: none; display: flex; flex-direction: column; gap: 5px; }
+  li { font-size: 10pt; color: ${d.text}; display: flex; gap: 8px; align-items: flex-start; }
+  .cta { display: inline-block; background: ${d.accent}; color: ${d.accentText}; padding: 9px 20px; border-radius: 8px; font-size: 10pt; font-weight: 800; letter-spacing: 0.03em; margin-top: 4px; }
+  .ftr { border-top: 1px solid ${d.headerBg}; padding: 8px 22px; display: flex; gap: 12px; align-items: center; flex-shrink: 0; }
+  .av-sm { width: 22px; height: 22px; border-radius: 50%; background: ${agentColor}; display: inline-flex; align-items: center; justify-content: center; font-size: 8pt; font-weight: 800; color: #fff; flex-shrink: 0; }
+  .ftr-txt { font-size: 9pt; color: ${d.text}; opacity: 0.65; }
+</style>
+</head><body>
+  <div class="hdr">
+    <span class="badge">${badge}</span>
+    ${agentInitials ? `<div class="av">${agentInitials}</div>` : ''}
+  </div>
+  <div class="body">
+    <div class="hl">${copy.headline}</div>
+    <div class="sub">${copy.subheadline}</div>
+    <div class="tag">${copy.tagline}</div>
+    <ul>${bulletsHtml}</ul>
+    <span class="cta">${copy.cta}</span>
+  </div>
+  ${agentInfo ? `<div class="ftr"><div class="av-sm">${agentInitials}</div><span class="ftr-txt">${agentInfo}</span></div>` : ''}
+</body></html>`)
+  w.document.close()
+  setTimeout(() => w.print(), 500)
+}
+
 // ── Flyer / AI Copy Tab ───────────────────────────────────────────────────────
 function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
   const [selectedTemplate, setSelectedTemplate] = useState(campaign.flyer_template || '')
@@ -382,34 +502,18 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
         </div>
       )}
 
-      {/* Generated copy preview */}
+      {/* Visual postcard preview */}
       {generatedCopy && (
-        <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
-          <div style={{ padding:'14px 16px', background:'var(--gw-bone)', borderBottom:'1px solid var(--gw-border)' }}>
-            <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:'0.05em' }}>Generated Copy Preview</div>
-          </div>
-          <div style={{ padding:'16px', display:'flex', flexDirection:'column', gap:10 }}>
-            <div style={{ fontSize:18, fontWeight:800, letterSpacing:'0.04em', color:'var(--gw-ink)', textTransform:'uppercase', lineHeight:1.2 }}>
-              {generatedCopy.headline}
-            </div>
-            <div style={{ fontSize:14, fontWeight:700, color:'#374151' }}>
-              {generatedCopy.subheadline}
-            </div>
-            <p style={{ fontSize:13, color:'#4b5563', lineHeight:1.7, margin:0 }}>
-              {generatedCopy.tagline}
-            </p>
-            {generatedCopy.bullets?.length > 0 && (
-              <ul style={{ margin:0, paddingLeft:18, fontSize:13, color:'var(--gw-ink)', display:'flex', flexDirection:'column', gap:4 }}>
-                {generatedCopy.bullets.map((b, i) => <li key={i}>{b}</li>)}
-              </ul>
-            )}
-            <div style={{ display:'inline-block', background:'var(--gw-azure)', color:'#fff', padding:'8px 16px', borderRadius:8, fontSize:13, fontWeight:700, alignSelf:'flex-start' }}>
-              {generatedCopy.cta}
-            </div>
-          </div>
-          <div style={{ padding:'10px 16px', borderTop:'1px solid var(--gw-border)', display:'flex', gap:8 }}>
-            <button className="btn btn--ghost btn--sm" onClick={copyAllText}>{copied ? '✓ Copied!' : 'Copy All Copy'}</button>
+        <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+          <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:'0.05em' }}>Flyer Preview</div>
+          <PostcardPreview copy={generatedCopy} template={selectedTemplate} agentObj={agentObj} />
+          <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+            <button className="btn btn--ghost btn--sm" onClick={copyAllText}>{copied ? '✓ Copied!' : 'Copy Text'}</button>
             <button className="btn btn--primary btn--sm" onClick={saveToCampaign} disabled={saving}>{saving ? 'Saving…' : 'Save to Campaign'}</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => printFlyerWindow(generatedCopy, selectedTemplate, agentObj, campaign.name)}
+              style={{ background:'#f0f7ff', borderColor:'#bfdbfe', color:'#1d4ed8' }}>
+              Print / Download
+            </button>
           </div>
         </div>
       )}
@@ -1238,7 +1342,7 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
     try {
       const [campRes, agentsRes, contactsRes] = await Promise.all([
         fetch('/api/campaigns?action=list_campaigns'),
-        supabase.from('agents').select('id, name, initials, color').order('name'),
+        supabase.from('agents').select('id, name, initials, color, email, role').order('name'),
         supabase.from('contacts').select('id, first_name, last_name, email, phone, owner_address, owner_city, owner_state, owner_zip').order('last_name'),
       ])
 

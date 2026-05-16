@@ -5,7 +5,7 @@ const INTEGRATION_KEY = process.env.DOCUSIGN_INTEGRATION_KEY
 const ACCOUNT_ID      = process.env.DOCUSIGN_ACCOUNT_ID
 const USER_ID         = process.env.DOCUSIGN_USER_ID
 
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
+const SUPABASE_URL = (process.env.SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co').replace(/\/rest\/v1\/?$/, '').replace(/\/+$/, '')
 
 const AUTH_SERVERS = [
   process.env.DOCUSIGN_AUTH_SERVER,

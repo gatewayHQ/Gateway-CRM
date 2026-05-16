@@ -90,7 +90,10 @@ export default async function handler(req, res) {
     if (!r.ok) return res.status(r.status).json({ error: data.message || 'Twilio error' })
 
     if (conversationId) {
-      const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+      const supabase = createClient(
+        (process.env.SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co').replace(/\/rest\/v1\/?$/, '').replace(/\/+$/, ''),
+        process.env.SUPABASE_SERVICE_KEY || ''
+      )
       await Promise.all([
         supabase.from('messages').insert([{
           conversation_id: conversationId, direction: 'outbound', body,
