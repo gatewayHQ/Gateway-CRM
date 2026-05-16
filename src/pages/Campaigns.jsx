@@ -1119,6 +1119,11 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
   const [roi,          setRoi]          = useState(null)
   const [deals,        setDeals]        = useState([])
   const [linkDealId,   setLinkDealId]   = useState(null)  // send.id currently being linked
+  const [costItems,    setCostItems]    = useState([])
+  const [costLoaded,   setCostLoaded]   = useState(false)
+  const [addingCost,   setAddingCost]   = useState(false)
+  const [costForm,     setCostForm]     = useState({ category:'postage', description:'', unit_cost:'', quantity:'1', date_incurred:'' })
+  const [savingCost,   setSavingCost]   = useState(false)
 
   useEffect(() => { loadSends(); loadAnalytics(); loadROI() }, [campaign.id])
   useEffect(() => { if (tab === 'suppression') loadSuppressions() }, [tab])
@@ -1148,6 +1153,44 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
     const res  = await fetch('/api/campaigns?action=list_deals')
     const data = await res.json()
     setDeals(data.deals || [])
+  }
+
+  const loadCostItems = async () => {
+    if (costLoaded) return
+    const res  = await fetch(`/api/campaigns?action=list_cost_items&campaign_id=${campaign.id}`)
+    const data = await res.json()
+    setCostItems(data.items || [])
+    setCostLoaded(true)
+  }
+
+  const addCostItem = async () => {
+    if (!costForm.unit_cost) return
+    setSavingCost(true)
+    const res  = await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'add_cost_item', campaign_id: campaign.id, ...costForm }),
+    })
+    const data = await res.json()
+    if (res.ok) {
+      setCostItems(p => [data.item, ...p])
+      setCostForm({ category:'postage', description:'', unit_cost:'', quantity:'1', date_incurred:'' })
+      setAddingCost(false)
+      pushToast('Cost item added')
+    } else {
+      pushToast(data.error || 'Failed to add cost item', 'error')
+    }
+    setSavingCost(false)
+  }
+
+  const deleteCostItem = async (id) => {
+    await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'delete_cost_item', id }),
+    })
+    setCostItems(p => p.filter(i => i.id !== id))
+    pushToast('Cost item removed')
   }
 
   const linkDeal = async (sendId, dealId) => {
@@ -1271,7 +1314,7 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
 
         {/* Tabs */}
         <div style={{ display:'flex', gap:0, borderBottom:'1px solid var(--gw-border)', marginTop:0, overflowX:'auto' }}>
-          {[['sends','Send Log'],['analytics','Analytics'],['qr','QR Code'],['flyer','Flyer & AI'],['suppression','Suppression']].map(([v,l]) => (
+          {[['sends','Send Log'],['analytics','Analytics'],['budget','Budget'],['qr','QR Code'],['flyer','Flyer & AI'],['suppression','Suppression']].map(([v,l]) => (
             <button key={v} onClick={() => setTab(v)}
               style={{ padding:'8px 14px', fontSize:13, fontWeight:600, cursor:'pointer', border:'none', background:'transparent', whiteSpace:'nowrap',
                 borderBottom: tab === v ? '2.5px solid var(--gw-azure)' : '2.5px solid transparent',
@@ -1491,6 +1534,124 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
             )
             : <div style={{ textAlign:'center', color:'var(--gw-mist)', padding:40, fontSize:13 }}>No data yet — log some sends first.</div>
         )}
+
+        {/* ── Budget & Cost Dashboard ── */}
+        {tab === 'budget' && (() => {
+          if (!costLoaded) loadCostItems()
+          const totalCost = costItems.reduce((acc, i) => acc + (i.unit_cost * i.quantity), 0)
+          const costPerSend = sends.length > 0 ? totalCost / sends.length : 0
+          const byCategory = costItems.reduce((acc, i) => {
+            acc[i.category] = (acc[i.category] || 0) + i.unit_cost * i.quantity
+            return acc
+          }, {})
+          const CATEGORY_COLORS = { printing:'#3b82f6', postage:'#8b5cf6', design:'#f59e0b', vendor:'#10b981', other:'#6b7280' }
+          return (
+            <div style={{ display:'flex', flexDirection:'column', gap:18 }}>
+              {/* Summary Cards */}
+              <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))', gap:10 }}>
+                <div style={{ background:'var(--gw-bone)', borderRadius:10, padding:'12px 16px', textAlign:'center' }}>
+                  <div style={{ fontSize:20, fontWeight:800, color:'var(--gw-ink)' }}>${totalCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+                  <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>Total Spend</div>
+                </div>
+                <div style={{ background:'var(--gw-bone)', borderRadius:10, padding:'12px 16px', textAlign:'center' }}>
+                  <div style={{ fontSize:20, fontWeight:800, color:'var(--gw-azure)' }}>{costItems.length}</div>
+                  <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>Line Items</div>
+                </div>
+                <div style={{ background:'var(--gw-bone)', borderRadius:10, padding:'12px 16px', textAlign:'center' }}>
+                  <div style={{ fontSize:20, fontWeight:800, color:'#7c3aed' }}>
+                    {costPerSend > 0 ? `$${costPerSend.toFixed(2)}` : '—'}
+                  </div>
+                  <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>Cost / Send</div>
+                </div>
+                {roi?.estimated_commission > 0 && (
+                  <div style={{ background: roi.roi_pct > 0 ? '#f0fdf4' : 'var(--gw-bone)', border: roi.roi_pct > 0 ? '1.5px solid #86efac' : 'none', borderRadius:10, padding:'12px 16px', textAlign:'center' }}>
+                    <div style={{ fontSize:20, fontWeight:800, color: roi.roi_pct > 0 ? '#16a34a' : 'var(--gw-mist)' }}>
+                      {roi.roi_pct > 0 ? '+' : ''}{roi.roi_pct}%
+                    </div>
+                    <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>ROI</div>
+                  </div>
+                )}
+              </div>
+
+              {/* Spend by Category */}
+              {Object.keys(byCategory).length > 0 && (
+                <div>
+                  <div className="eyebrow-label" style={{ marginBottom:8 }}>Spend by Category</div>
+                  {Object.entries(byCategory).sort((a,b) => b[1]-a[1]).map(([cat, amt]) => (
+                    <div key={cat} style={{ display:'flex', alignItems:'center', gap:10, marginBottom:6 }}>
+                      <span style={{ fontSize:11, fontWeight:700, minWidth:70, textTransform:'capitalize', color: CATEGORY_COLORS[cat] || '#6b7280' }}>{cat}</span>
+                      <div style={{ flex:1, height:8, background:'var(--gw-bone)', borderRadius:4, overflow:'hidden' }}>
+                        <div style={{ width:`${totalCost > 0 ? Math.round(amt/totalCost*100) : 0}%`, height:'100%', background: CATEGORY_COLORS[cat] || '#6b7280', borderRadius:4 }}/>
+                      </div>
+                      <span style={{ fontSize:12, fontWeight:700, minWidth:70, textAlign:'right' }}>${amt.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Add Cost Item */}
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                <div className="eyebrow-label">Cost Line Items</div>
+                <button className="btn btn--ghost btn--sm" onClick={() => setAddingCost(true)}>
+                  <Icon name="plus" size={13}/> Add Cost
+                </button>
+              </div>
+
+              {addingCost && (
+                <div style={{ background:'var(--gw-bone)', borderRadius:10, padding:14 }}>
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:8 }}>
+                    <select className="form-control" value={costForm.category} onChange={e => setCostForm(p=>({...p,category:e.target.value}))}>
+                      <option value="postage">Postage</option>
+                      <option value="printing">Printing</option>
+                      <option value="design">Design</option>
+                      <option value="vendor">Vendor</option>
+                      <option value="other">Other</option>
+                    </select>
+                    <input className="form-control" placeholder="Description" value={costForm.description} onChange={e => setCostForm(p=>({...p,description:e.target.value}))}/>
+                  </div>
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8, marginBottom:10 }}>
+                    <input className="form-control" type="number" min="0" step="0.01" placeholder="Unit cost ($)" value={costForm.unit_cost} onChange={e => setCostForm(p=>({...p,unit_cost:e.target.value}))}/>
+                    <input className="form-control" type="number" min="1" placeholder="Qty" value={costForm.quantity} onChange={e => setCostForm(p=>({...p,quantity:e.target.value}))}/>
+                    <input className="form-control" type="date" value={costForm.date_incurred} onChange={e => setCostForm(p=>({...p,date_incurred:e.target.value}))}/>
+                  </div>
+                  <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
+                    <button className="btn btn--ghost btn--sm" onClick={() => setAddingCost(false)}>Cancel</button>
+                    <button className="btn btn--primary btn--sm" disabled={savingCost} onClick={addCostItem}>
+                      {savingCost ? 'Adding…' : 'Add'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Line Items Table */}
+              {costItems.length === 0
+                ? <div style={{ textAlign:'center', color:'var(--gw-mist)', padding:24, fontSize:13 }}>No cost items yet. Add printing, postage, design, and vendor costs.</div>
+                : (
+                  <div style={{ display:'flex', flexDirection:'column', gap:0 }}>
+                    {costItems.map(item => (
+                      <div key={item.id} style={{ display:'grid', gridTemplateColumns:'auto 1fr auto auto auto', gap:10, alignItems:'center', padding:'8px 0', borderBottom:'1px solid var(--gw-border)' }}>
+                        <span style={{ fontSize:11, fontWeight:700, padding:'2px 8px', borderRadius:8, background:'var(--gw-bone)', color: CATEGORY_COLORS[item.category] || '#6b7280', textTransform:'capitalize' }}>
+                          {item.category}
+                        </span>
+                        <span style={{ fontSize:13, color:'var(--gw-ink)' }}>{item.description || '—'}</span>
+                        <span style={{ fontSize:12, color:'var(--gw-mist)' }}>×{item.quantity}</span>
+                        <span style={{ fontSize:13, fontWeight:700, color:'var(--gw-ink)' }}>
+                          ${(item.unit_cost * item.quantity).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
+                        </span>
+                        <button className="btn btn--ghost btn--icon btn--sm" onClick={() => deleteCostItem(item.id)} title="Remove">
+                          <Icon name="trash" size={12}/>
+                        </button>
+                      </div>
+                    ))}
+                    <div style={{ display:'flex', justifyContent:'flex-end', paddingTop:10, fontWeight:800, fontSize:14 }}>
+                      Total: ${totalCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
+                    </div>
+                  </div>
+                )
+              }
+            </div>
+          )
+        })()}
 
         {/* ── QR Code ── */}
         {tab === 'qr' && (

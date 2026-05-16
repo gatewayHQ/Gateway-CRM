@@ -402,6 +402,47 @@ export default async function handler(req, res) {
       return res.json({ send: data })
     }
 
+    // ── Budget & Cost Items ────────────────────────────────────────────────
+
+    if (action === 'list_cost_items') {
+      const { campaign_id } = req.query
+      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
+      const { data, error } = await supabase
+        .from('campaign_cost_items')
+        .select('*')
+        .eq('campaign_id', campaign_id)
+        .order('date_incurred', { ascending: false })
+      if (error) throw error
+      return res.json({ items: data || [] })
+    }
+
+    if (action === 'add_cost_item') {
+      const { campaign_id, category, description, unit_cost, quantity, date_incurred } = req.body
+      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
+      const { data, error } = await supabase
+        .from('campaign_cost_items')
+        .insert({
+          campaign_id,
+          category:      category || 'other',
+          description:   description || null,
+          unit_cost:     parseFloat(unit_cost) || 0,
+          quantity:      parseInt(quantity) || 1,
+          date_incurred: date_incurred || null,
+        })
+        .select()
+        .single()
+      if (error) throw error
+      return res.json({ item: data })
+    }
+
+    if (action === 'delete_cost_item') {
+      const { id } = req.body
+      if (!id) return res.status(400).json({ error: 'id is required' })
+      const { error } = await supabase.from('campaign_cost_items').delete().eq('id', id)
+      if (error) throw error
+      return res.json({ ok: true })
+    }
+
     if (action === 'list_deals') {
       const { data: deals, error } = await supabase
         .from('deals')
