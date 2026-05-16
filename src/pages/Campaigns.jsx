@@ -1116,8 +1116,11 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
   const [suppForm,     setSuppForm]     = useState({ full_name:'', address:'', reason:'dnc', notes:'' })
   const [confirmDel,   setConfirmDel]   = useState(null)
   const [scanCount,    setScanCount]    = useState(null)
+  const [roi,          setRoi]          = useState(null)
+  const [deals,        setDeals]        = useState([])
+  const [linkDealId,   setLinkDealId]   = useState(null)  // send.id currently being linked
 
-  useEffect(() => { loadSends(); loadAnalytics() }, [campaign.id])
+  useEffect(() => { loadSends(); loadAnalytics(); loadROI() }, [campaign.id])
   useEffect(() => { if (tab === 'suppression') loadSuppressions() }, [tab])
 
   const loadSends = async () => {
@@ -1132,6 +1135,30 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
     const res  = await fetch(`/api/campaigns?action=campaign_analytics&campaign_id=${campaign.id}`)
     const data = await res.json()
     setAnalytics(data.analytics || null)
+  }
+
+  const loadROI = async () => {
+    const res  = await fetch(`/api/campaigns?action=campaign_roi&campaign_id=${campaign.id}`)
+    const data = await res.json()
+    setRoi(data.roi || null)
+  }
+
+  const loadDeals = async () => {
+    if (deals.length > 0) return
+    const res  = await fetch('/api/campaigns?action=list_deals')
+    const data = await res.json()
+    setDeals(data.deals || [])
+  }
+
+  const linkDeal = async (sendId, dealId) => {
+    await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'link_deal', send_id: sendId, deal_id: dealId || null }),
+    })
+    setLinkDealId(null)
+    pushToast('Deal linked')
+    loadROI()
   }
 
   const loadSuppressions = async () => {
@@ -1239,6 +1266,7 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
           <StatCard value={`${conversionRate}%`} label="Conversion" color={conversionRate > 0 ? '#7c3aed' : undefined}/>
           <StatCard value={analytics?.converted  ?? 0}             label="Deals"/>
           <StatCard value={scanCount ?? '—'}                       label="QR Scans" color={scanCount > 0 ? 'var(--gw-azure)' : undefined}/>
+          {roi?.roi_pct != null && <StatCard value={`${roi.roi_pct > 0 ? '+' : ''}${roi.roi_pct}%`} label="ROI" color={roi.roi_pct > 0 ? '#16a34a' : roi.roi_pct < 0 ? 'var(--gw-red)' : undefined}/>}
         </div>
 
         {/* Tabs */}
@@ -1283,17 +1311,49 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
                             {s.notes && <span>· {s.notes}</span>}
                           </div>
                         </div>
-                        <div style={{ display:'flex', gap:6, alignItems:'center', flexShrink:0 }}>
+                        <div style={{ display:'flex', gap:6, alignItems:'center', flexShrink:0, flexWrap:'wrap', justifyContent:'flex-end' }}>
                           <select
                             value={s.response}
                             onChange={e => updateResponse(s, e.target.value)}
                             style={{ fontSize:11, padding:'3px 6px', borderRadius:6, border:'1px solid var(--gw-border)', cursor:'pointer', background:'#fff' }}>
                             {RESPONSE_OPTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                           </select>
+                          <button
+                            className="btn btn--ghost btn--sm"
+                            title={s.deal_id ? 'Change linked deal' : 'Link to a deal for ROI tracking'}
+                            onClick={() => { setLinkDealId(s.id); loadDeals() }}
+                            style={{ fontSize:11, padding:'3px 8px', color: s.deal_id ? 'var(--gw-green)' : undefined }}>
+                            {s.deal_id ? '$ Linked' : '$ Link Deal'}
+                          </button>
                           <button className="btn btn--ghost btn--icon btn--sm" onClick={() => setConfirmDel(s.id)} title="Remove">
                             <Icon name="trash" size={13}/>
                           </button>
                         </div>
+                        {linkDealId === s.id && (
+                          <div style={{ gridColumn:'1/-1', marginTop:6, padding:'10px 12px', background:'var(--gw-bone)', borderRadius:8, display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+                            <span style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Link deal:</span>
+                            <select
+                              className="form-control"
+                              style={{ fontSize:12, flex:1, minWidth:180 }}
+                              defaultValue={s.deal_id || ''}
+                              id={`deal-select-${s.id}`}>
+                              <option value="">— no deal —</option>
+                              {deals.map(d => (
+                                <option key={d.id} value={d.id}>
+                                  {d.address || d.id.slice(0,8)} · {d.stage} {d.value ? `· $${Number(d.value).toLocaleString()}` : ''}
+                                </option>
+                              ))}
+                            </select>
+                            <button className="btn btn--primary btn--sm" style={{ fontSize:12 }}
+                              onClick={() => {
+                                const sel = document.getElementById(`deal-select-${s.id}`)
+                                linkDeal(s.id, sel?.value || null)
+                              }}>
+                              Save
+                            </button>
+                            <button className="btn btn--ghost btn--sm" style={{ fontSize:12 }} onClick={() => setLinkDealId(null)}>Cancel</button>
+                          </div>
+                        )}
                       </div>
                     )
                   })}
@@ -1366,6 +1426,66 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
                   <strong>Benchmark:</strong> Direct mail response rates in CRE typically run 1–5% for cold lists and 8–15% for warm lists.
                   {responseRate > 12 && <span style={{ color:'var(--gw-green)', fontWeight:700 }}> Your {responseRate}% is above benchmark. 🏆</span>}
                   {responseRate < 5  && responseRate > 0 && <span style={{ color:'var(--gw-mist)' }}> Consider refining your target list or flyer design.</span>}
+                </div>
+
+                {/* ── Revenue Attribution (ROI) ── */}
+                <div>
+                  <div className="eyebrow-label" style={{ marginBottom:10 }}>Revenue Attribution</div>
+                  {roi ? (
+                    <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+                      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(130px,1fr))', gap:10 }}>
+                        <div style={{ background:'var(--gw-bone)', borderRadius:10, padding:'10px 14px', textAlign:'center' }}>
+                          <div style={{ fontSize:18, fontWeight:800, color:'var(--gw-ink)' }}>${roi.total_spend.toLocaleString()}</div>
+                          <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>Total Spend</div>
+                        </div>
+                        <div style={{ background:'var(--gw-bone)', borderRadius:10, padding:'10px 14px', textAlign:'center' }}>
+                          <div style={{ fontSize:18, fontWeight:800, color:'var(--gw-azure)' }}>{roi.deal_count}</div>
+                          <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>Attributed Deals</div>
+                        </div>
+                        <div style={{ background:'var(--gw-bone)', borderRadius:10, padding:'10px 14px', textAlign:'center' }}>
+                          <div style={{ fontSize:18, fontWeight:800, color:'#16a34a' }}>${roi.estimated_commission.toLocaleString()}</div>
+                          <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>Est. Commission</div>
+                        </div>
+                        <div style={{ background: roi.roi_pct > 0 ? '#f0fdf4' : 'var(--gw-bone)', border: roi.roi_pct > 0 ? '1.5px solid #86efac' : 'none', borderRadius:10, padding:'10px 14px', textAlign:'center' }}>
+                          <div style={{ fontSize:18, fontWeight:800, color: roi.roi_pct > 0 ? '#16a34a' : roi.roi_pct < 0 ? 'var(--gw-red)' : 'var(--gw-mist)' }}>
+                            {roi.roi_pct > 0 ? '+' : ''}{roi.roi_pct}%
+                          </div>
+                          <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>ROI</div>
+                        </div>
+                      </div>
+
+                      {roi.attributed_deals?.length > 0 && (
+                        <div>
+                          <div style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)', marginBottom:6 }}>Attributed Deals</div>
+                          <div style={{ display:'flex', flexDirection:'column', gap:0 }}>
+                            {roi.attributed_deals.map((d, i) => (
+                              <div key={d.deal_id + i} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 0', borderBottom:'1px solid var(--gw-border)', fontSize:12 }}>
+                                <span style={{ flex:1, fontWeight:600 }}>{d.address || d.deal_id?.slice(0,8) || '—'}</span>
+                                <span style={{ fontSize:11, color:'var(--gw-mist)' }}>{d.stage}</span>
+                                {d.value > 0 && <span style={{ fontWeight:700, color:'var(--gw-green)' }}>${Number(d.value).toLocaleString()}</span>}
+                                <span style={{
+                                  fontSize:10, fontWeight:700, padding:'2px 7px', borderRadius:8,
+                                  background: d.attribution === 'explicit' ? '#dbeafe' : '#fef9c3',
+                                  color:      d.attribution === 'explicit' ? '#1d4ed8' : '#92400e',
+                                }}>
+                                  {d.attribution === 'explicit' ? 'Direct' : 'Inferred'}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div style={{ fontSize:11, color:'var(--gw-mist)', padding:'8px 12px', background:'var(--gw-bone)', borderRadius:8 }}>
+                        Commission estimated at {Math.round((roi.commission_rate || 0.025) * 100)}% rate · {roi.attribution_window_days}-day attribution window.
+                        Link deals to sends in the Send Log for direct attribution.
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'16px 0' }}>
+                      No ROI data yet. Use "$ Link Deal" on send log rows to attribute closed deals to this campaign.
+                    </div>
+                  )}
                 </div>
               </div>
             )

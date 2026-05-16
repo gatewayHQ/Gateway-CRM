@@ -318,6 +318,100 @@ export default async function handler(req, res) {
       return res.json({ ok: true })
     }
 
+    // ── ROI Attribution (Implementation #4) ───────────────────────────────────
+
+    if (action === 'campaign_roi') {
+      const { campaign_id } = req.query
+      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
+
+      const { data: camp } = await supabase
+        .from('mail_campaigns')
+        .select('id, cost_per_piece, fixed_cost, commission_rate, attribution_window_days, created_at, total_sends')
+        .eq('id', campaign_id)
+        .single()
+      if (!camp) return res.status(404).json({ error: 'Campaign not found' })
+
+      const commissionRate = camp.commission_rate       || 0.025
+      const windowDays     = camp.attribution_window_days || 180
+      const windowStart    = new Date(camp.created_at).toISOString()
+      const totalSpend     = ((camp.total_sends || 0) * (camp.cost_per_piece || 0)) + (camp.fixed_cost || 0)
+
+      // Collect contact IDs + explicitly linked deal IDs from sends
+      const { data: sends } = await supabase
+        .from('mail_sends')
+        .select('contact_id, deal_id')
+        .eq('campaign_id', campaign_id)
+      const contactIds     = [...new Set((sends || []).map(s => s.contact_id).filter(Boolean))]
+      const explicitDealIds = [...new Set((sends || []).map(s => s.deal_id).filter(Boolean))]
+
+      let deals = []
+
+      // 1. Explicitly linked deals
+      if (explicitDealIds.length > 0) {
+        const { data: explicit } = await supabase
+          .from('deals')
+          .select('id, title, value, sold_price, stage, contact_id, created_at')
+          .in('id', explicitDealIds)
+        deals.push(...(explicit || []).map(d => ({ ...d, attribution: 'explicit' })))
+      }
+
+      // 2. Inferred: same contact, closed deal, within attribution window
+      if (contactIds.length > 0) {
+        const { data: inferred } = await supabase
+          .from('deals')
+          .select('id, title, value, sold_price, stage, contact_id, created_at')
+          .in('contact_id', contactIds)
+          .eq('stage', 'closed')
+          .gte('created_at', windowStart)
+        const explSet = new Set(explicitDealIds)
+        deals.push(...(inferred || []).filter(d => !explSet.has(d.id)).map(d => ({ ...d, attribution: 'inferred' })))
+      }
+
+      // Dedup by deal id
+      const seen = new Set()
+      deals = deals.filter(d => { if (seen.has(d.id)) return false; seen.add(d.id); return true })
+
+      const totalDealValue      = deals.reduce((n, d) => n + (d.sold_price || d.value || 0), 0)
+      const estimatedCommission = totalDealValue * commissionRate
+      const roiPct              = totalSpend > 0 ? Math.round((estimatedCommission - totalSpend) / totalSpend * 100) : null
+
+      return res.json({
+        roi: {
+          total_spend:            Math.round(totalSpend * 100) / 100,
+          total_deal_value:       Math.round(totalDealValue * 100) / 100,
+          estimated_commission:   Math.round(estimatedCommission * 100) / 100,
+          deal_count:             deals.length,
+          roi_pct:                roiPct,
+          commission_rate:        commissionRate,
+          attribution_window_days: windowDays,
+          attributed_deals:       deals,
+        }
+      })
+    }
+
+    if (action === 'link_deal') {
+      const { send_id, deal_id } = req.body
+      if (!send_id) return res.status(400).json({ error: 'send_id is required' })
+      const { data, error } = await supabase
+        .from('mail_sends')
+        .update({ deal_id: deal_id || null })
+        .eq('id', send_id)
+        .select()
+        .single()
+      if (error) throw error
+      return res.json({ send: data })
+    }
+
+    if (action === 'list_deals') {
+      const { data: deals, error } = await supabase
+        .from('deals')
+        .select('id, address, city, state, stage, value, contact_id')
+        .order('created_at', { ascending: false })
+        .limit(200)
+      if (error) throw error
+      return res.json({ deals: deals || [] })
+    }
+
     // ── Analytics ─────────────────────────────────────────────────────────
 
     if (action === 'campaign_analytics') {
