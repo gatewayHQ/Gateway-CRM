@@ -309,15 +309,25 @@ function PostcardPreview({ copy, template, agentObj, photoUrl, photoCaption }) {
   )
 }
 
-function printFlyerWindow(copy, template, agentObj, campaignName, photoUrl = '', photoCaption = '') {
-  const d = TEMPLATE_DESIGNS[template] || TEMPLATE_DESIGNS.just_listed
-  const badge = TEMPLATE_BADGE_LABELS[template] || 'Campaign'
+const FLYER_SIZES = [
+  { id:'4x6',      label:'4" × 6" Postcard',    w:'6in',    h:'4in',    desc:'Standard USPS postcard' },
+  { id:'5x7',      label:'5" × 7" Postcard',    w:'7in',    h:'5in',    desc:'Premium postcard size' },
+  { id:'6x9eddm',  label:'6" × 9" EDDM',        w:'9in',    h:'6in',    desc:'Every Door Direct Mail' },
+  { id:'letter',   label:'8.5" × 11" Letter',   w:'8.5in',  h:'11in',   desc:'Full-page mailer / flyer' },
+  { id:'doorhang', label:'4.25" × 11" Door Hanger', w:'4.25in', h:'11in', desc:'Door hanger format' },
+]
+
+function printFlyerWindow(copy, template, agentObj, campaignName, photoUrl = '', photoCaption = '', sizeId = '4x6', qrUrl = '') {
+  const d    = TEMPLATE_DESIGNS[template] || TEMPLATE_DESIGNS.just_listed
+  const size = FLYER_SIZES.find(s => s.id === sizeId) || FLYER_SIZES[0]
+  const badge         = TEMPLATE_BADGE_LABELS[template] || 'Campaign'
   const agentInitials = agentObj ? (agentObj.initials || agentObj.name?.[0] || '') : ''
   const agentColor    = agentObj?.color || d.accent
   const agentInfo     = agentObj ? [agentObj.name, agentObj.role, agentObj.email].filter(Boolean).join(' · ') : ''
   const hasPhoto      = !!photoUrl
+  const isVertical    = ['letter','doorhang'].includes(sizeId)
   const bulletsHtml   = (copy.bullets || []).map(b =>
-    `<li><span style="color:${d.accent};font-weight:800;flex-shrink:0;">✓</span> ${b}</li>`
+    `<li><span style="color:${d.accent};font-weight:800;flex-shrink:0;">✓</span> <span>${b}</span></li>`
   ).join('')
 
   const photoSection = hasPhoto ? `
@@ -326,43 +336,67 @@ function printFlyerWindow(copy, template, agentObj, campaignName, photoUrl = '',
       ${photoCaption ? `<div class="photo-cap">${photoCaption}</div>` : ''}
     </div>` : ''
 
+  const qrSection = qrUrl ? `
+    <div class="qr-block">
+      <div class="qr-cta">Scan to Learn More</div>
+      <img src="${qrUrl}" class="qr-img" alt="QR Code"/>
+    </div>` : ''
+
+  const photoH = isVertical ? '3in' : '1.6in'
+
   const w = window.open('', '_blank', 'width=960,height=700')
   if (!w) { pushToast('Allow pop-ups to print the flyer', 'error'); return }
   w.document.write(`<!DOCTYPE html><html><head><title>${campaignName} — Flyer</title>
 <style>
-  @page { size: 6in 4in; margin: 0; }
+  @page { size: ${size.w} ${size.h}; margin: 0; }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { width: 6in; height: 4in; overflow: hidden; }
+  html, body { width: ${size.w}; height: ${size.h}; overflow: hidden; }
   body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background: ${d.bg}; display: flex; flex-direction: column; }
-  .hdr { background: ${d.headerBg}; padding: ${hasPhoto ? '8px 18px' : '12px 20px'}; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+  .hdr { background: ${d.headerBg}; padding: ${hasPhoto ? '9px 18px' : '14px 22px'}; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+  .hdr-left { display: flex; align-items: center; gap: 10px; }
   .badge { background: ${d.accent}; color: ${d.accentText}; padding: 4px 14px; border-radius: 20px; font-size: 10pt; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; }
-  .av { width: ${hasPhoto ? '32px' : '40px'}; height: ${hasPhoto ? '32px' : '40px'}; border-radius: 50%; background: ${agentColor}; display: flex; align-items: center; justify-content: center; font-size: 11pt; font-weight: 800; color: #fff; }
-  .photo-wrap { position: relative; height: ${hasPhoto ? '1.6in' : '0'}; flex-shrink: 0; overflow: hidden; }
+  .agency { font-size: 9pt; color: ${d.text}; opacity: 0.75; font-weight: 600; letter-spacing: 0.05em; }
+  .av { width: ${hasPhoto ? '34px' : '42px'}; height: ${hasPhoto ? '34px' : '42px'}; border-radius: 50%; background: ${agentColor}; display: flex; align-items: center; justify-content: center; font-size: 12pt; font-weight: 800; color: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
+  .photo-wrap { position: relative; height: ${hasPhoto ? photoH : '0'}; flex-shrink: 0; overflow: hidden; }
   .photo-img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .photo-cap { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.58); padding: 4px 12px; font-size: 8pt; color: #fff; }
-  .body { flex: 1; padding: ${hasPhoto ? '10px 20px 8px' : '16px 22px 10px'}; display: flex; flex-direction: column; gap: ${hasPhoto ? '5px' : '8px'}; overflow: hidden; }
-  .hl { font-size: ${hasPhoto ? '16pt' : '22pt'}; font-weight: 900; color: ${d.text}; line-height: 1.1; text-transform: uppercase; letter-spacing: 0.02em; }
-  .sub { font-size: ${hasPhoto ? '10pt' : '11pt'}; font-weight: 700; color: ${d.accent}; }
-  .tag { font-size: 10pt; color: ${d.text}; opacity: 0.9; line-height: 1.5; }
-  ul { list-style: none; display: flex; flex-direction: ${hasPhoto ? 'row' : 'column'}; flex-wrap: ${hasPhoto ? 'wrap' : 'nowrap'}; gap: ${hasPhoto ? '4px 14px' : '5px'}; }
-  li { font-size: ${hasPhoto ? '9pt' : '10pt'}; color: ${d.text}; display: flex; gap: 6px; align-items: flex-start; }
-  .cta { display: inline-block; background: ${d.accent}; color: ${d.accentText}; padding: ${hasPhoto ? '6px 16px' : '9px 20px'}; border-radius: 8px; font-size: ${hasPhoto ? '9pt' : '10pt'}; font-weight: 800; letter-spacing: 0.03em; margin-top: 4px; }
-  .ftr { border-top: 1px solid ${d.headerBg}; padding: 7px 20px; display: flex; gap: 10px; align-items: center; flex-shrink: 0; }
-  .av-sm { width: 20px; height: 20px; border-radius: 50%; background: ${agentColor}; display: inline-flex; align-items: center; justify-content: center; font-size: 7pt; font-weight: 800; color: #fff; flex-shrink: 0; }
-  .ftr-txt { font-size: 9pt; color: ${d.text}; opacity: 0.65; }
+  .photo-cap { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.65); padding: 5px 14px; font-size: 8pt; color: #fff; font-weight: 600; }
+  .content { flex: 1; display: flex; flex-direction: ${isVertical ? 'column' : 'row'}; overflow: hidden; }
+  .body { flex: 1; padding: ${hasPhoto ? '12px 20px 10px' : '18px 24px 12px'}; display: flex; flex-direction: column; gap: ${hasPhoto ? '6px' : '10px'}; overflow: hidden; }
+  .hl { font-size: ${isVertical ? (hasPhoto ? '22pt' : '30pt') : (hasPhoto ? '17pt' : '24pt')}; font-weight: 900; color: ${d.text}; line-height: 1.08; text-transform: uppercase; letter-spacing: 0.02em; }
+  .sub { font-size: ${hasPhoto ? '11pt' : '12pt'}; font-weight: 700; color: ${d.accent}; line-height: 1.3; }
+  .tag { font-size: 10pt; color: ${d.text}; opacity: 0.88; line-height: 1.55; }
+  ul { list-style: none; display: flex; flex-direction: ${hasPhoto && !isVertical ? 'row' : 'column'}; flex-wrap: ${hasPhoto && !isVertical ? 'wrap' : 'nowrap'}; gap: ${hasPhoto && !isVertical ? '4px 16px' : '6px'}; }
+  li { font-size: ${hasPhoto ? '9.5pt' : '10.5pt'}; color: ${d.text}; display: flex; gap: 7px; align-items: flex-start; line-height: 1.4; }
+  .cta-row { display: flex; align-items: center; gap: 12px; margin-top: 4px; flex-wrap: wrap; }
+  .cta { display: inline-block; background: ${d.accent}; color: ${d.accentText}; padding: ${hasPhoto ? '7px 18px' : '10px 22px'}; border-radius: 8px; font-size: ${hasPhoto ? '9.5pt' : '11pt'}; font-weight: 800; letter-spacing: 0.04em; }
+  .qr-block { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: ${isVertical ? '16px 20px' : '0 14px 0 0'}; gap: 5px; flex-shrink: 0; }
+  .qr-cta { font-size: 8pt; font-weight: 700; color: ${d.accent}; text-align: center; letter-spacing: 0.04em; text-transform: uppercase; }
+  .qr-img { width: ${isVertical ? '1.1in' : '0.85in'}; height: ${isVertical ? '1.1in' : '0.85in'}; border-radius: 8px; border: 3px solid ${d.accent}; padding: 3px; background: #fff; }
+  .ftr { border-top: 2px solid rgba(255,255,255,0.15); padding: 7px 22px; display: flex; gap: 10px; align-items: center; flex-shrink: 0; background: ${d.headerBg}; }
+  .av-sm { width: 22px; height: 22px; border-radius: 50%; background: ${agentColor}; display: inline-flex; align-items: center; justify-content: center; font-size: 7pt; font-weight: 800; color: #fff; flex-shrink: 0; }
+  .ftr-txt { font-size: 9pt; color: ${d.text}; opacity: 0.75; font-weight: 600; }
+  .divider { width: 40px; height: 3px; background: ${d.accent}; border-radius: 2px; }
 </style>
 </head><body>
   <div class="hdr">
-    <span class="badge">${badge}</span>
+    <div class="hdr-left">
+      <span class="badge">${badge}</span>
+    </div>
     ${agentInitials ? `<div class="av">${agentInitials}</div>` : ''}
   </div>
   ${photoSection}
-  <div class="body">
-    <div class="hl">${copy.headline}</div>
-    <div class="sub">${copy.subheadline}</div>
-    ${!hasPhoto ? `<div class="tag">${copy.tagline}</div>` : ''}
-    <ul>${bulletsHtml}</ul>
-    <span class="cta">${copy.cta}</span>
+  <div class="content">
+    <div class="body">
+      <div class="divider"></div>
+      <div class="hl">${copy.headline}</div>
+      <div class="sub">${copy.subheadline}</div>
+      ${!hasPhoto ? `<div class="tag">${copy.tagline}</div>` : ''}
+      <ul>${bulletsHtml}</ul>
+      <div class="cta-row">
+        <span class="cta">${copy.cta}</span>
+      </div>
+    </div>
+    ${qrSection}
   </div>
   ${agentInfo ? `<div class="ftr"><div class="av-sm">${agentInitials}</div><span class="ftr-txt">${agentInfo}</span></div>` : ''}
 </body></html>`)
@@ -374,12 +408,15 @@ function printFlyerWindow(copy, template, agentObj, campaignName, photoUrl = '',
 function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
   const [selectedTemplate, setSelectedTemplate] = useState(campaign.flyer_template || '')
   const [generatedCopy,    setGeneratedCopy]    = useState(null)
+  const [editingCopy,      setEditingCopy]      = useState(null)  // null = not editing, object = edited fields
   const [generating,       setGenerating]       = useState(false)
   const [generateError,    setGenerateError]    = useState(null)
   const [copied,           setCopied]           = useState(false)
   const [saving,           setSaving]           = useState(false)
+  const [flyerSize,        setFlyerSize]        = useState('4x6')
   const [canvaUrl,         setCanvaUrl]         = useState(campaign.canva_design_url || '')
   const [savingCanva,      setSavingCanva]      = useState(false)
+  const [canvaPreview,     setCanvaPreview]     = useState(!!campaign.canva_design_url)
   // Personalization Engine (#6)
   const [persTarget,       setPersTarget]       = useState('')  // contact_type
   const [persTone,         setPersTone]         = useState('')  // urgent/warm/luxury/data
@@ -463,6 +500,13 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
 
   const effectivePhotoUrl     = selectedPhotoUrl || campaign.flyer_photo_urls?.[0] || ''
   const effectivePhotoCaption = photoCaption || campaign.flyer_photo_caption || ''
+  const activeCopy            = editingCopy ?? generatedCopy
+
+  const flyerQrUrl = campaign.tracking_code
+    ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(
+        campaign.landing_url || `${window.location.origin}/campaign/${campaign.tracking_code}`
+      )}`
+    : ''
 
   const generateCopy = async () => {
     if (!selectedTemplate) { pushToast('Select a campaign type first', 'error'); return }
@@ -499,6 +543,7 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
         return
       }
       setGeneratedCopy(data.copy)
+      setEditingCopy(null)
       pushToast('Copy generated!')
     } catch (err) {
       const msg = err.message || 'Network error — could not reach server'
@@ -510,16 +555,17 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
   }
 
   const copyAllText = () => {
-    if (!generatedCopy) return
+    const copy = editingCopy ?? generatedCopy
+    if (!copy) return
     const text = [
-      generatedCopy.headline,
-      generatedCopy.subheadline,
+      copy.headline,
+      copy.subheadline,
       '',
-      generatedCopy.tagline,
+      copy.tagline,
       '',
-      ...(generatedCopy.bullets || []).map(b => `• ${b}`),
+      ...(copy.bullets || []).map(b => `• ${b}`),
       '',
-      `CTA: ${generatedCopy.cta}`,
+      `CTA: ${copy.cta}`,
     ].join('\n')
     navigator.clipboard.writeText(text).then(() => {
       setCopied(true)
@@ -528,7 +574,8 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
   }
 
   const saveToCampaign = async () => {
-    if (!generatedCopy) return
+    const copy = editingCopy ?? generatedCopy
+    if (!copy) return
     setSaving(true)
     try {
       const res  = await fetch('/api/campaigns', {
@@ -537,9 +584,9 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
         body: JSON.stringify({
           action:           'update_campaign',
           id:               campaign.id,
-          landing_headline: generatedCopy.headline,
-          landing_tagline:  generatedCopy.tagline,
-          landing_cta:      generatedCopy.cta,
+          landing_headline: copy.headline,
+          landing_tagline:  copy.tagline,
+          landing_cta:      copy.cta,
           flyer_template:   selectedTemplate,
         }),
       })
@@ -718,17 +765,93 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
         )}
       </div>
 
-      {/* Visual postcard preview */}
+      {/* Size picker */}
       {generatedCopy && (
+        <div>
+          <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:'0.05em', marginBottom:8 }}>Print Size</div>
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+            {FLYER_SIZES.map(s => (
+              <button key={s.id} onClick={() => setFlyerSize(s.id)}
+                style={{
+                  padding:'5px 11px', borderRadius:20, fontSize:11, fontWeight:700, cursor:'pointer',
+                  border:`1.5px solid ${flyerSize === s.id ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+                  background: flyerSize === s.id ? '#dbeafe' : '#fff',
+                  color:      flyerSize === s.id ? '#1d4ed8' : 'var(--gw-mist)',
+                }}>
+                {s.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>
+            {FLYER_SIZES.find(s => s.id === flyerSize)?.desc}
+          </div>
+        </div>
+      )}
+
+      {/* Visual postcard preview */}
+      {activeCopy && (
         <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
           <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:'0.05em' }}>Flyer Preview</div>
-          <PostcardPreview copy={generatedCopy} template={selectedTemplate} agentObj={agentObj}
+          <PostcardPreview copy={activeCopy} template={selectedTemplate} agentObj={agentObj}
             photoUrl={effectivePhotoUrl} photoCaption={effectivePhotoCaption} />
+
+          {/* Inline copy editor */}
+          <div style={{ border:'1px solid var(--gw-border)', borderRadius:10, padding:'12px 14px', background:'var(--gw-bone)', display:'flex', flexDirection:'column', gap:8 }}>
+            <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:'0.05em' }}>Edit Copy</div>
+            {['headline','subheadline','tagline','cta'].map(field => (
+              <div key={field}>
+                <label style={{ fontSize:11, fontWeight:700, color:'var(--gw-ink)', textTransform:'capitalize', display:'block', marginBottom:3 }}>{field}</label>
+                <input
+                  className="form-control"
+                  style={{ fontSize:12 }}
+                  value={(editingCopy ?? generatedCopy)?.[field] || ''}
+                  onChange={e => {
+                    const base = editingCopy ?? { ...generatedCopy }
+                    setEditingCopy({ ...base, [field]: e.target.value })
+                  }}
+                />
+              </div>
+            ))}
+            <div>
+              <label style={{ fontSize:11, fontWeight:700, color:'var(--gw-ink)', display:'block', marginBottom:3 }}>Bullet Points</label>
+              {((editingCopy ?? generatedCopy)?.bullets || []).map((b, i) => (
+                <div key={i} style={{ display:'flex', gap:6, marginBottom:5 }}>
+                  <input
+                    className="form-control"
+                    style={{ fontSize:12, flex:1 }}
+                    value={b}
+                    onChange={e => {
+                      const base    = editingCopy ?? { ...generatedCopy }
+                      const bullets = [...(base.bullets || [])]
+                      bullets[i] = e.target.value
+                      setEditingCopy({ ...base, bullets })
+                    }}
+                  />
+                  <button className="btn btn--ghost btn--sm" style={{ padding:'0 8px', color:'var(--gw-red)' }}
+                    onClick={() => {
+                      const base    = editingCopy ?? { ...generatedCopy }
+                      const bullets = (base.bullets || []).filter((_, idx) => idx !== i)
+                      setEditingCopy({ ...base, bullets })
+                    }}>✕</button>
+                </div>
+              ))}
+              <button className="btn btn--ghost btn--sm" style={{ fontSize:11 }}
+                onClick={() => {
+                  const base = editingCopy ?? { ...generatedCopy }
+                  setEditingCopy({ ...base, bullets: [...(base.bullets || []), ''] })
+                }}>+ Add bullet</button>
+            </div>
+            {editingCopy && (
+              <button className="btn btn--ghost btn--sm" style={{ fontSize:11, color:'var(--gw-mist)', alignSelf:'flex-start' }}
+                onClick={() => setEditingCopy(null)}>Reset to AI original</button>
+            )}
+          </div>
+
           <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
             <button className="btn btn--ghost btn--sm" onClick={copyAllText}>{copied ? '✓ Copied!' : 'Copy Text'}</button>
             <button className="btn btn--primary btn--sm" onClick={saveToCampaign} disabled={saving}>{saving ? 'Saving…' : 'Save to Campaign'}</button>
             <button className="btn btn--ghost btn--sm"
-              onClick={() => printFlyerWindow(generatedCopy, selectedTemplate, agentObj, campaign.name, effectivePhotoUrl, effectivePhotoCaption)}
+              onClick={() => printFlyerWindow(activeCopy, selectedTemplate, agentObj, campaign.name, effectivePhotoUrl, effectivePhotoCaption, flyerSize, flyerQrUrl)}
               style={{ background:'#f0f7ff', borderColor:'#bfdbfe', color:'#1d4ed8' }}>
               Print / Download
             </button>
@@ -737,7 +860,7 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
       )}
 
       {/* Print-on-Demand (#20) */}
-      {generatedCopy && (
+      {activeCopy && (
         <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:16 }}>
           <div style={{ fontSize:13, fontWeight:700, color:'var(--gw-ink)', marginBottom:4 }}>Print-on-Demand</div>
           <div style={{ fontSize:12, color:'var(--gw-mist)', marginBottom:10 }}>
@@ -745,10 +868,10 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
           </div>
           <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
             {[
-              { name:'USPS EDDM', url:'https://eddm.usps.com', color:'#1d4ed8', bg:'#dbeafe' },
-              { name:'Vistaprint', url:'https://www.vistaprint.com/postcards', color:'#7c3aed', bg:'#ede9fe' },
-              { name:'Canva Print', url:'https://www.canva.com/print/postcards', color:'#0f766e', bg:'#ccfbf1' },
-              { name:'GotPrint', url:'https://www.gotprint.com/postcards', color:'#92400e', bg:'#fef3c7' },
+              { name:'USPS EDDM', url:'https://www.usps.com/business/every-door-direct-mail.htm', color:'#1d4ed8', bg:'#dbeafe' },
+              { name:'Vistaprint', url:'https://www.vistaprint.com/marketing-materials/postcards', color:'#7c3aed', bg:'#ede9fe' },
+              { name:'Canva Print', url:'https://www.canva.com/postcards/templates/', color:'#0f766e', bg:'#ccfbf1' },
+              { name:'GotPrint', url:'https://www.gotprint.com/g/products/postcards.html', color:'#92400e', bg:'#fef3c7' },
             ].map(v => (
               <a key={v.name} href={v.url} target="_blank" rel="noopener noreferrer"
                 style={{ padding:'6px 14px', borderRadius:20, fontSize:12, fontWeight:700, cursor:'pointer', border:'1.5px solid', textDecoration:'none',
@@ -758,9 +881,9 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
             ))}
           </div>
           <div style={{ marginTop:10, padding:'8px 12px', background:'var(--gw-bone)', borderRadius:8, fontSize:12, color:'var(--gw-mist)' }}>
-            <strong>Quick-copy for vendor:</strong> {generatedCopy.headline} · {generatedCopy.subheadline} · {generatedCopy.cta}
+            <strong>Quick-copy for vendor:</strong> {activeCopy.headline} · {activeCopy.subheadline} · {activeCopy.cta}
             <button className="btn btn--ghost btn--sm" style={{ marginLeft:8, fontSize:11 }} onClick={() => {
-              navigator.clipboard.writeText(`${generatedCopy.headline}\n${generatedCopy.subheadline}\n\n${generatedCopy.tagline}\n\n${generatedCopy.bullets?.join('\n')}\n\n${generatedCopy.cta}`)
+              navigator.clipboard.writeText(`${activeCopy.headline}\n${activeCopy.subheadline}\n\n${activeCopy.tagline}\n\n${activeCopy.bullets?.join('\n')}\n\n${activeCopy.cta}`)
               pushToast('Copied to clipboard')
             }}>Copy All</button>
           </div>
@@ -780,19 +903,43 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
         <div style={{ display:'flex', gap:8, marginBottom:8 }}>
           <input
             className="form-control"
-            placeholder="Paste Canva design URL here…"
+            placeholder="Paste Canva share URL here… (e.g. https://www.canva.com/design/…)"
             value={canvaUrl}
-            onChange={e => setCanvaUrl(e.target.value)}
+            onChange={e => { setCanvaUrl(e.target.value); setCanvaPreview(false) }}
             style={{ flex:1 }}
           />
-          <button className="btn btn--ghost btn--sm" onClick={saveCanvaUrl} disabled={savingCanva || !canvaUrl.trim()}>
-            {savingCanva ? 'Saving…' : 'Save'}
+          <button className="btn btn--ghost btn--sm" onClick={async () => { await saveCanvaUrl(); setCanvaPreview(true) }} disabled={savingCanva || !canvaUrl.trim()}>
+            {savingCanva ? 'Saving…' : 'Save & Preview'}
           </button>
         </div>
-        {campaign.canva_design_url && (
-          <a href={campaign.canva_design_url} target="_blank" rel="noopener noreferrer" style={{ fontSize:12, color:'var(--gw-azure)' }}>
-            Open Design →
-          </a>
+
+        {/* Canva preview iframe */}
+        {canvaPreview && (canvaUrl || campaign.canva_design_url) && (() => {
+          const url  = canvaUrl || campaign.canva_design_url
+          const embedUrl = url.includes('/view') ? url : url.replace(/\?.*$/, '') + '?embed'
+          return (
+            <div style={{ borderRadius:10, overflow:'hidden', border:'1px solid var(--gw-border)', marginBottom:10 }}>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'6px 12px', background:'var(--gw-bone)', borderBottom:'1px solid var(--gw-border)' }}>
+                <span style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)' }}>Canva Preview</span>
+                <div style={{ display:'flex', gap:8 }}>
+                  <a href={url} target="_blank" rel="noopener noreferrer" style={{ fontSize:11, color:'var(--gw-azure)', fontWeight:700 }}>Open in Canva →</a>
+                  <button className="btn btn--ghost btn--sm" style={{ fontSize:10, padding:'1px 8px' }} onClick={() => setCanvaPreview(false)}>Hide</button>
+                </div>
+              </div>
+              <iframe
+                src={embedUrl}
+                style={{ width:'100%', height:300, border:'none', display:'block' }}
+                allowFullScreen
+                title="Canva Design Preview"
+              />
+            </div>
+          )
+        })()}
+
+        {campaign.canva_design_url && !canvaPreview && (
+          <button className="btn btn--ghost btn--sm" style={{ fontSize:11, marginBottom:8 }} onClick={() => setCanvaPreview(true)}>
+            Show Canva Preview
+          </button>
         )}
       </div>
     </div>
@@ -1451,6 +1598,137 @@ function AudienceBuilderModal({ campaign, agents, activeAgent, onSent, onClose }
   )
 }
 
+// ── Analytics sub-panels (must be top-level components — no hooks in IIFEs) ───
+function CompetitiveIntelPanel({ campaign, analytics }) {
+  const [intel,        setIntel]        = useState(null)
+  const [intelLoading, setIntelLoading] = useState(false)
+
+  const loadIntel = async () => {
+    setIntelLoading(true)
+    try {
+      const res  = await fetch('/api/claude', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action:                 'competitive_intelligence',
+          property_types:         campaign.property_types,
+          flyer_template:         campaign.flyer_template,
+          campaign_sends:         analytics.total,
+          campaign_response_rate: analytics.response_rate,
+          top_zip_codes:          Object.keys(analytics.by_zip || {}).slice(0,5).join(', '),
+        }),
+      })
+      const data = await res.json()
+      setIntel(data.insights || null)
+    } catch (_) {}
+    setIntelLoading(false)
+  }
+
+  return (
+    <div>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+        <div className="eyebrow-label">Competitive Intelligence</div>
+        <button className="btn btn--ghost btn--sm" style={{ fontSize:12 }} onClick={loadIntel} disabled={intelLoading}>
+          {intelLoading ? 'Analyzing…' : intel ? 'Refresh' : '✦ Get Insights'}
+        </button>
+      </div>
+      {intel ? (
+        <div style={{ display:'flex', flexDirection:'column', gap:10, fontSize:12 }}>
+          {intel.response_rate_context && (
+            <div style={{ padding:'8px 12px', background:'#eff6ff', borderRadius:8, color:'#1d4ed8', borderLeft:'3px solid #2563eb' }}>
+              {intel.response_rate_context}
+            </div>
+          )}
+          {intel.market_insights?.length > 0 && (
+            <div>
+              <div style={{ fontWeight:700, color:'var(--gw-ink)', marginBottom:4 }}>What top agents do:</div>
+              {intel.market_insights.map((tip, i) => <div key={i} style={{ color:'var(--gw-mist)', marginBottom:3 }}>• {tip}</div>)}
+            </div>
+          )}
+          {intel.positioning_tips?.length > 0 && (
+            <div>
+              <div style={{ fontWeight:700, color:'var(--gw-ink)', marginBottom:4 }}>Differentiate your campaign:</div>
+              {intel.positioning_tips.map((tip, i) => <div key={i} style={{ color:'var(--gw-mist)', marginBottom:3 }}>• {tip}</div>)}
+            </div>
+          )}
+          {intel.timing_recommendations && (
+            <div style={{ padding:'8px 12px', background:'var(--gw-bone)', borderRadius:8 }}>
+              <strong>Timing:</strong> {intel.timing_recommendations}
+            </div>
+          )}
+        </div>
+      ) : !intelLoading && (
+        <div style={{ fontSize:12, color:'var(--gw-mist)' }}>Click "Get Insights" for AI-powered competitive intelligence.</div>
+      )}
+    </div>
+  )
+}
+
+function PredictiveOptimizerPanel({ analytics }) {
+  const [preds,       setPreds]       = useState(null)
+  const [predLoading, setPredLoading] = useState(false)
+
+  const loadPredictions = async () => {
+    setPredLoading(true)
+    try {
+      const res  = await fetch('/api/claude', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action:        'predict_best_segments',
+          zip_detail:    analytics.by_zip_detail,
+          by_channel:    analytics.by_channel,
+          by_month:      analytics.by_month,
+          total_sends:   analytics.total,
+          response_rate: analytics.response_rate,
+        }),
+      })
+      const data = await res.json()
+      setPreds(data.predictions || null)
+    } catch (_) {}
+    setPredLoading(false)
+  }
+
+  return (
+    <div>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+        <div className="eyebrow-label">Predictive List Optimization</div>
+        <button className="btn btn--ghost btn--sm" style={{ fontSize:12 }} onClick={loadPredictions} disabled={predLoading}>
+          {predLoading ? 'Predicting…' : preds ? 'Refresh' : '✦ Optimize List'}
+        </button>
+      </div>
+      {preds ? (
+        <div style={{ display:'flex', flexDirection:'column', gap:10, fontSize:12 }}>
+          {preds.top_segments?.length > 0 && (
+            <div style={{ padding:'8px 12px', background:'#f0fdf4', border:'1px solid #86efac', borderRadius:8 }}>
+              <div style={{ fontWeight:700, color:'#166534', marginBottom:4 }}>Double down on:</div>
+              {preds.top_segments.map((s, i) => <div key={i} style={{ color:'#166534' }}>• {s}</div>)}
+            </div>
+          )}
+          {preds.drop_segments?.length > 0 && (
+            <div style={{ padding:'8px 12px', background:'#fef2f2', border:'1px solid #fca5a5', borderRadius:8 }}>
+              <div style={{ fontWeight:700, color:'#991b1b', marginBottom:4 }}>Stop mailing:</div>
+              {preds.drop_segments.map((s, i) => <div key={i} style={{ color:'#991b1b' }}>• {s}</div>)}
+            </div>
+          )}
+          {preds.next_send_strategy && (
+            <div style={{ padding:'8px 12px', background:'var(--gw-bone)', borderRadius:8 }}>
+              <strong>Next send strategy:</strong> {preds.next_send_strategy}
+            </div>
+          )}
+          {preds.predicted_roi_improvement && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
+              Predicted improvement: {preds.predicted_roi_improvement}
+            </div>
+          )}
+        </div>
+      ) : !predLoading && (
+        <div style={{ fontSize:12, color:'var(--gw-mist)' }}>Click "Optimize List" for AI predictions on your best-performing segments.</div>
+      )}
+    </div>
+  )
+}
+
 // ── Campaign detail drawer ────────────────────────────────────────────────────
 function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, onUpdate, onClose }) {
   const [tab,          setTab]          = useState('sends')
@@ -1477,6 +1755,7 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
   const [abComparison, setAbComparison] = useState(null)
   const [abLoaded,     setAbLoaded]     = useState(false)
   const [creatingVariant, setCreatingVariant] = useState(false)
+  const [abMigrationSql,  setAbMigrationSql]  = useState(null)
   const [seqSteps,     setSeqSteps]     = useState(() => campaign.schedule_steps || [])
   const [seqDirty,     setSeqDirty]     = useState(false)
   const [seqSaving,    setSeqSaving]    = useState(false)
@@ -1574,9 +1853,11 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
     setCreatingVariant(false)
     if (res.ok) {
       pushToast(`Variant B created: "${data.variant?.name}"`)
-      // Reload parent with updated is_ab_test flag
       onUpdate({ ...campaign, is_ab_test: true, ab_variant: 'A' })
     } else {
+      if (data.migration_required) {
+        setAbMigrationSql(data.migration_sql)
+      }
       pushToast(data.error || 'Failed to create variant', 'error')
     }
   }
@@ -1793,6 +2074,26 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
             </button>
           </div>
         </div>
+
+        {/* A/B migration hint */}
+        {abMigrationSql && (
+          <div style={{ margin:'0 0 14px', padding:'12px 14px', background:'#fef2f2', border:'1px solid #fca5a5', borderRadius:10 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:8 }}>
+              <div style={{ fontSize:13, fontWeight:700, color:'#dc2626' }}>Database migration required for A/B Testing</div>
+              <button className="btn btn--ghost btn--sm" style={{ fontSize:10 }} onClick={() => setAbMigrationSql(null)}>Dismiss</button>
+            </div>
+            <div style={{ fontSize:12, color:'#7f1d1d', marginBottom:8 }}>
+              Run this SQL in your <a href="https://supabase.com/dashboard" target="_blank" rel="noopener noreferrer" style={{ color:'#dc2626', fontWeight:700 }}>Supabase SQL Editor</a>, then try again:
+            </div>
+            <pre style={{ fontSize:11, background:'#fff', padding:'10px 12px', borderRadius:8, border:'1px solid #fca5a5', overflowX:'auto', lineHeight:1.6, color:'#374151', whiteSpace:'pre-wrap' }}>
+              {abMigrationSql}
+            </pre>
+            <button className="btn btn--ghost btn--sm" style={{ marginTop:8, fontSize:11 }}
+              onClick={() => { navigator.clipboard.writeText(abMigrationSql); pushToast('SQL copied to clipboard') }}>
+              Copy SQL
+            </button>
+          </div>
+        )}
 
         {/* Stats row */}
         <div style={{ display:'flex', gap:10, marginBottom:14, flexWrap:'wrap' }}>
@@ -2109,6 +2410,30 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
                       ))}
                   </div>
                 )}
+                {/* ── Agent Breakdown (Multi-Agent) ── */}
+                {agentBreakdown == null && (() => { loadAgentBreakdown(); return null })()}
+                {agentBreakdown?.length > 0 && (
+                  <div>
+                    <div className="eyebrow-label" style={{ marginBottom:8 }}>Performance by Agent</div>
+                    <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                      {agentBreakdown.map(row => {
+                        const agent = agents?.find(a => a.id === row.agent_id)
+                        const name  = agent?.name || (row.agent_id ? row.agent_id.slice(0,8) : 'Unassigned')
+                        return (
+                          <div key={row.agent_id || 'none'} style={{ display:'flex', alignItems:'center', gap:10 }}>
+                            <span style={{ fontSize:12, fontWeight:600, minWidth:120, color:'var(--gw-ink)' }}>{name}</span>
+                            <div style={{ flex:1, height:8, background:'var(--gw-bone)', borderRadius:4, overflow:'hidden' }}>
+                              <div style={{ width:`${Math.round(row.sends/agentBreakdown[0].sends*100)}%`, height:'100%', background:'var(--gw-azure)', borderRadius:4 }}/>
+                            </div>
+                            <span style={{ fontSize:12, color:'var(--gw-mist)', minWidth:50, textAlign:'right' }}>{row.sends} sends</span>
+                            <span style={{ fontSize:12, fontWeight:700, color: row.response_rate > 5 ? 'var(--gw-green)' : 'var(--gw-ink)', minWidth:36, textAlign:'right' }}>{row.response_rate}%</span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 {/* ── Industry Benchmarks ── */}
                 {(() => {
                   const BENCHMARKS = [
@@ -2118,33 +2443,6 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
                       low:0.3, mid:0.8, high:1.5, unit:'$', prefix:true, tip:'USPS Every Door Direct Mail: $0.20–$0.50/piece. Full-service with printing: $0.80–$1.50.' },
                     { label:'ROI',             your: roi?.roi_pct ?? null,            low:0,  mid:200,high:500, unit:'%', tip:'A single closed deal from 500 mailers ($400 cost, $10k commission) = 2,400% ROI.' },
                   ]
-                  {/* ── Agent Breakdown (Multi-Agent) ── */}
-                  {(() => {
-                    if (!agentBreakdown) loadAgentBreakdown()
-                    if (!agentBreakdown?.length) return null
-                    return (
-                      <div>
-                        <div className="eyebrow-label" style={{ marginBottom:8 }}>Performance by Agent</div>
-                        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-                          {agentBreakdown.map(row => {
-                            const agent = agents?.find(a => a.id === row.agent_id)
-                            const name  = agent?.name || (row.agent_id ? row.agent_id.slice(0,8) : 'Unassigned')
-                            return (
-                              <div key={row.agent_id || 'none'} style={{ display:'flex', alignItems:'center', gap:10 }}>
-                                <span style={{ fontSize:12, fontWeight:600, minWidth:120, color:'var(--gw-ink)' }}>{name}</span>
-                                <div style={{ flex:1, height:8, background:'var(--gw-bone)', borderRadius:4, overflow:'hidden' }}>
-                                  <div style={{ width:`${Math.round(row.sends/agentBreakdown[0].sends*100)}%`, height:'100%', background:'var(--gw-azure)', borderRadius:4 }}/>
-                                </div>
-                                <span style={{ fontSize:12, color:'var(--gw-mist)', minWidth:50, textAlign:'right' }}>{row.sends} sends</span>
-                                <span style={{ fontSize:12, fontWeight:700, color: row.response_rate > 5 ? 'var(--gw-green)' : 'var(--gw-ink)', minWidth:36, textAlign:'right' }}>{row.response_rate}%</span>
-                              </div>
-                            )
-                          })}
-                        </div>
-                      </div>
-                    )
-                  })()}
-
                   return (
                     <div>
                       <div className="eyebrow-label" style={{ marginBottom:10 }}>Industry Benchmarks</div>
@@ -2310,132 +2608,10 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
                 })()}
 
                 {/* ── Competitive Intelligence (#15) ── */}
-                {(() => {
-                  const [intel, setIntel] = useState(null)
-                  const [intelLoading, setIntelLoading] = useState(false)
-
-                  const loadIntel = async () => {
-                    setIntelLoading(true)
-                    const res  = await fetch('/api/claude', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        action:                'competitive_intelligence',
-                        property_types:        campaign.property_types,
-                        flyer_template:        campaign.flyer_template,
-                        campaign_sends:        analytics.total,
-                        campaign_response_rate: analytics.response_rate,
-                        top_zip_codes:         Object.keys(analytics.by_zip || {}).slice(0,5).join(', '),
-                      }),
-                    })
-                    const data = await res.json()
-                    setIntel(data.insights || null)
-                    setIntelLoading(false)
-                  }
-
-                  return (
-                    <div>
-                      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
-                        <div className="eyebrow-label">Competitive Intelligence</div>
-                        <button className="btn btn--ghost btn--sm" style={{ fontSize:12 }} onClick={loadIntel} disabled={intelLoading}>
-                          {intelLoading ? 'Analyzing…' : intel ? 'Refresh' : '✦ Get Insights'}
-                        </button>
-                      </div>
-                      {intel ? (
-                        <div style={{ display:'flex', flexDirection:'column', gap:10, fontSize:12 }}>
-                          {intel.response_rate_context && (
-                            <div style={{ padding:'8px 12px', background:'#eff6ff', borderRadius:8, color:'#1d4ed8', borderLeft:'3px solid #2563eb' }}>
-                              {intel.response_rate_context}
-                            </div>
-                          )}
-                          {intel.market_insights?.length > 0 && (
-                            <div>
-                              <div style={{ fontWeight:700, color:'var(--gw-ink)', marginBottom:4 }}>What top agents do:</div>
-                              {intel.market_insights.map((tip, i) => <div key={i} style={{ color:'var(--gw-mist)', marginBottom:3 }}>• {tip}</div>)}
-                            </div>
-                          )}
-                          {intel.positioning_tips?.length > 0 && (
-                            <div>
-                              <div style={{ fontWeight:700, color:'var(--gw-ink)', marginBottom:4 }}>Differentiate your campaign:</div>
-                              {intel.positioning_tips.map((tip, i) => <div key={i} style={{ color:'var(--gw-mist)', marginBottom:3 }}>• {tip}</div>)}
-                            </div>
-                          )}
-                          {intel.timing_recommendations && (
-                            <div style={{ padding:'8px 12px', background:'var(--gw-bone)', borderRadius:8 }}>
-                              <strong>Timing:</strong> {intel.timing_recommendations}
-                            </div>
-                          )}
-                        </div>
-                      ) : !intelLoading && (
-                        <div style={{ fontSize:12, color:'var(--gw-mist)' }}>Click "Get Insights" for AI-powered competitive intelligence.</div>
-                      )}
-                    </div>
-                  )
-                })()}
+                <CompetitiveIntelPanel campaign={campaign} analytics={analytics} />
 
                 {/* ── Predictive List Optimization (#19) ── */}
-                {(() => {
-                  const [preds, setPreds] = useState(null)
-                  const [predLoading, setPredLoading] = useState(false)
-
-                  const loadPredictions = async () => {
-                    setPredLoading(true)
-                    const res  = await fetch('/api/claude', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        action:        'predict_best_segments',
-                        zip_detail:    analytics.by_zip_detail,
-                        by_channel:    analytics.by_channel,
-                        by_month:      analytics.by_month,
-                        total_sends:   analytics.total,
-                        response_rate: analytics.response_rate,
-                      }),
-                    })
-                    const data = await res.json()
-                    setPreds(data.predictions || null)
-                    setPredLoading(false)
-                  }
-
-                  return (
-                    <div>
-                      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
-                        <div className="eyebrow-label">Predictive List Optimization</div>
-                        <button className="btn btn--ghost btn--sm" style={{ fontSize:12 }} onClick={loadPredictions} disabled={predLoading}>
-                          {predLoading ? 'Predicting…' : preds ? 'Refresh' : '✦ Optimize List'}
-                        </button>
-                      </div>
-                      {preds ? (
-                        <div style={{ display:'flex', flexDirection:'column', gap:10, fontSize:12 }}>
-                          {preds.top_segments?.length > 0 && (
-                            <div style={{ padding:'8px 12px', background:'#f0fdf4', border:'1px solid #86efac', borderRadius:8 }}>
-                              <div style={{ fontWeight:700, color:'#166534', marginBottom:4 }}>Double down on:</div>
-                              {preds.top_segments.map((s, i) => <div key={i} style={{ color:'#166534' }}>• {s}</div>)}
-                            </div>
-                          )}
-                          {preds.drop_segments?.length > 0 && (
-                            <div style={{ padding:'8px 12px', background:'#fef2f2', border:'1px solid #fca5a5', borderRadius:8 }}>
-                              <div style={{ fontWeight:700, color:'#991b1b', marginBottom:4 }}>Stop mailing:</div>
-                              {preds.drop_segments.map((s, i) => <div key={i} style={{ color:'#991b1b' }}>• {s}</div>)}
-                            </div>
-                          )}
-                          {preds.next_send_strategy && (
-                            <div style={{ padding:'8px 12px', background:'var(--gw-bone)', borderRadius:8 }}>
-                              <strong>Next send strategy:</strong> {preds.next_send_strategy}
-                            </div>
-                          )}
-                          {preds.predicted_roi_improvement && (
-                            <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
-                              Predicted improvement: {preds.predicted_roi_improvement}
-                            </div>
-                          )}
-                        </div>
-                      ) : !predLoading && (
-                        <div style={{ fontSize:12, color:'var(--gw-mist)' }}>Click "Optimize List" for AI predictions on your best-performing segments.</div>
-                      )}
-                    </div>
-                  )
-                })()}
+                <PredictiveOptimizerPanel analytics={analytics} />
               </div>
             )
             : <div style={{ textAlign:'center', color:'var(--gw-mist)', padding:40, fontSize:13 }}>No data yet — log some sends first.</div>

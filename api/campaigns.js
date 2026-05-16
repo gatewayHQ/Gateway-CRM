@@ -434,7 +434,16 @@ export default async function handler(req, res) {
         })
         .select()
         .single()
-      if (cloneErr) throw cloneErr
+      if (cloneErr) {
+        if (cloneErr.message?.includes('ab_parent_campaign_id') || cloneErr.message?.includes('schema cache')) {
+          return res.status(400).json({
+            error: 'Missing database columns for A/B testing. Run the migration SQL below in your Supabase SQL Editor.',
+            migration_required: true,
+            migration_sql: `alter table mail_campaigns add column if not exists is_ab_test boolean default false;\nalter table mail_campaigns add column if not exists ab_variant char(1);\nalter table mail_campaigns add column if not exists ab_parent_campaign_id uuid references mail_campaigns(id) on delete set null;\nalter table mail_campaigns add column if not exists ab_winning_variant char(1);\nalter table mail_campaigns add column if not exists ab_concluded_at timestamptz;\nalter table mail_sends add column if not exists variant char(1);`,
+          })
+        }
+        throw cloneErr
+      }
       return res.json({ variant })
     }
 
