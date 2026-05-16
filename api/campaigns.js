@@ -567,6 +567,113 @@ export default async function handler(req, res) {
       return res.json({ ok: true, removed: send_ids.length })
     }
 
+    // ── Automated Response Tracking ──────────────────────────────────────
+
+    if (action === 'suggest_response_updates') {
+      const { campaign_id } = req.query
+      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
+
+      // Get all sends with contact_ids for this campaign
+      const { data: sends } = await supabase
+        .from('mail_sends')
+        .select('id, contact_id, response, sent_at, recipient_name')
+        .eq('campaign_id', campaign_id)
+        .not('contact_id', 'is', null)
+        .eq('response', 'no-response')
+
+      if (!sends?.length) return res.json({ suggestions: [] })
+
+      const contactIds = [...new Set(sends.map(s => s.contact_id))]
+
+      // Check for deals with these contacts (any stage change since send)
+      const { data: deals } = await supabase
+        .from('deals')
+        .select('id, contact_id, stage, created_at, value, address')
+        .in('contact_id', contactIds)
+
+      // Check activities
+      const { data: activities } = await supabase
+        .from('activities')
+        .select('contact_id, type, body, created_at')
+        .in('contact_id', contactIds)
+        .order('created_at', { ascending: false })
+
+      const suggestions = []
+
+      for (const send of sends) {
+        const cid = send.contact_id
+        const sendDate = new Date(send.sent_at)
+
+        // Look for a deal created after send date
+        const dealAfterSend = (deals || []).find(d =>
+          d.contact_id === cid && new Date(d.created_at) >= sendDate
+        )
+        if (dealAfterSend) {
+          const isClosedWon = ['closed','won','sold'].some(s => dealAfterSend.stage?.toLowerCase().includes(s))
+          suggestions.push({
+            send_id:           send.id,
+            contact_id:        cid,
+            recipient_name:    send.recipient_name,
+            current_response:  send.response,
+            suggested_response: isClosedWon ? 'converted' : 'interested',
+            reason:            `Deal ${isClosedWon ? 'closed' : 'opened'}: ${dealAfterSend.address || dealAfterSend.id.slice(0,8)} (${dealAfterSend.stage})`,
+            confidence:        isClosedWon ? 'high' : 'medium',
+          })
+          continue
+        }
+
+        // Look for a callback/interested activity after send
+        const relevantActivity = (activities || []).find(a =>
+          a.contact_id === cid &&
+          new Date(a.created_at) >= sendDate &&
+          (a.type === 'call' || a.type === 'meeting' || (a.body || '').toLowerCase().match(/interest|callback|follow.?up|meeting|signed/))
+        )
+        if (relevantActivity) {
+          suggestions.push({
+            send_id:           send.id,
+            contact_id:        cid,
+            recipient_name:    send.recipient_name,
+            current_response:  send.response,
+            suggested_response: 'callback',
+            reason:            `Activity: ${relevantActivity.type} — ${(relevantActivity.body || '').slice(0, 80)}`,
+            confidence:        'medium',
+          })
+        }
+      }
+
+      return res.json({ suggestions, count: suggestions.length })
+    }
+
+    // ── Multi-Agent Analytics ─────────────────────────────────────────────
+
+    if (action === 'agent_breakdown') {
+      const { campaign_id } = req.query
+      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
+
+      const { data: sends, error } = await supabase
+        .from('mail_sends')
+        .select('agent_id, response')
+        .eq('campaign_id', campaign_id)
+      if (error) throw error
+
+      const byAgent = {}
+      for (const s of (sends || [])) {
+        const aid = s.agent_id || 'unassigned'
+        if (!byAgent[aid]) byAgent[aid] = { sends:0, responses:0, conversions:0 }
+        byAgent[aid].sends++
+        if (s.response !== 'no-response') byAgent[aid].responses++
+        if (s.response === 'converted') byAgent[aid].conversions++
+      }
+
+      const rows = Object.entries(byAgent).map(([agent_id, stats]) => ({
+        agent_id: agent_id === 'unassigned' ? null : agent_id,
+        ...stats,
+        response_rate: stats.sends > 0 ? Math.round(stats.responses / stats.sends * 100) : 0,
+      })).sort((a,b) => b.sends - a.sends)
+
+      return res.json({ breakdown: rows })
+    }
+
     // ── Send History Export ───────────────────────────────────────────────
 
     if (action === 'export_sends_csv') {

@@ -1452,6 +1452,9 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
   const [seqDueMap,    setSeqDueMap]    = useState({})  // { stepIndex: {sends, count} }
   const [duplicates,   setDuplicates]   = useState(null)
   const [dupLoading,   setDupLoading]   = useState(false)
+  const [suggestions,  setSuggestions]  = useState(null)
+  const [sugLoading,   setSugLoading]   = useState(false)
+  const [agentBreakdown, setAgentBreakdown] = useState(null)
 
   useEffect(() => { loadSends(); loadAnalytics(); loadROI(); setAbLoaded(false); setAbComparison(null) }, [campaign.id])
   useEffect(() => { if (tab === 'suppression') loadSuppressions() }, [tab])
@@ -1585,6 +1588,33 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
       setDuplicates([])
       pushToast(`Removed ${data.removed} duplicate sends`)
     }
+  }
+
+  const loadSuggestions = async () => {
+    setSugLoading(true)
+    const res  = await fetch(`/api/campaigns?action=suggest_response_updates&campaign_id=${campaign.id}`)
+    const data = await res.json()
+    setSuggestions(data.suggestions || [])
+    setSugLoading(false)
+    if (!(data.suggestions?.length)) pushToast('No automated suggestions found')
+  }
+
+  const applySuggestion = async (sug) => {
+    await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'update_send', id: sug.send_id, response: sug.suggested_response }),
+    })
+    setSends(p => p.map(s => s.id === sug.send_id ? { ...s, response: sug.suggested_response } : s))
+    setSuggestions(p => p.filter(s => s.send_id !== sug.send_id))
+    pushToast('Response updated')
+  }
+
+  const loadAgentBreakdown = async () => {
+    if (agentBreakdown) return
+    const res  = await fetch(`/api/campaigns?action=agent_breakdown&campaign_id=${campaign.id}`)
+    const data = await res.json()
+    setAgentBreakdown(data.breakdown || [])
   }
 
   const saveSeqSteps = async () => {
@@ -1766,14 +1796,40 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
               ? <EmptyState icon="mail" title="No sends yet" message="Click 'Log Send' to record the first outreach for this campaign." action={<button className="btn btn--primary btn--sm" onClick={()=>setLogOpen(true)}>Log Send</button>}/>
               : (
                 <div style={{ display:'flex', flexDirection:'column', gap:0 }}>
-                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', paddingBottom:8 }}>
-                    <button className="btn btn--ghost btn--sm" style={{ fontSize:12 }} onClick={checkDuplicates} disabled={dupLoading}>
-                      {dupLoading ? 'Checking…' : 'Check Duplicates'}
-                    </button>
+                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', paddingBottom:8, flexWrap:'wrap', gap:6 }}>
+                    <div style={{ display:'flex', gap:6 }}>
+                      <button className="btn btn--ghost btn--sm" style={{ fontSize:12 }} onClick={checkDuplicates} disabled={dupLoading}>
+                        {dupLoading ? 'Checking…' : 'Check Duplicates'}
+                      </button>
+                      <button className="btn btn--ghost btn--sm" style={{ fontSize:12, color:'#7c3aed' }} onClick={loadSuggestions} disabled={sugLoading}>
+                        {sugLoading ? 'Scanning…' : '✦ Smart Suggestions'}
+                      </button>
+                    </div>
                     <a href={`/api/campaigns?action=export_sends_csv&campaign_id=${campaign.id}`} download className="btn btn--ghost btn--sm" style={{ fontSize:12 }}>
                       <Icon name="download" size={12}/> Export CSV
                     </a>
                   </div>
+                  {suggestions !== null && suggestions.length > 0 && (
+                    <div style={{ background:'#faf5ff', border:'1.5px solid #d8b4fe', borderRadius:8, padding:'10px 14px', marginBottom:8 }}>
+                      <div style={{ fontSize:12, fontWeight:700, color:'#6d28d9', marginBottom:8 }}>
+                        {suggestions.length} automated response suggestion{suggestions.length!==1?'s':''}
+                      </div>
+                      {suggestions.map(sug => (
+                        <div key={sug.send_id} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 0', borderBottom:'1px solid #ede9fe', fontSize:12 }}>
+                          <div style={{ flex:1 }}>
+                            <span style={{ fontWeight:600 }}>{sug.recipient_name || sug.contact_id?.slice(0,8)}</span>
+                            <span style={{ color:'var(--gw-mist)', marginLeft:6 }}>→ {sug.reason}</span>
+                          </div>
+                          <span style={{ fontSize:10, padding:'1px 7px', borderRadius:8, background: sug.confidence==='high'?'#d1fae5':'#fef9c3', color:sug.confidence==='high'?'#065f46':'#92400e', fontWeight:700 }}>
+                            {sug.confidence}
+                          </span>
+                          <button className="btn btn--primary btn--sm" style={{ fontSize:11, padding:'2px 10px' }} onClick={() => applySuggestion(sug)}>
+                            Set: {sug.suggested_response}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {duplicates !== null && duplicates.length > 0 && (
                     <div style={{ background:'#fef9c3', border:'1.5px solid #f59e0b', borderRadius:8, padding:'10px 14px', marginBottom:8 }}>
                       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:6 }}>
@@ -2031,6 +2087,33 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
                       low:0.3, mid:0.8, high:1.5, unit:'$', prefix:true, tip:'USPS Every Door Direct Mail: $0.20–$0.50/piece. Full-service with printing: $0.80–$1.50.' },
                     { label:'ROI',             your: roi?.roi_pct ?? null,            low:0,  mid:200,high:500, unit:'%', tip:'A single closed deal from 500 mailers ($400 cost, $10k commission) = 2,400% ROI.' },
                   ]
+                  {/* ── Agent Breakdown (Multi-Agent) ── */}
+                  {(() => {
+                    if (!agentBreakdown) loadAgentBreakdown()
+                    if (!agentBreakdown?.length) return null
+                    return (
+                      <div>
+                        <div className="eyebrow-label" style={{ marginBottom:8 }}>Performance by Agent</div>
+                        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                          {agentBreakdown.map(row => {
+                            const agent = agents?.find(a => a.id === row.agent_id)
+                            const name  = agent?.name || (row.agent_id ? row.agent_id.slice(0,8) : 'Unassigned')
+                            return (
+                              <div key={row.agent_id || 'none'} style={{ display:'flex', alignItems:'center', gap:10 }}>
+                                <span style={{ fontSize:12, fontWeight:600, minWidth:120, color:'var(--gw-ink)' }}>{name}</span>
+                                <div style={{ flex:1, height:8, background:'var(--gw-bone)', borderRadius:4, overflow:'hidden' }}>
+                                  <div style={{ width:`${Math.round(row.sends/agentBreakdown[0].sends*100)}%`, height:'100%', background:'var(--gw-azure)', borderRadius:4 }}/>
+                                </div>
+                                <span style={{ fontSize:12, color:'var(--gw-mist)', minWidth:50, textAlign:'right' }}>{row.sends} sends</span>
+                                <span style={{ fontSize:12, fontWeight:700, color: row.response_rate > 5 ? 'var(--gw-green)' : 'var(--gw-ink)', minWidth:36, textAlign:'right' }}>{row.response_rate}%</span>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )
+                  })()}
+
                   return (
                     <div>
                       <div className="eyebrow-label" style={{ marginBottom:10 }}>Industry Benchmarks</div>
