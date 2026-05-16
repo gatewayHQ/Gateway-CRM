@@ -1465,11 +1465,59 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
                       ))}
                   </div>
                 )}
-                <div style={{ padding:'12px', background:'var(--gw-bone)', borderRadius:'var(--radius)', fontSize:12 }}>
-                  <strong>Benchmark:</strong> Direct mail response rates in CRE typically run 1–5% for cold lists and 8–15% for warm lists.
-                  {responseRate > 12 && <span style={{ color:'var(--gw-green)', fontWeight:700 }}> Your {responseRate}% is above benchmark. 🏆</span>}
-                  {responseRate < 5  && responseRate > 0 && <span style={{ color:'var(--gw-mist)' }}> Consider refining your target list or flyer design.</span>}
-                </div>
+                {/* ── Industry Benchmarks ── */}
+                {(() => {
+                  const BENCHMARKS = [
+                    { label:'Response Rate',   your: responseRate,                    low:1,  mid:5,  high:12, unit:'%', tip:'Warm lists (past clients, farm area) see 8–15%. Cold lists typically 1–5%.' },
+                    { label:'Conversion Rate', your: conversionRate,                  low:0.5,mid:2,  high:5,  unit:'%', tip:'Top-performing agents convert 3–5% of mailer responses into deals.' },
+                    { label:'Cost / Send',     your: costItems.length > 0 && sends.length > 0 ? Math.round(costItems.reduce((a,i)=>a+i.unit_cost*i.quantity,0)/sends.length*100)/100 : null,
+                      low:0.3, mid:0.8, high:1.5, unit:'$', prefix:true, tip:'USPS Every Door Direct Mail: $0.20–$0.50/piece. Full-service with printing: $0.80–$1.50.' },
+                    { label:'ROI',             your: roi?.roi_pct ?? null,            low:0,  mid:200,high:500, unit:'%', tip:'A single closed deal from 500 mailers ($400 cost, $10k commission) = 2,400% ROI.' },
+                  ]
+                  return (
+                    <div>
+                      <div className="eyebrow-label" style={{ marginBottom:10 }}>Industry Benchmarks</div>
+                      <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+                        {BENCHMARKS.map(b => {
+                          const hasData = b.your != null && b.your !== 0
+                          const pct = hasData ? Math.min(Math.round(b.your / b.high * 100), 100) : 0
+                          const status = !hasData ? 'none' : b.your >= b.high ? 'top' : b.your >= b.mid ? 'good' : b.your >= b.low ? 'ok' : 'low'
+                          const color = { top:'#16a34a', good:'#2563eb', ok:'#d97706', low:'#dc2626', none:'#9ca3af' }[status]
+                          const label = { top:'Above Benchmark', good:'At Benchmark', ok:'Below Average', low:'Needs Attention', none:'No data yet' }[status]
+                          return (
+                            <div key={b.label} style={{ background:'var(--gw-bone)', borderRadius:10, padding:'10px 14px' }}>
+                              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:6 }}>
+                                <span style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>{b.label}</span>
+                                <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                                  {hasData && (
+                                    <span style={{ fontSize:13, fontWeight:800, color }}>
+                                      {b.prefix ? '$' : ''}{b.your}{!b.prefix ? b.unit : ''}
+                                    </span>
+                                  )}
+                                  <span style={{ fontSize:10, fontWeight:700, padding:'1px 7px', borderRadius:8, background: color+'22', color }}>{label}</span>
+                                </div>
+                              </div>
+                              <div style={{ position:'relative', height:6, background:'#e5e7eb', borderRadius:4, overflow:'visible', marginBottom:6 }}>
+                                {/* benchmark markers */}
+                                <div style={{ position:'absolute', left:`${Math.round(b.low/b.high*100)}%`, top:-2, width:2, height:10, background:'#d97706', borderRadius:1, opacity:0.6 }}/>
+                                <div style={{ position:'absolute', left:`${Math.round(b.mid/b.high*100)}%`, top:-2, width:2, height:10, background:'#2563eb', borderRadius:1, opacity:0.6 }}/>
+                                {hasData && <div style={{ width:`${pct}%`, height:'100%', background: color, borderRadius:4, transition:'width 0.4s' }}/>}
+                              </div>
+                              <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, color:'var(--gw-mist)' }}>
+                                <span>Low {b.prefix?'$':''}{b.low}{!b.prefix?b.unit:''}</span>
+                                <span>Avg {b.prefix?'$':''}{b.mid}{!b.prefix?b.unit:''}</span>
+                                <span>Top {b.prefix?'$':''}{b.high}{!b.prefix?b.unit:''}</span>
+                              </div>
+                              {(!hasData || status === 'low' || status === 'ok') && (
+                                <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6, borderTop:'1px solid var(--gw-border)', paddingTop:6 }}>{b.tip}</div>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )
+                })()}
 
                 {/* ── Revenue Attribution (ROI) ── */}
                 <div>
