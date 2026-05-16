@@ -402,6 +402,98 @@ export default async function handler(req, res) {
       return res.json({ send: data })
     }
 
+    // ── Smart Audience Builder ────────────────────────────────────────────
+
+    if (action === 'audience_preview') {
+      const { types, statuses, zip_codes, cities, states, tags, asset_types, sources, days_since_contact, assigned_agent_id } = req.method === 'POST' ? req.body : req.query
+
+      let query = supabase
+        .from('contacts')
+        .select('id, first_name, last_name, email, phone, type, status, source, owner_address, owner_city, owner_state, owner_zip, tags, asset_types, last_contacted_at, assigned_agent_id')
+        .order('last_contacted_at', { ascending: true, nullsFirst: true })
+        .limit(500)
+
+      const parseArr = v => {
+        if (!v) return null
+        if (Array.isArray(v)) return v.filter(Boolean)
+        if (typeof v === 'string') return v.split(',').map(s => s.trim()).filter(Boolean)
+        return null
+      }
+
+      const typesArr   = parseArr(types)
+      const statusArr  = parseArr(statuses)
+      const zipArr     = parseArr(zip_codes)
+      const cityArr    = parseArr(cities)
+      const stateArr   = parseArr(states)
+      const tagsArr    = parseArr(tags)
+      const assetArr   = parseArr(asset_types)
+      const sourceArr  = parseArr(sources)
+
+      if (typesArr?.length)   query = query.in('type', typesArr)
+      if (statusArr?.length)  query = query.in('status', statusArr)
+      if (zipArr?.length)     query = query.in('owner_zip', zipArr)
+      if (cityArr?.length)    query = query.in('owner_city', cityArr)
+      if (stateArr?.length)   query = query.in('owner_state', stateArr)
+      if (sourceArr?.length)  query = query.in('source', sourceArr)
+      if (assigned_agent_id)  query = query.eq('assigned_agent_id', assigned_agent_id)
+
+      if (tagsArr?.length) {
+        query = query.overlaps('tags', tagsArr)
+      }
+      if (assetArr?.length) {
+        query = query.overlaps('asset_types', assetArr)
+      }
+      if (days_since_contact) {
+        const cutoff = new Date(Date.now() - parseInt(days_since_contact) * 86400000).toISOString()
+        query = query.or(`last_contacted_at.lte.${cutoff},last_contacted_at.is.null`)
+      }
+
+      const { data: contacts, error } = await query
+      if (error) throw error
+      return res.json({ contacts: contacts || [], count: (contacts || []).length })
+    }
+
+    if (action === 'bulk_log_sends') {
+      const { campaign_id, contact_ids, channel, agent_id, notes, sent_at } = req.body
+      if (!campaign_id || !contact_ids?.length) {
+        return res.status(400).json({ error: 'campaign_id and contact_ids are required' })
+      }
+
+      // Fetch contact addresses for the sends
+      const { data: contacts } = await supabase
+        .from('contacts')
+        .select('id, first_name, last_name, owner_address, owner_city, owner_state, owner_zip')
+        .in('id', contact_ids)
+
+      const contactMap = {}
+      ;(contacts || []).forEach(c => { contactMap[c.id] = c })
+
+      const rows = contact_ids.map(cid => {
+        const c = contactMap[cid] || {}
+        return {
+          campaign_id,
+          contact_id:         cid,
+          channel:            channel || 'direct-mail',
+          agent_id:           agent_id || null,
+          recipient_name:     [c.first_name, c.last_name].filter(Boolean).join(' ') || null,
+          recipient_address:  c.owner_address || null,
+          recipient_city:     c.owner_city    || null,
+          recipient_state:    c.owner_state   || null,
+          recipient_zip:      c.owner_zip     || null,
+          response:           'no-response',
+          notes:              notes || null,
+          sent_at:            sent_at || new Date().toISOString(),
+        }
+      })
+
+      const { data: inserted, error } = await supabase
+        .from('mail_sends')
+        .insert(rows)
+        .select()
+      if (error) throw error
+      return res.json({ sends: inserted || [], count: (inserted || []).length })
+    }
+
     // ── Budget & Cost Items ────────────────────────────────────────────────
 
     if (action === 'list_cost_items') {

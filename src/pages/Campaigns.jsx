@@ -1102,6 +1102,211 @@ function LogSendModal({ campaign, contacts, agents, activeAgent, coldLeads, onSa
   )
 }
 
+// ── Audience Builder Modal ────────────────────────────────────────────────────
+const CONTACT_TYPES   = ['buyer','seller','landlord','tenant','investor']
+const CONTACT_SOURCES = ['referral','website','open house','social','cold call','other']
+
+function AudienceBuilderModal({ campaign, agents, activeAgent, onSent, onClose }) {
+  const [filters, setFilters] = useState({ types:[], statuses:['active'], zip_codes:'', cities:'', states:'', tags:'', sources:[], days_since_contact:'', assigned_agent_id:'' })
+  const [preview, setPreview]   = useState(null)
+  const [loading, setLoading]   = useState(false)
+  const [selected, setSelected] = useState(new Set())
+  const [channel,  setChannel]  = useState('direct-mail')
+  const [sending,  setSending]  = useState(false)
+  const [sentAt,   setSentAt]   = useState(new Date().toISOString().slice(0,10))
+
+  const setF = (k, v) => setFilters(p => ({ ...p, [k]: v }))
+
+  const toggleArr = (k, v) => setFilters(p => {
+    const arr = p[k] || []
+    return { ...p, [k]: arr.includes(v) ? arr.filter(x => x !== v) : [...arr, v] }
+  })
+
+  const runPreview = async () => {
+    setLoading(true)
+    const params = new URLSearchParams({ action:'audience_preview' })
+    if (filters.types.length)     params.set('types',            filters.types.join(','))
+    if (filters.statuses.length)  params.set('statuses',         filters.statuses.join(','))
+    if (filters.zip_codes.trim()) params.set('zip_codes',        filters.zip_codes)
+    if (filters.cities.trim())    params.set('cities',           filters.cities)
+    if (filters.states.trim())    params.set('states',           filters.states)
+    if (filters.tags.trim())      params.set('tags',             filters.tags)
+    if (filters.sources.length)   params.set('sources',          filters.sources.join(','))
+    if (filters.days_since_contact) params.set('days_since_contact', filters.days_since_contact)
+    if (filters.assigned_agent_id)  params.set('assigned_agent_id', filters.assigned_agent_id)
+    const res  = await fetch(`/api/campaigns?${params}`)
+    const data = await res.json()
+    const contacts = data.contacts || []
+    setPreview(contacts)
+    setSelected(new Set(contacts.map(c => c.id)))
+    setLoading(false)
+  }
+
+  const sendBatch = async () => {
+    if (!selected.size) return
+    setSending(true)
+    const res  = await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action:      'bulk_log_sends',
+        campaign_id: campaign.id,
+        contact_ids: [...selected],
+        channel,
+        agent_id:    activeAgent?.id || null,
+        sent_at:     sentAt ? new Date(sentAt).toISOString() : new Date().toISOString(),
+      }),
+    })
+    const data = await res.json()
+    setSending(false)
+    if (res.ok) {
+      onSent(data.sends || [])
+      pushToast(`${data.count} sends logged`)
+      onClose()
+    } else {
+      pushToast(data.error || 'Failed to log batch', 'error')
+    }
+  }
+
+  const allSelected = preview && selected.size === preview.length
+  const toggleAll   = () => setSelected(allSelected ? new Set() : new Set(preview.map(c => c.id)))
+  const toggleOne   = id => setSelected(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n })
+
+  return (
+    <Modal open={true} onClose={onClose} width={700}>
+      <div className="modal__head">
+        <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:18 }}>Smart Audience Builder</h3>
+        <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
+      </div>
+      <div className="modal__body" style={{ display:'flex', flexDirection:'column', gap:16 }}>
+
+        {/* Filters */}
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+          <div>
+            <label className="form-label">Contact Type</label>
+            <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+              {CONTACT_TYPES.map(t => (
+                <button key={t} onClick={() => toggleArr('types', t)}
+                  style={{ padding:'3px 10px', borderRadius:20, fontSize:12, fontWeight:600, cursor:'pointer', border:'1.5px solid', textTransform:'capitalize',
+                    background: filters.types.includes(t) ? 'var(--gw-azure)' : 'transparent',
+                    color:      filters.types.includes(t) ? '#fff' : 'var(--gw-mist)',
+                    borderColor:filters.types.includes(t) ? 'var(--gw-azure)' : 'var(--gw-border)' }}>
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="form-label">Status</label>
+            <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+              {['active','cold','closed'].map(s => (
+                <button key={s} onClick={() => toggleArr('statuses', s)}
+                  style={{ padding:'3px 10px', borderRadius:20, fontSize:12, fontWeight:600, cursor:'pointer', border:'1.5px solid', textTransform:'capitalize',
+                    background: filters.statuses.includes(s) ? '#7c3aed' : 'transparent',
+                    color:      filters.statuses.includes(s) ? '#fff' : 'var(--gw-mist)',
+                    borderColor:filters.statuses.includes(s) ? '#7c3aed' : 'var(--gw-border)' }}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="form-label">Zip Codes (comma-separated)</label>
+            <input className="form-control" placeholder="e.g. 30301, 30302" value={filters.zip_codes} onChange={e => setF('zip_codes', e.target.value)}/>
+          </div>
+          <div>
+            <label className="form-label">Cities (comma-separated)</label>
+            <input className="form-control" placeholder="e.g. Atlanta, Decatur" value={filters.cities} onChange={e => setF('cities', e.target.value)}/>
+          </div>
+          <div>
+            <label className="form-label">Tags (comma-separated)</label>
+            <input className="form-control" placeholder="e.g. investor, vip" value={filters.tags} onChange={e => setF('tags', e.target.value)}/>
+          </div>
+          <div>
+            <label className="form-label">Days Since Last Contact</label>
+            <input className="form-control" type="number" min="0" placeholder="e.g. 90 (contacts not touched in 90+ days)" value={filters.days_since_contact} onChange={e => setF('days_since_contact', e.target.value)}/>
+          </div>
+          <div>
+            <label className="form-label">Assigned Agent</label>
+            <select className="form-control" value={filters.assigned_agent_id} onChange={e => setF('assigned_agent_id', e.target.value)}>
+              <option value="">All agents</option>
+              {agents?.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="form-label">Source</label>
+            <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+              {CONTACT_SOURCES.map(s => (
+                <button key={s} onClick={() => toggleArr('sources', s)}
+                  style={{ padding:'2px 8px', borderRadius:20, fontSize:11, fontWeight:600, cursor:'pointer', border:'1.5px solid', textTransform:'capitalize',
+                    background: filters.sources.includes(s) ? '#0f766e' : 'transparent',
+                    color:      filters.sources.includes(s) ? '#fff' : 'var(--gw-mist)',
+                    borderColor:filters.sources.includes(s) ? '#0f766e' : 'var(--gw-border)' }}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <button className="btn btn--primary" onClick={runPreview} disabled={loading} style={{ alignSelf:'flex-start' }}>
+          {loading ? 'Loading…' : 'Preview Audience'}
+        </button>
+
+        {/* Preview list */}
+        {preview !== null && (
+          <div>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+              <div style={{ fontSize:13, fontWeight:700, color:'var(--gw-ink)' }}>
+                {preview.length} contacts matched · {selected.size} selected
+              </div>
+              <button className="btn btn--ghost btn--sm" onClick={toggleAll}>
+                {allSelected ? 'Deselect All' : 'Select All'}
+              </button>
+            </div>
+            <div style={{ maxHeight:220, overflowY:'auto', border:'1px solid var(--gw-border)', borderRadius:8 }}>
+              {preview.length === 0
+                ? <div style={{ padding:24, textAlign:'center', color:'var(--gw-mist)', fontSize:13 }}>No contacts match these filters.</div>
+                : preview.map(c => (
+                  <label key={c.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 12px', borderBottom:'1px solid var(--gw-border)', cursor:'pointer', background: selected.has(c.id) ? '#eff6ff' : '#fff' }}>
+                    <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleOne(c.id)} style={{ cursor:'pointer' }}/>
+                    <span style={{ flex:1, fontSize:13, fontWeight:600 }}>{c.first_name} {c.last_name}</span>
+                    {c.owner_zip && <span style={{ fontSize:11, color:'var(--gw-mist)' }}>{c.owner_city || ''} {c.owner_zip}</span>}
+                    <span style={{ fontSize:11, padding:'1px 7px', borderRadius:8, background:'var(--gw-bone)', color:'var(--gw-mist)', textTransform:'capitalize' }}>{c.type}</span>
+                    {c.last_contacted_at && <span style={{ fontSize:11, color:'var(--gw-mist)' }}>{new Date(c.last_contacted_at).toLocaleDateString()}</span>}
+                  </label>
+                ))
+              }
+            </div>
+          </div>
+        )}
+
+        {/* Send options */}
+        {preview !== null && selected.size > 0 && (
+          <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap', paddingTop:8, borderTop:'1px solid var(--gw-border)' }}>
+            <div>
+              <label className="form-label" style={{ marginBottom:4 }}>Channel</label>
+              <select className="form-control" value={channel} onChange={e => setChannel(e.target.value)} style={{ width:160 }}>
+                <option value="direct-mail">Direct Mail</option>
+                <option value="email">Email</option>
+                <option value="text">Text</option>
+                <option value="door-hanger">Door Hanger</option>
+              </select>
+            </div>
+            <div>
+              <label className="form-label" style={{ marginBottom:4 }}>Send Date</label>
+              <input className="form-control" type="date" value={sentAt} onChange={e => setSentAt(e.target.value)} style={{ width:160 }}/>
+            </div>
+            <button className="btn btn--primary" onClick={sendBatch} disabled={sending} style={{ alignSelf:'flex-end', marginBottom:0 }}>
+              {sending ? 'Logging…' : `Log ${selected.size} Send${selected.size !== 1 ? 's' : ''}`}
+            </button>
+          </div>
+        )}
+      </div>
+    </Modal>
+  )
+}
+
 // ── Campaign detail drawer ────────────────────────────────────────────────────
 function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, onUpdate, onClose }) {
   const [tab,          setTab]          = useState('sends')
@@ -1117,6 +1322,7 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
   const [confirmDel,   setConfirmDel]   = useState(null)
   const [scanCount,    setScanCount]    = useState(null)
   const [roi,          setRoi]          = useState(null)
+  const [audienceOpen, setAudienceOpen] = useState(false)
   const [deals,        setDeals]        = useState([])
   const [linkDealId,   setLinkDealId]   = useState(null)  // send.id currently being linked
   const [costItems,    setCostItems]    = useState([])
@@ -1295,6 +1501,9 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
               </a>
             )}
             <button className="btn btn--ghost btn--sm" onClick={() => setEditOpen(true)}>Edit</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => setAudienceOpen(true)} title="Build a targeted audience and log batch sends">
+              <Icon name="users" size={13}/> Batch Send
+            </button>
             <button className="btn btn--primary btn--sm" onClick={() => setLogOpen(true)}>
               <Icon name="plus" size={13}/> Log Send
             </button>
@@ -1761,6 +1970,15 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
       </div>
 
       {/* Modals */}
+      {audienceOpen && (
+        <AudienceBuilderModal
+          campaign={campaign}
+          agents={agents}
+          activeAgent={activeAgent}
+          onSent={newSends => { setSends(p => [...newSends, ...p]); loadAnalytics(); loadROI() }}
+          onClose={() => setAudienceOpen(false)}
+        />
+      )}
       {logOpen && (
         <LogSendModal
           campaign={campaign}
