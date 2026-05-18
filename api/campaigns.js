@@ -1015,7 +1015,7 @@ export default async function handler(req, res) {
       const code_challenge = crypto.createHash('sha256').update(code_verifier).digest('base64url')
       // HMAC-signed state carries agent_id, origin, timestamp, and PKCE verifier
       const state        = signState({ a: agent_id, n: crypto.randomBytes(8).toString('hex'), o: redirect_origin, t: Date.now(), v: code_verifier })
-      const redirect_uri = `${redirect_origin}/api/campaigns?action=canva_oauth_callback`
+      const redirect_uri = `${redirect_origin}/canva/callback`
       const scopes       = [
         'design:content:read', 'design:content:write', 'design:meta:read',
         'brandtemplate:meta:read', 'brandtemplate:content:read',
@@ -1051,7 +1051,7 @@ export default async function handler(req, res) {
       // Origin must match the request's actual origin (prevents open redirect)
       if (origin !== reqOrigin) return res.redirect(302, `${reqOrigin}/?canva_error=origin_mismatch`)
 
-      const redirect_uri   = `${origin}/api/campaigns?action=canva_oauth_callback`
+      const redirect_uri   = `${origin}/canva/callback`
       const tokenBody      = {
         grant_type:    'authorization_code',
         code,

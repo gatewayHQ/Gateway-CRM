@@ -6,7 +6,8 @@
   "rewrites": [
     { "source": "/r/:code", "destination": "/api/track?c=:code" },
     { "source": "/share/:id", "destination": "/api/share?id=:id" },
-    { "source": "/((?!api/)(?!share/)(?!r/).*)", "destination": "/index.html" }
+    { "source": "/canva/callback", "destination": "/api/campaigns?action=canva_oauth_callback" },
+    { "source": "/((?!api/)(?!share/)(?!r/)(?!canva/).*)", "destination": "/index.html" }
   ],
   "functions": {
     "api/docusign-webhook.js": { "maxDuration": 30 },
