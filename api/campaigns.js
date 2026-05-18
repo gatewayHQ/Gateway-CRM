@@ -1010,8 +1010,11 @@ export default async function handler(req, res) {
       if (redirect_origin !== reqOrigin) {
         return res.status(400).json({ error: `redirect_origin mismatch (expected ${reqOrigin})` })
       }
-      // HMAC-signed state prevents agent_id forgery / CSRF
-      const state        = signState({ a: agent_id, n: crypto.randomBytes(8).toString('hex'), o: redirect_origin, t: Date.now() })
+      // PKCE: generate verifier + challenge (Canva Connect API requires PKCE)
+      const code_verifier  = crypto.randomBytes(32).toString('base64url')
+      const code_challenge = crypto.createHash('sha256').update(code_verifier).digest('base64url')
+      // HMAC-signed state carries agent_id, origin, timestamp, and PKCE verifier
+      const state        = signState({ a: agent_id, n: crypto.randomBytes(8).toString('hex'), o: redirect_origin, t: Date.now(), v: code_verifier })
       const redirect_uri = `${redirect_origin}/api/campaigns?action=canva_oauth_callback`
       const scopes       = [
         'design:content:read', 'design:content:write', 'design:meta:read',
@@ -1020,11 +1023,13 @@ export default async function handler(req, res) {
         'profile:read',
       ].join(' ')
       const authUrl = `https://www.canva.com/api/oauth/authorize?` + new URLSearchParams({
-        client_id:     process.env.CANVA_CLIENT_ID,
-        response_type: 'code',
+        client_id:             process.env.CANVA_CLIENT_ID,
+        response_type:         'code',
         redirect_uri,
-        scope:         scopes,
+        scope:                 scopes,
         state,
+        code_challenge,
+        code_challenge_method: 'S256',
       }).toString()
       return res.json({ auth_url: authUrl })
     }
@@ -1038,7 +1043,7 @@ export default async function handler(req, res) {
       const parsedState = verifyState(state)
       if (!parsedState) return res.redirect(302, `${reqOrigin}/?canva_error=invalid_state`)
 
-      const { a: agent_id, o: origin, t: issuedAt } = parsedState
+      const { a: agent_id, o: origin, t: issuedAt, v: code_verifier } = parsedState
       // Reject states older than 10 minutes (replay protection)
       if (!agent_id || !origin || !issuedAt || Date.now() - issuedAt > 600_000) {
         return res.redirect(302, `${reqOrigin}/?canva_error=state_expired`)
@@ -1046,18 +1051,21 @@ export default async function handler(req, res) {
       // Origin must match the request's actual origin (prevents open redirect)
       if (origin !== reqOrigin) return res.redirect(302, `${reqOrigin}/?canva_error=origin_mismatch`)
 
-      const redirect_uri = `${origin}/api/campaigns?action=canva_oauth_callback`
-      const tokenRes     = await fetch('https://api.canva.com/rest/v1/oauth/token', {
+      const redirect_uri   = `${origin}/api/campaigns?action=canva_oauth_callback`
+      const tokenBody      = {
+        grant_type:    'authorization_code',
+        code,
+        redirect_uri,
+      }
+      // Include PKCE verifier if present (required by Canva Connect API)
+      if (code_verifier) tokenBody.code_verifier = code_verifier
+      const tokenRes = await fetch('https://api.canva.com/rest/v1/oauth/token', {
         method:  'POST',
         headers: {
           'Content-Type':  'application/x-www-form-urlencoded',
           'Authorization': 'Basic ' + Buffer.from(`${process.env.CANVA_CLIENT_ID}:${process.env.CANVA_CLIENT_SECRET}`).toString('base64'),
         },
-        body: new URLSearchParams({
-          grant_type:   'authorization_code',
-          code,
-          redirect_uri,
-        }).toString(),
+        body: new URLSearchParams(tokenBody).toString(),
       })
       const tokens = await tokenRes.json()
       if (!tokenRes.ok) {
