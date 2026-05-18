@@ -47,13 +47,14 @@ function CapCelebration({ agentName, onClose }) {
 }
 
 // ── Commission Drawer ──────────────────────────────────────────────────────────
-function CommissionDrawer({ open, onClose, deal, commission, onSave }) {
+function CommissionDrawer({ open, onClose, deal, commission, onSave, agents = [] }) {
   const init = {
     gross_pct:       commission?.gross_pct       ?? D_GROSS,
     broker_pct:      commission?.broker_pct      ?? D_BROKER,
     agent_pct:       commission?.agent_pct       ?? D_AGENT,
     referral_pct:    commission?.referral_pct    ?? 0,
     co_agent_pct:    commission?.co_agent_pct    ?? 0,
+    co_agent_id:     commission?.co_agent_id     ?? '',
     transaction_fee: commission?.transaction_fee ?? 0,
     notes: commission?.notes ?? '',
   }
@@ -67,6 +68,7 @@ function CommissionDrawer({ open, onClose, deal, commission, onSave }) {
       agent_pct:       commission?.agent_pct       ?? D_AGENT,
       referral_pct:    commission?.referral_pct    ?? 0,
       co_agent_pct:    commission?.co_agent_pct    ?? 0,
+      co_agent_id:     commission?.co_agent_id     ?? '',
       transaction_fee: commission?.transaction_fee ?? 0,
       notes: commission?.notes ?? '',
     })
@@ -95,6 +97,7 @@ function CommissionDrawer({ open, onClose, deal, commission, onSave }) {
       agent_pct:       Number(form.agent_pct),
       referral_pct:    Number(form.referral_pct),
       co_agent_pct:    Number(form.co_agent_pct),
+      co_agent_id:     form.co_agent_id || null,
       transaction_fee: Number(form.transaction_fee),
       notes: form.notes.trim(),
       updated_at: new Date().toISOString(),
@@ -166,6 +169,22 @@ function CommissionDrawer({ open, onClose, deal, commission, onSave }) {
           </div>
         </div>
 
+        {/* Which agent receives the co-agent split? */}
+        {(Number(form.co_agent_pct) > 0 || form.co_agent_id) && agents.length > 0 && (
+          <div className="form-group">
+            <label className="form-label">Co-Agent</label>
+            <select className="form-control" value={form.co_agent_id||''} onChange={e=>setForm(p=>({...p,co_agent_id:e.target.value||''}))}>
+              <option value="">— Select agent —</option>
+              {agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+            {form.co_agent_id && coAgentAmt > 0 && (
+              <div className="form-hint">
+                {agents.find(a=>a.id===form.co_agent_id)?.name} receives {formatCurrency(coAgentAmt)} on this deal
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Step-by-step breakdown */}
         {sp > 0 && (
           <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'12px 14px', marginBottom:16, fontSize:12 }}>
@@ -177,7 +196,7 @@ function CommissionDrawer({ open, onClose, deal, commission, onSave }) {
               referralAmt > 0 && { label:'Net to Split',        val: netGross,    color:'var(--gw-ink)' },
               { label:`Brokerage (${form.broker_pct}%)`,        val: -brokerAmt,  color:'var(--gw-red)' },
               txFee > 0 && { label:'Transaction Fee',           val: -txFee,      color:'var(--gw-red)' },
-              coAgentAmt > 0 && { label:`Co-Agent (${form.co_agent_pct}%)`,      val: -coAgentAmt, color:'var(--gw-red)' },
+              coAgentAmt > 0 && { label:`${agents.find(a=>a.id===form.co_agent_id)?.name || 'Co-Agent'} (${form.co_agent_pct}%)`, val: -coAgentAmt, color:'var(--gw-red)' },
               { label:'Your Net',            val: agentNet,    color:'var(--gw-green)', bold:true },
             ].filter(Boolean).map((row, i) => (
               <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'3px 0', borderTop: row.bold ? '1px solid var(--gw-border)' : 'none', marginTop: row.bold ? 6 : 0, paddingTop: row.bold ? 8 : 3, fontWeight: row.bold ? 700 : 400 }}>
@@ -832,6 +851,12 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
                           {isCustom && <span style={{ fontSize:10, color:'var(--gw-azure)', fontWeight:600 }}>CUSTOM SPLIT</span>}
                           {deal.agent_side === 'listing' && <span style={{ fontSize:10, fontWeight:700, color:'var(--gw-azure)', background:'#eff6ff', padding:'1px 5px', borderRadius:5 }}>🏷 Listing</span>}
                           {deal.agent_side === 'buyer'   && <span style={{ fontSize:10, fontWeight:700, color:'var(--gw-green)', background:'#f0fdf4', padding:'1px 5px', borderRadius:5 }}>🤝 Buyer</span>}
+                          {(() => {
+                            const comm = getComm(deal.id)
+                            const coAg = comm?.co_agent_id ? agents.find(a => a.id === comm.co_agent_id) : null
+                            if (!coAg || !comm?.co_agent_pct) return null
+                            return <span style={{ fontSize:10, fontWeight:700, color:'#7c3aed', background:'#ede9fe', padding:'1px 5px', borderRadius:5 }}>👥 {coAg.name} ({comm.co_agent_pct}%)</span>
+                          })()}
                         </div>
                       </td>
                       <td>
@@ -878,7 +903,7 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
       )}
 
       {drawer && selectedDeal && (
-        <CommissionDrawer open={drawer} onClose={()=>setDrawer(false)} deal={selectedDeal} commission={getComm(selectedDeal.id)} onSave={reload} />
+        <CommissionDrawer open={drawer} onClose={()=>setDrawer(false)} deal={selectedDeal} commission={getComm(selectedDeal.id)} onSave={reload} agents={agents} />
       )}
 
       {celebration && (

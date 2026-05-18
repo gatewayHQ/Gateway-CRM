@@ -1214,7 +1214,7 @@ create policy "agent_notifications_policy" on agent_notifications
 const DEAL_CONTACT_ROLES = ['Primary Buyer','Co-Buyer','Seller','Co-Seller','Tenant','Landlord','Investor','Other']
 
 function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave }) {
-  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, sold_price:'', commission_pct:'', listing_side_pct:'', buyer_side_pct:'', referral_fee:'', agent_side:'both' }
+  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, sold_price:'', commission_pct:'', listing_side_pct:'', buyer_side_pct:'', referral_fee:'', agent_side:'both', co_agent_ids:[] }
   const [form, setForm]         = useState(deal || blank)
   const [dealContacts, setDealContacts] = useState([])  // [{contact_id, role}]
   const [errors, setErrors]     = useState({})
@@ -1230,7 +1230,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
       listing_side_pct:  agent?.default_listing_side_pct  ?? '',
       buyer_side_pct:    agent?.default_buyer_side_pct    ?? '',
     }
-    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {}, sold_price: deal.sold_price ?? '', commission_pct: deal.commission_pct ?? '', listing_side_pct: deal.listing_side_pct ?? '', buyer_side_pct: deal.buyer_side_pct ?? '', referral_fee: deal.referral_fee ?? '', agent_side: deal.agent_side || 'both' } : { ...blank, ...defaults })
+    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {}, sold_price: deal.sold_price ?? '', commission_pct: deal.commission_pct ?? '', listing_side_pct: deal.listing_side_pct ?? '', buyer_side_pct: deal.buyer_side_pct ?? '', referral_fee: deal.referral_fee ?? '', agent_side: deal.agent_side || 'both', co_agent_ids: deal.co_agent_ids || [] } : { ...blank, ...defaults })
     setErrors({})
     setTab('details')
     prevStageRef.current = deal?.stage || 'lead'
@@ -1248,7 +1248,18 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
   }, [deal, open])
 
   const set = (k, v) => {
-    setForm(p => ({...p, [k]: v}))
+    setForm(p => {
+      const next = {...p, [k]: v}
+      // Auto-populate co-agents from property details when a property is selected
+      if (k === 'property_id' && v) {
+        const prop = properties.find(pr => pr.id === v)
+        const propCoAgIds = prop?.details?.co_agent_ids || []
+        if (propCoAgIds.length > 0 && (!next.co_agent_ids || next.co_agent_ids.length === 0)) {
+          next.co_agent_ids = propCoAgIds
+        }
+      }
+      return next
+    })
     if (k === 'stage' && ['under-contract','closed'].includes(v) && !['under-contract','closed'].includes(prevStageRef.current)) {
       prevStageRef.current = v
       setTimeout(() => soldPriceRef.current?.focus(), 50)
@@ -1288,6 +1299,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
         buyer_side_pct:      form.buyer_side_pct  !== '' && form.buyer_side_pct  != null ? Number(form.buyer_side_pct)  : null,
         referral_fee:        form.referral_fee    !== '' && form.referral_fee    != null ? Number(form.referral_fee)    : null,
         agent_side:          form.agent_side || 'both',
+        co_agent_ids:        form.co_agent_ids || [],
       }
       let error
       let savedDealId = deal?.id
@@ -1317,11 +1329,14 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
           let grossPct = Number(payload.commission_pct)
           if (side === 'listing') grossPct = Math.round(grossPct * lPct * 1000) / 1000
           if (side === 'buyer')   grossPct = Math.round(grossPct * bPct  * 1000) / 1000
-          const { data: existingComm } = await supabase.from('commissions').select('id').eq('deal_id', savedDealId).maybeSingle()
+          const coAgentId = (form.co_agent_ids || [])[0] || null
+          const { data: existingComm } = await supabase.from('commissions').select('id,co_agent_id').eq('deal_id', savedDealId).maybeSingle()
           if (!existingComm) {
-            await supabase.from('commissions').insert([{ deal_id: savedDealId, gross_pct: grossPct }])
+            await supabase.from('commissions').insert([{ deal_id: savedDealId, gross_pct: grossPct, co_agent_id: coAgentId }])
           } else {
-            await supabase.from('commissions').update({ gross_pct: grossPct, updated_at: new Date().toISOString() }).eq('deal_id', savedDealId)
+            const commUpdate = { gross_pct: grossPct, updated_at: new Date().toISOString() }
+            if (coAgentId) commUpdate.co_agent_id = coAgentId
+            await supabase.from('commissions').update(commUpdate).eq('deal_id', savedDealId)
           }
         } catch (_) { /* Commission sync failed — user can adjust in Commission page */ }
       }
@@ -1420,6 +1435,33 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
             </div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
             <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+
+            {/* ── Co-Agents ── */}
+            <div className="form-group">
+              <label className="form-label">Co-Agents <span style={{ fontWeight:400, color:'var(--gw-mist)', fontSize:11 }}>(share commission)</span></label>
+              {(form.co_agent_ids || []).map(agId => {
+                const ag = agents.find(a => a.id === agId)
+                if (!ag) return null
+                return (
+                  <div key={agId} style={{ display:'flex', gap:6, alignItems:'center', marginBottom:6 }}>
+                    <div style={{ flex:1, display:'flex', alignItems:'center', gap:8, background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'6px 10px' }}>
+                      <Avatar agent={ag} size={18} />
+                      <span style={{ fontSize:13, fontWeight:500 }}>{ag.name}</span>
+                    </div>
+                    <button type="button"
+                      onClick={() => set('co_agent_ids', (form.co_agent_ids||[]).filter(id => id !== agId))}
+                      style={{ border:'none', background:'none', cursor:'pointer', color:'var(--gw-mist)', padding:4, lineHeight:1 }} title="Remove">✕</button>
+                  </div>
+                )
+              })}
+              <select className="form-control" value=""
+                onChange={e => { if (e.target.value) set('co_agent_ids', [...(form.co_agent_ids||[]).filter(id => id !== e.target.value), e.target.value]) }}>
+                <option value="">Add co-agent…</option>
+                {agents.filter(a => a.id !== form.agent_id && !(form.co_agent_ids||[]).includes(a.id)).map(a =>
+                  <option key={a.id} value={a.id}>{a.name}</option>
+                )}
+              </select>
+            </div>
 
             {/* ── Comp Data ─────────────────────────────────────── */}
             <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
@@ -1799,7 +1841,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                   const contact    = contactMap[deal.contact_id]
                   const agent      = agentMap[deal.agent_id]
                   const dealProp   = deal.property_id ? propertyMap[deal.property_id] : null
-                  const coAgIds    = dealProp?.details?.co_agent_ids || []
+                  const coAgIds    = deal.co_agent_ids?.length ? deal.co_agent_ids : (dealProp?.details?.co_agent_ids || [])
                   const allAgents  = [deal.agent_id, ...coAgIds].filter(Boolean)
                     .map(id => agentMap[id]).filter(Boolean)
                     .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)

@@ -676,9 +676,11 @@ alter table mail_campaigns add column if not exists canva_design_id   text;
 alter table mail_campaigns add column if not exists canva_template_id text;
 alter table mail_campaigns add column if not exists canva_thumbnail   text;
 
--- ── Commission side tracking + auto-sync ─────────────────────────────────────
+-- ── Commission side tracking + co-agent tagging ──────────────────────────────
 -- Which side of the transaction the agent represents
-alter table deals add column if not exists agent_side text default 'both';
+alter table deals add column if not exists agent_side    text    default 'both';
+-- Co-agents assigned to this specific deal (deal-level, separate from property co-agents)
+alter table deals add column if not exists co_agent_ids  uuid[]  default '{}';
 
 -- Migrate commissions table to percentage-based schema (replaces flat gross/net/paid columns)
 alter table commissions add column if not exists gross_pct       numeric not null default 3.0;
@@ -688,6 +690,8 @@ alter table commissions add column if not exists referral_pct    numeric not nul
 alter table commissions add column if not exists co_agent_pct    numeric not null default 0;
 alter table commissions add column if not exists transaction_fee numeric not null default 0;
 alter table commissions add column if not exists updated_at      timestamptz default now();
+-- Which specific agent receives the co-agent split amount
+alter table commissions add column if not exists co_agent_id     uuid references agents(id) on delete set null;
 -- One commission record per deal
 do $$ begin
   if not exists (
