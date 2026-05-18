@@ -562,43 +562,46 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
       </div>
       <div style={{ maxHeight:420, overflowY:'auto', overflowX:'auto', background:'#e5e7eb', borderRadius:'var(--radius)', padding:12, display:'flex', flexDirection:'column', alignItems:'flex-start', gap:12 }}>
         {pages.map((_, i) => (
-          <div key={i} style={{ position:'relative' }}>
+          <div key={i}>
             <div style={{ fontSize:10, color:'#6b7280', marginBottom:4, textAlign:'center' }}>Page {i + 1}</div>
-            <canvas ref={el => { if (el) canvasRefs.current[i] = el }} style={{ display:'block', boxShadow:'0 2px 8px rgba(0,0,0,0.2)' }}/>
-            <div style={{ position:'absolute', inset:0, cursor:activeTool?'crosshair':'default', marginTop:18 }} onClick={e => handleClick(e, i)}/>
-            {allFields.filter(f => f.pageIndex === i).map(f => {
-              const color = SIGNER_COLORS[f.signerIndex] || SIGNER_COLORS[0]
-              const bg    = SIGNER_BGS[f.signerIndex]    || SIGNER_BGS[0]
-              const ft    = FIELD_TYPES[f.type]
-              const dim   = f.signerIndex !== activeSignerIndex
-              return (
-                <div key={f.id} style={{ position:'absolute', left:f.xCanvas - 42, top:f.yCanvas - 10 + 18, display:'flex', alignItems:'center', gap:3, background:bg, border:`1.5px solid ${color}`, borderRadius:3, padding:'2px 6px', fontSize:10, fontWeight:700, color, whiteSpace:'nowrap', zIndex:10, pointerEvents:'auto', opacity: dim ? 0.4 : 1 }}>
-                  {ft?.label}
-                  <span onClick={e => { e.stopPropagation(); onRemove(f.id) }} style={{ cursor:'pointer', fontSize:12, lineHeight:1, opacity:0.6, marginLeft:1 }}>×</span>
-                </div>
-              )
-            })}
-            {/* Document annotations (highlight / strikethrough) */}
-            {(docAnnotations||[]).filter(a => a.pageIndex === i).map(a => {
-              const ann = ANNOTATION_TYPES[a.type]
-              return (
-                <div key={a.id} style={{
-                  position:'absolute',
-                  left: a.xCanvas, top: a.yCanvas + 18,
-                  width: a.width, height: a.height,
-                  background: ann?.bg,
-                  border: `${a.type === 'checkbox' ? 2 : 1}px solid ${ann?.color}`,
-                  borderRadius: a.type === 'highlight' ? 2 : 0,
-                  zIndex: 9, pointerEvents:'auto', cursor:'default',
-                  display:'flex', alignItems:'center', justifyContent: a.type === 'checkbox' ? 'center' : 'flex-end',
-                }}>
-                  {a.type === 'checkbox'
-                    ? <span onClick={e => { e.stopPropagation(); onRemoveAnnotation(a.id) }} style={{ fontSize:9, cursor:'pointer', color: ann?.color, lineHeight:1, opacity:0.7 }}>×</span>
-                    : <span onClick={e => { e.stopPropagation(); onRemoveAnnotation(a.id) }} style={{ fontSize:10, cursor:'pointer', color: ann?.color, lineHeight:1, padding:'0 2px', opacity:0.8 }}>×</span>
-                  }
-                </div>
-              )
-            })}
+            {/* Inner wrapper covers exactly the canvas — no offset hacks needed */}
+            <div style={{ position:'relative', display:'inline-block', lineHeight:0 }}>
+              <canvas ref={el => { if (el) canvasRefs.current[i] = el }} style={{ display:'block', boxShadow:'0 2px 8px rgba(0,0,0,0.2)' }}/>
+              <div style={{ position:'absolute', inset:0, cursor:activeTool?'crosshair':'default' }} onClick={e => handleClick(e, i)}/>
+              {allFields.filter(f => f.pageIndex === i).map(f => {
+                const color = SIGNER_COLORS[f.signerIndex] || SIGNER_COLORS[0]
+                const bg    = SIGNER_BGS[f.signerIndex]    || SIGNER_BGS[0]
+                const ft    = FIELD_TYPES[f.type]
+                const dim   = f.signerIndex !== activeSignerIndex
+                return (
+                  <div key={f.id} style={{ position:'absolute', left:f.xCanvas - 42, top:f.yCanvas - 10, display:'flex', alignItems:'center', gap:3, background:bg, border:`1.5px solid ${color}`, borderRadius:3, padding:'2px 6px', fontSize:10, fontWeight:700, color, whiteSpace:'nowrap', zIndex:10, pointerEvents:'auto', opacity: dim ? 0.4 : 1 }}>
+                    {ft?.label}
+                    <span onClick={e => { e.stopPropagation(); onRemove(f.id) }} style={{ cursor:'pointer', fontSize:12, lineHeight:1, opacity:0.6, marginLeft:1 }}>×</span>
+                  </div>
+                )
+              })}
+              {/* Document annotations (highlight / strikethrough) */}
+              {(docAnnotations||[]).filter(a => a.pageIndex === i).map(a => {
+                const ann = ANNOTATION_TYPES[a.type]
+                return (
+                  <div key={a.id} style={{
+                    position:'absolute',
+                    left: a.xCanvas, top: a.yCanvas,
+                    width: a.width, height: a.height,
+                    background: ann?.bg,
+                    border: `${a.type === 'checkbox' ? 2 : 1}px solid ${ann?.color}`,
+                    borderRadius: a.type === 'highlight' ? 2 : 0,
+                    zIndex: 9, pointerEvents:'auto', cursor:'default',
+                    display:'flex', alignItems:'center', justifyContent: a.type === 'checkbox' ? 'center' : 'flex-end',
+                  }}>
+                    {a.type === 'checkbox'
+                      ? <span onClick={e => { e.stopPropagation(); onRemoveAnnotation(a.id) }} style={{ fontSize:9, cursor:'pointer', color: ann?.color, lineHeight:1, opacity:0.7 }}>×</span>
+                      : <span onClick={e => { e.stopPropagation(); onRemoveAnnotation(a.id) }} style={{ fontSize:10, cursor:'pointer', color: ann?.color, lineHeight:1, padding:'0 2px', opacity:0.8 }}>×</span>
+                    }
+                  </div>
+                )
+              })}
+            </div>
           </div>
         ))}
       </div>
@@ -648,7 +651,9 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
   }, [signers, agentSigns, activeAgent, agentTabs])
 
   // Flat list of all tabs across all signers (for PDFPlacer)
-  const allFields = allSigners.flatMap((s, i) => (s.tabs || []).map(t => ({ ...t, signerIndex: i })))
+  const allFields = React.useMemo(() =>
+    allSigners.flatMap((s, i) => (s.tabs || []).map(t => ({ ...t, signerIndex: i })))
+  , [allSigners])
 
   const placeField = (field) => {
     const isAgent = agentSigns && activeSignerI === signers.length
@@ -739,28 +744,30 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
       await page.render({ canvasContext: ctx, viewport }).promise
 
       for (const a of annotations.filter(ann => ann.page === pageNum)) {
-        const sx = 2, sy = 2  // scale factor (viewport scale = 2)
+        // xCanvas/yCanvas are at PDF_SCALE; this canvas is at scale 2 → rescale
+        const s = 2 / PDF_SCALE
         if (a.type === 'highlight') {
           ctx.fillStyle = 'rgba(255, 235, 59, 0.42)'
-          ctx.fillRect(a.xCanvas * sx, a.yCanvas * sy, a.width * sx, a.height * sy)
+          ctx.fillRect(a.xCanvas * s, a.yCanvas * s, a.width * s, a.height * s)
         } else if (a.type === 'strikethrough') {
           ctx.strokeStyle = 'rgba(220, 38, 38, 0.85)'
           ctx.lineWidth   = 3
-          const midY = (a.yCanvas + a.height / 2) * sy
+          const midY = (a.yCanvas + a.height / 2) * s
           ctx.beginPath()
-          ctx.moveTo(a.xCanvas * sx, midY)
-          ctx.lineTo((a.xCanvas + a.width) * sx, midY)
+          ctx.moveTo(a.xCanvas * s, midY)
+          ctx.lineTo((a.xCanvas + a.width) * s, midY)
           ctx.stroke()
         } else if (a.type === 'checkbox') {
           ctx.strokeStyle = '#1a2236'
           ctx.lineWidth   = 2
-          ctx.strokeRect(a.xCanvas * sx, a.yCanvas * sy, a.width * sx, a.height * sy)
+          ctx.strokeRect(a.xCanvas * s, a.yCanvas * s, a.width * s, a.height * s)
         }
       }
 
       const imgData  = canvas.toDataURL('image/jpeg', 0.92)
-      const pdfW     = viewport.width  * 0.75
-      const pdfH     = viewport.height * 0.75
+      canvas.width   = 0  // release GPU memory
+      const pdfW     = viewport.width  / 2  // scale=2 → divide by 2 = original PDF points
+      const pdfH     = viewport.height / 2
       if (!firstPage) doc.addPage([pdfW, pdfH])
       else { doc.internal.pageSize.width = pdfW; doc.internal.pageSize.height = pdfH; firstPage = false }
       doc.addImage(imgData, 'JPEG', 0, 0, pdfW, pdfH, '', 'FAST')
