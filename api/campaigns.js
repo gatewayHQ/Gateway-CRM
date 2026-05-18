@@ -1373,9 +1373,9 @@ async function uploadCanvaAsset(accessToken, photoUrl, filename) {
   const jobId = uploadData.job?.id
   if (!jobId) throw new Error('no job id in upload response')
 
-  // Poll up to ~12s with exponential backoff
+  // Poll up to ~6.5s with exponential backoff (4 attempts: 800+1200+1800+2700ms)
   let delay = 800
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 4; i++) {
     await new Promise(r => setTimeout(r, delay))
     const poll = await fetch(`https://api.canva.com/rest/v1/asset-uploads/${jobId}`, {
       headers: { Authorization: `Bearer ${accessToken}` },

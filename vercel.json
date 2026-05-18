@@ -10,7 +10,7 @@
   ],
   "functions": {
     "api/docusign-webhook.js": { "maxDuration": 30 },
-    "api/campaigns.js":        { "maxDuration": 10 },
+    "api/campaigns.js":        { "maxDuration": 30 },
     "api/claude.js":           { "maxDuration": 30 },
     "api/track.js":            { "maxDuration": 5  },
     "api/share.js":            { "maxDuration": 5  },
