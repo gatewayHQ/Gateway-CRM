@@ -187,16 +187,17 @@ create table if not exists envelopes (
 -- COMMISSIONS
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists commissions (
-  id          uuid primary key default uuid_generate_v4(),
-  deal_id     uuid references deals(id) on delete cascade,
-  agent_id    uuid references agents(id) on delete set null,
-  gross       numeric,
-  split_pct   numeric default 100,
-  net         numeric,
-  paid        boolean default false,
-  paid_at     timestamptz,
-  notes       text,
-  created_at  timestamptz default now()
+  id               uuid primary key default gen_random_uuid(),
+  deal_id          uuid references deals(id) on delete cascade unique not null,
+  gross_pct        numeric not null default 3.0,
+  broker_pct       numeric not null default 30.0,
+  agent_pct        numeric not null default 70.0,
+  referral_pct     numeric not null default 0,
+  co_agent_pct     numeric not null default 0,
+  transaction_fee  numeric not null default 0,
+  notes            text,
+  created_at       timestamptz default now(),
+  updated_at       timestamptz default now()
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -674,3 +675,25 @@ end $$;
 alter table mail_campaigns add column if not exists canva_design_id   text;
 alter table mail_campaigns add column if not exists canva_template_id text;
 alter table mail_campaigns add column if not exists canva_thumbnail   text;
+
+-- ── Commission side tracking + auto-sync ─────────────────────────────────────
+-- Which side of the transaction the agent represents
+alter table deals add column if not exists agent_side text default 'both';
+
+-- Migrate commissions table to percentage-based schema (replaces flat gross/net/paid columns)
+alter table commissions add column if not exists gross_pct       numeric not null default 3.0;
+alter table commissions add column if not exists broker_pct      numeric not null default 30.0;
+alter table commissions add column if not exists agent_pct       numeric not null default 70.0;
+alter table commissions add column if not exists referral_pct    numeric not null default 0;
+alter table commissions add column if not exists co_agent_pct    numeric not null default 0;
+alter table commissions add column if not exists transaction_fee numeric not null default 0;
+alter table commissions add column if not exists updated_at      timestamptz default now();
+-- One commission record per deal
+do $$ begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'commissions_deal_id_key'
+    and conrelid = 'commissions'::regclass
+  ) then
+    alter table commissions add constraint commissions_deal_id_key unique (deal_id);
+  end if;
+end $$;

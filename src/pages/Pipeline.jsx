@@ -1214,7 +1214,7 @@ create policy "agent_notifications_policy" on agent_notifications
 const DEAL_CONTACT_ROLES = ['Primary Buyer','Co-Buyer','Seller','Co-Seller','Tenant','Landlord','Investor','Other']
 
 function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave }) {
-  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, sold_price:'', commission_pct:'', listing_side_pct:'', buyer_side_pct:'', referral_fee:'' }
+  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, sold_price:'', commission_pct:'', listing_side_pct:'', buyer_side_pct:'', referral_fee:'', agent_side:'both' }
   const [form, setForm]         = useState(deal || blank)
   const [dealContacts, setDealContacts] = useState([])  // [{contact_id, role}]
   const [errors, setErrors]     = useState({})
@@ -1230,7 +1230,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
       listing_side_pct:  agent?.default_listing_side_pct  ?? '',
       buyer_side_pct:    agent?.default_buyer_side_pct    ?? '',
     }
-    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {}, sold_price: deal.sold_price ?? '', commission_pct: deal.commission_pct ?? '', listing_side_pct: deal.listing_side_pct ?? '', buyer_side_pct: deal.buyer_side_pct ?? '', referral_fee: deal.referral_fee ?? '' } : { ...blank, ...defaults })
+    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {}, sold_price: deal.sold_price ?? '', commission_pct: deal.commission_pct ?? '', listing_side_pct: deal.listing_side_pct ?? '', buyer_side_pct: deal.buyer_side_pct ?? '', referral_fee: deal.referral_fee ?? '', agent_side: deal.agent_side || 'both' } : { ...blank, ...defaults })
     setErrors({})
     setTab('details')
     prevStageRef.current = deal?.stage || 'lead'
@@ -1287,22 +1287,43 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
         listing_side_pct:    form.listing_side_pct !== '' && form.listing_side_pct != null ? Number(form.listing_side_pct) : null,
         buyer_side_pct:      form.buyer_side_pct  !== '' && form.buyer_side_pct  != null ? Number(form.buyer_side_pct)  : null,
         referral_fee:        form.referral_fee    !== '' && form.referral_fee    != null ? Number(form.referral_fee)    : null,
+        agent_side:          form.agent_side || 'both',
       }
       let error
+      let savedDealId = deal?.id
       if (deal?.id) {
         ;({ error } = await supabase.from('deals').update(payload).eq('id', deal.id))
       } else {
-        ;({ error } = await supabase.from('deals').insert([payload]))
+        const { data: inserted, error: insertErr } = await supabase.from('deals').insert([payload]).select('id').single()
+        error = insertErr
+        if (!insertErr && inserted) savedDealId = inserted.id
       }
       if (error) { pushToast(error.message, 'error'); return }
 
-      // Sync deal_contacts junction table
-      const dealId = deal?.id || null
-      if (dealId && dealContacts.length > 0) {
-        await supabase.from('deal_contacts').delete().eq('deal_id', dealId)
+      // Sync deal_contacts junction table (works for both new and updated deals)
+      if (savedDealId && dealContacts.length > 0) {
+        await supabase.from('deal_contacts').delete().eq('deal_id', savedDealId)
         await supabase.from('deal_contacts').insert(
-          dealContacts.map((dc, i) => ({ deal_id: dealId, contact_id: dc.contact_id, role: dc.role || 'Primary Buyer', sort_order: i }))
+          dealContacts.map((dc, i) => ({ deal_id: savedDealId, contact_id: dc.contact_id, role: dc.role || 'Primary Buyer', sort_order: i }))
         )
+      }
+
+      // Auto-sync commission rate to Commission page (non-fatal — table may not be migrated yet)
+      if (savedDealId && ['under-contract','closed'].includes(payload.stage) && payload.commission_pct) {
+        try {
+          const side   = payload.agent_side || 'both'
+          const lPct   = Number(form.listing_side_pct || 50) / 100
+          const bPct   = Number(form.buyer_side_pct   || 50) / 100
+          let grossPct = Number(payload.commission_pct)
+          if (side === 'listing') grossPct = Math.round(grossPct * lPct * 1000) / 1000
+          if (side === 'buyer')   grossPct = Math.round(grossPct * bPct  * 1000) / 1000
+          const { data: existingComm } = await supabase.from('commissions').select('id').eq('deal_id', savedDealId).maybeSingle()
+          if (!existingComm) {
+            await supabase.from('commissions').insert([{ deal_id: savedDealId, gross_pct: grossPct }])
+          } else {
+            await supabase.from('commissions').update({ gross_pct: grossPct, updated_at: new Date().toISOString() }).eq('deal_id', savedDealId)
+          }
+        } catch (_) { /* Commission sync failed — user can adjust in Commission page */ }
       }
 
       pushToast(deal?.id ? 'Deal updated' : 'Deal added')
@@ -1504,6 +1525,27 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
             {['under-contract','closed'].includes(form.stage) && (
               <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
                 <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:12 }}>Closing Details</div>
+
+                {/* Which side does this agent represent? */}
+                <div className="form-group">
+                  <label className="form-label">Your Side of the Deal</label>
+                  <div style={{ display:'flex', gap:0, border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
+                    {[['listing','🏷 Listing Side'],['buyer','🤝 Buyer Side'],['both','⚡ Both Sides']].map(([val, lbl]) => (
+                      <button key={val} type="button" onClick={() => set('agent_side', val)}
+                        style={{ flex:1, padding:'7px 4px', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:11, fontWeight:600, transition:'all 150ms',
+                          background: form.agent_side === val ? 'var(--gw-slate)' : '#fff',
+                          color:      form.agent_side === val ? '#fff'            : 'var(--gw-mist)' }}>
+                        {lbl}
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:3 }}>
+                    {(form.agent_side||'both') === 'listing' && 'You represent the seller — commission = listing side of total gross'}
+                    {(form.agent_side||'both') === 'buyer'   && 'You represent the buyer — commission = buyer side of total gross'}
+                    {(form.agent_side||'both') === 'both'    && 'Double-ended — you represent both sides of this transaction'}
+                  </div>
+                </div>
+
                 <div className="form-row">
                   <div className="form-group">
                     <label className="form-label" style={{ display:'flex', alignItems:'center', gap:6 }}>
@@ -1534,22 +1576,26 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
                     <input className="form-control" type="number" step="0.1" min="0" max="100" value={form.buyer_side_pct||''} onChange={e=>set('buyer_side_pct',e.target.value)} placeholder={activeAgent?.default_buyer_side_pct ?? '50'} />
                   </div>
                 </div>
-                {/* Live commission estimate */}
+                {/* Live commission estimate — reflects agent's side */}
                 {form.sold_price && form.commission_pct && (
                   <div style={{ background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:'10px 14px', fontSize:12, display:'flex', gap:16, flexWrap:'wrap' }}>
                     {(() => {
-                      const price = Number(form.sold_price)
-                      const totalPct = Number(form.commission_pct) / 100
-                      const gross = price * totalPct
-                      const listPct = Number(form.listing_side_pct || 50) / 100
-                      const buyPct  = Number(form.buyer_side_pct  || 50) / 100
-                      const ref = Number(form.referral_fee || 0)
+                      const price    = Number(form.sold_price)
+                      const gross    = price * Number(form.commission_pct) / 100
+                      const listPct  = Number(form.listing_side_pct || 50) / 100
+                      const buyPct   = Number(form.buyer_side_pct  || 50) / 100
+                      const ref      = Number(form.referral_fee || 0)
+                      const side     = form.agent_side || 'both'
+                      const yourComm = side === 'listing' ? gross * listPct
+                                     : side === 'buyer'   ? gross * buyPct
+                                     : gross
                       const fmt = n => new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(n)
                       return <>
-                        <span><strong>Gross comm:</strong> {fmt(gross)}</span>
-                        <span><strong>Listing side:</strong> {fmt(gross * listPct)}</span>
-                        <span><strong>Buyer side:</strong> {fmt(gross * buyPct)}</span>
-                        {ref > 0 && <span><strong>After referral:</strong> {fmt(gross - ref)}</span>}
+                        <span><strong>Total gross:</strong> {fmt(gross)}</span>
+                        {side === 'listing' && <span style={{ color:'var(--gw-green)', fontWeight:700 }}>Listing side (yours): {fmt(yourComm)}</span>}
+                        {side === 'buyer'   && <span style={{ color:'var(--gw-green)', fontWeight:700 }}>Buyer side (yours): {fmt(yourComm)}</span>}
+                        {side === 'both'    && <><span>Listing: {fmt(gross * listPct)}</span><span>Buyer: {fmt(gross * buyPct)}</span></>}
+                        {ref > 0 && <span>After referral: {fmt(yourComm - ref)}</span>}
                       </>
                     })()}
                   </div>
@@ -1785,6 +1831,15 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                       )}
                       {contact && <div className="deal-card__contact">{contact.first_name} {contact.last_name}</div>}
                       {deal.value > 0 && <div className="deal-card__value">{formatCurrency(deal.value)}</div>}
+                      {['under-contract','closed'].includes(stage) && deal.agent_side && deal.agent_side !== 'both' && (
+                        <div style={{ marginBottom:4 }}>
+                          <span style={{ fontSize:9, fontWeight:700, padding:'1px 5px', borderRadius:4,
+                            background: deal.agent_side === 'listing' ? '#dbeafe' : '#d1fae5',
+                            color:      deal.agent_side === 'listing' ? 'var(--gw-azure)' : 'var(--gw-green)' }}>
+                            {deal.agent_side === 'listing' ? '🏷 LISTING SIDE' : '🤝 BUYER SIDE'}
+                          </span>
+                        </div>
+                      )}
                       <div className="deal-card__meta">
                         <div style={{ fontSize:11, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)' }}>
                           {deal.expected_close_date ? formatDate(deal.expected_close_date) : ''}

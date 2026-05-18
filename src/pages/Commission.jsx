@@ -114,6 +114,18 @@ function CommissionDrawer({ open, onClose, deal, commission, onSave }) {
           <div style={{ fontSize:11, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:'0.06em', marginBottom:2 }}>Deal</div>
           <div style={{ fontWeight:600 }}>{deal?.title}</div>
           {sp>0 && <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:2 }}>Sale Price: {formatCurrency(sp)}</div>}
+          {deal?.agent_side && deal.agent_side !== 'both' && (
+            <div style={{ marginTop:6, display:'flex', alignItems:'center', gap:6 }}>
+              <span style={{
+                background: deal.agent_side === 'listing' ? '#dbeafe' : '#d1fae5',
+                color:      deal.agent_side === 'listing' ? 'var(--gw-azure)' : 'var(--gw-green)',
+                padding:'2px 8px', borderRadius:8, fontSize:11, fontWeight:700
+              }}>
+                {deal.agent_side === 'listing' ? '🏷 Listing Side' : '🤝 Buyer Side'}
+              </span>
+              <span style={{ fontSize:11, color:'var(--gw-mist)' }}>Gross % reflects your side only</span>
+            </div>
+          )}
         </div>
         <div className="form-group">
           <label className="form-label">Gross Commission Rate (%)</label>
@@ -816,7 +828,11 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
                       <td>
                         <div style={{ fontWeight:600, fontSize:13 }}>{deal.title}</div>
                         {contact && <div style={{ fontSize:11, color:'var(--gw-mist)' }}>{contact.first_name} {contact.last_name}</div>}
-                        {isCustom && <span style={{ fontSize:10, color:'var(--gw-azure)', fontWeight:600 }}>CUSTOM SPLIT</span>}
+                        <div style={{ display:'flex', gap:4, marginTop:2, flexWrap:'wrap' }}>
+                          {isCustom && <span style={{ fontSize:10, color:'var(--gw-azure)', fontWeight:600 }}>CUSTOM SPLIT</span>}
+                          {deal.agent_side === 'listing' && <span style={{ fontSize:10, fontWeight:700, color:'var(--gw-azure)', background:'#eff6ff', padding:'1px 5px', borderRadius:5 }}>🏷 Listing</span>}
+                          {deal.agent_side === 'buyer'   && <span style={{ fontSize:10, fontWeight:700, color:'var(--gw-green)', background:'#f0fdf4', padding:'1px 5px', borderRadius:5 }}>🤝 Buyer</span>}
+                        </div>
                       </td>
                       <td>
                         {agent ? <div style={{ display:'flex', alignItems:'center', gap:6 }}><Avatar agent={agent} size={22} /><span style={{ fontSize:12 }}>{agent.name}</span></div>
