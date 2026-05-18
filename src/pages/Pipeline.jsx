@@ -609,7 +609,7 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
 function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, onSent }) {
   const contact     = contacts?.find(c => c.id === deal?.contact_id)
   const defaultName = `${contact?.first_name || ''} ${contact?.last_name || ''}`.trim()
-  const defaultEmail= (contact?.emails || [])[0] || ''
+  const defaultEmail= contact?.email || ''
 
   const [step,          setStep]        = React.useState(1)
   const [subject,       setSubject]     = React.useState(`Please sign: ${deal?.title || 'Document'}`)
