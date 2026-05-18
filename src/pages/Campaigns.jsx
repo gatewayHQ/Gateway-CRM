@@ -596,7 +596,14 @@ function FlyerTab({ campaign, agents, activeAgent, onUpdate }) {
       const data = await res.json()
       if (!res.ok) {
         pushToast(data.error || 'Canva generation failed', 'error')
-        if (data.hint) pushToast(data.hint, 'info')
+        if (data.template_fields?.length) {
+          const names = data.template_fields.map(f => `${f.name} (${f.type})`).join(', ')
+          pushToast(`Your template fields: ${names} — rename to match: headline, subheadline, cta, agent_name, photo`, 'info')
+        } else if (data.setup_steps) {
+          pushToast('Fix: in Canva, select a text element → ⋮ menu → "Add data field" → name it headline, subheadline, cta, or agent_name. For photo: select image → "Add data field" → name it photo.', 'info')
+        } else if (data.hint) {
+          pushToast(data.hint, 'info')
+        }
         return
       }
       if (data.pending) {

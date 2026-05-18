@@ -1199,15 +1199,39 @@ alter table mail_campaigns add column if not exists canva_thumbnail   text;`,
       const token = await getCanvaAccessToken(supabase, agent_id)
       if (!token.ok) return res.status(token.status || 400).json({ error: token.error })
 
-      // Load campaign for autofill data
+      // Load campaign + agent for autofill data
       const { data: campaign, error: cErr } = await supabase
         .from('mail_campaigns').select('*').eq('id', campaign_id).single()
       if (cErr || !campaign) return res.status(404).json({ error: 'Campaign not found' })
-
       const { data: agent } = await supabase
         .from('agents').select('name, role, email').eq('id', agent_id).maybeSingle()
 
-      // Optional: upload property photo to Canva and reference it in autofill
+      // Fetch the template's actual dataset so we know what fields exist.
+      // This prevents the "no autofill capable elements" error and lets us map
+      // our campaign data to whatever names the user chose in Canva.
+      const dsRes = await fetch(`https://api.canva.com/rest/v1/brand-templates/${template_id}/dataset`, {
+        headers: { Authorization: `Bearer ${token.access_token}` },
+      })
+      const dsData  = dsRes.ok ? await dsRes.json() : {}
+      const dataset = dsData.dataset || {}
+      const fields  = Object.keys(dataset)
+
+      if (fields.length === 0) {
+        return res.status(400).json({
+          error: 'This Canva brand template has no autofill data fields.',
+          hint:  'In Canva, open the template → select a text element → click the ⋮ menu → "Add data field" and name it (e.g. headline). For images, select an image → "Add data field" → name it photo. Then try again.',
+          setup_steps: [
+            '1. Open the template in Canva',
+            '2. Click a text element you want auto-filled',
+            '3. In the right panel (or ⋮ menu) choose "Add data field"',
+            '4. Name it: headline, subheadline, cta, or agent_name',
+            '5. For a property photo, select an image placeholder → "Add data field" → name it: photo',
+            '6. Save and come back here to generate',
+          ],
+        })
+      }
+
+      // Upload property photo if available
       let assetId = null
       const effectivePhotoUrl = photo_url || campaign.flyer_photo_urls?.[0] || null
       if (effectivePhotoUrl) {
@@ -1218,25 +1242,58 @@ alter table mail_campaigns add column if not exists canva_thumbnail   text;`,
         }
       }
 
-      // Build autofill data map. Common placeholder names — admin should
-      // name their brand template placeholders to match these for best results.
-      const data = {}
-      const addText  = (k, v) => { if (v) data[k] = { type: 'text',  text:     String(v) } }
-      const addImage = (k, v) => { if (v) data[k] = { type: 'image', asset_id: v } }
+      // Map our campaign values to every possible placeholder name the user might have used.
+      // We only send fields that actually exist in the template's dataset.
+      const TEXT_SOURCES = {
+        headline:      campaign.landing_headline,
+        title:         campaign.landing_headline,
+        header:        campaign.landing_headline,
+        subheadline:   campaign.landing_tagline,
+        subheader:     campaign.landing_tagline,
+        subtitle:      campaign.landing_tagline,
+        tagline:       campaign.landing_tagline,
+        body:          campaign.landing_tagline,
+        description:   campaign.landing_tagline,
+        cta:           campaign.landing_cta,
+        call_to_action: campaign.landing_cta,
+        button:        campaign.landing_cta,
+        agent_name:    agent?.name,
+        name:          agent?.name,
+        agent:         agent?.name,
+        agent_role:    agent?.role,
+        role:          agent?.role,
+        agent_email:   agent?.email,
+        email:         agent?.email,
+        campaign_name: campaign.name,
+        photo_caption: campaign.flyer_photo_caption,
+        caption:       campaign.flyer_photo_caption,
+      }
+      const IMAGE_SOURCES = {
+        photo:          assetId,
+        image:          assetId,
+        property_image: assetId,
+        hero_image:     assetId,
+        background:     assetId,
+        property_photo: assetId,
+      }
 
-      addText('headline',     campaign.landing_headline)
-      addText('subheadline',  campaign.landing_tagline)
-      addText('tagline',      campaign.landing_tagline)
-      addText('cta',          campaign.landing_cta)
-      addText('agent_name',   agent?.name)
-      addText('agent_role',   agent?.role)
-      addText('agent_email',  agent?.email)
-      addText('campaign_name', campaign.name)
-      addText('photo_caption', campaign.flyer_photo_caption)
-      if (assetId) {
-        addImage('photo',         assetId)
-        addImage('property_image', assetId)
-        addImage('hero_image',     assetId)
+      const data = {}
+      for (const field of fields) {
+        const type = dataset[field]?.type
+        if ((type === 'text' || type === 'richtext') && TEXT_SOURCES[field]) {
+          data[field] = { type: 'text', text: String(TEXT_SOURCES[field]) }
+        } else if (type === 'image' && IMAGE_SOURCES[field] && assetId) {
+          data[field] = { type: 'image', asset_id: IMAGE_SOURCES[field] }
+        }
+      }
+
+      if (Object.keys(data).length === 0) {
+        const fieldList = fields.map(f => `${f} (${dataset[f]?.type})`).join(', ')
+        return res.status(400).json({
+          error:           'None of your template\'s data fields matched our campaign data.',
+          template_fields: fields.map(f => ({ name: f, type: dataset[f]?.type })),
+          hint:            `Your template has these fields: ${fieldList}. Rename them in Canva to match: headline, subheadline, cta, agent_name (text) and photo (image).`,
+        })
       }
 
       const fillRes = await fetch('https://api.canva.com/rest/v1/autofills', {
@@ -1256,7 +1313,6 @@ alter table mail_campaigns add column if not exists canva_thumbnail   text;`,
         return res.status(fillRes.status).json({
           error: fillData.message || 'Canva autofill failed',
           detail: fillData,
-          hint: 'Ensure your Canva brand template has placeholders named: headline, subheadline, cta, agent_name, photo (image).',
         })
       }
 
