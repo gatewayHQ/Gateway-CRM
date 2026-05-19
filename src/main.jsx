@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
 import LeadCapturePage from './pages/LeadCapture.jsx'
 import PropertyLandingPage from './pages/PropertyLanding.jsx'
+import CampaignLandingPage from './pages/CampaignLanding.jsx'
 import './styles/app.css'
 
 class ErrorBoundary extends React.Component {
@@ -35,14 +36,17 @@ class ErrorBoundary extends React.Component {
 const pathname = window.location.pathname
 const isLeadPage    = pathname === '/lead'
 const listingMatch  = pathname.match(/^\/listing\/([0-9a-f-]{36})/i)
+const campaignMatch = pathname.match(/^\/campaign\/([0-9a-f-]{36})/i)
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <ErrorBoundary>
     {listingMatch
       ? <PropertyLandingPage propertyId={listingMatch[1]} />
-      : isLeadPage
-        ? <LeadCapturePage />
-        : <App />
+      : campaignMatch
+        ? <CampaignLandingPage campaignId={campaignMatch[1]} />
+        : isLeadPage
+          ? <LeadCapturePage />
+          : <App />
     }
   </ErrorBoundary>
 )

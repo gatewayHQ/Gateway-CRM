@@ -12,14 +12,19 @@ export default async function handler(req, res) {
   const id = req.query.id || req.url?.split('/').pop()?.split('?')[0]
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).send('Invalid property ID')
 
-  const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
-  const ANON_KEY     = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR3Z3dlbWtpaHB3bGdsaWZ0YWdnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNjkzMjAsImV4cCI6MjA5MjY0NTMyMH0.YRaCsDpExXjuPyrssFyzXP9RQktFAW7GTuEMgQq8sZU'
+  const SUPABASE_URL = process.env.SUPABASE_URL
+  const ANON_KEY     = process.env.SUPABASE_SERVICE_KEY
+  if (!SUPABASE_URL || !ANON_KEY) return res.status(500).send('Server configuration error')
 
   const r = await fetch(
     `${SUPABASE_URL}/rest/v1/properties?id=eq.${id}&select=address,city,state,zip,type,status,list_price,beds,baths,sqft,details,notes&limit=1`,
     { headers: { apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` } }
   )
-  if (!r.ok) return res.status(500).send('Database error')
+  if (!r.ok) {
+    const errText = await r.text().catch(() => '')
+    console.error('[share] Supabase error', r.status, errText)
+    return res.status(500).send('Database error')
+  }
   const rows = await r.json()
   if (!rows?.length) return res.status(404).send('Listing not found')
 

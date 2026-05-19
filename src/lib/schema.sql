@@ -376,6 +376,15 @@ create table if not exists mail_campaigns (
   qr_code_url         text,                  -- Bitly QR code image URL
   bitly_id            text,                  -- Bitly link ID for analytics
   qr_target           text check (qr_target in ('crm_landing','custom_url')) default 'crm_landing',
+  landing_headline    text,                  -- headline shown on the campaign landing page
+  landing_tagline     text,                  -- tagline / sub-headline on landing page
+  cta_button_text     text default 'Schedule a Call',
+  cta_button_url      text,                  -- overrides default agent contact link if set
+  date_sent           date,
+  date_completed      date,
+  cost_per_piece      numeric(10,2),
+  fixed_cost          numeric(10,2),
+  recipient_count     integer,
   frequency_cap       integer default 0,     -- 0 = no cap; >0 = max sends per contact
   frequency_days      integer default 30,    -- rolling window for frequency cap
   total_sends         integer default 0,     -- denormalised counter (updated by trigger/app)
@@ -393,6 +402,33 @@ do $$ begin
   end if;
   if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='qr_target') then
     alter table mail_campaigns add column qr_target text default 'crm_landing';
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='landing_headline') then
+    alter table mail_campaigns add column landing_headline text;
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='landing_tagline') then
+    alter table mail_campaigns add column landing_tagline text;
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='cta_button_text') then
+    alter table mail_campaigns add column cta_button_text text default 'Schedule a Call';
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='cta_button_url') then
+    alter table mail_campaigns add column cta_button_url text;
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='date_sent') then
+    alter table mail_campaigns add column date_sent date;
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='date_completed') then
+    alter table mail_campaigns add column date_completed date;
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='cost_per_piece') then
+    alter table mail_campaigns add column cost_per_piece numeric(10,2);
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='fixed_cost') then
+    alter table mail_campaigns add column fixed_cost numeric(10,2);
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='recipient_count') then
+    alter table mail_campaigns add column recipient_count integer;
   end if;
 end $$;
 

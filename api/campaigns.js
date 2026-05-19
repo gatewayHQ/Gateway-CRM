@@ -53,6 +53,8 @@ export default async function handler(req, res) {
       const {
         name, description, property_types, status, agent_id,
         flyer_url, flyer_photo_caption, property_id, qr_target,
+        landing_headline, landing_tagline, cta_button_text, cta_button_url,
+        date_sent, date_completed, cost_per_piece, fixed_cost, recipient_count,
         frequency_cap, frequency_days,
       } = req.body
       if (!name) return res.status(400).json({ error: 'name is required' })
@@ -66,6 +68,15 @@ export default async function handler(req, res) {
           flyer_url: flyer_url || null,
           flyer_photo_caption: flyer_photo_caption || null,
           qr_target: qr_target || 'crm_landing',
+          landing_headline: landing_headline || null,
+          landing_tagline: landing_tagline || null,
+          cta_button_text: cta_button_text || 'Schedule a Call',
+          cta_button_url: cta_button_url || null,
+          date_sent: date_sent || null,
+          date_completed: date_completed || null,
+          cost_per_piece: cost_per_piece || null,
+          fixed_cost: fixed_cost || null,
+          recipient_count: recipient_count || null,
           frequency_cap: frequency_cap || 0,
           frequency_days: frequency_days || 30,
         }])
@@ -83,6 +94,8 @@ export default async function handler(req, res) {
         'name','description','property_types','status','agent_id',
         'property_id','flyer_url','flyer_photo_caption','qr_target',
         'tracking_url','qr_code_url','bitly_id',
+        'landing_headline','landing_tagline','cta_button_text','cta_button_url',
+        'date_sent','date_completed','cost_per_piece','fixed_cost','recipient_count',
         'frequency_cap','frequency_days',
       ]
       const patch = {}
@@ -321,6 +334,41 @@ export default async function handler(req, res) {
       })
     }
 
+    // ── Get single campaign (public landing page) ─────────────────────────
+    if (action === 'get_campaign') {
+      const { campaign_id } = req.query
+      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
+
+      const { data: camp, error: campErr } = await supabase
+        .from('mail_campaigns')
+        .select('*')
+        .eq('id', campaign_id)
+        .single()
+      if (campErr || !camp) return res.status(404).json({ error: 'Campaign not found' })
+
+      let property = null
+      if (camp.property_id) {
+        const { data: prop } = await supabase
+          .from('properties')
+          .select('address,city,state,zip,type,list_price,beds,baths,sqft')
+          .eq('id', camp.property_id)
+          .single()
+        property = prop || null
+      }
+
+      let agent = null
+      if (camp.agent_id) {
+        const { data: ag } = await supabase
+          .from('agents')
+          .select('name,initials,color,phone,email')
+          .eq('id', camp.agent_id)
+          .single()
+        agent = ag || null
+      }
+
+      return res.json({ campaign: camp, property, agent })
+    }
+
     // ── Generate QR code via Bitly ────────────────────────────────────────
     if (action === 'generate_qr') {
       const { campaign_id } = req.body
@@ -341,12 +389,12 @@ export default async function handler(req, res) {
       const baseUrl = `${proto}://${host}`
 
       let longUrl
-      if (camp.qr_target === 'crm_landing' && camp.property_id) {
-        longUrl = `${baseUrl}/listing/${camp.property_id}`
+      if (camp.qr_target === 'crm_landing') {
+        longUrl = `${baseUrl}/campaign/${campaign_id}`
       } else if (camp.qr_target === 'custom_url' && camp.tracking_url) {
         longUrl = camp.tracking_url
       } else {
-        longUrl = `${baseUrl}/listing`
+        longUrl = `${baseUrl}/campaign/${campaign_id}`
       }
 
       // Create Bitly short link

@@ -65,6 +65,9 @@ function CampaignForm({ initial, agents, activeAgent, properties, onSave, onCanc
     name: '', description: '', status: 'active',
     property_types: [], flyer_url: '', flyer_photo_caption: '',
     property_id: '', qr_target: 'crm_landing',
+    landing_headline: '', landing_tagline: '', cta_button_text: 'Schedule a Call', cta_button_url: '',
+    date_sent: '', date_completed: '',
+    cost_per_piece: '', fixed_cost: '', recipient_count: '',
     frequency_cap: 0, frequency_days: 30,
     agent_id: activeAgent?.id || '',
     ...initial,
@@ -141,7 +144,27 @@ function CampaignForm({ initial, agents, activeAgent, properties, onSave, onCanc
               ))}
             </select>
             <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>
-              QR code will link to the property&apos;s public landing page. Generate it after saving via the campaign detail view.
+              QR code will link to the campaign&apos;s public landing page. Generate it after saving via the campaign detail view.
+            </div>
+          </div>
+        )}
+        {form.qr_target === 'crm_landing' && (
+          <div style={{ marginTop:10, display:'flex', flexDirection:'column', gap:8 }}>
+            <div className="form-group" style={{ margin:0 }}>
+              <label className="form-label" style={{fontSize:11}}>Landing Headline</label>
+              <input className="form-control" placeholder="e.g. Gateway Real Estate Advisors – Just Sold" value={form.landing_headline || ''} onChange={e => set('landing_headline', e.target.value)}/>
+            </div>
+            <div className="form-group" style={{ margin:0 }}>
+              <label className="form-label" style={{fontSize:11}}>Landing Tagline</label>
+              <textarea className="form-control" rows={2} placeholder="e.g. Akron, IA – 9 Plex · Just closed at $1.2M" value={form.landing_tagline || ''} onChange={e => set('landing_tagline', e.target.value)}/>
+            </div>
+            <div className="form-group" style={{ margin:0 }}>
+              <label className="form-label" style={{fontSize:11}}>CTA Button Text</label>
+              <input className="form-control" placeholder="e.g. Schedule a Call" value={form.cta_button_text || ''} onChange={e => set('cta_button_text', e.target.value)}/>
+            </div>
+            <div className="form-group" style={{ margin:0 }}>
+              <label className="form-label" style={{fontSize:11}}>CTA Button URL <span style={{fontWeight:400,color:'var(--gw-mist)'}}>— leave blank to use agent&apos;s phone/email</span></label>
+              <input className="form-control" placeholder="https://calendly.com/… or tel:+1…" value={form.cta_button_url || ''} onChange={e => set('cta_button_url', e.target.value)}/>
             </div>
           </div>
         )}
@@ -149,6 +172,45 @@ function CampaignForm({ initial, agents, activeAgent, properties, onSave, onCanc
           <div className="form-group" style={{ margin:0 }}>
             <label className="form-label" style={{fontSize:11}}>Target URL</label>
             <input className="form-control" placeholder="https://…" value={form.tracking_url || ''} onChange={e => set('tracking_url', e.target.value)}/>
+          </div>
+        )}
+      </div>
+      <div style={{ background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:'12px 14px' }}>
+        <div style={{ fontSize:12, fontWeight:700, marginBottom:8 }}>Dates & Cost</div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:8 }}>
+          <div className="form-group" style={{ margin:0 }}>
+            <label className="form-label" style={{fontSize:11}}>Date Sent</label>
+            <input type="date" className="form-control" value={form.date_sent || ''} onChange={e => set('date_sent', e.target.value)}/>
+          </div>
+          <div className="form-group" style={{ margin:0 }}>
+            <label className="form-label" style={{fontSize:11}}>Date Completed</label>
+            <input type="date" className="form-control" value={form.date_completed || ''} onChange={e => set('date_completed', e.target.value)}/>
+          </div>
+        </div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8 }}>
+          <div className="form-group" style={{ margin:0 }}>
+            <label className="form-label" style={{fontSize:11}}>Cost / Piece ($)</label>
+            <input type="number" min={0} step="0.01" className="form-control" placeholder="1.90" value={form.cost_per_piece || ''} onChange={e => set('cost_per_piece', e.target.value)}/>
+          </div>
+          <div className="form-group" style={{ margin:0 }}>
+            <label className="form-label" style={{fontSize:11}}>Fixed Costs ($)</label>
+            <input type="number" min={0} step="0.01" className="form-control" placeholder="400" value={form.fixed_cost || ''} onChange={e => set('fixed_cost', e.target.value)}/>
+          </div>
+          <div className="form-group" style={{ margin:0 }}>
+            <label className="form-label" style={{fontSize:11}}># Recipients</label>
+            <input type="number" min={0} className="form-control" placeholder="500" value={form.recipient_count || ''} onChange={e => set('recipient_count', e.target.value)}/>
+          </div>
+        </div>
+        {(form.cost_per_piece || form.fixed_cost || form.recipient_count) && (
+          <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
+            {(() => {
+              const piece = parseFloat(form.cost_per_piece) || 0
+              const fixed = parseFloat(form.fixed_cost) || 0
+              const count = parseInt(form.recipient_count) || 0
+              if (!count && !fixed) return null
+              const total = (piece * count) + fixed
+              return `Estimated spend: $${total.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}`
+            })()}
           </div>
         )}
       </div>
@@ -793,6 +855,11 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
       supabase.from('properties').select('id, address, city, state, zip').order('address'),
     ])
 
+    // Always set these — they load independently of the campaigns table
+    setAgents(agentsRes.data || [])
+    setContacts(contactsRes.data || [])
+    setProperties(propsRes.data || [])
+
     if (!campRes.ok) {
       const err = await campRes.json()
       if (err.error?.includes('does not exist') || err.error?.includes('relation')) setReady(false)
@@ -802,9 +869,6 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
 
     const campData = await campRes.json()
     setCampaigns(campData.campaigns || [])
-    setAgents(agentsRes.data || [])
-    setContacts(contactsRes.data || [])
-    setProperties(propsRes.data || [])
 
     // Load cold call leads in background
     supabase.from('cold_call_leads').select('id, owner_name, contact_name, property_address, list_id').limit(500).then(({ data }) => {
