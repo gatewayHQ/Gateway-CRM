@@ -2,6 +2,7 @@
 -- Run in Supabase SQL Editor (Table Editor → SQL Editor → New Query → Run)
 -- Safe to re-run: uses IF NOT EXISTS and IF EXISTS guards throughout
 
+set search_path to public;
 create extension if not exists "uuid-ossp";
 
 -- ─────────────────────────────────────────────────────────────────────────────
