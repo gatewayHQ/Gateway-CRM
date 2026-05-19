@@ -398,6 +398,25 @@ create table if not exists mail_campaigns (
   date_completed   date,
   cost_per_piece   numeric default 0,
   fixed_cost       numeric default 0,
+  -- Property photo integration
+  property_id          uuid references properties(id) on delete set null,
+  flyer_photo_urls     text[]  default '{}',
+  flyer_photo_caption  text,
+  -- ROI tracking
+  attribution_window_days  int     default 180,
+  commission_rate          numeric default 0.025,
+  -- A/B testing
+  is_ab_test               boolean default false,
+  ab_variant               char(1),
+  ab_parent_campaign_id    uuid    references mail_campaigns(id) on delete set null,
+  ab_winning_variant       char(1),
+  ab_concluded_at          timestamptz,
+  -- Sequence scheduler
+  schedule_steps           jsonb   default '[]',
+  -- Canva integration
+  canva_design_id          text,
+  canva_template_id        text,
+  canva_thumbnail          text,
   created_at       timestamptz default now()
 );
 
