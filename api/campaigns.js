@@ -50,11 +50,25 @@ export default async function handler(req, res) {
     }
 
     if (action === 'create_campaign') {
-      const { name, description, property_types, status, agent_id, flyer_url, frequency_cap, frequency_days } = req.body
+      const {
+        name, description, property_types, status, agent_id,
+        flyer_url, flyer_photo_caption, property_id, qr_target,
+        frequency_cap, frequency_days,
+      } = req.body
       if (!name) return res.status(400).json({ error: 'name is required' })
       const { data, error } = await supabase
         .from('mail_campaigns')
-        .insert([{ name, description, property_types, status: status || 'active', agent_id, flyer_url, frequency_cap: frequency_cap || 0, frequency_days: frequency_days || 30 }])
+        .insert([{
+          name, description, property_types,
+          status: status || 'active',
+          agent_id: agent_id || null,
+          property_id: property_id || null,
+          flyer_url: flyer_url || null,
+          flyer_photo_caption: flyer_photo_caption || null,
+          qr_target: qr_target || 'crm_landing',
+          frequency_cap: frequency_cap || 0,
+          frequency_days: frequency_days || 30,
+        }])
         .select()
         .single()
       if (error) throw error
@@ -62,9 +76,20 @@ export default async function handler(req, res) {
     }
 
     if (action === 'update_campaign') {
-      const { id, ...patch } = req.body
+      const { id } = req.body
       if (!id) return res.status(400).json({ error: 'id is required' })
-      delete patch.action
+      // Whitelist only valid mail_campaigns columns to prevent schema cache errors
+      const ALLOWED = [
+        'name','description','property_types','status','agent_id',
+        'property_id','flyer_url','flyer_photo_caption','qr_target',
+        'tracking_url','qr_code_url','bitly_id',
+        'frequency_cap','frequency_days',
+      ]
+      const patch = {}
+      for (const key of ALLOWED) {
+        if (Object.prototype.hasOwnProperty.call(req.body, key)) patch[key] = req.body[key]
+      }
+      if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'no updatable fields provided' })
       const { data, error } = await supabase
         .from('mail_campaigns')
         .update(patch)
@@ -294,6 +319,64 @@ export default async function handler(req, res) {
           by_month:    byMonth,
         },
       })
+    }
+
+    // ── Generate QR code via Bitly ────────────────────────────────────────
+    if (action === 'generate_qr') {
+      const { campaign_id } = req.body
+      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
+
+      const { data: camp, error: campErr } = await supabase
+        .from('mail_campaigns')
+        .select('id, name, property_id, qr_target, tracking_url')
+        .eq('id', campaign_id)
+        .single()
+      if (campErr) throw campErr
+
+      const BITLY_TOKEN = process.env.BITLY_ACCESS_TOKEN
+      if (!BITLY_TOKEN) return res.status(500).json({ error: 'Bitly is not configured (missing BITLY_ACCESS_TOKEN)' })
+
+      const proto   = req.headers['x-forwarded-proto'] || 'https'
+      const host    = req.headers.host
+      const baseUrl = `${proto}://${host}`
+
+      let longUrl
+      if (camp.qr_target === 'crm_landing' && camp.property_id) {
+        longUrl = `${baseUrl}/listing/${camp.property_id}`
+      } else if (camp.qr_target === 'custom_url' && camp.tracking_url) {
+        longUrl = camp.tracking_url
+      } else {
+        longUrl = `${baseUrl}/listing`
+      }
+
+      // Create Bitly short link
+      const linkRes = await fetch('https://api-ssl.bitly.com/v4/shorten', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${BITLY_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ long_url: longUrl, title: camp.name }),
+      })
+      const linkData = await linkRes.json()
+      if (!linkRes.ok) throw new Error(linkData.message || 'Bitly link creation failed')
+
+      const shortUrl = linkData.link
+      const bitlyId  = linkData.id
+
+      // Create Bitly QR code
+      const qrRes = await fetch(`https://api-ssl.bitly.com/v4/bitlinks/${bitlyId}/qr`, {
+        headers: { Authorization: `Bearer ${BITLY_TOKEN}` },
+      })
+      const qrData = await qrRes.json()
+      const qrCodeUrl = qrRes.ok ? (qrData.qr_code || qrData.link || null) : null
+
+      const { data: updated, error: updateErr } = await supabase
+        .from('mail_campaigns')
+        .update({ tracking_url: shortUrl, bitly_id: bitlyId, qr_code_url: qrCodeUrl })
+        .eq('id', campaign_id)
+        .select()
+        .single()
+      if (updateErr) throw updateErr
+
+      return res.json({ campaign: updated })
     }
 
     return res.status(400).json({ error: `Unknown action: ${action}` })

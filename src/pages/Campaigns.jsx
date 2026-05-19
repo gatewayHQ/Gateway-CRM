@@ -60,10 +60,11 @@ function StatCard({ value, label, sub, color }) {
 }
 
 // ── Campaign form ─────────────────────────────────────────────────────────────
-function CampaignForm({ initial, agents, activeAgent, onSave, onCancel, saving }) {
+function CampaignForm({ initial, agents, activeAgent, properties, onSave, onCancel, saving }) {
   const [form, setForm] = useState({
     name: '', description: '', status: 'active',
-    property_types: [], flyer_url: '',
+    property_types: [], flyer_url: '', flyer_photo_caption: '',
+    property_id: '', qr_target: 'crm_landing',
     frequency_cap: 0, frequency_days: 30,
     agent_id: activeAgent?.id || '',
     ...initial,
@@ -115,6 +116,41 @@ function CampaignForm({ initial, agents, activeAgent, onSave, onCancel, saving }
       <div className="form-group">
         <label className="form-label">Flyer / Asset URL <span style={{fontWeight:400,color:'var(--gw-mist)',fontSize:11}}>— link to Canva, Google Drive, PDF…</span></label>
         <input className="form-control" placeholder="https://…" value={form.flyer_url || ''} onChange={e => set('flyer_url', e.target.value)}/>
+      </div>
+      <div className="form-group">
+        <label className="form-label">Flyer Photo Caption <span style={{fontWeight:400,color:'var(--gw-mist)',fontSize:11}}>— text shown under the hero photo on your flyer</span></label>
+        <input className="form-control" placeholder="e.g. 3BR/2BA Multifamily — Asking $1.2M" value={form.flyer_photo_caption || ''} onChange={e => set('flyer_photo_caption', e.target.value)}/>
+      </div>
+      <div style={{ background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:'12px 14px' }}>
+        <div style={{ fontSize:12, fontWeight:700, marginBottom:8 }}>QR Code Target <span style={{fontWeight:400,color:'var(--gw-mist)'}}>— where the QR code on your flyer sends people</span></div>
+        <div style={{ display:'flex', gap:0, borderRadius:'var(--radius)', border:'1px solid var(--gw-border)', overflow:'hidden', marginBottom: form.qr_target === 'crm_landing' ? 10 : 0 }}>
+          {[['crm_landing','CRM Landing Page'],['custom_url','Custom URL']].map(([v,l]) => (
+            <button key={v} type="button" onClick={() => set('qr_target', v)}
+              style={{ flex:1, padding:'7px 0', fontSize:12, fontWeight:700, cursor:'pointer', border:'none',
+                background: form.qr_target === v ? 'var(--gw-azure)' : '#fff',
+                color: form.qr_target === v ? '#fff' : 'var(--gw-mist)' }}>{l}</button>
+          ))}
+        </div>
+        {form.qr_target === 'crm_landing' && (
+          <div className="form-group" style={{ margin:0 }}>
+            <label className="form-label" style={{fontSize:11}}>Linked Property</label>
+            <select className="form-control" value={form.property_id || ''} onChange={e => set('property_id', e.target.value)}>
+              <option value="">— None (link to CRM home) —</option>
+              {(properties || []).map(p => (
+                <option key={p.id} value={p.id}>{p.address}{p.city ? `, ${p.city}` : ''}</option>
+              ))}
+            </select>
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>
+              QR code will link to the property&apos;s public landing page. Generate it after saving via the campaign detail view.
+            </div>
+          </div>
+        )}
+        {form.qr_target === 'custom_url' && (
+          <div className="form-group" style={{ margin:0 }}>
+            <label className="form-label" style={{fontSize:11}}>Target URL</label>
+            <input className="form-control" placeholder="https://…" value={form.tracking_url || ''} onChange={e => set('tracking_url', e.target.value)}/>
+          </div>
+        )}
       </div>
       <div style={{ background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:'12px 14px' }}>
         <div style={{ fontSize:12, fontWeight:700, marginBottom:8 }}>Frequency Cap <span style={{fontWeight:400,color:'var(--gw-mist)'}}>— prevent over-mailing the same contact</span></div>
@@ -328,7 +364,7 @@ function LogSendModal({ campaign, contacts, agents, activeAgent, coldLeads, onSa
 }
 
 // ── Campaign detail drawer ────────────────────────────────────────────────────
-function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, onUpdate, onClose }) {
+function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, properties, onUpdate, onClose }) {
   const [tab,          setTab]          = useState('sends')
   const [sends,        setSends]        = useState([])
   const [suppressions, setSuppressions] = useState([])
@@ -337,12 +373,27 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
   const [logOpen,      setLogOpen]      = useState(false)
   const [editOpen,     setEditOpen]     = useState(false)
   const [saving,       setSaving]       = useState(false)
+  const [generatingQR, setGeneratingQR] = useState(false)
   const [addSupp,      setAddSupp]      = useState(false)
   const [suppForm,     setSuppForm]     = useState({ full_name:'', address:'', reason:'dnc', notes:'' })
   const [confirmDel,   setConfirmDel]   = useState(null)
 
   useEffect(() => { loadSends(); loadAnalytics() }, [campaign.id])
   useEffect(() => { if (tab === 'suppression') loadSuppressions() }, [tab])
+
+  const generateQR = async () => {
+    setGeneratingQR(true)
+    const res  = await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'generate_qr', campaign_id: campaign.id }),
+    })
+    const data = await res.json()
+    setGeneratingQR(false)
+    if (!res.ok || data.error) { pushToast(data.error || 'QR generation failed', 'error'); return }
+    onUpdate(data.campaign)
+    pushToast('QR code generated')
+  }
 
   const loadSends = async () => {
     setLoading(true)
@@ -442,10 +493,23 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
               </div>
             )}
           </div>
-          <div style={{ display:'flex', gap:6 }}>
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
             {campaign.flyer_url && (
               <a href={campaign.flyer_url} target="_blank" rel="noopener noreferrer" className="btn btn--ghost btn--sm">
                 <Icon name="download" size={13}/> Flyer
+              </a>
+            )}
+            {campaign.qr_code_url
+              ? <a href={campaign.qr_code_url} target="_blank" rel="noopener noreferrer" className="btn btn--ghost btn--sm" title="View QR code">
+                  <Icon name="qr-code" size={13}/> QR Code
+                </a>
+              : <button className="btn btn--ghost btn--sm" onClick={generateQR} disabled={generatingQR} title="Generate Bitly QR code linking to the CRM landing page">
+                  <Icon name="qr-code" size={13}/> {generatingQR ? 'Generating…' : 'Generate QR'}
+                </button>
+            }
+            {campaign.tracking_url && (
+              <a href={campaign.tracking_url} target="_blank" rel="noopener noreferrer" className="btn btn--ghost btn--sm" title="Open tracking link">
+                <Icon name="link" size={13}/> Link
               </a>
             )}
             <button className="btn btn--ghost btn--sm" onClick={() => setEditOpen(true)}>Edit</button>
@@ -454,6 +518,13 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
             </button>
           </div>
         </div>
+
+        {/* Flyer photo caption */}
+        {campaign.flyer_photo_caption && (
+          <div style={{ fontSize:12, color:'var(--gw-mist)', marginBottom:10, fontStyle:'italic' }}>
+            Photo caption: {campaign.flyer_photo_caption}
+          </div>
+        )}
 
         {/* Stats row */}
         <div style={{ display:'flex', gap:10, marginBottom:14, flexWrap:'wrap' }}>
@@ -666,6 +737,7 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, on
             <CampaignForm
               initial={campaign}
               agents={agents}
+              properties={properties}
               activeAgent={activeAgent}
               saving={saving}
               onCancel={() => setEditOpen(false)}
@@ -701,6 +773,7 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
   const [agents,       setAgents]       = useState([])
   const [contacts,     setContacts]     = useState([])
   const [coldLeads,    setColdLeads]    = useState([])
+  const [properties,   setProperties]   = useState([])
   const [loading,      setLoading]      = useState(true)
   const [selected,     setSelected]     = useState(null)
   const [newOpen,      setNewOpen]      = useState(false)
@@ -713,10 +786,11 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
 
   const loadAll = async () => {
     setLoading(true)
-    const [campRes, agentsRes, contactsRes] = await Promise.all([
+    const [campRes, agentsRes, contactsRes, propsRes] = await Promise.all([
       fetch('/api/campaigns?action=list_campaigns'),
       supabase.from('agents').select('id, name, initials, color').order('name'),
       supabase.from('contacts').select('id, first_name, last_name, email, phone, owner_address, owner_city, owner_state, owner_zip').order('last_name'),
+      supabase.from('properties').select('id, address, city, state, zip').order('address'),
     ])
 
     if (!campRes.ok) {
@@ -730,6 +804,7 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
     setCampaigns(campData.campaigns || [])
     setAgents(agentsRes.data || [])
     setContacts(contactsRes.data || [])
+    setProperties(propsRes.data || [])
 
     // Load cold call leads in background
     supabase.from('cold_call_leads').select('id, owner_name, contact_name, property_address, list_id').limit(500).then(({ data }) => {
@@ -902,6 +977,7 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
               agents={agents}
               activeAgent={activeAgent}
               coldLeads={coldLeads}
+              properties={properties}
               onUpdate={updateCampaign}
               onClose={() => setSelected(null)}
             />
@@ -919,6 +995,7 @@ export default function CampaignsPage({ db, setDb, activeAgent }) {
           <div className="modal__body">
             <CampaignForm
               agents={agents}
+              properties={properties}
               activeAgent={activeAgent}
               saving={saving}
               onCancel={() => setNewOpen(false)}

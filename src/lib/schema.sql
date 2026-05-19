@@ -363,22 +363,38 @@ end $$;
 -- MAIL CAMPAIGNS  (outreach campaigns — mail flyers, cold call, email blasts)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists mail_campaigns (
-  id              uuid primary key default uuid_generate_v4(),
-  name            text not null,
-  description     text,
-  property_types  text[] default '{}',   -- target property types (multifamily, office…)
-  status          text check (status in ('draft','active','paused','completed')) default 'draft',
-  agent_id        uuid references agents(id) on delete set null,
-  flyer_url       text,                  -- link to flyer asset (Canva, PDF URL, etc.)
-  tracking_url    text,                  -- Bitly short URL for QR tracking
-  qr_code_url     text,                  -- Bitly QR code image URL
-  bitly_id        text,                  -- Bitly link ID for analytics
-  frequency_cap   integer default 0,     -- 0 = no cap; >0 = max sends per contact
-  frequency_days  integer default 30,    -- rolling window for frequency cap
-  total_sends     integer default 0,     -- denormalised counter (updated by trigger/app)
-  total_responses integer default 0,
-  created_at      timestamptz default now()
+  id                  uuid primary key default uuid_generate_v4(),
+  name                text not null,
+  description         text,
+  property_types      text[] default '{}',   -- target property types (multifamily, office…)
+  status              text check (status in ('draft','active','paused','completed')) default 'draft',
+  agent_id            uuid references agents(id) on delete set null,
+  property_id         uuid references properties(id) on delete set null, -- linked property for QR/landing page
+  flyer_url           text,                  -- link to flyer asset (Canva, PDF URL, etc.)
+  flyer_photo_caption text,                  -- caption shown under the hero photo on the flyer
+  tracking_url        text,                  -- Bitly short URL for QR tracking
+  qr_code_url         text,                  -- Bitly QR code image URL
+  bitly_id            text,                  -- Bitly link ID for analytics
+  qr_target           text check (qr_target in ('crm_landing','custom_url')) default 'crm_landing',
+  frequency_cap       integer default 0,     -- 0 = no cap; >0 = max sends per contact
+  frequency_days      integer default 30,    -- rolling window for frequency cap
+  total_sends         integer default 0,     -- denormalised counter (updated by trigger/app)
+  total_responses     integer default 0,
+  created_at          timestamptz default now()
 );
+
+-- Migration: add new columns if they don't exist yet
+do $$ begin
+  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='flyer_photo_caption') then
+    alter table mail_campaigns add column flyer_photo_caption text;
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='property_id') then
+    alter table mail_campaigns add column property_id uuid references properties(id) on delete set null;
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='qr_target') then
+    alter table mail_campaigns add column qr_target text default 'crm_landing';
+  end if;
+end $$;
 
 alter table mail_campaigns enable row level security;
 do $$ begin
