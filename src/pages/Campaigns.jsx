@@ -65,6 +65,7 @@ function CampaignForm({ initial, agents, activeAgent, properties, onSave, onCanc
     name: '', description: '', status: 'active',
     property_types: [], flyer_url: '', flyer_photo_caption: '',
     property_id: '', qr_target: 'crm_landing',
+    tracking_url: '',
     landing_headline: '', landing_tagline: '', cta_button_text: 'Schedule a Call', cta_button_url: '',
     date_sent: '', date_completed: '',
     cost_per_piece: '', fixed_cost: '', recipient_count: '',
@@ -746,9 +747,9 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, pr
                 <div style={{ display:'grid', gridTemplateColumns:'1fr 2fr', gap:8, marginBottom:8 }}>
                   <select className="form-control" value={suppForm.reason} onChange={e => setSuppForm(p=>({...p,reason:e.target.value}))}>
                     <option value="dnc">DNC</option>
-                    <option value="opted-out">Opted Out</option>
+                    <option value="opt-out">Opted Out</option>
                     <option value="deceased">Deceased</option>
-                    <option value="returned-mail">Returned Mail</option>
+                    <option value="returned">Returned Mail</option>
                     <option value="other">Other</option>
                   </select>
                   <input className="form-control" placeholder="Notes (optional)" value={suppForm.notes} onChange={e => setSuppForm(p=>({...p,notes:e.target.value}))}/>

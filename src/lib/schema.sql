@@ -482,16 +482,32 @@ end $$;
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists mail_suppressions (
   id         uuid primary key default uuid_generate_v4(),
+  full_name  text,
   address    text,
   email      text,
   phone      text,
-  full_name  text,
-  reason     text check (reason in ('dnc','opted-out','deceased','returned-mail','other')) default 'dnc',
+  reason     text check (reason in ('dnc','opt-out','returned','deceased','other')) default 'dnc',
   contact_id uuid references contacts(id) on delete set null,
   agent_id   uuid references agents(id) on delete set null,
   notes      text,
   created_at timestamptz default now()
 );
+
+-- Migration: add columns that may be missing from older deployments
+do $$ begin
+  if not exists (select 1 from information_schema.columns where table_name='mail_suppressions' and column_name='full_name') then
+    alter table mail_suppressions add column full_name text;
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_suppressions' and column_name='email') then
+    alter table mail_suppressions add column email text;
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_suppressions' and column_name='phone') then
+    alter table mail_suppressions add column phone text;
+  end if;
+  if not exists (select 1 from information_schema.columns where table_name='mail_suppressions' and column_name='agent_id') then
+    alter table mail_suppressions add column agent_id uuid references agents(id) on delete set null;
+  end if;
+end $$;
 
 alter table mail_suppressions enable row level security;
 do $$ begin

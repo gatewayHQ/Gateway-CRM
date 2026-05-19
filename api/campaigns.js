@@ -53,6 +53,7 @@ export default async function handler(req, res) {
       const {
         name, description, property_types, status, agent_id,
         flyer_url, flyer_photo_caption, property_id, qr_target,
+        tracking_url,
         landing_headline, landing_tagline, cta_button_text, cta_button_url,
         date_sent, date_completed, cost_per_piece, fixed_cost, recipient_count,
         frequency_cap, frequency_days,
@@ -68,6 +69,7 @@ export default async function handler(req, res) {
           flyer_url: flyer_url || null,
           flyer_photo_caption: flyer_photo_caption || null,
           qr_target: qr_target || 'crm_landing',
+          tracking_url: tracking_url || null,
           landing_headline: landing_headline || null,
           landing_tagline: landing_tagline || null,
           cta_button_text: cta_button_text || 'Schedule a Call',
@@ -275,7 +277,16 @@ export default async function handler(req, res) {
       const { address, email, phone, full_name, reason, contact_id, agent_id, notes } = req.body
       const { data, error } = await supabase
         .from('mail_suppressions')
-        .insert([{ address, email, phone, full_name, reason: reason || 'dnc', contact_id, agent_id, notes }])
+        .insert([{
+          full_name:  full_name  || null,
+          address:    address    || null,
+          email:      email      || null,
+          phone:      phone      || null,
+          reason:     reason     || 'dnc',
+          contact_id: contact_id || null,
+          agent_id:   agent_id   || null,
+          notes:      notes      || null,
+        }])
         .select()
         .single()
       if (error) throw error
