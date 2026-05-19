@@ -3,13 +3,13 @@
 -- Safe to re-run: uses IF NOT EXISTS and IF EXISTS guards throughout
 
 set search_path to public;
-create extension if not exists "uuid-ossp";
+-- uuid-ossp not required: gen_random_uuid() is built-in on PostgreSQL 13+
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- AGENTS
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists agents (
-  id         uuid primary key default uuid_generate_v4(),
+  id         uuid primary key default gen_random_uuid(),
   auth_id    uuid unique,                  -- links to Supabase Auth user
   name       text not null,
   initials   text not null,
@@ -24,7 +24,7 @@ create table if not exists agents (
 -- CONTACTS
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists contacts (
-  id                uuid primary key default uuid_generate_v4(),
+  id                uuid primary key default gen_random_uuid(),
   first_name        text not null,
   last_name         text not null,
   email             text,
@@ -64,7 +64,7 @@ create table if not exists contacts (
 -- PROPERTIES
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists properties (
-  id                uuid primary key default uuid_generate_v4(),
+  id                uuid primary key default gen_random_uuid(),
   address           text not null,
   city              text,
   state             text,
@@ -94,7 +94,7 @@ create table if not exists properties (
 -- DEALS  (Pipeline)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists deals (
-  id                  uuid primary key default uuid_generate_v4(),
+  id                  uuid primary key default gen_random_uuid(),
   title               text not null,
   contact_id          uuid references contacts(id) on delete set null,
   property_id         uuid references properties(id) on delete set null,
@@ -115,7 +115,7 @@ create table if not exists deals (
 -- TASKS
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists tasks (
-  id         uuid primary key default uuid_generate_v4(),
+  id         uuid primary key default gen_random_uuid(),
   title      text not null,
   type       text check (type in ('call','email','showing','follow-up','document','other')) default 'other',
   priority   text check (priority in ('high','medium','low')) default 'medium',
@@ -132,7 +132,7 @@ create table if not exists tasks (
 -- EMAIL TEMPLATES
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists templates (
-  id          uuid primary key default uuid_generate_v4(),
+  id          uuid primary key default gen_random_uuid(),
   name        text not null,
   subject     text not null,
   body        text not null,
@@ -146,7 +146,7 @@ create table if not exists templates (
 -- ACTIVITIES  (contact timeline — calls, notes, emails, meetings, showings)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists activities (
-  id         uuid primary key default uuid_generate_v4(),
+  id         uuid primary key default gen_random_uuid(),
   contact_id uuid references contacts(id) on delete cascade,
   agent_id   uuid references agents(id) on delete set null,
   type       text check (type in ('note','call','email','meeting','showing')) default 'note',
@@ -158,7 +158,7 @@ create table if not exists activities (
 -- DOCUMENTS  (files attached to deals)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists documents (
-  id          uuid primary key default uuid_generate_v4(),
+  id          uuid primary key default gen_random_uuid(),
   deal_id     uuid references deals(id) on delete cascade,
   agent_id    uuid references agents(id) on delete set null,
   name        text not null,
@@ -172,7 +172,7 @@ create table if not exists documents (
 -- ENVELOPES  (DocuSign signature tracking)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists envelopes (
-  id          uuid primary key default uuid_generate_v4(),
+  id          uuid primary key default gen_random_uuid(),
   deal_id     uuid references deals(id) on delete cascade,
   document_id uuid references documents(id) on delete set null,
   agent_id    uuid references agents(id) on delete set null,
@@ -263,7 +263,7 @@ end $$;
 -- TEAMS  (collaboration and split-commission team types)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists teams (
-  id          uuid primary key default uuid_generate_v4(),
+  id          uuid primary key default gen_random_uuid(),
   name        text not null,
   type        text check (type in ('collaboration','split')) default 'collaboration',
   description text,
@@ -281,7 +281,7 @@ end $$;
 -- TEAM SPLITS  (per-member split % for split-type teams)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists team_splits (
-  id               uuid primary key default uuid_generate_v4(),
+  id               uuid primary key default gen_random_uuid(),
   team_id          uuid references teams(id) on delete cascade,
   agent_id         uuid references agents(id) on delete cascade,
   split_pct        numeric default 0 check (split_pct >= 0 and split_pct <= 100),
@@ -304,7 +304,7 @@ end $$;
 -- AGENT NOTIFICATIONS
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists agent_notifications (
-  id          uuid primary key default uuid_generate_v4(),
+  id          uuid primary key default gen_random_uuid(),
   agent_id    uuid references agents(id) on delete cascade,
   deal_id     uuid references deals(id) on delete set null,
   envelope_id text,
@@ -326,7 +326,7 @@ end $$;
 -- DOCUSIGN ENVELOPES  (named to match app code)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists docusign_envelopes (
-  id            uuid primary key default uuid_generate_v4(),
+  id            uuid primary key default gen_random_uuid(),
   deal_id       uuid references deals(id) on delete cascade,
   document_id   uuid references documents(id) on delete set null,
   agent_id      uuid references agents(id) on delete set null,
@@ -352,7 +352,7 @@ end $$;
 -- TRANSACTION STEPS  (closing checklists per deal)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists transaction_steps (
-  id           uuid primary key default uuid_generate_v4(),
+  id           uuid primary key default gen_random_uuid(),
   deal_id      uuid references deals(id) on delete cascade,
   title        text not null,
   completed    boolean default false,
@@ -372,7 +372,7 @@ end $$;
 -- MAIL CAMPAIGNS  (outreach campaigns — mail flyers, cold call, email blasts)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists mail_campaigns (
-  id               uuid primary key default uuid_generate_v4(),
+  id               uuid primary key default gen_random_uuid(),
   name             text not null,
   description      text,
   property_types   text[] default '{}',
@@ -432,7 +432,7 @@ end $$;
 -- MAIL SENDS  (every individual send / contact event — mail, call, or email)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists mail_sends (
-  id                uuid primary key default uuid_generate_v4(),
+  id                uuid primary key default gen_random_uuid(),
   campaign_id       uuid references mail_campaigns(id) on delete cascade,
   contact_id        uuid references contacts(id) on delete set null,
   cold_lead_id      uuid,   -- plain uuid; FK added later when cold_call_leads table exists
@@ -465,7 +465,7 @@ end $$;
 -- CAMPAIGN SCANS  (QR code scan events)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists campaign_scans (
-  id          uuid primary key default uuid_generate_v4(),
+  id          uuid primary key default gen_random_uuid(),
   campaign_id uuid references mail_campaigns(id) on delete cascade,
   scanned_at  timestamptz default now(),
   ip_address  text,
@@ -488,7 +488,7 @@ end $$;
 -- MAIL SUPPRESSIONS  (global DNC / opt-out list across all campaigns)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists mail_suppressions (
-  id         uuid primary key default uuid_generate_v4(),
+  id         uuid primary key default gen_random_uuid(),
   address    text,
   email      text,
   phone      text,
@@ -511,7 +511,7 @@ end $$;
 -- DOCUSIGN FIELD TEMPLATES  (pre-built anchor tab configs per document type)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists docusign_field_templates (
-  id            uuid primary key default uuid_generate_v4(),
+  id            uuid primary key default gen_random_uuid(),
   name          text not null,             -- e.g. "Purchase Agreement"
   doc_type      text not null unique,      -- key for lookup (purchase_agreement, listing_agreement…)
   description   text,
@@ -567,7 +567,7 @@ alter table agents      add column if not exists default_buyer_side_pct   numeri
 
 -- deal_contacts junction table (multi-contact per deal)
 create table if not exists deal_contacts (
-  id         uuid primary key default uuid_generate_v4(),
+  id         uuid primary key default gen_random_uuid(),
   deal_id    uuid references deals(id) on delete cascade,
   contact_id uuid references contacts(id) on delete cascade,
   role       text default 'Primary Buyer',
@@ -620,7 +620,7 @@ alter table mail_sends     add column if not exists variant                  cha
 
 -- ── Implementation #14: Budget & Cost Dashboard ──────────────────────────────
 create table if not exists campaign_cost_items (
-  id           uuid primary key default uuid_generate_v4(),
+  id           uuid primary key default gen_random_uuid(),
   campaign_id  uuid references mail_campaigns(id) on delete cascade not null,
   category     text check (category in ('printing','postage','design','vendor','other')) default 'other',
   description  text,
@@ -645,7 +645,7 @@ end $$;
 
 -- ── Implementation #16: Campaign Templates Library ───────────────────────────
 create table if not exists campaign_templates (
-  id          uuid primary key default uuid_generate_v4(),
+  id          uuid primary key default gen_random_uuid(),
   name        text not null,
   description text,
   config      jsonb default '{}',  -- stores campaign fields: property_types, flyer_template, channel, cost_per_piece, etc.
@@ -670,7 +670,7 @@ alter table mail_campaigns add column if not exists schedule_steps jsonb default
 -- Per-agent OAuth tokens for Canva Connect API. Allows agents to push campaign
 -- copy + property photos into Canva brand templates with one click.
 create table if not exists canva_connections (
-  id              uuid primary key default uuid_generate_v4(),
+  id              uuid primary key default gen_random_uuid(),
   agent_id        uuid references agents(id) on delete cascade,
   canva_user_id   text,
   canva_team_id   text,
