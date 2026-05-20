@@ -5,6 +5,22 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 )
 
+// Extract missing column name from Supabase/PostgREST/Postgres errors.
+// Returns the column name or null if the error isn't a missing-column error.
+function extractMissingColumn(msg) {
+  if (!msg) return null
+  // PostgREST: "Could not find the 'foo' column of 'mail_campaigns' in the schema cache"
+  let m = msg.match(/Could not find the ['"]?([a-z_][a-z0-9_]*)['"]? column/i)
+  if (m) return m[1]
+  // Postgres: column "foo" of relation "..." does not exist
+  m = msg.match(/column ["']?([a-z_][a-z0-9_]*)["']? of relation/i)
+  if (m) return m[1]
+  // Postgres alt: column "foo" does not exist
+  m = msg.match(/column ["']?([a-z_][a-z0-9_]*)["']? does not exist/i)
+  if (m) return m[1]
+  return null
+}
+
 const CORS = {
   'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
@@ -54,31 +70,42 @@ export default async function handler(req, res) {
     if (action === 'create_campaign') {
       const {
         name, description, property_types, status, agent_id,
-        flyer_url, flyer_photo_caption, property_id, qr_target,
+        property_id, qr_target,
         tracking_url, frequency_cap, frequency_days,
         channel, email_subject, email_body,
       } = req.body
       if (!name) return res.status(400).json({ error: 'name is required' })
-      const { data, error } = await supabase
-        .from('mail_campaigns')
-        .insert([{
-          name, description,
-          property_types: property_types || [],
-          status: status || 'active',
-          agent_id:             agent_id             || null,
-          property_id:          property_id          || null,
-          flyer_url:            flyer_url            || null,
-          flyer_photo_caption:  flyer_photo_caption  || null,
-          qr_target:            qr_target            || 'crm_landing',
-          tracking_url:         tracking_url         || null,
-          frequency_cap:        frequency_cap        || 0,
-          frequency_days:       frequency_days       || 30,
-          channel:              channel              || 'mail',
-          email_subject:        email_subject        || null,
-          email_body:           email_body           || null,
-        }])
-        .select()
-        .single()
+
+      // Build payload — retry without optional columns if schema is missing them
+      const CORE = {
+        name,
+        description:    description    || null,
+        property_types: property_types || [],
+        status:         status         || 'active',
+        agent_id:       agent_id       || null,
+        property_id:    property_id    || null,
+        qr_target:      qr_target      || 'crm_landing',
+        tracking_url:   tracking_url   || null,
+        frequency_cap:  frequency_cap  || 0,
+        frequency_days: frequency_days || 30,
+      }
+      const OPTIONAL = {
+        channel:       channel       || 'mail',
+        email_subject: email_subject || null,
+        email_body:    email_body    || null,
+      }
+
+      let payload = { ...CORE, ...OPTIONAL }
+      let { data, error } = await supabase.from('mail_campaigns').insert([payload]).select().single()
+
+      // If a column doesn't exist in the user's schema, drop it and retry
+      let attempts = 0
+      while (error && attempts++ < 12) {
+        const badCol = extractMissingColumn(error.message)
+        if (!badCol || !(badCol in payload)) break
+        delete payload[badCol]
+        ;({ data, error } = await supabase.from('mail_campaigns').insert([payload]).select().single())
+      }
       if (error) throw error
       return res.json({ campaign: data })
     }
@@ -88,7 +115,7 @@ export default async function handler(req, res) {
       if (!id) return res.status(400).json({ error: 'id is required' })
       const ALLOWED = [
         'name','description','property_types','status','agent_id',
-        'property_id','flyer_url','flyer_photo_caption','qr_target',
+        'property_id','qr_target',
         'tracking_url','qr_code_url','bitly_id',
         'frequency_cap','frequency_days',
         'channel','email_subject','email_body',
@@ -98,12 +125,17 @@ export default async function handler(req, res) {
         if (Object.prototype.hasOwnProperty.call(req.body, key)) patch[key] = req.body[key]
       }
       if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'no updatable fields provided' })
-      const { data, error } = await supabase
-        .from('mail_campaigns')
-        .update(patch)
-        .eq('id', id)
-        .select()
-        .single()
+
+      let working = { ...patch }
+      let { data, error } = await supabase.from('mail_campaigns').update(working).eq('id', id).select().single()
+      let attempts = 0
+      while (error && attempts++ < 12) {
+        const badCol = extractMissingColumn(error.message)
+        if (!badCol || !(badCol in working)) break
+        delete working[badCol]
+        if (Object.keys(working).length === 0) break
+        ;({ data, error } = await supabase.from('mail_campaigns').update(working).eq('id', id).select().single())
+      }
       if (error) throw error
       return res.json({ campaign: data })
     }

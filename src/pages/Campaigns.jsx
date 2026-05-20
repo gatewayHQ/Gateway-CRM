@@ -138,7 +138,6 @@ function CampaignForm({ initial, agents, properties, activeAgent, onSave, onCanc
     name: '', description: '', status: 'active',
     channel: 'mail',
     property_types: [],
-    flyer_url: '', flyer_photo_caption: '',
     property_id: '', qr_target: 'crm_landing', tracking_url: '',
     frequency_cap: 0, frequency_days: 30,
     agent_id: activeAgent?.id || '',
@@ -218,17 +217,9 @@ function CampaignForm({ initial, agents, properties, activeAgent, onSave, onCanc
         </div>
       )}
 
-      {/* Mail flyer fields */}
+      {/* QR Code (mail only) */}
       {(form.channel === 'mail' || !form.channel) && (
         <>
-          <div className="form-group">
-            <label className="form-label">Flyer / Asset URL <span style={{fontWeight:400,color:'var(--gw-mist)',fontSize:11}}>— Canva, Google Drive, PDF…</span></label>
-            <input className="form-control" placeholder="https://…" value={form.flyer_url || ''} onChange={e => set('flyer_url', e.target.value)}/>
-          </div>
-          <div className="form-group">
-            <label className="form-label">Flyer Photo Caption</label>
-            <input className="form-control" placeholder="e.g. 3BR/2BA Multifamily — Asking $1.2M" value={form.flyer_photo_caption || ''} onChange={e => set('flyer_photo_caption', e.target.value)}/>
-          </div>
           <div style={{ background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:'12px 14px' }}>
             <div style={{ fontSize:12, fontWeight:700, marginBottom:8 }}>QR Code Target <span style={{fontWeight:400,color:'var(--gw-mist)'}}>— where your QR code sends leads</span></div>
             <div style={{ display:'flex', gap:0, borderRadius:'var(--radius)', border:'1px solid var(--gw-border)', overflow:'hidden', marginBottom: 10 }}>
@@ -870,11 +861,6 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, pr
             )}
           </div>
           <div style={{ display:'flex', gap:6, flexWrap:'wrap', flexShrink:0 }}>
-            {campaign.channel === 'mail' && campaign.flyer_url && (
-              <a href={campaign.flyer_url} target="_blank" rel="noopener noreferrer" className="btn btn--ghost btn--sm">
-                <Icon name="download" size={13}/> Flyer
-              </a>
-            )}
             {campaign.qr_code_url
               ? <a href={campaign.qr_code_url} target="_blank" rel="noopener noreferrer" className="btn btn--ghost btn--sm">
                   <Icon name="qr-code" size={13}/> QR Code
@@ -900,12 +886,6 @@ function CampaignDrawer({ campaign, contacts, agents, activeAgent, coldLeads, pr
             </button>
           </div>
         </div>
-
-        {campaign.flyer_photo_caption && (
-          <div style={{ fontSize:12, color:'var(--gw-mist)', marginBottom:8, fontStyle:'italic' }}>
-            Photo caption: {campaign.flyer_photo_caption}
-          </div>
-        )}
 
         {/* Stats */}
         <div style={{ display:'flex', gap:10, marginBottom:14, flexWrap:'wrap' }}>
@@ -1341,8 +1321,6 @@ CREATE TABLE IF NOT EXISTS mail_campaigns (
   property_types text[] DEFAULT '{}',
   agent_id uuid,
   property_id uuid,
-  flyer_url text,
-  flyer_photo_caption text,
   qr_target text DEFAULT 'crm_landing',
   tracking_url text,
   qr_code_url text,
