@@ -714,12 +714,7 @@ function RecipientImporter({ mailingId, contacts, onDone, onCancel }) {
     setDmResults(null)
     setDmSetupNeeded(false)
     try {
-      const r = await fetch('/api/deal-machine', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ address: dmAddress, radius: dmRadius }),
-      })
-      const data = await r.json()
+      const data = await api('deal_machine', { address: dmAddress, radius: dmRadius })
       if (data.setup) { setDmSetupNeeded(true); return }
       if (data.error) { pushToast(data.error, 'error'); return }
       const props = data.properties || []

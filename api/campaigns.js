@@ -477,6 +477,59 @@ export default async function handler(req, res) {
       return json(res, 200, { ok: true, lead_id: lead.id })
     }
 
+    // ── Deal Machine neighbor lookup ────────────────────────────────────────
+    // Proxies a property-search request to Deal Machine so the API key never
+    // touches the browser. Folded into campaigns.js to stay under the 12-fn
+    // Vercel Hobby limit.
+    if (action === 'deal_machine') {
+      const apiKey = (process.env.DEAL_MACHINE_API_KEY || '').trim()
+      if (!apiKey) return json(res, 200, { setup: true, error: 'DEAL_MACHINE_API_KEY is not configured.' })
+
+      const { address, radius = 500 } = req.body || {}
+      if (!address?.trim()) return json(res, 400, { error: 'address is required' })
+      const radiusNum = Math.min(5280, Math.max(100, Number(radius) || 500))
+
+      const dmRes = await fetch('https://app.dealmachine.com/api/v2/property_list', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type':  'application/json',
+          'Accept':        'application/json',
+        },
+        body: JSON.stringify({ address, radius: radiusNum, limit: 500, include_owner_info: true }),
+      })
+
+      if (!dmRes.ok) {
+        const ct = dmRes.headers.get('content-type') || ''
+        const body = ct.includes('json') ? await dmRes.json() : await dmRes.text()
+        const msg = typeof body === 'object'
+          ? (body.message || body.error || JSON.stringify(body))
+          : String(body).slice(0, 300)
+        return json(res, dmRes.status, { error: `Deal Machine error: ${msg}` })
+      }
+
+      const data = await dmRes.json()
+      const raw  = data.properties || data.results || data.data || data.items || []
+
+      const properties = raw.map(p => {
+        const ownerFirst = p.owner_first_name || p.mailing_first_name || ''
+        const ownerLast  = p.owner_last_name  || p.mailing_last_name  || ''
+        const ownerFull  = p.owner_name || p.mailing_name || [ownerFirst, ownerLast].filter(Boolean).join(' ') || null
+        return {
+          owner_name:       ownerFull,
+          address_line1:    p.mailing_street  || p.mailing_address || p.property_street  || p.address || null,
+          city:             p.mailing_city    || p.property_city   || p.city    || null,
+          state:            p.mailing_state   || p.property_state  || p.state   || null,
+          zip:              p.mailing_zip     || p.property_zip    || p.zip     || null,
+          property_address: p.property_street || p.property_address || p.address || null,
+          property_type:    p.property_type   || p.type            || null,
+          estimated_value:  p.estimated_value || p.avm             || p.value   || null,
+        }
+      }).filter(p => p.owner_name || p.address_line1)
+
+      return json(res, 200, { properties, count: properties.length })
+    }
+
     return json(res, 400, { error: `Unknown action: ${action}` })
   } catch (err) {
     console.error('[api/campaigns]', err)
