@@ -1,0 +1,417 @@
+import React, { useState, useEffect, useCallback } from 'react'
+import { supabase } from '../../lib/supabase.js'
+import { Drawer, Tabs, pushToast } from '../../components/UI.jsx'
+import { normalizePhone } from '../../lib/phone.js'
+import { validateEmail, validateRequired, validateForm } from '../../lib/validation.js'
+import TagInput from './TagInput.jsx'
+import ActivityTab from './ActivityTab.jsx'
+
+const BLANK = {
+  first_name: '', last_name: '', email: '', phone: '',
+  type: 'buyer', status: 'active', source: 'other',
+  assigned_agent_id: '', notes: '', tags: [],
+  owner_address: '', owner_city: '', owner_state: '', owner_zip: '',
+  birthday: '', anniversary_date: '',
+  submarket: '', asset_types: [], size_min: '', size_max: '', size_unit: 'sqft',
+}
+const BLANK_PROP = { address: '', list_price: '', type: 'residential', subtype: '', beds: '', baths: '', sqft: '', garage: '', details: {} }
+
+const COMM_SUBTYPES = ['multifamily', 'office', 'land', 'retail', 'industrial', 'mixed-use']
+
+export default function ContactDrawer({
+  open, onClose, contact, agents,
+  deals, tasks, activities, activeAgent,
+  allTags = [],
+  onSave, onActivityAdded,
+  onDuplicateCheck,  // optional: (form) => existingContact | null
+}) {
+  const [form, setForm] = useState(BLANK)
+  const [errors, setErrors] = useState({})
+  const [saving, setSaving] = useState(false)
+  const [tab, setTab] = useState('details')
+  const [addProp, setAddProp] = useState(false)
+  const [propForm, setPropForm] = useState(BLANK_PROP)
+  const [dirty, setDirty] = useState(false)
+  const [duplicateWarn, setDuplicateWarn] = useState(null)
+
+  // Reset on contact change
+  useEffect(() => {
+    setForm(contact ? { ...BLANK, ...contact, tags: Array.isArray(contact.tags) ? contact.tags : [] } : BLANK)
+    setErrors({})
+    setTab('details')
+    setAddProp(false)
+    setPropForm(BLANK_PROP)
+    setDirty(false)
+    setDuplicateWarn(null)
+  }, [contact, open])
+
+  const set = useCallback((k, v) => {
+    setForm(p => ({ ...p, [k]: v }))
+    setDirty(true)
+  }, [])
+  const setP  = useCallback((k, v) => { setPropForm(p => ({ ...p, [k]: v })); setDirty(true) }, [])
+  const setPD = useCallback((k, v) => { setPropForm(p => ({ ...p, details: { ...(p.details || {}), [k]: v } })); setDirty(true) }, [])
+
+  // Dirty-form warning on close
+  const requestClose = () => {
+    if (dirty && !saving) {
+      if (!confirm('You have unsaved changes. Discard them?')) return
+    }
+    onClose()
+  }
+
+  const isComm = propForm.type === 'commercial'
+  const isBuyer = form.type === 'buyer' || form.type === 'investor'
+
+  const save = async () => {
+    // Validate
+    const { valid, errors: validationErrors } = validateForm(form, {
+      first_name: [(v) => validateRequired(v, 'First name')],
+      last_name:  [(v) => validateRequired(v, 'Last name')],
+      email:      [(v) => validateEmail(v, { required: false })],
+    })
+    if (!valid) { setErrors(validationErrors); return }
+    if (addProp && !propForm.address.trim()) {
+      setErrors({ prop_address: 'Property address is required' })
+      return
+    }
+    setErrors({})
+
+    // Duplicate check (creating only — not editing)
+    if (!contact?.id && onDuplicateCheck) {
+      const dup = onDuplicateCheck(form)
+      if (dup && !duplicateWarn) {
+        setDuplicateWarn(dup)
+        return  // First click surfaces the warning; second click proceeds
+      }
+    }
+
+    setSaving(true)
+
+    // Normalize phone to E.164 before storing
+    const normalizedPhone = form.phone ? normalizePhone(form.phone) : null
+    if (form.phone && !normalizedPhone) {
+      setSaving(false)
+      setErrors({ phone: 'Could not parse phone number' })
+      return
+    }
+
+    const { submarket, asset_types, size_min, size_max, size_unit, ...baseForm } = form
+
+    const payload = {
+      ...baseForm,
+      birthday:          form.birthday || null,
+      anniversary_date:  form.anniversary_date || null,
+      assigned_agent_id: form.assigned_agent_id || null,
+      email:             form.email?.trim() || null,
+      phone:             normalizedPhone,
+      tags:              Array.isArray(form.tags) ? form.tags : [],
+      ...(isBuyer && {
+        submarket:   submarket || null,
+        asset_types: Array.isArray(asset_types) ? asset_types : [],
+        size_min:    size_min ? Number(size_min) : null,
+        size_max:    size_max ? Number(size_max) : null,
+        size_unit:   size_unit || 'sqft',
+      }),
+    }
+
+    const doSave = (p) => contact?.id
+      ? supabase.from('contacts').update(p).eq('id', contact.id).select().single()
+      : supabase.from('contacts').insert([p]).select().single()
+
+    let { data: saved, error } = await doSave(payload)
+
+    // Migration-pending fallback
+    let criteriaDropped = false
+    if (error?.message?.includes('schema cache') && isBuyer) {
+      const { submarket: _s, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u, ...payloadNoCriteria } = payload
+      ;({ data: saved, error } = await doSave(payloadNoCriteria))
+      if (!error) criteriaDropped = true
+    }
+
+    if (error) {
+      setSaving(false)
+      pushToast(error.message, 'error')
+      return
+    }
+
+    const contactId = saved?.id || contact?.id
+
+    if (addProp && propForm.address.trim() && contactId) {
+      const propPayload = {
+        address:    propForm.address.trim(),
+        type:       propForm.type === 'commercial' ? (propForm.subtype || 'commercial') : 'residential',
+        list_price: propForm.list_price ? Number(propForm.list_price) : null,
+        beds:       propForm.beds  ? Number(propForm.beds)  : null,
+        baths:      propForm.baths ? Number(propForm.baths) : null,
+        sqft:       propForm.sqft  ? Number(propForm.sqft)  : null,
+        garage:     propForm.garage ? Number(propForm.garage) : 0,
+        details:    { ...propForm.details, category: propForm.type },
+        linked_contact_id: contactId,
+        status:     'active',
+      }
+      const { error: pe } = await supabase.from('properties').insert([propPayload])
+      if (pe) pushToast(`Contact saved but property failed: ${pe.message}`, 'error')
+      else pushToast(criteriaDropped ? 'Contact & property saved (run DB migration to store buyer criteria)' : 'Contact & property saved')
+    } else {
+      pushToast(criteriaDropped
+        ? 'Contact saved — run DB migration to store buyer criteria'
+        : (contact?.id ? 'Contact updated' : 'Contact added'))
+    }
+
+    setSaving(false)
+    setDirty(false)
+    onSave?.(saved)
+    onClose()
+  }
+
+  const contactDeals      = (deals      || []).filter(d => d.contact_id === contact?.id)
+  const contactTasks      = (tasks      || []).filter(t => t.contact_id === contact?.id)
+  const contactActivities = (activities || []).filter(a => a.contact_id === contact?.id)
+  const activityCount     = contactDeals.length + contactTasks.length + contactActivities.length
+
+  return (
+    <Drawer
+      open={open}
+      onClose={requestClose}
+      title={contact?.id ? `${contact.first_name} ${contact.last_name}` : 'Add Contact'}
+      width={500}
+    >
+      {contact?.id && (
+        <Tabs
+          active={tab}
+          onChange={setTab}
+          tabs={[
+            { id: 'details',  label: 'Details',  count: 0 },
+            { id: 'activity', label: 'Activity', count: activityCount },
+          ]}
+        />
+      )}
+
+      {tab === 'details' && (
+        <>
+          <div className="drawer__body">
+            {duplicateWarn && (
+              <div style={{
+                background: 'var(--gw-amber-light, #fef3c7)',
+                border: '1px solid var(--gw-amber)',
+                borderRadius: 'var(--radius)',
+                padding: '10px 12px',
+                marginBottom: 14,
+                fontSize: 12,
+              }}>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                  Possible duplicate: {duplicateWarn.first_name} {duplicateWarn.last_name}
+                </div>
+                <div style={{ color: 'var(--gw-mist)' }}>
+                  {duplicateWarn.email && <span>{duplicateWarn.email} · </span>}
+                  {duplicateWarn.phone && <span>{duplicateWarn.phone}</span>}
+                </div>
+                <div style={{ marginTop: 6, fontSize: 11, color: 'var(--gw-mist)' }}>
+                  Click "Save" again to add anyway.
+                </div>
+              </div>
+            )}
+
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label required">First Name</label>
+                <input
+                  className={`form-control${errors.first_name ? ' error' : ''}`}
+                  value={form.first_name}
+                  onChange={(e) => set('first_name', e.target.value)}
+                  placeholder="Jane"
+                />
+                {errors.first_name && <div className="form-hint" style={{ color: 'var(--gw-red)' }}>{errors.first_name}</div>}
+              </div>
+              <div className="form-group">
+                <label className="form-label required">Last Name</label>
+                <input
+                  className={`form-control${errors.last_name ? ' error' : ''}`}
+                  value={form.last_name}
+                  onChange={(e) => set('last_name', e.target.value)}
+                  placeholder="Smith"
+                />
+              </div>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Email</label>
+              <input
+                className={`form-control${errors.email ? ' error' : ''}`}
+                type="email"
+                value={form.email || ''}
+                onChange={(e) => set('email', e.target.value)}
+                placeholder="jane@email.com"
+              />
+              {errors.email && <div className="form-hint" style={{ color: 'var(--gw-red)' }}>{errors.email}</div>}
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Phone</label>
+              <input
+                className={`form-control${errors.phone ? ' error' : ''}`}
+                value={form.phone || ''}
+                onChange={(e) => set('phone', e.target.value)}
+                placeholder="(555) 000-0000"
+              />
+              {errors.phone && <div className="form-hint" style={{ color: 'var(--gw-red)' }}>{errors.phone}</div>}
+            </div>
+
+            {/* Owner Address */}
+            <div style={{ borderTop: '1px solid var(--gw-border)', marginTop: 4, paddingTop: 14 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gw-mist)', marginBottom: 10 }}>
+                Owner Address
+              </div>
+              <div className="form-group">
+                <label className="form-label">Street</label>
+                <input className="form-control" value={form.owner_address || ''} onChange={(e) => set('owner_address', e.target.value)} placeholder="123 Oak Lane" />
+              </div>
+              <div className="form-row">
+                <div className="form-group"><label className="form-label">City</label><input className="form-control" value={form.owner_city || ''} onChange={(e) => set('owner_city', e.target.value)} /></div>
+                <div className="form-group"><label className="form-label">State</label><input className="form-control" value={form.owner_state || ''} onChange={(e) => set('owner_state', e.target.value)} placeholder="TX" style={{ maxWidth: 80 }} /></div>
+                <div className="form-group"><label className="form-label">ZIP</label><input className="form-control" value={form.owner_zip || ''} onChange={(e) => set('owner_zip', e.target.value)} placeholder="78701" /></div>
+              </div>
+            </div>
+
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Type</label>
+                <select className="form-control" value={form.type} onChange={(e) => set('type', e.target.value)}>
+                  {['buyer','seller','landlord','tenant','investor'].map(t => <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>)}
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Status</label>
+                <select className="form-control" value={form.status} onChange={(e) => set('status', e.target.value)}>
+                  {['active','cold','closed'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Source</label>
+                <select className="form-control" value={form.source || 'other'} onChange={(e) => set('source', e.target.value)}>
+                  {['referral','website','open house','social','cold call','other'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Assigned Agent</label>
+                <select className="form-control" value={form.assigned_agent_id || ''} onChange={(e) => set('assigned_agent_id', e.target.value)}>
+                  <option value="">Unassigned</option>
+                  {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Tags</label>
+              <TagInput
+                value={Array.isArray(form.tags) ? form.tags : []}
+                onChange={(v) => set('tags', v)}
+                suggestions={allTags}
+                placeholder="vip, referral, hot-lead…"
+              />
+            </div>
+
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Birthday</label>
+                <input className="form-control" type="date" value={form.birthday || ''} onChange={(e) => set('birthday', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Closing Anniversary</label>
+                <input className="form-control" type="date" value={form.anniversary_date || ''} onChange={(e) => set('anniversary_date', e.target.value)} />
+              </div>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Notes</label>
+              <textarea className="form-control form-control--textarea" value={form.notes || ''} onChange={(e) => set('notes', e.target.value)} placeholder="Add notes…" />
+            </div>
+
+            {/* Investment Criteria */}
+            {isBuyer && (
+              <div style={{ borderTop: '1px solid var(--gw-border)', marginTop: 4, paddingTop: 14 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gw-mist)', marginBottom: 10 }}>
+                  {form.type === 'investor' ? 'Investment Criteria' : 'Buyer Criteria'}
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Target Market / Area</label>
+                  <input className="form-control" value={form.submarket || ''} onChange={(e) => set('submarket', e.target.value)} placeholder="e.g. Austin, Travis County" />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Asset Types</label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                    {['residential','rental','multifamily','office','land','retail','industrial','mixed-use'].map(t => {
+                      const on = (form.asset_types || []).includes(t)
+                      return (
+                        <label key={t} style={{
+                          display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer',
+                          fontSize: 11, fontWeight: 600, padding: '3px 10px', borderRadius: 20,
+                          color: on ? 'var(--gw-azure)' : 'var(--gw-mist)',
+                          background: on ? 'var(--gw-sky)' : '#fff',
+                          border: `1px solid ${on ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+                          transition: 'all 120ms', userSelect: 'none',
+                        }}>
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            onChange={() => {
+                              const current = form.asset_types || []
+                              set('asset_types', on ? current.filter(x => x !== t) : [...current, t])
+                            }}
+                            style={{ display: 'none' }}
+                          />
+                          {t.charAt(0).toUpperCase() + t.slice(1)}
+                        </label>
+                      )
+                    })}
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">Min Size</label>
+                    <input className="form-control" type="number" value={form.size_min || ''} onChange={(e) => set('size_min', e.target.value)} placeholder="0" />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Max Size</label>
+                    <input className="form-control" type="number" value={form.size_max || ''} onChange={(e) => set('size_max', e.target.value)} placeholder="Any" />
+                  </div>
+                  <div className="form-group" style={{ maxWidth: 90 }}>
+                    <label className="form-label">Unit</label>
+                    <select className="form-control" value={form.size_unit || 'sqft'} onChange={(e) => set('size_unit', e.target.value)}>
+                      <option value="sqft">sqft</option>
+                      <option value="acres">acres</option>
+                      <option value="units">units</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="drawer__foot">
+            <button className="btn btn--secondary" onClick={requestClose}>Cancel</button>
+            <button className="btn btn--primary" onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : duplicateWarn ? 'Save anyway' : 'Save Contact'}
+            </button>
+          </div>
+        </>
+      )}
+
+      {tab === 'activity' && (
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <ActivityTab
+            contact={contact}
+            deals={deals}
+            tasks={tasks}
+            activities={activities}
+            activeAgent={activeAgent}
+            onActivityAdded={onActivityAdded}
+          />
+        </div>
+      )}
+    </Drawer>
+  )
+}
