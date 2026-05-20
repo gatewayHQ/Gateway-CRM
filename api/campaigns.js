@@ -27,24 +27,26 @@ export default async function handler(req, res) {
         .order('created_at', { ascending: false })
       if (error) throw error
 
-      // Attach per-campaign send/response counts
       const ids = data.map(c => c.id)
       let counts = {}
       if (ids.length > 0) {
         const { data: sends } = await supabase
           .from('mail_sends')
-          .select('campaign_id, response')
+          .select('campaign_id, response, sent_at')
           .in('campaign_id', ids)
+          .order('sent_at', { ascending: false })
         ;(sends || []).forEach(s => {
-          if (!counts[s.campaign_id]) counts[s.campaign_id] = { total: 0, responses: 0 }
+          if (!counts[s.campaign_id]) counts[s.campaign_id] = { total: 0, responses: 0, last_at: null }
           counts[s.campaign_id].total++
           if (s.response !== 'no-response') counts[s.campaign_id].responses++
+          if (!counts[s.campaign_id].last_at) counts[s.campaign_id].last_at = s.sent_at
         })
       }
       const enriched = data.map(c => ({
         ...c,
         total_sends:     counts[c.id]?.total     || 0,
         total_responses: counts[c.id]?.responses || 0,
+        last_send_at:    counts[c.id]?.last_at   || null,
       }))
       return res.json({ campaigns: enriched })
     }
@@ -53,21 +55,27 @@ export default async function handler(req, res) {
       const {
         name, description, property_types, status, agent_id,
         flyer_url, flyer_photo_caption, property_id, qr_target,
-        frequency_cap, frequency_days,
+        tracking_url, frequency_cap, frequency_days,
+        channel, email_subject, email_body,
       } = req.body
       if (!name) return res.status(400).json({ error: 'name is required' })
       const { data, error } = await supabase
         .from('mail_campaigns')
         .insert([{
-          name, description, property_types,
+          name, description,
+          property_types: property_types || [],
           status: status || 'active',
-          agent_id: agent_id || null,
-          property_id: property_id || null,
-          flyer_url: flyer_url || null,
-          flyer_photo_caption: flyer_photo_caption || null,
-          qr_target: qr_target || 'crm_landing',
-          frequency_cap: frequency_cap || 0,
-          frequency_days: frequency_days || 30,
+          agent_id:             agent_id             || null,
+          property_id:          property_id          || null,
+          flyer_url:            flyer_url            || null,
+          flyer_photo_caption:  flyer_photo_caption  || null,
+          qr_target:            qr_target            || 'crm_landing',
+          tracking_url:         tracking_url         || null,
+          frequency_cap:        frequency_cap        || 0,
+          frequency_days:       frequency_days       || 30,
+          channel:              channel              || 'mail',
+          email_subject:        email_subject        || null,
+          email_body:           email_body           || null,
         }])
         .select()
         .single()
@@ -78,12 +86,12 @@ export default async function handler(req, res) {
     if (action === 'update_campaign') {
       const { id } = req.body
       if (!id) return res.status(400).json({ error: 'id is required' })
-      // Whitelist only valid mail_campaigns columns to prevent schema cache errors
       const ALLOWED = [
         'name','description','property_types','status','agent_id',
         'property_id','flyer_url','flyer_photo_caption','qr_target',
         'tracking_url','qr_code_url','bitly_id',
         'frequency_cap','frequency_days',
+        'channel','email_subject','email_body',
       ]
       const patch = {}
       for (const key of ALLOWED) {
@@ -111,7 +119,7 @@ export default async function handler(req, res) {
     // ── Sends ──────────────────────────────────────────────────────────────
 
     if (action === 'list_sends') {
-      const { campaign_id, contact_id, limit: lim = 200 } = req.query
+      const { campaign_id, contact_id, limit: lim = 500 } = req.query
       let q = supabase.from('mail_sends').select('*').order('sent_at', { ascending: false }).limit(Number(lim))
       if (campaign_id) q = q.eq('campaign_id', campaign_id)
       if (contact_id)  q = q.eq('contact_id', contact_id)
@@ -170,14 +178,13 @@ export default async function handler(req, res) {
         .single()
       if (error) throw error
 
-      // Auto-create follow-up task when marked interested
       if (response === 'interested' && contact_id && agent_id) {
         await supabase.from('tasks').insert([{
           title: `Follow up — interested lead from campaign`,
           type: 'follow-up', priority: 'high',
           due_date: new Date(Date.now() + 86400000).toISOString(),
           contact_id, agent_id,
-          notes: `Responded to mail campaign. Notes: ${notes || ''}`,
+          notes: `Responded to campaign outreach. Notes: ${notes || ''}`,
         }])
       }
 
@@ -188,14 +195,31 @@ export default async function handler(req, res) {
       const { id, ...patch } = req.body
       if (!id) return res.status(400).json({ error: 'id is required' })
       delete patch.action
-      if (patch.response && !patch.responded_at) patch.responded_at = new Date().toISOString()
+      const SEND_ALLOWED = ['response', 'notes', 'channel', 'sent_at', 'agent_id']
+      const cleanPatch = {}
+      for (const k of SEND_ALLOWED) {
+        if (Object.prototype.hasOwnProperty.call(patch, k)) cleanPatch[k] = patch[k]
+      }
+      if (cleanPatch.response && cleanPatch.response !== 'no-response') {
+        cleanPatch.responded_at = new Date().toISOString()
+      }
       const { data, error } = await supabase
         .from('mail_sends')
-        .update(patch)
+        .update(cleanPatch)
         .eq('id', id)
         .select()
         .single()
       if (error) throw error
+
+      if (patch.response === 'interested' && patch.contact_id && patch.agent_id) {
+        await supabase.from('tasks').insert([{
+          title: `Follow up — interested lead from campaign`,
+          type: 'follow-up', priority: 'high',
+          due_date: new Date(Date.now() + 86400000).toISOString(),
+          contact_id: patch.contact_id, agent_id: patch.agent_id,
+        }])
+      }
+
       return res.json({ send: data })
     }
 
@@ -207,44 +231,153 @@ export default async function handler(req, res) {
       return res.json({ ok: true })
     }
 
-    // ── Recipient history (how many times a contact has been sent to) ────
+    // ── Contact campaign history ──────────────────────────────────────────
 
     if (action === 'contact_history') {
       const { contact_id } = req.query
       if (!contact_id) return res.status(400).json({ error: 'contact_id is required' })
       const { data, error } = await supabase
         .from('mail_sends')
-        .select('*, mail_campaigns(name, property_types)')
+        .select('*, mail_campaigns(name, property_types, channel)')
         .eq('contact_id', contact_id)
         .order('sent_at', { ascending: false })
       if (error) throw error
       return res.json({ history: data, total_sends: data.length })
     }
 
-    // ── Batch log sends (one campaign → list of contacts/addresses) ──────
+    // ── Batch log ─────────────────────────────────────────────────────────
 
     if (action === 'batch_log') {
       const { campaign_id, recipients, channel, sent_at, agent_id } = req.body
       if (!campaign_id || !Array.isArray(recipients) || recipients.length === 0) {
         return res.status(400).json({ error: 'campaign_id and recipients[] are required' })
       }
-      const rows = recipients.map(r => ({
-        campaign_id,
-        contact_id:       r.contact_id       || null,
-        cold_lead_id:     r.cold_lead_id     || null,
-        recipient_name:   r.recipient_name   || null,
-        recipient_address:r.recipient_address|| null,
-        recipient_city:   r.recipient_city   || null,
-        recipient_state:  r.recipient_state  || null,
-        recipient_zip:    r.recipient_zip    || null,
-        channel:          channel  || 'mail',
-        sent_at:          sent_at  || new Date().toISOString(),
-        agent_id:         agent_id || null,
-        response: 'no-response',
-      }))
+
+      // Suppress check for all contact_ids
+      const contactIds = recipients.filter(r => r.contact_id).map(r => r.contact_id)
+      let suppressedIds = new Set()
+      if (contactIds.length > 0) {
+        const { data: sups } = await supabase
+          .from('mail_suppressions')
+          .select('contact_id')
+          .in('contact_id', contactIds)
+        ;(sups || []).forEach(s => suppressedIds.add(s.contact_id))
+      }
+
+      const now = sent_at || new Date().toISOString()
+      const rows = recipients
+        .filter(r => !r.contact_id || !suppressedIds.has(r.contact_id))
+        .map(r => ({
+          campaign_id,
+          contact_id:        r.contact_id        || null,
+          cold_lead_id:      r.cold_lead_id      || null,
+          recipient_name:    r.recipient_name    || null,
+          recipient_address: r.recipient_address || null,
+          recipient_city:    r.recipient_city    || null,
+          recipient_state:   r.recipient_state   || null,
+          recipient_zip:     r.recipient_zip     || null,
+          channel:           channel  || 'mail',
+          sent_at:           now,
+          agent_id:          agent_id || null,
+          response:          'no-response',
+        }))
+
+      if (rows.length === 0) return res.json({ sends: [], count: 0, skipped: suppressedIds.size })
+
       const { data, error } = await supabase.from('mail_sends').insert(rows).select()
       if (error) throw error
-      return res.json({ sends: data, count: data.length })
+      return res.json({ sends: data, count: data.length, skipped: suppressedIds.size })
+    }
+
+    // ── Email blast via Resend ────────────────────────────────────────────
+
+    if (action === 'send_email_blast') {
+      const { campaign_id, contact_ids, subject, body, agent_id, sent_at } = req.body
+      if (!campaign_id || !Array.isArray(contact_ids) || !subject || !body) {
+        return res.status(400).json({ error: 'campaign_id, contact_ids, subject, and body are required' })
+      }
+
+      const RESEND_KEY = process.env.RESEND_API_KEY
+      const FROM       = process.env.RESEND_FROM || 'noreply@example.com'
+      if (!RESEND_KEY) return res.status(500).json({ error: 'Email not configured — add RESEND_API_KEY to your environment variables' })
+
+      const { data: camp } = await supabase
+        .from('mail_campaigns')
+        .select('frequency_cap, frequency_days, name')
+        .eq('id', campaign_id)
+        .single()
+
+      const { data: contacts } = await supabase
+        .from('contacts')
+        .select('id, first_name, last_name, email')
+        .in('id', contact_ids)
+
+      if (!contacts?.length) return res.status(400).json({ error: 'No valid contacts found' })
+
+      // Get all suppressed contact_ids
+      const { data: sups } = await supabase
+        .from('mail_suppressions')
+        .select('contact_id')
+        .in('contact_id', contact_ids)
+      const suppressedIds = new Set((sups || []).map(s => s.contact_id))
+
+      const results = { sent: 0, skipped: 0, errors: [] }
+      const sentRows = []
+      const now = sent_at || new Date().toISOString()
+
+      const applyMerge = (text, c) =>
+        text
+          .replace(/\{\{first_name\}\}/g, c.first_name || '')
+          .replace(/\{\{last_name\}\}/g,  c.last_name  || '')
+          .replace(/\{\{full_name\}\}/g,  `${c.first_name || ''} ${c.last_name || ''}`.trim())
+
+      for (const contact of contacts) {
+        if (!contact.email)             { results.skipped++; continue }
+        if (suppressedIds.has(contact.id)) { results.skipped++; continue }
+
+        // Frequency cap
+        if (camp?.frequency_cap > 0) {
+          const since = new Date(Date.now() - camp.frequency_days * 86400000).toISOString()
+          const { count } = await supabase
+            .from('mail_sends')
+            .select('*', { count: 'exact', head: true })
+            .eq('campaign_id', campaign_id)
+            .eq('contact_id', contact.id)
+            .gte('sent_at', since)
+          if ((count || 0) >= camp.frequency_cap) { results.skipped++; continue }
+        }
+
+        const mergedSubject = applyMerge(subject, contact)
+        const mergedHtml    = applyMerge(body, contact).replace(/\n/g, '<br>')
+
+        try {
+          const emailRes = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${RESEND_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ from: FROM, to: [contact.email], subject: mergedSubject, html: mergedHtml }),
+          })
+          if (!emailRes.ok) {
+            const err = await emailRes.json()
+            results.errors.push({ contact_id: contact.id, error: err.message || 'Send failed' })
+            results.skipped++
+            continue
+          }
+        } catch (e) {
+          results.errors.push({ contact_id: contact.id, error: e.message })
+          results.skipped++
+          continue
+        }
+
+        sentRows.push({ campaign_id, contact_id: contact.id, channel: 'email', sent_at: now, agent_id: agent_id || null, response: 'no-response' })
+        results.sent++
+      }
+
+      if (sentRows.length > 0) {
+        const { error: insErr } = await supabase.from('mail_sends').insert(sentRows)
+        if (insErr) console.error('[send_email_blast] insert error', insErr)
+      }
+
+      return res.json(results)
     }
 
     // ── Suppressions ───────────────────────────────────────────────────────
@@ -284,15 +417,16 @@ export default async function handler(req, res) {
 
       const { data: sends } = await supabase
         .from('mail_sends')
-        .select('channel, response, sent_at, recipient_zip')
+        .select('channel, response, sent_at, recipient_zip, agent_id')
         .eq('campaign_id', campaign_id)
 
       if (!sends) return res.json({ analytics: {} })
 
-      const byChannel = {}
+      const byChannel  = {}
       const byResponse = {}
-      const byZip = {}
-      const byMonth = {}
+      const byZip      = {}
+      const byMonth    = {}
+      const byAgent    = {}
 
       for (const s of sends) {
         byChannel[s.channel]   = (byChannel[s.channel]   || 0) + 1
@@ -300,28 +434,31 @@ export default async function handler(req, res) {
         if (s.recipient_zip) byZip[s.recipient_zip] = (byZip[s.recipient_zip] || 0) + 1
         const mo = s.sent_at?.slice(0, 7)
         if (mo) byMonth[mo] = (byMonth[mo] || 0) + 1
+        if (s.agent_id) byAgent[s.agent_id] = (byAgent[s.agent_id] || 0) + 1
       }
 
-      const total    = sends.length
+      const total     = sends.length
       const responded = sends.filter(s => s.response !== 'no-response').length
       const converted = sends.filter(s => s.response === 'converted').length
+      const interested = sends.filter(s => s.response === 'interested').length
 
       return res.json({
         analytics: {
-          total,
-          responded,
-          converted,
-          response_rate: total > 0 ? Math.round(responded / total * 100) : 0,
-          conversion_rate: total > 0 ? Math.round(converted / total * 100) : 0,
+          total, responded, converted, interested,
+          response_rate:   total > 0 ? Math.round(responded  / total * 100) : 0,
+          conversion_rate: total > 0 ? Math.round(converted  / total * 100) : 0,
+          interest_rate:   total > 0 ? Math.round(interested / total * 100) : 0,
           by_channel:  byChannel,
           by_response: byResponse,
           by_zip:      byZip,
           by_month:    byMonth,
+          by_agent:    byAgent,
         },
       })
     }
 
     // ── Generate QR code via Bitly ────────────────────────────────────────
+
     if (action === 'generate_qr') {
       const { campaign_id } = req.body
       if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
@@ -334,7 +471,7 @@ export default async function handler(req, res) {
       if (campErr) throw campErr
 
       const BITLY_TOKEN = process.env.BITLY_ACCESS_TOKEN
-      if (!BITLY_TOKEN) return res.status(500).json({ error: 'Bitly is not configured (missing BITLY_ACCESS_TOKEN)' })
+      if (!BITLY_TOKEN) return res.status(500).json({ error: 'Bitly not configured (missing BITLY_ACCESS_TOKEN)' })
 
       const proto   = req.headers['x-forwarded-proto'] || 'https'
       const host    = req.headers.host
@@ -349,7 +486,6 @@ export default async function handler(req, res) {
         longUrl = `${baseUrl}/listing`
       }
 
-      // Create Bitly short link
       const linkRes = await fetch('https://api-ssl.bitly.com/v4/shorten', {
         method: 'POST',
         headers: { Authorization: `Bearer ${BITLY_TOKEN}`, 'Content-Type': 'application/json' },
@@ -361,11 +497,10 @@ export default async function handler(req, res) {
       const shortUrl = linkData.link
       const bitlyId  = linkData.id
 
-      // Create Bitly QR code
       const qrRes = await fetch(`https://api-ssl.bitly.com/v4/bitlinks/${bitlyId}/qr`, {
         headers: { Authorization: `Bearer ${BITLY_TOKEN}` },
       })
-      const qrData = await qrRes.json()
+      const qrData    = await qrRes.json()
       const qrCodeUrl = qrRes.ok ? (qrData.qr_code || qrData.link || null) : null
 
       const { data: updated, error: updateErr } = await supabase
