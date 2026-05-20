@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { Drawer, Tabs, pushToast } from '../../components/UI.jsx'
 import { normalizePhone } from '../../lib/phone.js'
 import { validateEmail, validateRequired, validateForm } from '../../lib/validation.js'
 import OptionMultiSelect from '../../components/OptionMultiSelect.jsx'
 import ActivityTab from './ActivityTab.jsx'
+import { findMatchingProperties } from '../../lib/matching.js'
+import { formatCurrency } from '../../lib/helpers.js'
 
 const BLANK = {
   first_name: '', last_name: '', email: '', phone: '',
@@ -23,6 +25,7 @@ export default function ContactDrawer({
   open, onClose, contact, agents,
   deals, tasks, activities, activeAgent,
   allTags = [],
+  properties = [],
   onSave, onActivityAdded,
   onDuplicateCheck,  // optional: (form) => existingContact | null
 }) {
@@ -188,6 +191,12 @@ export default function ContactDrawer({
   const contactActivities = (activities || []).filter(a => a.contact_id === contact?.id)
   const activityCount     = contactDeals.length + contactTasks.length + contactActivities.length
 
+  // Compute matching properties using the live form state so matches update as criteria change
+  const matchingProperties = useMemo(() => {
+    if (!isBuyer) return []
+    return findMatchingProperties(form, properties)
+  }, [form, properties, isBuyer])
+
   return (
     <Drawer
       open={open}
@@ -202,6 +211,7 @@ export default function ContactDrawer({
           tabs={[
             { id: 'details',  label: 'Details',  count: 0 },
             { id: 'activity', label: 'Activity', count: activityCount },
+            ...(isBuyer ? [{ id: 'matches', label: 'Matches', count: matchingProperties.length }] : []),
           ]}
         />
       )}
@@ -423,6 +433,74 @@ export default function ContactDrawer({
             activeAgent={activeAgent}
             onActivityAdded={onActivityAdded}
           />
+        </div>
+      )}
+
+      {tab === 'matches' && (
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ fontSize: 12, color: 'var(--gw-mist)', lineHeight: 1.6 }}>
+            Properties that match this contact's submarket, asset type, and size criteria.
+            Update their <strong>Buyer Criteria</strong> in the Details tab to see more or fewer matches.
+          </div>
+
+          {matchingProperties.length === 0 ? (
+            <div style={{
+              flex: 1, display: 'flex', flexDirection: 'column',
+              alignItems: 'center', justifyContent: 'center',
+              textAlign: 'center', color: 'var(--gw-mist)', padding: '40px 20px',
+            }}>
+              <div style={{ fontSize: 32, marginBottom: 12 }}>🏘️</div>
+              <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--gw-ink)' }}>No matching properties</div>
+              <div style={{ fontSize: 12 }}>
+                {form.submarkets?.length === 0 || form.asset_types?.length === 0
+                  ? 'Add submarkets and asset types in the Details tab to enable matching.'
+                  : 'No active listings match their submarket, asset type, and size criteria right now.'}
+              </div>
+            </div>
+          ) : (
+            matchingProperties.map(p => (
+              <div key={p.id} style={{
+                border: '1px solid var(--gw-border)',
+                borderRadius: 'var(--radius)',
+                padding: '12px 14px',
+                background: '#fff',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--gw-ink)', marginBottom: 2 }}>
+                      {p.address}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>
+                      {[p.city, p.state].filter(Boolean).join(', ')}
+                      {p.submarket ? ` · ${p.submarket}` : ''}
+                    </div>
+                  </div>
+                  {p.list_price && (
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--gw-gold, #C8A84B)', whiteSpace: 'nowrap' }}>
+                      {formatCurrency(p.list_price)}
+                    </div>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+                  {p.type && (
+                    <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 99, background: 'var(--gw-sky)', color: 'var(--gw-azure)', fontWeight: 600 }}>
+                      {p.type}
+                    </span>
+                  )}
+                  {p.sqft && (
+                    <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 99, background: 'var(--gw-bone)', color: 'var(--gw-mist)' }}>
+                      {Number(p.sqft).toLocaleString()} sqft
+                    </span>
+                  )}
+                  {p.status && (
+                    <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 99, background: 'var(--gw-bone)', color: 'var(--gw-mist)', textTransform: 'capitalize' }}>
+                      {p.status}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
         </div>
       )}
     </Drawer>

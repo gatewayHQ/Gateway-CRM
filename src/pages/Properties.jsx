@@ -3,6 +3,8 @@ import { supabase } from '../lib/supabase.js'
 import { formatCurrency } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
+import { findMatchingBuyers } from '../lib/matching.js'
+import OptionSelect from '../components/OptionSelect.jsx'
 
 // Types where commercial fields apply
 const COMMERCIAL_TYPES = ['multifamily','office','land','retail','industrial','mixed-use']
@@ -329,8 +331,65 @@ function PhotoUploader({ photos = [], propertyId, onAdd, onRemove }) {
   )
 }
 
+function PossibleBuyers({ form, contacts }) {
+  const buyers = useMemo(() => findMatchingBuyers(form, contacts), [form, contacts])
+  const hasSubmarket = Boolean(form.submarket)
+
+  if (!hasSubmarket) return null
+
+  return (
+    <div style={{ borderTop: '1px solid var(--gw-border)', marginTop: 4, paddingTop: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gw-mist)' }}>
+          Possible Buyers
+        </div>
+        {buyers.length > 0 && (
+          <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--gw-azure)', background: 'var(--gw-sky)', padding: '2px 8px', borderRadius: 99 }}>
+            {buyers.length} match{buyers.length !== 1 ? 'es' : ''}
+          </span>
+        )}
+      </div>
+      {buyers.length === 0 ? (
+        <div style={{ fontSize: 12, color: 'var(--gw-mist)', padding: '8px 0' }}>
+          No buyers have this submarket + asset type in their criteria yet.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {buyers.map(c => (
+            <div key={c.id} style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '8px 10px',
+              background: 'var(--gw-sky)',
+              border: '1px solid var(--gw-azure)',
+              borderRadius: 'var(--radius)',
+            }}>
+              <Avatar agent={{ name: `${c.first_name} ${c.last_name}` }} size={28} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--gw-ink)' }}>
+                  {c.first_name} {c.last_name}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--gw-azure)', marginTop: 1 }}>
+                  {(c.submarkets || []).join(', ')}
+                  {c.asset_types?.length > 0 ? ` · ${c.asset_types.join(', ')}` : ''}
+                </div>
+              </div>
+              {(c.size_min || c.size_max) && (
+                <div style={{ fontSize: 11, color: 'var(--gw-mist)', whiteSpace: 'nowrap' }}>
+                  {c.size_min ? Number(c.size_min).toLocaleString() : '0'}
+                  {'–'}
+                  {c.size_max ? Number(c.size_max).toLocaleString() : '∞'} {c.size_unit || 'sqft'}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave, go, setDb }) {
-  const blank = { address:'', city:'', state:'', zip:'', county:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{} }
+  const blank = { address:'', city:'', state:'', zip:'', county:'', submarket:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{} }
   const [form, setForm]             = useState(property || blank)
   const [errors, setErrors]         = useState({})
   const [saving, setSaving]         = useState(false)
@@ -453,6 +512,16 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
           <div className="form-group"><label className="form-label">County</label><input className="form-control" value={form.county||''} onChange={e=>set('county',e.target.value)} placeholder="e.g. Travis County" /></div>
         </div>
         <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">Submarket</label>
+            <OptionSelect
+              fieldKey="submarket"
+              value={form.submarket || ''}
+              onChange={v => set('submarket', v)}
+              placeholder="Select submarket…"
+              allowAdd
+            />
+          </div>
           <div className="form-group"><label className="form-label">MLS #</label><input className="form-control" value={form.mls_number||''} onChange={e=>set('mls_number',e.target.value)} /></div>
         </div>
 
@@ -535,53 +604,8 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
         )}
         <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} /></div>
 
-        {/* ── Matching Buyers / Investors ── */}
-        {(() => {
-          const propSize  = form.sqft ? Number(form.sqft) : null
-          const propType  = form.type
-          const propArea  = (form.county || form.city || '').toLowerCase()
-          const buyers = (contacts || []).filter(c => {
-            if (c.type !== 'buyer' && c.type !== 'investor') return false
-            const wantsTypes = c.asset_types && c.asset_types.length > 0
-            if (wantsTypes && !c.asset_types.includes(propType)) return false
-            if (c.submarket) {
-              const sm = c.submarket.toLowerCase()
-              if (propArea && !propArea.includes(sm) && !sm.includes(propArea)) return false
-            }
-            if (propSize !== null) {
-              if (c.size_min && Number(c.size_min) > propSize) return false
-              if (c.size_max && Number(c.size_max) < propSize) return false
-            }
-            return true
-          })
-          if (buyers.length === 0) return null
-          return (
-            <div style={{ borderTop:'1px solid var(--gw-border)', marginTop:4, paddingTop:14 }}>
-              <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:10 }}>
-                Matching Buyers · {buyers.length}
-              </div>
-              <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-                {buyers.map(c => (
-                  <div key={c.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'8px 10px', background:'var(--gw-sky)', border:'1px solid var(--gw-azure)', borderRadius:'var(--radius)' }}>
-                    <div style={{ flex:1, minWidth:0 }}>
-                      <div style={{ fontSize:13, fontWeight:600, color:'var(--gw-ink)' }}>{c.first_name} {c.last_name}</div>
-                      {(c.asset_types?.length > 0 || c.submarket) && (
-                        <div style={{ fontSize:11, color:'var(--gw-azure)', marginTop:1 }}>
-                          {c.asset_types?.join(', ')}{c.submarket ? ` · ${c.submarket}` : ''}
-                        </div>
-                      )}
-                    </div>
-                    {(c.size_min || c.size_max) && (
-                      <div style={{ fontSize:11, color:'var(--gw-mist)', whiteSpace:'nowrap' }}>
-                        {c.size_min ? Number(c.size_min).toLocaleString() : '0'}–{c.size_max ? Number(c.size_max).toLocaleString() : '∞'} {c.size_unit||'sqft'}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )
-        })()}
+        {/* ── Possible Buyers — powered by the matching engine ── */}
+        <PossibleBuyers form={form} contacts={contacts} />
       </div>
       <div className="drawer__foot">
         {property?.id && (

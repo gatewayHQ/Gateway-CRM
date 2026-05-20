@@ -453,6 +453,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
         activities={activities}
         activeAgent={activeAgent}
         allTags={allTags}
+        properties={db.properties || []}
         onActivityAdded={(act) => setDb(p => ({ ...p, activities: [act, ...(p.activities || [])] }))}
         onSave={(saved) => {
           if (saved) {
