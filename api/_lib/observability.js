@@ -8,7 +8,7 @@ const SERVICE = process.env.VERCEL_PROJECT_NAME || 'gateway-crm'
 const ENV     = process.env.VERCEL_ENV || process.env.NODE_ENV || 'development'
 
 function emit(level, message, meta = {}) {
-  const line = {
+  const line = JSON.stringify({
     ts: new Date().toISOString(),
     level,
     service: SERVICE,
@@ -16,9 +16,9 @@ function emit(level, message, meta = {}) {
     region: process.env.VERCEL_REGION || null,
     msg: message,
     ...meta,
-  }
-  // eslint-disable-next-line no-console
-  (level === 'error' ? console.error : console.log)(JSON.stringify(line))
+  })
+  if (level === 'error') console.error(line)
+  else                   console.log(line)
 }
 
 export const log = {
