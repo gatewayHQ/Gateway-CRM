@@ -33,10 +33,14 @@ import crypto from 'crypto'
 let _supabase = null
 function db() {
   if (_supabase) return _supabase
-  const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL
-  const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!url || !key) throw new Error('Server misconfigured: SUPABASE_URL / SUPABASE_SERVICE_KEY missing')
-  _supabase = createClient(url, key, { auth: { persistSession: false } })
+  const url = (
+    process.env.SUPABASE_URL ||
+    process.env.VITE_SUPABASE_URL ||
+    'https://twgwemkihpwlgliftagg.supabase.co'
+  ).trim().replace(/\/+$/, '')
+  const key = (process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
+  if (!key) throw new Error('Server misconfigured: SUPABASE_SERVICE_KEY missing — add it to Vercel Environment Variables')
+  _supabase = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInBrowser: false } })
   return _supabase
 }
 
