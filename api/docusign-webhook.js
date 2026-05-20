@@ -61,10 +61,9 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end()
 
   // Use service role key to bypass RLS for server-side writes
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  const serviceKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!serviceKey) {
-    console.error('SUPABASE_SERVICE_ROLE_KEY not set — webhook cannot write to DB')
-    return res.status(200).json({ received: true, error: 'Server misconfigured' })
+    return res.status(200).json({ received: true, error: 'Server misconfigured: set SUPABASE_SERVICE_KEY in Vercel env vars' })
   }
 
   const supabase = createClient(SUPABASE_URL, serviceKey)
