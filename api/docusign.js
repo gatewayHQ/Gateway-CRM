@@ -1,4 +1,5 @@
 import { createSign } from 'crypto'
+import { createClient } from '@supabase/supabase-js'
 
 const INTEGRATION_KEY = process.env.DOCUSIGN_INTEGRATION_KEY
 const ACCOUNT_ID      = process.env.DOCUSIGN_ACCOUNT_ID
@@ -355,6 +356,13 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
+  // DocuSign Connect webhook payloads never carry an `action` field.
+  // Route them to the webhook handler; all frontend calls use `action`.
+  const body = req.body || {}
+  if (!body.action && (body.envelopeId || body?.data?.envelopeId || body.event)) {
+    return handleWebhook(req, res)
+  }
+
   if (!INTEGRATION_KEY || !ACCOUNT_ID || !USER_ID || !process.env.DOCUSIGN_PRIVATE_KEY) {
     return res.status(500).json({
       error: 'DocuSign environment variables not configured',
@@ -493,5 +501,87 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Unknown action' })
   } catch (err) {
     return res.status(500).json({ error: err.message })
+  }
+}
+
+// ─── DocuSign Connect webhook handler ────────────────────────────────────────
+// DocuSign POSTs envelope status updates here. Route: POST /api/docusign
+// (no `action` field in body — distinguishes it from frontend calls above)
+//
+// Configure DocuSign Connect to POST to: https://your-app.vercel.app/api/docusign
+//
+async function handleWebhook(req, res) {
+  const SUPABASE_URL = process.env.SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
+  const serviceKey   = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!serviceKey) {
+    return res.status(200).json({ received: true, error: 'Server misconfigured: set SUPABASE_SERVICE_KEY' })
+  }
+
+  const supabase = createClient(SUPABASE_URL, serviceKey)
+
+  try {
+    const body = req.body || {}
+    let envelopeId, status, completedDateTime
+
+    if (body?.data?.envelopeId) {
+      envelopeId        = body.data.envelopeId
+      const summary     = body.data.envelopeSummary || {}
+      status            = summary.status || (body.event || '').replace('envelope-', '') || 'unknown'
+      completedDateTime = summary.completedDateTime || null
+    } else if (body?.envelopeId) {
+      envelopeId        = body.envelopeId
+      status            = body.status
+      completedDateTime = body.completedDateTime || null
+    } else {
+      return res.status(200).json({ received: true, note: 'No envelope data in payload' })
+    }
+
+    if (!envelopeId || !status) return res.status(200).json({ received: true })
+
+    const { data: envelope } = await supabase
+      .from('docusign_envelopes')
+      .select('*, deals(id, agent_id, title)')
+      .eq('envelope_id', envelopeId)
+      .maybeSingle()
+
+    if (!envelope) return res.status(200).json({ received: true, note: 'Envelope not tracked' })
+
+    const patch = { status }
+    if (completedDateTime) patch.completed_at = completedDateTime
+    await supabase.from('docusign_envelopes').update(patch).eq('envelope_id', envelopeId)
+
+    if (status === 'completed') {
+      try {
+        const { accessToken, baseUri } = await getAuthConfig()
+        const docRes = await fetch(
+          `${baseUri}/restapi/v2.1/accounts/${ACCOUNT_ID}/envelopes/${envelopeId}/documents/combined`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        )
+        if (docRes.ok) {
+          const pdfBuffer   = await docRes.arrayBuffer()
+          const baseName    = (envelope.document_name || 'document').replace(/\.pdf$/i, '')
+          const storagePath = `deal-${envelope.deal_id}/${Date.now()}-signed-${baseName}.pdf`
+          await supabase.storage.from('deal-documents').upload(
+            storagePath, Buffer.from(pdfBuffer), { contentType: 'application/pdf', upsert: false }
+          )
+        }
+      } catch (_) { /* non-fatal — status already updated */ }
+
+      const deal = envelope.deals
+      if (deal?.agent_id) {
+        await supabase.from('agent_notifications').insert([{
+          agent_id:    deal.agent_id,
+          deal_id:     envelope.deal_id,
+          envelope_id: envelopeId,
+          title:       'Document Signed',
+          message:     `"${envelope.document_name || 'Document'}" for ${deal.title || 'your deal'} has been fully signed by ${envelope.signer_name || 'the signer'}. The signed copy has been saved to the deal's Documents tab.`,
+          type:        'document_signed',
+        }])
+      }
+    }
+
+    return res.status(200).json({ received: true, envelopeId, status })
+  } catch (err) {
+    return res.status(200).json({ received: true, error: err.message })
   }
 }
