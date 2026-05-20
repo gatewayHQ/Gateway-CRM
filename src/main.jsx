@@ -3,7 +3,10 @@ import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
 import LeadCapturePage from './pages/LeadCapture.jsx'
 import PropertyLandingPage from './pages/PropertyLanding.jsx'
+import { initWebVitals } from './lib/perf.js'
 import './styles/app.css'
+
+initWebVitals()
 
 class ErrorBoundary extends React.Component {
   constructor(props) {

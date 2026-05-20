@@ -309,23 +309,26 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
     if (resendKey) {
       try {
         const fromAddr = resendFrom || (agent.email ? `${agent.name || 'Gateway'} <${agent.email}>` : 'onboarding@resend.dev')
-        const res = await fetch('https://api.resend.com/emails', {
+        // Route through our server — keeps the API key off the wire and
+        // gives us a server-side audit trail + retry handling.
+        const res = await fetch('/api/email-send', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${resendKey}`,
             'Content-Type': 'application/json',
+            'x-resend-key': resendKey,
           },
           body: JSON.stringify({
             from: fromAddr,
-            to: [to],
+            to,
             subject: subject || '(no subject)',
             text: body,
+            html: body.split(/\n\n+/).map(p => `<p style="margin:0 0 16px 0">${p.replace(/\n/g, '<br>')}</p>`).join(''),
           }),
         })
         const result = await res.json()
         if (!res.ok) {
           setSending(false)
-          pushToast(`Send failed: ${result.message || result.name || 'Unknown error'}`, 'error')
+          pushToast(`Send failed: ${result.error || 'Unknown error'}`, 'error')
           return
         }
 

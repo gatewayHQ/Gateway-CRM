@@ -1,1021 +1,505 @@
-import React, { useState, useMemo } from 'react'
+/**
+ * Contacts page — orchestrator.
+ *
+ * Architecture:
+ *   - StatsStrip:     KPI cards (total / new / hot / dormant / in-deal)
+ *   - SavedViews:     preset filter tabs (All / Hot / Untouched / New / Mine)
+ *   - Toolbar:        search + filters + add/import buttons
+ *   - ContactsTable:  virtualized + inline-editable grid (handles 50k+ rows)
+ *   - ContactDrawer:  detail panel for view/edit
+ *   - CSVImportModal: bulk import with duplicate detection
+ *   - BulkActionBar:  floating multi-select toolbar
+ *
+ * Performance characteristics:
+ *   - Heat scores memoized once per (contacts, activities, deals) change
+ *   - Sort uses a typed comparator that handles nulls correctly
+ *   - Search is debounced
+ *   - Table virtualizes — 50k rows render in O(viewport)
+ *   - Mutations use optimistic updates via cache layer
+ *   - Filters persist to localStorage
+ *
+ * Keyboard:
+ *   /   focus search    j/k  navigate    Enter  open
+ *   x   select          ⌘a   select all   Esc    clear
+ *   ⌘⌫  delete selected
+ */
+
+import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { formatDate, formatPhone, formatCurrency, calcHeatScore } from '../lib/helpers.js'
-import { Icon, Badge, Avatar, HeatBadge, Drawer, EmptyState, ConfirmDialog, SearchDropdown, Tabs, pushToast } from '../components/UI.jsx'
+import { calcHeatScore } from '../lib/helpers.js'
+import { normalizePhone } from '../lib/phone.js'
+import { Icon, EmptyState, ConfirmDialog, pushToast } from '../components/UI.jsx'
+import { useDebounce } from '../hooks/useDebounce.js'
+import { useKeyboard } from '../hooks/useKeyboard.js'
+import { usePersistedState } from '../hooks/usePersistedState.js'
+import StatsStrip from './Contacts/StatsStrip.jsx'
+import SavedViews, { BUILTIN_VIEWS } from './Contacts/SavedViews.jsx'
+import ContactsTable from './Contacts/ContactsTable.jsx'
+import ContactDrawer from './Contacts/ContactDrawer.jsx'
+import CSVImportModal from './Contacts/CSVImportModal.jsx'
+import BulkActionBar from './Contacts/BulkActionBar.jsx'
 
-const ACTIVITY_TYPES = ['note','call','email','meeting','showing']
-const ACTIVITY_ICONS = { note:'note', call:'phone', email:'mail', meeting:'calendar', showing:'building' }
-const ACTIVITY_COLORS = {
-  note:    { bg:'var(--gw-bone)',       border:'var(--gw-border)',  icon:'var(--gw-mist)' },
-  call:    { bg:'#e8f4fd',             border:'var(--gw-azure)',   icon:'var(--gw-azure)' },
-  email:   { bg:'var(--gw-sky)',        border:'var(--gw-azure)',   icon:'var(--gw-azure)' },
-  meeting: { bg:'#f0ebff',             border:'var(--gw-purple)',  icon:'var(--gw-purple)' },
-  showing: { bg:'var(--gw-green-light)', border:'var(--gw-green)', icon:'var(--gw-green)' },
+// ─── Comparators that handle nulls correctly ────────────────────────────────
+function compareValues(a, b, dir = 'asc') {
+  // Push nulls/empty to the end regardless of direction
+  const aEmpty = a == null || a === ''
+  const bEmpty = b == null || b === ''
+  if (aEmpty && bEmpty) return 0
+  if (aEmpty) return 1
+  if (bEmpty) return -1
+
+  // Date strings
+  if (typeof a === 'string' && /^\d{4}-\d{2}-\d{2}/.test(a)) {
+    return dir === 'asc' ? new Date(a) - new Date(b) : new Date(b) - new Date(a)
+  }
+  if (typeof a === 'number' && typeof b === 'number') {
+    return dir === 'asc' ? a - b : b - a
+  }
+  // String compare
+  const av = String(a).toLowerCase()
+  const bv = String(b).toLowerCase()
+  if (av === bv) return 0
+  return dir === 'asc' ? (av < bv ? -1 : 1) : (av > bv ? -1 : 1)
 }
 
-function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivityAdded }) {
-  const [type, setType]       = useState('note')
-  const [body, setBody]       = useState('')
-  const [saving, setSaving]   = useState(false)
-
-  const contactDeals      = (deals      || []).filter(d => d.contact_id === contact?.id)
-  const contactTasks      = (tasks      || []).filter(t => t.contact_id === contact?.id)
-  const contactActivities = (activities || []).filter(a => a.contact_id === contact?.id)
-
-  const entries = [
-    ...contactActivities.map(a => ({ kind: 'activity', date: a.created_at, data: a })),
-    ...contactDeals.map(d      => ({ kind: 'deal',     date: d.created_at, data: d })),
-    ...contactTasks.map(t      => ({ kind: 'task',     date: t.due_date || t.created_at, data: t })),
-    ...(contact?.created_at    ? [{ kind: 'created',   date: contact.created_at, data: contact }] : []),
-  ].sort((a, b) => new Date(b.date) - new Date(a.date))
-
-  const logActivity = async () => {
-    if (!body.trim()) return
-    setSaving(true)
-    const { data, error } = await supabase.from('activities').insert([{
-      contact_id: contact.id,
-      agent_id:   activeAgent?.id || null,
-      type,
-      body: body.trim(),
-    }]).select().single()
-    setSaving(false)
-    if (error) { pushToast(error.message, 'error'); return }
-    pushToast(`${type.charAt(0).toUpperCase() + type.slice(1)} logged`)
-    setBody('')
-    onActivityAdded(data)
-  }
-
-  const STAGE_COLORS = { lead:'var(--gw-mist)', qualified:'var(--gw-azure)', showing:'var(--gw-azure)', offer:'var(--gw-amber)', 'under-contract':'var(--gw-purple)', closed:'var(--gw-green)', lost:'var(--gw-red)' }
-  const fmt = (d) => new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Log form */}
-      <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--gw-border)', background: 'var(--gw-bone)', flexShrink: 0 }}>
-        <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-          {ACTIVITY_TYPES.map(t => (
-            <button key={t} onClick={() => setType(t)}
-              style={{ padding: '3px 10px', borderRadius: 14, border: `1px solid ${type === t ? 'var(--gw-azure)' : 'var(--gw-border)'}`, background: type === t ? 'var(--gw-azure)' : '#fff', color: type === t ? '#fff' : 'var(--gw-ink)', cursor: 'pointer', fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-body)', transition: 'all 120ms' }}>
-              {t.charAt(0).toUpperCase() + t.slice(1)}
-            </button>
-          ))}
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input className="form-control" style={{ flex: 1, fontSize: 13 }}
-            placeholder={`Log a ${type}…`}
-            value={body} onChange={e => setBody(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && !e.shiftKey && logActivity()}
-            disabled={saving} />
-          <button className="btn btn--primary btn--sm" onClick={logActivity} disabled={saving || !body.trim()} style={{ whiteSpace: 'nowrap' }}>
-            {saving ? '…' : 'Log'}
-          </button>
-        </div>
-      </div>
-
-      {/* Timeline */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
-        {entries.length === 0 ? (
-          <div style={{ padding: '40px 24px', textAlign: 'center' }}>
-            <div style={{ fontSize: 32, marginBottom: 12 }}>📋</div>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>No activity yet</div>
-            <div style={{ fontSize: 13, color: 'var(--gw-mist)' }}>Log a call, note, or email above to get started.</div>
-          </div>
-        ) : (
-          entries.map((entry, i) => {
-            const isLast = i === entries.length - 1
-
-            if (entry.kind === 'activity') {
-              const a = entry.data
-              const c = ACTIVITY_COLORS[a.type] || ACTIVITY_COLORS.note
-              return (
-                <div key={`act-${a.id}`} style={{ display: 'flex', gap: 12, padding: '10px 16px', position: 'relative' }}>
-                  {!isLast && <div style={{ position: 'absolute', left: 27, top: 34, bottom: 0, width: 2, background: 'var(--gw-border)' }} />}
-                  <div style={{ width: 22, height: 22, borderRadius: '50%', background: c.bg, border: `2px solid ${c.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>
-                    <Icon name={ACTIVITY_ICONS[a.type] || 'note'} size={10} style={{ color: c.icon }} />
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'capitalize', color: 'var(--gw-mist)', marginBottom: 2 }}>{a.type}</div>
-                    <div style={{ fontSize: 13, lineHeight: 1.5 }}>{a.body}</div>
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--gw-mist)', whiteSpace: 'nowrap', marginTop: 2 }}>{fmt(a.created_at)}</div>
-                </div>
-              )
-            }
-
-            if (entry.kind === 'deal') {
-              const d = entry.data
-              return (
-                <div key={`deal-${d.id}`} style={{ display: 'flex', gap: 12, padding: '10px 16px', position: 'relative' }}>
-                  {!isLast && <div style={{ position: 'absolute', left: 27, top: 34, bottom: 0, width: 2, background: 'var(--gw-border)' }} />}
-                  <div style={{ width: 22, height: 22, borderRadius: '50%', background: 'var(--gw-sky)', border: '2px solid var(--gw-azure)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>
-                    <Icon name="pipeline" size={10} style={{ color: 'var(--gw-azure)' }} />
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: 13 }}>{d.title}</div>
-                    <div style={{ fontSize: 11, marginTop: 2, display: 'flex', gap: 8 }}>
-                      <span style={{ color: STAGE_COLORS[d.stage] || 'var(--gw-mist)', fontWeight: 600, textTransform: 'capitalize' }}>{d.stage.replace('-', ' ')}</span>
-                      {d.value > 0 && <span style={{ color: 'var(--gw-mist)' }}>{formatCurrency(d.value)}</span>}
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--gw-mist)', whiteSpace: 'nowrap', marginTop: 2 }}>{fmt(entry.date)}</div>
-                </div>
-              )
-            }
-
-            if (entry.kind === 'task') {
-              const t = entry.data
-              const overdue  = !t.completed && t.due_date && new Date(t.due_date) < new Date()
-              const typeIcon = t.type === 'call' ? 'phone' : t.type === 'email' ? 'mail' : t.type === 'showing' ? 'building' : 'tasks'
-              return (
-                <div key={`task-${t.id}`} style={{ display: 'flex', gap: 12, padding: '10px 16px', position: 'relative' }}>
-                  {!isLast && <div style={{ position: 'absolute', left: 27, top: 34, bottom: 0, width: 2, background: 'var(--gw-border)' }} />}
-                  <div style={{ width: 22, height: 22, borderRadius: '50%', background: t.completed ? 'var(--gw-green-light)' : 'var(--gw-bone)', border: `2px solid ${t.completed ? 'var(--gw-green)' : 'var(--gw-border)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>
-                    <Icon name={t.completed ? 'check' : typeIcon} size={10} style={{ color: t.completed ? 'var(--gw-green)' : 'var(--gw-mist)' }} />
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: 13, textDecoration: t.completed ? 'line-through' : 'none', color: t.completed ? 'var(--gw-mist)' : 'inherit' }}>{t.title}</div>
-                    <div style={{ fontSize: 11, marginTop: 2, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)', fontWeight: overdue ? 600 : 400 }}>
-                      {t.completed ? 'Completed' : overdue ? 'Overdue' : t.priority + ' priority'} · {t.type}
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 11, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)', whiteSpace: 'nowrap', marginTop: 2 }}>
-                    {t.due_date ? fmt(t.due_date) : '—'}
-                  </div>
-                </div>
-              )
-            }
-
-            return (
-              <div key="created" style={{ display: 'flex', gap: 12, padding: '10px 16px' }}>
-                <div style={{ width: 22, height: 22, borderRadius: '50%', background: '#fef9ec', border: '2px solid var(--gw-amber)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>
-                  <Icon name="contacts" size={10} style={{ color: 'var(--gw-amber)' }} />
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>Added to CRM</div>
-                  <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2 }}>Contact record created</div>
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--gw-mist)', whiteSpace: 'nowrap', marginTop: 2 }}>{new Date(entry.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</div>
-              </div>
-            )
-          })
-        )}
-      </div>
-    </div>
-  )
-}
-
-function ContactDrawer({ open, onClose, contact, agents, deals, tasks, activities, activeAgent, onSave, onActivityAdded }) {
-  const blank = { first_name:'', last_name:'', email:'', phone:'', type:'buyer', status:'active', source:'other', assigned_agent_id:'', notes:'', tags:[], owner_address:'', owner_city:'', owner_state:'', owner_zip:'', birthday:'', anniversary_date:'', submarket:'', asset_types:[], size_min:'', size_max:'', size_unit:'sqft' }
-  const blankProp = { address:'', list_price:'', type:'residential', subtype:'', beds:'', baths:'', sqft:'', garage:'', details:{} }
-  const [form, setForm] = useState(contact || blank)
-  const [errors, setErrors] = useState({})
-  const [saving, setSaving] = useState(false)
-  const [tab, setTab] = useState('details')
-  const [addProp, setAddProp] = useState(false)
-  const [propForm, setPropForm] = useState(blankProp)
-
-  React.useEffect(() => {
-    setForm(contact || blank)
-    setErrors({})
-    setTab('details')
-    setAddProp(false)
-    setPropForm(blankProp)
-  }, [contact, open])
-
-  const set = (k, v) => setForm(p => ({...p, [k]: v}))
-  const setP = (k, v) => setPropForm(p => ({...p, [k]: v}))
-  const setPD = (k, v) => setPropForm(p => ({...p, details: {...(p.details||{}), [k]: v}}))
-
-  const COMM_SUBTYPES = ['multifamily','office','land','retail','industrial','mixed-use']
-  const isComm = propForm.type === 'commercial'
-
-  const validate = () => {
-    const e = {}
-    if (!form.first_name.trim()) e.first_name = true
-    if (!form.last_name.trim()) e.last_name = true
-    if (addProp && !propForm.address.trim()) e.prop_address = true
-    setErrors(e)
-    return Object.keys(e).length === 0
-  }
-
-  const save = async () => {
-    if (!validate()) return
-    setSaving(true)
-
-    // Destructure buyer-criteria fields out of form so ...baseForm never spreads
-    // unmigrated columns to Supabase (causes schema cache error for all contact types)
-    const { submarket, asset_types, size_min, size_max, size_unit, ...baseForm } = form
-    const isBuyer = form.type === 'buyer' || form.type === 'investor'
-
-    const payload = {
-      ...baseForm,
-      // Coerce empty strings → null for typed DB columns
-      birthday:          form.birthday          || null,
-      anniversary_date:  form.anniversary_date  || null,
-      assigned_agent_id: form.assigned_agent_id || null,
-      email:             form.email?.trim()      || null,
-      phone:             form.phone?.trim()      || null,
-      tags: typeof form.tags === 'string'
-        ? form.tags.split(',').map(t => t.trim()).filter(Boolean)
-        : (form.tags || []),
-      // Buyer/investor criteria — only included for those contact types
-      ...(isBuyer && {
-        submarket:   submarket   || null,
-        asset_types: Array.isArray(asset_types) ? asset_types : [],
-        size_min:    size_min    ? Number(size_min)  : null,
-        size_max:    size_max    ? Number(size_max)  : null,
-        size_unit:   size_unit   || 'sqft',
-      }),
-    }
-
-    const doSave = (p) => contact?.id
-      ? supabase.from('contacts').update(p).eq('id', contact.id).select().single()
-      : supabase.from('contacts').insert([p]).select().single()
-
-    let { data: saved, error } = await doSave(payload)
-
-    // Graceful fallback: if buyer-criteria columns don't exist yet (migration pending),
-    // retry without them so the contact save still succeeds
-    let criteriaDropped = false
-    if (error?.message?.includes('schema cache') && isBuyer) {
-      const { submarket: _s, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u, ...payloadNoCriteria } = payload
-      ;({ data: saved, error } = await doSave(payloadNoCriteria))
-      if (!error) criteriaDropped = true
-    }
-
-    const contactId = saved?.id || contact?.id
-    if (error) { setSaving(false); pushToast(error.message, 'error'); return }
-
-    if (addProp && propForm.address.trim() && contactId) {
-      const propPayload = {
-        address: propForm.address.trim(),
-        type: propForm.type === 'commercial' ? (propForm.subtype || 'commercial') : 'residential',
-        list_price: propForm.list_price ? Number(propForm.list_price) : null,
-        beds: propForm.beds ? Number(propForm.beds) : null,
-        baths: propForm.baths ? Number(propForm.baths) : null,
-        sqft: propForm.sqft ? Number(propForm.sqft) : null,
-        garage: propForm.garage ? Number(propForm.garage) : 0,
-        details: { ...propForm.details, category: propForm.type },
-        contact_id: contactId,
-        status: 'active',
-      }
-      const { error: pe } = await supabase.from('properties').insert([propPayload])
-      if (pe) pushToast(`Contact saved but property failed: ${pe.message}`, 'error')
-      else pushToast(criteriaDropped ? 'Contact & property saved (run DB migration to store buyer criteria)' : 'Contact & property saved')
-    } else {
-      pushToast(criteriaDropped
-        ? 'Contact saved — run DB migration to store buyer criteria'
-        : (contact?.id ? 'Contact updated' : 'Contact added'))
-    }
-
-    setSaving(false)
-    onSave(); onClose()
-  }
-
-  const contactDeals      = (deals      || []).filter(d => d.contact_id === contact?.id)
-  const contactTasks      = (tasks      || []).filter(t => t.contact_id === contact?.id)
-  const contactActivities = (activities || []).filter(a => a.contact_id === contact?.id)
-  const activityCount     = contactDeals.length + contactTasks.length + contactActivities.length
-
-  return (
-    <Drawer open={open} onClose={onClose} title={contact?.id ? `${contact.first_name} ${contact.last_name}` : 'Add Contact'} width={500}>
-      {contact?.id && (
-        <Tabs
-          active={tab}
-          onChange={setTab}
-          tabs={[
-            { id: 'details', label: 'Details', count: 0 },
-            { id: 'activity', label: 'Activity', count: activityCount },
-          ]}
-        />
-      )}
-
-      {tab === 'details' && (
-        <>
-          <div className="drawer__body">
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label required">First Name</label>
-                <input className={`form-control${errors.first_name?' error':''}`} value={form.first_name} onChange={e=>set('first_name',e.target.value)} placeholder="Jane" />
-              </div>
-              <div className="form-group">
-                <label className="form-label required">Last Name</label>
-                <input className={`form-control${errors.last_name?' error':''}`} value={form.last_name} onChange={e=>set('last_name',e.target.value)} placeholder="Smith" />
-              </div>
-            </div>
-            <div className="form-group"><label className="form-label">Email</label><input className="form-control" type="email" value={form.email||''} onChange={e=>set('email',e.target.value)} placeholder="jane@email.com" /></div>
-            <div className="form-group"><label className="form-label">Phone</label><input className="form-control" value={form.phone||''} onChange={e=>set('phone',e.target.value)} placeholder="(555) 000-0000" /></div>
-
-            {/* ── Owner / Home Address ── */}
-            <div style={{ borderTop:'1px solid var(--gw-border)', marginTop:4, paddingTop:14 }}>
-              <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:10 }}>Owner Address</div>
-              <div className="form-group"><label className="form-label">Street</label><input className="form-control" value={form.owner_address||''} onChange={e=>set('owner_address',e.target.value)} placeholder="123 Oak Lane" /></div>
-              <div className="form-row">
-                <div className="form-group"><label className="form-label">City</label><input className="form-control" value={form.owner_city||''} onChange={e=>set('owner_city',e.target.value)} /></div>
-                <div className="form-group"><label className="form-label">State</label><input className="form-control" value={form.owner_state||''} onChange={e=>set('owner_state',e.target.value)} placeholder="TX" style={{ maxWidth:80 }} /></div>
-                <div className="form-group"><label className="form-label">ZIP</label><input className="form-control" value={form.owner_zip||''} onChange={e=>set('owner_zip',e.target.value)} placeholder="78701" /></div>
-              </div>
-            </div>
-
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">Type</label>
-                <select className="form-control" value={form.type} onChange={e=>set('type',e.target.value)}>
-                  {['buyer','seller','landlord','tenant','investor'].map(t=><option key={t} value={t}>{t.charAt(0).toUpperCase()+t.slice(1)}</option>)}
-                </select>
-              </div>
-              <div className="form-group">
-                <label className="form-label">Status</label>
-                <select className="form-control" value={form.status} onChange={e=>set('status',e.target.value)}>
-                  {['active','cold','closed'].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1)}</option>)}
-                </select>
-              </div>
-            </div>
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">Source</label>
-                <select className="form-control" value={form.source||'other'} onChange={e=>set('source',e.target.value)}>
-                  {['referral','website','open house','social','cold call','other'].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1)}</option>)}
-                </select>
-              </div>
-              <div className="form-group">
-                <label className="form-label">Assigned Agent</label>
-                <select className="form-control" value={form.assigned_agent_id||''} onChange={e=>set('assigned_agent_id',e.target.value)}>
-                  <option value="">Unassigned</option>
-                  {agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
-                </select>
-              </div>
-            </div>
-            <div className="form-group"><label className="form-label">Tags</label><input className="form-control" value={Array.isArray(form.tags)?form.tags.join(', '):(form.tags||'')} onChange={e=>set('tags',e.target.value)} placeholder="vip, referral, hot-lead" /><div className="form-hint">Comma separated</div></div>
-
-            {/* ── Reminders ── */}
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">Birthday</label>
-                <input className="form-control" type="date" value={form.birthday||''} onChange={e=>set('birthday',e.target.value)} />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Closing Anniversary</label>
-                <input className="form-control" type="date" value={form.anniversary_date||''} onChange={e=>set('anniversary_date',e.target.value)} />
-              </div>
-            </div>
-
-            <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} placeholder="Add notes…" /></div>
-
-            {/* ── Investment / Buyer Criteria (buyer + investor only) ── */}
-            {(form.type === 'buyer' || form.type === 'investor') && (
-              <div style={{ borderTop:'1px solid var(--gw-border)', marginTop:4, paddingTop:14 }}>
-                <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:10 }}>
-                  {form.type === 'investor' ? 'Investment Criteria' : 'Buyer Criteria'}
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Target Market / Area</label>
-                  <input className="form-control" value={form.submarket||''} onChange={e=>set('submarket',e.target.value)} placeholder="e.g. Austin, Travis County, Downtown" />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Asset Types</label>
-                  <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginTop:4 }}>
-                    {['residential','rental','multifamily','office','land','retail','industrial','mixed-use'].map(t => {
-                      const on = (form.asset_types||[]).includes(t)
-                      return (
-                        <label key={t} style={{ display:'flex', alignItems:'center', gap:4, cursor:'pointer', fontSize:11, fontWeight:600, padding:'3px 10px', borderRadius:20,
-                          color: on ? 'var(--gw-azure)' : 'var(--gw-mist)',
-                          background: on ? 'var(--gw-sky)' : '#fff',
-                          border: `1px solid ${on ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
-                          transition:'all 120ms', userSelect:'none' }}>
-                          <input type="checkbox" checked={on} onChange={() => {
-                            const current = form.asset_types||[]
-                            set('asset_types', on ? current.filter(x=>x!==t) : [...current, t])
-                          }} style={{ display:'none' }} />
-                          {t.charAt(0).toUpperCase()+t.slice(1)}
-                        </label>
-                      )
-                    })}
-                  </div>
-                </div>
-                <div className="form-row">
-                  <div className="form-group">
-                    <label className="form-label">Min Size</label>
-                    <input className="form-control" type="number" value={form.size_min||''} onChange={e=>set('size_min',e.target.value)} placeholder="0" />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">Max Size</label>
-                    <input className="form-control" type="number" value={form.size_max||''} onChange={e=>set('size_max',e.target.value)} placeholder="Any" />
-                  </div>
-                  <div className="form-group" style={{ maxWidth:90 }}>
-                    <label className="form-label">Unit</label>
-                    <select className="form-control" value={form.size_unit||'sqft'} onChange={e=>set('size_unit',e.target.value)}>
-                      <option value="sqft">sqft</option>
-                      <option value="acres">acres</option>
-                      <option value="units">units</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* ── Inline Add Property ────────────────────────────────── */}
-            {!contact?.id && (
-              <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 14, marginTop: 4 }}>
-                <button type="button" onClick={() => setAddProp(p => !p)}
-                  style={{ display: 'flex', alignItems: 'center', gap: 8, background: addProp ? 'var(--gw-sky)' : 'var(--gw-bone)', border: `1px solid ${addProp ? 'var(--gw-azure)' : 'var(--gw-border)'}`, borderRadius: 'var(--radius)', padding: '8px 14px', cursor: 'pointer', width: '100%', fontFamily: 'var(--font-body)', fontSize: 13, fontWeight: 600, color: addProp ? 'var(--gw-azure)' : 'var(--gw-slate)', transition: 'all 150ms' }}>
-                  <Icon name="plus" size={14} />
-                  {addProp ? 'Remove Property' : 'Add a Property'}
-                  <span style={{ marginLeft: 'auto', fontSize: 10, opacity: 0.5 }}>{addProp ? '▲' : '▼'}</span>
-                </button>
-
-                {addProp && (
-                  <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 0 }}>
-                    <div className="form-group">
-                      <label className="form-label required">Property Address</label>
-                      <input className={`form-control${errors.prop_address?' error':''}`} value={propForm.address} onChange={e=>setP('address',e.target.value)} placeholder="123 Main St, City, State" />
-                    </div>
-
-                    {/* Residential / Commercial toggle */}
-                    <div className="form-group">
-                      <label className="form-label">Category</label>
-                      <div style={{ display:'flex', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
-                        {['residential','commercial'].map(cat => (
-                          <button key={cat} type="button" onClick={() => { setP('type', cat); setP('subtype','') }}
-                            style={{ flex:1, padding:'7px 0', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, transition:'all 150ms',
-                              background: propForm.type === cat ? 'var(--gw-slate)' : '#fff',
-                              color:      propForm.type === cat ? '#fff'            : 'var(--gw-mist)' }}>
-                            {cat.charAt(0).toUpperCase()+cat.slice(1)}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Commercial subtype */}
-                    {isComm && (
-                      <div className="form-group">
-                        <label className="form-label">Commercial Type</label>
-                        <select className="form-control" value={propForm.subtype||''} onChange={e=>setP('subtype',e.target.value)}>
-                          <option value="">— Select type —</option>
-                          {COMM_SUBTYPES.map(t=><option key={t} value={t}>{t.charAt(0).toUpperCase()+t.slice(1)}</option>)}
-                        </select>
-                      </div>
-                    )}
-
-                    <div className="form-group">
-                      <label className="form-label">{isComm ? 'Asking Price' : 'List Price'}</label>
-                      <input className="form-control" type="number" value={propForm.list_price||''} onChange={e=>setP('list_price',e.target.value)} placeholder="0" />
-                    </div>
-
-                    {/* Residential fields */}
-                    {!isComm && (
-                      <>
-                        <div className="form-row">
-                          <div className="form-group"><label className="form-label">Beds</label><input className="form-control" type="number" value={propForm.beds||''} onChange={e=>setP('beds',e.target.value)} /></div>
-                          <div className="form-group"><label className="form-label">Baths</label><input className="form-control" type="number" step="0.5" value={propForm.baths||''} onChange={e=>setP('baths',e.target.value)} /></div>
-                        </div>
-                        <div className="form-row">
-                          <div className="form-group"><label className="form-label">Sq Ft</label><input className="form-control" type="number" value={propForm.sqft||''} onChange={e=>setP('sqft',e.target.value)} /></div>
-                          <div className="form-group"><label className="form-label">Garage</label>
-                            <select className="form-control" value={propForm.garage??''} onChange={e=>setP('garage',e.target.value)}>
-                              <option value="">—</option><option value="0">No Garage</option><option value="1">1 Car</option><option value="2">2 Car</option><option value="3">3+ Car</option>
-                            </select>
-                          </div>
-                        </div>
-                      </>
-                    )}
-
-                    {/* Commercial — multifamily */}
-                    {isComm && propForm.subtype === 'multifamily' && (
-                      <div className="form-row">
-                        <div className="form-group"><label className="form-label">Total Units</label><input className="form-control" type="number" value={propForm.details?.total_units||''} onChange={e=>setPD('total_units',e.target.value)} /></div>
-                        <div className="form-group"><label className="form-label">Sq Ft (total)</label><input className="form-control" type="number" value={propForm.sqft||''} onChange={e=>setP('sqft',e.target.value)} /></div>
-                      </div>
-                    )}
-
-                    {/* Commercial — office / retail / industrial */}
-                    {isComm && ['office','retail','industrial'].includes(propForm.subtype) && (
-                      <div className="form-row">
-                        <div className="form-group"><label className="form-label">Sq Ft</label><input className="form-control" type="number" value={propForm.sqft||''} onChange={e=>setP('sqft',e.target.value)} /></div>
-                        <div className="form-group"><label className="form-label">Price / SF</label><input className="form-control" type="number" step="0.01" value={propForm.details?.price_per_sf||''} onChange={e=>setPD('price_per_sf',e.target.value)} /></div>
-                      </div>
-                    )}
-
-                    {/* Commercial — land */}
-                    {isComm && propForm.subtype === 'land' && (
-                      <div className="form-row">
-                        <div className="form-group"><label className="form-label">Acres</label><input className="form-control" type="number" step="0.01" value={propForm.details?.acres||''} onChange={e=>setPD('acres',e.target.value)} /></div>
-                        <div className="form-group"><label className="form-label">Zoning</label><input className="form-control" value={propForm.details?.zoning||''} onChange={e=>setPD('zoning',e.target.value)} placeholder="R-1, C-2…" /></div>
-                      </div>
-                    )}
-
-                    {/* Commercial — mixed-use */}
-                    {isComm && propForm.subtype === 'mixed-use' && (
-                      <div className="form-row">
-                        <div className="form-group"><label className="form-label">Sq Ft</label><input className="form-control" type="number" value={propForm.sqft||''} onChange={e=>setP('sqft',e.target.value)} /></div>
-                        <div className="form-group"><label className="form-label">Units</label><input className="form-control" type="number" value={propForm.details?.total_units||''} onChange={e=>setPD('total_units',e.target.value)} /></div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-          <div className="drawer__foot">
-            <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-            <button className="btn btn--primary" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save Contact'}</button>
-          </div>
-        </>
-      )}
-
-      {tab === 'activity' && (
-        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          <ActivityTab
-            contact={contact} deals={deals} tasks={tasks}
-            activities={activities} activeAgent={activeAgent}
-            onActivityAdded={onActivityAdded} />
-        </div>
-      )}
-    </Drawer>
-  )
-}
-
-// ── Simple RFC-4180 CSV parser ──────────────────────────────────────────────
-function parseCSV(text) {
-  const rows = []
-  const lines = text.split(/\r?\n/)
-  for (const line of lines) {
-    if (!line.trim()) continue
-    const row = []
-    let cur = '', inQ = false
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i]
-      if (ch === '"') { inQ = !inQ }
-      else if (ch === ',' && !inQ) { row.push(cur.trim()); cur = '' }
-      else { cur += ch }
-    }
-    row.push(cur.trim())
-    rows.push(row)
-  }
-  return rows
-}
-
-const IMPORT_FIELDS = ['first_name','last_name','email','phone','type','source','status','notes','assigned_agent']
-const IMPORT_LABELS = { first_name:'First Name', last_name:'Last Name', email:'Email', phone:'Phone', type:'Type', source:'Source', status:'Status', notes:'Notes', assigned_agent:'Agent Name' }
-
-function CSVImportModal({ onClose, onImported, agents, activeAgent }) {
-  const [step, setStep]               = useState(1)   // 1=upload  2=map  3=preview  4=importing
-  const [headers, setHeaders]         = useState([])
-  const [rows, setRows]               = useState([])
-  const [mapping, setMapping]         = useState({})
-  const [progress, setProgress]       = useState(0)
-  const [errors, setErrors]           = useState([])
-  const [defaultAgentId, setDefaultAgentId] = useState(activeAgent?.id || '')
-
-  const handleFile = (file) => {
-    if (!file) return
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      const parsed = parseCSV(e.target.result)
-      if (parsed.length < 2) { alert('File must have a header row and at least one data row.'); return }
-      const hdrs = parsed[0]
-      setHeaders(hdrs)
-      setRows(parsed.slice(1))
-      // Auto-map headers that match field names
-      const auto = {}
-      hdrs.forEach((h, i) => {
-        const norm = h.toLowerCase().replace(/\s+/g,'_')
-        const match = IMPORT_FIELDS.find(f => f === norm || f.replace('_','') === norm.replace('_',''))
-        if (match) auto[match] = i
-      })
-      setMapping(auto)
-      setStep(2)
-    }
-    reader.readAsText(file)
-  }
-
-  const resolveAgentId = (nameStr) => {
-    if (!nameStr) return defaultAgentId || null
-    const norm = nameStr.toLowerCase().trim()
-    const exact = agents.find(a => a.name.toLowerCase() === norm)
-    if (exact) return exact.id
-    const partial = agents.find(a =>
-      a.name.toLowerCase().split(' ')[0] === norm ||
-      a.name.toLowerCase().includes(norm)
-    )
-    return partial ? partial.id : (defaultAgentId || null)
-  }
-
-  const getFirstName = (row) =>
-    mapping.first_name !== undefined ? (row[mapping.first_name] || '').trim() : ''
-
-  const validRows = rows.filter(row => getFirstName(row) !== '')
-  const blankCount = rows.length - validRows.length
-
-  const preview = validRows.slice(0, 5).map(row => {
-    const obj = {}
-    IMPORT_FIELDS.forEach(f => { if (mapping[f] !== undefined) obj[f] = row[mapping[f]] || '' })
-    return obj
-  })
-
-  const doImport = async () => {
-    setStep(4); setProgress(0); setErrors([])
-    const validTypes   = ['buyer','seller','landlord','tenant','investor']
-    const validSources = ['referral','website','open house','social','cold call','other']
-    const validStatus  = ['active','cold','closed']
-    const CHUNK = 50
-    let done = 0, errs = []
-    for (let i = 0; i < validRows.length; i += CHUNK) {
-      const chunk = validRows.slice(i, i + CHUNK).map(row => {
-        const r = {}
-        IMPORT_FIELDS.forEach(f => { if (mapping[f] !== undefined) r[f] = (row[mapping[f]] || '').trim() })
-        return {
-          first_name: r.first_name || '(Unknown)',
-          last_name:  r.last_name  || '',
-          email:      r.email  || null,
-          phone:      r.phone  || null,
-          type:       validTypes.includes(r.type?.toLowerCase())     ? r.type.toLowerCase()   : 'buyer',
-          source:     validSources.includes(r.source?.toLowerCase()) ? r.source.toLowerCase() : 'other',
-          status:     validStatus.includes(r.status?.toLowerCase())  ? r.status.toLowerCase() : 'active',
-          notes:      r.notes  || null,
-          assigned_agent_id: resolveAgentId(r.assigned_agent),
-          tags: [],
-        }
-      })
-      const { error } = await supabase.from('contacts').insert(chunk)
-      if (error) errs.push(`Rows ${i+1}–${i+CHUNK}: ${error.message}`)
-      done += chunk.length
-      setProgress(Math.round(done / validRows.length * 100))
-    }
-    setErrors(errs)
-    if (errs.length === 0) {
-      const skippedNote = blankCount > 0 ? `, ${blankCount} blank rows skipped` : ''
-      pushToast(`${validRows.length} contacts imported${skippedNote}`)
-      onImported()
-      onClose()
-    }
-  }
-
-  return (
-    <div style={{ position:'fixed', inset:0, background:'rgba(10,14,28,0.5)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:900, padding:24 }}>
-      <div style={{ background:'#fff', borderRadius:14, width:'100%', maxWidth:560, boxShadow:'var(--shadow-modal)', display:'flex', flexDirection:'column', maxHeight:'90vh' }}>
-        {/* Header */}
-        <div style={{ padding:'20px 24px', borderBottom:'1px solid var(--gw-border)', display:'flex', justifyContent:'space-between', alignItems:'center', flexShrink:0 }}>
-          <div>
-            <div className="eyebrow-label">Contacts</div>
-            <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Import CSV</h3>
-          </div>
-          <button className="drawer__close" onClick={onClose}><Icon name="x" size={18} /></button>
-        </div>
-
-        {/* Step 1 — Upload */}
-        {step === 1 && (
-          <div style={{ padding:24, flex:1, overflowY:'auto' }}>
-            <p style={{ fontSize:13, color:'var(--gw-mist)', lineHeight:1.6, marginTop:0 }}>
-              Upload a CSV with contacts. First row must be headers. Supported columns: <strong>first_name, last_name, email, phone, type, source, status, notes</strong>.
-            </p>
-            <label style={{ display:'block', border:'2px dashed var(--gw-border)', borderRadius:'var(--radius)', padding:'36px 24px', textAlign:'center', cursor:'pointer', transition:'all 150ms' }}
-              onDragOver={e => { e.preventDefault(); e.currentTarget.style.borderColor = 'var(--gw-azure)' }}
-              onDragLeave={e => { e.currentTarget.style.borderColor = 'var(--gw-border)' }}
-              onDrop={e => { e.preventDefault(); handleFile(e.dataTransfer.files[0]) }}>
-              <Icon name="upload" size={28} style={{ color:'var(--gw-border)', marginBottom:10 }} />
-              <div style={{ fontWeight:600, marginBottom:6 }}>Drop CSV here or click to browse</div>
-              <div style={{ fontSize:12, color:'var(--gw-mist)' }}>CSV files only</div>
-              <input type="file" accept=".csv,text/csv" style={{ display:'none' }} onChange={e => handleFile(e.target.files[0])} />
-            </label>
-          </div>
-        )}
-
-        {/* Step 2 — Map columns */}
-        {step === 2 && (
-          <div style={{ padding:24, flex:1, overflowY:'auto' }}>
-            <p style={{ fontSize:13, color:'var(--gw-mist)', marginTop:0, lineHeight:1.6 }}>
-              Map your CSV columns to CRM fields. <strong>{rows.length} rows</strong> detected.
-            </p>
-            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:20 }}>
-              {IMPORT_FIELDS.map(field => (
-                <React.Fragment key={field}>
-                  <div style={{ display:'flex', alignItems:'center', fontSize:13, fontWeight:600 }}>
-                    {IMPORT_LABELS[field]}{['first_name','last_name'].includes(field) && <span style={{ color:'var(--gw-red)', marginLeft:2 }}>*</span>}
-                    {field === 'assigned_agent' && <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)', marginLeft:4 }}>(optional)</span>}
-                  </div>
-                  <select className="form-control" style={{ fontSize:12 }} value={mapping[field] ?? ''} onChange={e => setMapping(p => ({ ...p, [field]: e.target.value === '' ? undefined : Number(e.target.value) }))}>
-                    <option value="">— Skip —</option>
-                    {headers.map((h, i) => <option key={i} value={i}>{h}</option>)}
-                  </select>
-                </React.Fragment>
-              ))}
-            </div>
-
-            {/* Default agent fallback */}
-            <div style={{ background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:'12px 14px', marginBottom:20 }}>
-              <div style={{ fontSize:13, fontWeight:600, marginBottom:4 }}>Default Agent</div>
-              <div style={{ fontSize:12, color:'var(--gw-mist)', marginBottom:8 }}>
-                Contacts with no agent column — or whose name doesn't match — go to this agent.
-              </div>
-              <select className="form-control" style={{ fontSize:12 }} value={defaultAgentId} onChange={e => setDefaultAgentId(e.target.value)}>
-                {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-              </select>
-            </div>
-
-            <div style={{ display:'flex', gap:8 }}>
-              <button className="btn btn--secondary" onClick={() => setStep(1)}>Back</button>
-              <button className="btn btn--primary" onClick={() => setStep(3)} disabled={mapping.first_name === undefined}>Preview →</button>
-            </div>
-          </div>
-        )}
-
-        {/* Step 3 — Preview */}
-        {step === 3 && (
-          <div style={{ padding:24, flex:1, overflowY:'auto' }}>
-            <p style={{ fontSize:13, color:'var(--gw-mist)', marginTop:0 }}>
-              Preview of first {Math.min(5, validRows.length)} rows — importing <strong>{validRows.length} contacts</strong>
-              {blankCount > 0 && <span style={{ color:'var(--gw-amber)', marginLeft:4 }}>({blankCount} blank row{blankCount !== 1 ? 's' : ''} will be skipped)</span>}.
-            </p>
-            <div style={{ overflowX:'auto', marginBottom:20 }}>
-              <table className="import-preview-table">
-                <thead>
-                  <tr>{IMPORT_FIELDS.filter(f => mapping[f] !== undefined).map(f => <th key={f}>{IMPORT_LABELS[f]}</th>)}</tr>
-                </thead>
-                <tbody>
-                  {preview.map((row, i) => (
-                    <tr key={i}>{IMPORT_FIELDS.filter(f => mapping[f] !== undefined).map(f => <td key={f}>{row[f] || '—'}</td>)}</tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div style={{ display:'flex', gap:8 }}>
-              <button className="btn btn--secondary" onClick={() => setStep(2)}>Back</button>
-              <button className="btn btn--primary" onClick={doImport}><Icon name="import" size={13} /> Import {validRows.length} Contacts</button>
-            </div>
-          </div>
-        )}
-
-        {/* Step 4 — Progress */}
-        {step === 4 && (
-          <div style={{ padding:40, textAlign:'center', flex:1 }}>
-            <div style={{ fontWeight:600, fontSize:16, marginBottom:16 }}>Importing…</div>
-            <div style={{ height:8, background:'var(--gw-border)', borderRadius:4, marginBottom:12, overflow:'hidden' }}>
-              <div style={{ width:`${progress}%`, height:'100%', background:'var(--gw-azure)', borderRadius:4, transition:'width 200ms ease' }} />
-            </div>
-            <div style={{ fontSize:13, color:'var(--gw-mist)' }}>{progress}% complete</div>
-            {errors.length > 0 && (
-              <div style={{ marginTop:16, textAlign:'left' }}>
-                {errors.map((e, i) => <div key={i} style={{ fontSize:12, color:'var(--gw-red)', marginBottom:4 }}>{e}</div>)}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
+const HEAT_ORDER = { hot: 0, warm: 1, cold: 2 }
 
 export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, visibleAgentIds }) {
+  // ── Persistent filter state ─────────────────────────────────────────────
   const [search, setSearch] = useState('')
-  const [filterType, setFilterType] = useState('')
-  const [filterStatus, setFilterStatus] = useState('')
-  const [filterAgent, setFilterAgent] = useState('')
-  const [drawer, setDrawer] = useState(false)
+  const debouncedSearch = useDebounce(search, 150)
+  const [filters, setFilters] = usePersistedState('contacts.filters.v2', {
+    type: '', status: '', agent: '', heat: '',
+  })
+  const [view, setView] = usePersistedState('contacts.view.v2', 'all')
+  const [sort, setSort] = usePersistedState('contacts.sort.v2', { key: 'created_at', dir: 'desc' })
+
+  // ── UI state ────────────────────────────────────────────────────────────
+  const [drawerOpen, setDrawerOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [confirm, setConfirm] = useState(null)
-  const [sortKey, setSortKey] = useState('created_at')
-  const [sortDir, setSortDir] = useState('desc')
-  const [filterHeat, setFilterHeat] = useState('')
   const [importModal, setImportModal] = useState(false)
-  const [selected, setSelected]       = useState(new Set())
-  const [reassignTo, setReassignTo]   = useState('')
+  const [selected, setSelected] = useState(new Set())
+  const [reassignTo, setReassignTo] = useState('')
+  const [focusedIndex, setFocusedIndex] = useState(0)
+  const searchInputRef = useRef(null)
 
-  const contacts    = db.contacts    || []
-  const agents      = db.agents      || []
-  const activities  = db.activities  || []
-  const deals       = db.deals       || []
+  // ── Data from props ─────────────────────────────────────────────────────
+  const contacts   = db.contacts   || []
+  const agents     = db.agents     || []
+  const activities = db.activities || []
+  const deals      = db.deals      || []
 
-  // Compute heat scores once per contacts/activities/deals change — O(n×m) so must not run per render
+  // ── Heat scores: memoized once per data change ─────────────────────────
   const heatScores = useMemo(() => {
     const map = {}
     for (const c of contacts) map[c.id] = calcHeatScore(c, activities, deals)
     return map
   }, [contacts, activities, deals])
 
-  const filtered = useMemo(() => contacts.filter(c => {
-    const name = `${c.first_name} ${c.last_name}`.toLowerCase()
-    const q = search.toLowerCase()
-    if (q && !name.includes(q) && !(c.email||'').toLowerCase().includes(q) && !(c.phone||'').includes(q)) return false
-    if (filterType   && c.type              !== filterType)   return false
-    if (filterStatus && c.status            !== filterStatus) return false
-    if (filterAgent  && c.assigned_agent_id !== filterAgent)  return false
-    if (filterHeat   && heatScores[c.id]    !== filterHeat)   return false
-    return true
-  }).sort((a, b) => {
-    const av = a[sortKey] || '', bv = b[sortKey] || ''
-    return sortDir === 'asc' ? (av > bv ? 1 : -1) : (av < bv ? 1 : -1)
-  }), [contacts, heatScores, search, filterType, filterStatus, filterAgent, filterHeat, sortKey, sortDir])
+  // ── Active deal index for view predicate ────────────────────────────────
+  const activeDealContactIds = useMemo(() => {
+    const s = new Set()
+    for (const d of deals) {
+      if (!['closed', 'lost'].includes(d.stage) && d.contact_id) s.add(d.contact_id)
+    }
+    return s
+  }, [deals])
 
-  const reload = async () => {
+  // ── All known tags (for autocomplete in TagInput) ───────────────────────
+  const allTags = useMemo(() => {
+    const tagSet = new Set()
+    for (const c of contacts) for (const t of (c.tags || [])) tagSet.add(t)
+    return [...tagSet].sort()
+  }, [contacts])
+
+  // ── Filtered + sorted contacts ──────────────────────────────────────────
+  const filtered = useMemo(() => {
+    const q = debouncedSearch.toLowerCase().trim()
+    const currentView = BUILTIN_VIEWS.find(v => v.id === view)
+    const ctx = { heatScores, activeDealContactIds, activeAgentId: activeAgent?.id }
+
+    let result = contacts.filter(c => {
+      // Exclude soft-deleted
+      if (c.deleted_at) return false
+
+      // Saved view
+      if (currentView && !currentView.predicate(c, ctx)) return false
+
+      // Search
+      if (q) {
+        const name  = `${c.first_name || ''} ${c.last_name || ''}`.toLowerCase()
+        const email = (c.email || '').toLowerCase()
+        const phone = (c.phone || '').toLowerCase()
+        const city  = (c.owner_city || '').toLowerCase()
+        const tags  = (c.tags || []).join(' ').toLowerCase()
+        if (!name.includes(q) && !email.includes(q) && !phone.includes(q) && !city.includes(q) && !tags.includes(q)) return false
+      }
+
+      // Filters
+      if (filters.type   && c.type              !== filters.type)   return false
+      if (filters.status && c.status            !== filters.status) return false
+      if (filters.agent  && c.assigned_agent_id !== filters.agent)  return false
+      if (filters.heat   && heatScores[c.id]    !== filters.heat)   return false
+      return true
+    })
+
+    // Sort
+    result.sort((a, b) => {
+      let av, bv
+      if (sort.key === '_heat') {
+        av = HEAT_ORDER[heatScores[a.id]] ?? 99
+        bv = HEAT_ORDER[heatScores[b.id]] ?? 99
+        return sort.dir === 'asc' ? av - bv : bv - av
+      }
+      if (sort.key === '_agent') {
+        av = agents.find(g => g.id === a.assigned_agent_id)?.name || ''
+        bv = agents.find(g => g.id === b.assigned_agent_id)?.name || ''
+      } else {
+        av = a[sort.key]
+        bv = b[sort.key]
+      }
+      return compareValues(av, bv, sort.dir)
+    })
+
+    return result
+  }, [contacts, debouncedSearch, filters, view, sort, heatScores, activeDealContactIds, activeAgent?.id, agents])
+
+  // ── Counts per saved view ───────────────────────────────────────────────
+  const viewCounts = useMemo(() => {
+    const ctx = { heatScores, activeDealContactIds, activeAgentId: activeAgent?.id }
+    const counts = {}
+    for (const v of BUILTIN_VIEWS) {
+      counts[v.id] = contacts.filter(c => !c.deleted_at && v.predicate(c, ctx)).length
+    }
+    return counts
+  }, [contacts, heatScores, activeDealContactIds, activeAgent?.id])
+
+  // ── Clear selection when filters change (prevents invisible-selection bug) ──
+  useEffect(() => {
+    if (selected.size > 0) {
+      setSelected(prev => {
+        const visibleIds = new Set(filtered.map(c => c.id))
+        const next = new Set()
+        for (const id of prev) if (visibleIds.has(id)) next.add(id)
+        return next
+      })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch, filters, view])
+
+  // ── Optimistic update helper ────────────────────────────────────────────
+  const optimisticUpdate = useCallback((id, patch) => {
+    setDb(prev => ({
+      ...prev,
+      contacts: (prev.contacts || []).map(c => c.id === id ? { ...c, ...patch } : c),
+    }))
+  }, [setDb])
+
+  // ── Mutations ───────────────────────────────────────────────────────────
+  const reload = useCallback(async () => {
     if (!visibleAgentIds?.length) return
     const { data } = await supabase.from('contacts').select('*')
       .in('assigned_agent_id', visibleAgentIds)
+      .is('deleted_at', null)
       .order('created_at', { ascending: false })
-    setDb(p => ({ ...p, contacts: data || [] }))
-  }
+    if (data) setDb(p => ({ ...p, contacts: data }))
+  }, [visibleAgentIds, setDb])
 
-  const deleteContact = async (id) => {
-    await supabase.from('contacts').delete().eq('id', id)
-    pushToast('Contact deleted', 'info')
-    setConfirm(null)
-    reload()
-  }
-
-  const bulkDelete = async () => {
-    const ids = [...selected]
-    await supabase.from('contacts').delete().in('id', ids)
-    pushToast(`${ids.length} contact${ids.length !== 1 ? 's' : ''} deleted`, 'info')
+  const softDeleteContacts = useCallback(async (ids) => {
+    const arr = Array.isArray(ids) ? ids : [ids]
+    // Optimistic remove
+    setDb(prev => ({
+      ...prev,
+      contacts: (prev.contacts || []).map(c =>
+        arr.includes(c.id) ? { ...c, deleted_at: new Date().toISOString() } : c
+      ),
+    }))
     setSelected(new Set())
-    reload()
-  }
 
-  const bulkReassign = async (agentId) => {
+    // Soft-delete in DB; falls back to hard delete if deleted_at column missing
+    let { error } = await supabase.from('contacts')
+      .update({ deleted_at: new Date().toISOString() })
+      .in('id', arr)
+
+    if (error?.message?.includes('column') || error?.message?.includes('deleted_at')) {
+      // Schema not yet migrated — fall back to hard delete
+      const { error: delErr } = await supabase.from('contacts').delete().in('id', arr)
+      error = delErr
+    }
+
+    if (error) { pushToast(error.message, 'error'); reload(); return }
+
+    // Undo toast
+    pushToast(
+      `${arr.length} contact${arr.length !== 1 ? 's' : ''} deleted`,
+      'info',
+      {
+        actionLabel: 'Undo',
+        onAction: async () => {
+          // Restore by clearing deleted_at (or re-fetching if hard-deleted)
+          const { error: restoreErr } = await supabase.from('contacts')
+            .update({ deleted_at: null })
+            .in('id', arr)
+          if (restoreErr) {
+            pushToast('Could not undo — contact was hard-deleted', 'error')
+          } else {
+            pushToast(`${arr.length} contact${arr.length !== 1 ? 's' : ''} restored`)
+            reload()
+          }
+        },
+        duration: 8000,
+      }
+    )
+  }, [setDb, reload])
+
+  const inlineUpdate = useCallback(async (id, field, value) => {
+    // Optimistic
+    optimisticUpdate(id, { [field]: value })
+    const { error } = await supabase.from('contacts').update({ [field]: value }).eq('id', id)
+    if (error) {
+      pushToast(error.message, 'error')
+      reload()  // restore truth
+    }
+  }, [optimisticUpdate, reload])
+
+  const bulkReassign = useCallback(async (agentId) => {
     if (!agentId) return
     const ids = [...selected]
+    // Optimistic
+    setDb(prev => ({
+      ...prev,
+      contacts: (prev.contacts || []).map(c => ids.includes(c.id) ? { ...c, assigned_agent_id: agentId } : c),
+    }))
     const { error } = await supabase.from('contacts').update({ assigned_agent_id: agentId }).in('id', ids)
-    if (error) { pushToast(error.message, 'error'); return }
+    if (error) { pushToast(error.message, 'error'); reload(); return }
     const agent = agents.find(a => a.id === agentId)
-    pushToast(`${ids.length} contact${ids.length !== 1 ? 's' : ''} reassigned to ${agent?.name || 'agent'}`)
+    pushToast(`${ids.length} reassigned to ${agent?.name || 'agent'}`)
     setSelected(new Set())
     setReassignTo('')
-    reload()
-  }
+  }, [selected, agents, setDb, reload])
 
-  const toggleSelect = (id, e) => {
-    e.stopPropagation()
-    setSelected(prev => {
-      const next = new Set(prev)
-      next.has(id) ? next.delete(id) : next.add(id)
-      return next
+  const bulkSetStatus = useCallback(async (status) => {
+    const ids = [...selected]
+    setDb(prev => ({
+      ...prev,
+      contacts: (prev.contacts || []).map(c => ids.includes(c.id) ? { ...c, status } : c),
+    }))
+    const { error } = await supabase.from('contacts').update({ status }).in('id', ids)
+    if (error) { pushToast(error.message, 'error'); reload(); return }
+    pushToast(`${ids.length} set to ${status}`)
+    setSelected(new Set())
+  }, [selected, setDb, reload])
+
+  // ── Duplicate detection ─────────────────────────────────────────────────
+  const checkDuplicate = useCallback((form) => {
+    const email = form.email?.trim().toLowerCase()
+    const phone = form.phone ? normalizePhone(form.phone) : null
+    return contacts.find(c => {
+      if (c.deleted_at) return false
+      if (email && c.email?.toLowerCase() === email) return true
+      if (phone && normalizePhone(c.phone) === phone) return true
+      return false
     })
+  }, [contacts])
+
+  // ── Keyboard shortcuts ──────────────────────────────────────────────────
+  useKeyboard({
+    '/':            () => searchInputRef.current?.focus(),
+    'j':            () => setFocusedIndex(i => Math.min(filtered.length - 1, i + 1)),
+    'k':            () => setFocusedIndex(i => Math.max(0, i - 1)),
+    'Enter':        () => { if (filtered[focusedIndex]) { setEditing(filtered[focusedIndex]); setDrawerOpen(true) } },
+    'Escape':       () => { if (selected.size) setSelected(new Set()); else setSearch('') },
+    'cmd+a':        () => setSelected(new Set(filtered.map(c => c.id))),
+    'cmd+Backspace': () => { if (selected.size) setConfirm({ ids: [...selected], bulk: true }) },
+    'n':            () => { setEditing(null); setDrawerOpen(true) },
+  }, { enabled: !drawerOpen && !importModal && !confirm })
+
+  // ── Stat card → view jump ───────────────────────────────────────────────
+  const handleStatJump = (statKey) => {
+    const map = { total: 'all', new: 'new', hot: 'hot', untouched: 'untouched', activeDeals: 'in-deal' }
+    setView(map[statKey] || 'all')
   }
 
-  const allSelected = filtered.length > 0 && filtered.every(c => selected.has(c.id))
-  const toggleAll = (e) => {
-    e.stopPropagation()
-    if (allSelected) {
-      setSelected(prev => { const next = new Set(prev); filtered.forEach(c => next.delete(c.id)); return next })
-    } else {
-      setSelected(prev => { const next = new Set(prev); filtered.forEach(c => next.add(c.id)); return next })
-    }
+  const sortColumn = (key) => {
+    if (sort.key === key) setSort({ key, dir: sort.dir === 'asc' ? 'desc' : 'asc' })
+    else setSort({ key, dir: 'asc' })
   }
 
-  const sort = (key) => {
-    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
-    else { setSortKey(key); setSortDir('asc') }
-  }
-
-  const SortIcon = ({ k }) => sortKey === k ? <Icon name={sortDir === 'asc' ? 'chevronRight' : 'chevronDown'} size={12} /> : null
+  const visible = contacts.filter(c => !c.deleted_at)
 
   return (
-    <div className="page-content">
+    <div className="page-content" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <div className="page-header">
         <div>
           <div className="page-title">Contacts</div>
-          <div className="page-sub">{contacts.length} total contacts</div>
+          <div className="page-sub">
+            {filtered.length === visible.length
+              ? `${visible.length.toLocaleString()} contacts`
+              : `${filtered.length.toLocaleString()} of ${visible.length.toLocaleString()}`}
+          </div>
         </div>
-        <div style={{ display:'flex', gap:8 }}>
-          <button className="btn btn--secondary" onClick={() => setImportModal(true)}><Icon name="import" size={14} /> Import CSV</button>
-          <button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Contact</button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn--secondary" onClick={() => setImportModal(true)}>
+            <Icon name="import" size={14} /> Import CSV
+          </button>
+          <button className="btn btn--primary" onClick={() => { setEditing(null); setDrawerOpen(true) }}>
+            <Icon name="plus" size={14} /> Add Contact
+          </button>
         </div>
       </div>
 
-      <div className="filters-bar">
-        <div style={{ display:'flex', alignItems:'center', gap:8, background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'0 10px', height:34, flex:1, maxWidth:300 }}>
-          <Icon name="search" size={14} style={{ color:'var(--gw-mist)' }} />
-          <input style={{ border:'none', outline:'none', fontSize:13, flex:1 }} placeholder="Search contacts…" value={search} onChange={e=>setSearch(e.target.value)} />
+      {/* Stats */}
+      <StatsStrip
+        contacts={visible}
+        heatScores={heatScores}
+        deals={deals}
+        onFilterStat={handleStatJump}
+      />
+
+      {/* Saved views */}
+      <SavedViews active={view} onChange={setView} counts={viewCounts} />
+
+      {/* Toolbar */}
+      <div className="filters-bar" style={{ marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#fff', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', padding: '0 10px', height: 34, flex: 1, maxWidth: 320 }}>
+          <Icon name="search" size={14} style={{ color: 'var(--gw-mist)' }} />
+          <input
+            ref={searchInputRef}
+            style={{ border: 'none', outline: 'none', fontSize: 13, flex: 1, fontFamily: 'var(--font-body)' }}
+            placeholder="Search name, email, phone, city, tag…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          {search && (
+            <button
+              onClick={() => setSearch('')}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--gw-mist)', display: 'flex' }}
+              aria-label="Clear search"
+            >
+              <Icon name="x" size={13} />
+            </button>
+          )}
+          <span style={{ fontSize: 10, color: 'var(--gw-mist)', padding: '2px 6px', background: 'var(--gw-bone)', borderRadius: 4, fontFamily: 'var(--font-mono)' }}>/</span>
         </div>
-        <select className="filter-select" value={filterType} onChange={e=>setFilterType(e.target.value)}>
+        <select className="filter-select" value={filters.type} onChange={(e) => setFilters({ ...filters, type: e.target.value })}>
           <option value="">All Types</option>
-          {['buyer','seller','landlord','tenant','investor'].map(t=><option key={t} value={t}>{t.charAt(0).toUpperCase()+t.slice(1)}</option>)}
+          {['buyer','seller','landlord','tenant','investor'].map(t => <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>)}
         </select>
-        <select className="filter-select" value={filterStatus} onChange={e=>setFilterStatus(e.target.value)}>
+        <select className="filter-select" value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
           <option value="">All Statuses</option>
-          {['active','cold','closed'].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1)}</option>)}
+          {['active','cold','closed'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
         </select>
-        <select className="filter-select" value={filterAgent} onChange={e=>setFilterAgent(e.target.value)}>
+        <select className="filter-select" value={filters.agent} onChange={(e) => setFilters({ ...filters, agent: e.target.value })}>
           <option value="">All Agents</option>
-          {agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
+          {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
-        <select className="filter-select" value={filterHeat} onChange={e=>setFilterHeat(e.target.value)}>
+        <select className="filter-select" value={filters.heat} onChange={(e) => setFilters({ ...filters, heat: e.target.value })}>
           <option value="">All Heat</option>
           <option value="hot">🔥 Hot</option>
           <option value="warm">▲ Warm</option>
           <option value="cold">– Cold</option>
         </select>
+        {(filters.type || filters.status || filters.agent || filters.heat || search) && (
+          <button
+            onClick={() => { setFilters({ type: '', status: '', agent: '', heat: '' }); setSearch('') }}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--gw-mist)', fontSize: 12, padding: '0 8px', fontFamily: 'var(--font-body)' }}
+          >
+            Clear
+          </button>
+        )}
       </div>
 
+      {/* Table */}
       {filtered.length === 0 ? (
-        <EmptyState icon="contacts" title="No contacts yet" message="Add your first contact to get started with your CRM."
-          action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Contact</button>} />
+        <EmptyState
+          icon="contacts"
+          title={visible.length === 0 ? 'No contacts yet' : 'No matches'}
+          message={visible.length === 0
+            ? 'Add your first contact to get started.'
+            : 'Try clearing filters or adjusting your search.'}
+          action={visible.length === 0
+            ? <button className="btn btn--primary" onClick={() => { setEditing(null); setDrawerOpen(true) }}><Icon name="plus" size={14} /> Add Contact</button>
+            : null
+          }
+        />
       ) : (
-        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          <div className="data-table-wrap">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th style={{ width:36, paddingRight:0 }}>
-                  <input type="checkbox" checked={allSelected} onChange={toggleAll} style={{ cursor:'pointer' }} />
-                </th>
-                <th className="sortable" onClick={() => sort('first_name')}>Name <SortIcon k="first_name" /></th>
-                <th>Heat</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th className="sortable" onClick={() => sort('phone')}>Phone <SortIcon k="phone" /></th>
-                <th className="sortable" onClick={() => sort('email')}>Email <SortIcon k="email" /></th>
-                <th>Agent</th>
-                <th className="sortable" onClick={() => sort('last_contacted_at')}>Last Contact <SortIcon k="last_contacted_at" /></th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(c => {
-                const agent = agents.find(a => a.id === c.assigned_agent_id)
-                return (
-                  <tr key={c.id} onClick={() => { setEditing(c); setDrawer(true) }}>
-                    <td style={{ paddingRight:0 }} onClick={e => toggleSelect(c.id, e)}>
-                      <input type="checkbox" checked={selected.has(c.id)} onChange={() => {}} style={{ cursor:'pointer' }} />
-                    </td>
-                    <td>
-                      <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-                        <div style={{ width:30, height:30, borderRadius:'var(--radius)', background:'var(--gw-sky)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontWeight:700, color:'var(--gw-azure)', flexShrink:0 }}>
-                          {(c.first_name||'')[0]}{(c.last_name||'')[0]}
-                        </div>
-                        <div>
-                          <div style={{ fontWeight:600 }}>{c.first_name} {c.last_name}</div>
-                          {c.tags?.length > 0 && <div style={{ fontSize:11, color:'var(--gw-mist)' }}>{c.tags.slice(0,2).join(', ')}</div>}
-                        </div>
-                      </div>
-                    </td>
-                    <td><HeatBadge score={calcHeatScore(c, activities, deals)} /></td>
-                    <td><Badge variant={c.type}>{c.type}</Badge></td>
-                    <td><Badge variant={c.status}>{c.status}</Badge></td>
-                    <td style={{ fontFamily:'var(--font-mono)', fontSize:12 }}>{formatPhone(c.phone)}</td>
-                    <td style={{ fontSize:12 }}>{c.email || '—'}</td>
-                    <td>{agent ? <div style={{ display:'flex', alignItems:'center', gap:6 }}><Avatar agent={agent} size={24} /><span style={{ fontSize:12 }}>{agent.name}</span></div> : '—'}</td>
-                    <td style={{ fontSize:12, color:'var(--gw-mist)' }}>{formatDate(c.last_contacted_at)}</td>
-                    <td onClick={e => e.stopPropagation()}>
-                      <div style={{ display:'flex', gap:4 }}>
-                        <button className="btn btn--ghost btn--icon" title="Email" onClick={() => openCompose({ to: c.email, contactName: `${c.first_name} ${c.last_name}` })}><Icon name="mail" size={13} /></button>
-                        <button className="btn btn--ghost btn--icon" title="Edit" onClick={() => { setEditing(c); setDrawer(true) }}><Icon name="edit" size={13} /></button>
-                        <button className="btn btn--ghost btn--icon" title="Delete" onClick={() => setConfirm(c.id)}><Icon name="trash" size={13} /></button>
-                      </div>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-          </div>
-        </div>
+        <ContactsTable
+          rows={filtered}
+          agents={agents}
+          heatScores={heatScores}
+          selected={selected}
+          setSelected={setSelected}
+          sortKey={sort.key}
+          sortDir={sort.dir}
+          onSort={sortColumn}
+          onOpen={(c) => { setEditing(c); setDrawerOpen(true) }}
+          onCompose={(c) => openCompose?.({ to: c.email, contactName: `${c.first_name} ${c.last_name}`, contactId: c.id })}
+          onDelete={(id) => setConfirm({ ids: [id], bulk: false })}
+          onInlineUpdate={inlineUpdate}
+          focusedIndex={focusedIndex}
+          setFocusedIndex={setFocusedIndex}
+        />
       )}
 
+      {/* Drawer */}
       <ContactDrawer
-        open={drawer} onClose={() => setDrawer(false)}
-        contact={editing} agents={agents} deals={deals}
-        tasks={db.tasks||[]} activities={activities}
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        contact={editing}
+        agents={agents}
+        deals={deals}
+        tasks={db.tasks || []}
+        activities={activities}
         activeAgent={activeAgent}
-        onActivityAdded={act => setDb(p => ({ ...p, activities: [act, ...(p.activities || [])] }))}
-        onSave={reload}
+        allTags={allTags}
+        properties={db.properties || []}
+        onActivityAdded={(act) => setDb(p => ({ ...p, activities: [act, ...(p.activities || [])] }))}
+        onSave={(saved) => {
+          if (saved) {
+            setDb(p => {
+              const existing = (p.contacts || []).find(c => c.id === saved.id)
+              const next = existing
+                ? p.contacts.map(c => c.id === saved.id ? saved : c)
+                : [saved, ...(p.contacts || [])]
+              return { ...p, contacts: next }
+            })
+          } else {
+            reload()
+          }
+        }}
+        onDuplicateCheck={checkDuplicate}
       />
-      {selected.size > 0 && (
-        <div style={{ position:'fixed', bottom:24, left:'50%', transform:'translateX(-50%)', background:'#1a2236', color:'#fff', borderRadius:12, padding:'12px 20px', display:'flex', alignItems:'center', gap:12, zIndex:500, boxShadow:'0 4px 24px rgba(0,0,0,0.35)', whiteSpace:'nowrap' }}>
-          <span style={{ fontSize:13, fontWeight:600 }}>{selected.size} contact{selected.size !== 1 ? 's' : ''} selected</span>
-          <div style={{ width:1, height:20, background:'rgba(255,255,255,0.15)' }} />
-          {/* Reassign to agent */}
-          <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-            <select
-              value={reassignTo}
-              onChange={e => setReassignTo(e.target.value)}
-              style={{ padding:'5px 10px', borderRadius:8, background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.25)', cursor:'pointer', fontSize:12, fontFamily:'var(--font-body)' }}
-            >
-              <option value="">Reassign to…</option>
-              {agents.map(a => <option key={a.id} value={a.id} style={{ color:'#000' }}>{a.name}</option>)}
-            </select>
-            {reassignTo && (
-              <button
-                style={{ padding:'5px 14px', borderRadius:8, background:'var(--gw-azure)', color:'#fff', border:'none', cursor:'pointer', fontSize:12, fontWeight:600 }}
-                onClick={() => bulkReassign(reassignTo)}
-              >
-                Assign
-              </button>
-            )}
-          </div>
-          <div style={{ width:1, height:20, background:'rgba(255,255,255,0.15)' }} />
-          <button style={{ padding:'5px 14px', borderRadius:8, background:'#ef4444', color:'#fff', border:'none', cursor:'pointer', fontSize:12, fontWeight:600, display:'flex', alignItems:'center', gap:6 }} onClick={bulkDelete}>
-            <Icon name="trash" size={13} /> Delete
-          </button>
-          <button style={{ padding:'5px 12px', borderRadius:8, background:'transparent', color:'#fff', border:'1px solid rgba(255,255,255,0.25)', cursor:'pointer', fontSize:12 }} onClick={() => { setSelected(new Set()); setReassignTo('') }}>
-            Cancel
-          </button>
-        </div>
+
+      {/* Bulk action bar */}
+      <BulkActionBar
+        selectedCount={selected.size}
+        agents={agents}
+        reassignTo={reassignTo}
+        setReassignTo={setReassignTo}
+        onReassign={bulkReassign}
+        onSetStatus={bulkSetStatus}
+        onDelete={() => setConfirm({ ids: [...selected], bulk: true })}
+        onClear={() => { setSelected(new Set()); setReassignTo('') }}
+      />
+
+      {/* Confirm dialogs */}
+      {confirm && (
+        <ConfirmDialog
+          message={confirm.bulk
+            ? `Delete ${confirm.ids.length} contact${confirm.ids.length !== 1 ? 's' : ''}? You'll have 8 seconds to undo.`
+            : 'Delete this contact? You\'ll have 8 seconds to undo.'}
+          onConfirm={() => { softDeleteContacts(confirm.ids); setConfirm(null) }}
+          onCancel={() => setConfirm(null)}
+        />
       )}
 
-      {confirm && <ConfirmDialog message="This will permanently delete this contact." onConfirm={() => deleteContact(confirm)} onCancel={() => setConfirm(null)} />}
+      {/* CSV import */}
       {importModal && (
         <CSVImportModal
-          agents={agents} activeAgent={activeAgent}
+          agents={agents}
+          activeAgent={activeAgent}
+          existingContacts={visible}
           onClose={() => setImportModal(false)}
           onImported={reload}
         />

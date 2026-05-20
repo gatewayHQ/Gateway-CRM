@@ -1,28 +1,34 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase.js'
+import { primeCache, invalidate } from './lib/queryCache.js'
 import { Icon, Avatar, Modal, Badge, ToastHost, Loading, ErrorBoundary, pushToast } from './components/UI.jsx'
-import Dashboard from './pages/Dashboard.jsx'
-import ContactsPage from './pages/Contacts.jsx'
-import PropertiesPage from './pages/Properties.jsx'
-import PipelinePage from './pages/Pipeline.jsx'
-import TasksPage from './pages/Tasks.jsx'
-import { ComposeModal } from './pages/Templates.jsx'
-import LoginPage from './pages/Login.jsx'
-import QuickAdd from './pages/QuickAdd.jsx'
-import MessagesPage from './pages/Messages.jsx'
+// All pages are lazy-loaded — only the current route's bundle downloads
+const Dashboard        = React.lazy(() => import('./pages/Dashboard.jsx'))
+const ContactsPage     = React.lazy(() => import('./pages/Contacts.jsx'))
+const PropertiesPage   = React.lazy(() => import('./pages/Properties.jsx'))
+const PipelinePage     = React.lazy(() => import('./pages/Pipeline.jsx'))
+const TasksPage        = React.lazy(() => import('./pages/Tasks.jsx'))
+const MessagesPage     = React.lazy(() => import('./pages/Messages.jsx'))
 const CommissionPage   = React.lazy(() => import('./pages/Commission.jsx'))
 const TemplatesPage    = React.lazy(() => import('./pages/Templates.jsx'))
 const TeamPage         = React.lazy(() => import('./pages/Team/index.jsx'))
 const SettingsPage     = React.lazy(() => import('./pages/Settings.jsx'))
 const LeadsPage        = React.lazy(() => import('./pages/Leads.jsx'))
-const OmPage           = React.lazy(() => import('./pages/Om.jsx'))
-const SocialPage       = React.lazy(() => import('./pages/Social.jsx'))
+const OmPage             = React.lazy(() => import('./pages/Om.jsx'))
+const SocialPage         = React.lazy(() => import('./pages/Social.jsx'))
+const DataManagementPage = React.lazy(() => import('./pages/DataManagement.jsx'))
 const ReportsPage      = React.lazy(() => import('./pages/Reports.jsx'))
 const SequencesPage    = React.lazy(() => import('./pages/Sequences.jsx'))
 const ColdCallsPage    = React.lazy(() => import('./pages/ColdCalls.jsx'))
 const IntegrationsPage = React.lazy(() => import('./pages/Integrations.jsx'))
 const CampaignsPage    = React.lazy(() => import('./pages/Campaigns.jsx'))
+import LoginPage from './pages/Login.jsx'
+import QuickAdd from './pages/QuickAdd.jsx'
 import { Analytics } from '@vercel/analytics/react'
+// ComposeModal is a named export — wrap in a lazy default-export shim
+const ComposeModalLazy = React.lazy(() =>
+  import('./pages/Templates.jsx').then(m => ({ default: m.ComposeModal }))
+)
 
 // Primary: what every agent uses every day
 const NAV_CORE = [
@@ -54,8 +60,9 @@ const NAV_TOOLS = [
 
 // Always visible at the bottom — never buried
 const NAV_ADMIN = [
-  { id: 'integrations', label: 'Integrations', icon: 'pipeline' },
-  { id: 'settings',     label: 'Settings',     icon: 'settings' },
+  { id: 'integrations',   label: 'Integrations',    icon: 'pipeline'  },
+  { id: 'data-management', label: 'Data Management', icon: 'tag'      },
+  { id: 'settings',       label: 'Settings',        icon: 'settings' },
 ]
 
 const TOOLS_IDS = NAV_TOOLS.map(n => n.id)
@@ -78,6 +85,7 @@ const TITLES = {
   social:     { title: 'Social Media',     crumb: 'Tools · Content' },
   leads:      { title: 'Website Leads',    crumb: 'Marketing · Captures' },
   integrations: { title: 'Integrations',    crumb: 'Tools · Connections' },
+  'data-management': { title: 'Data Management', crumb: 'Admin · Controlled Vocabulary' },
   settings:     { title: 'Settings',        crumb: 'Workspace' },
 }
 
@@ -324,18 +332,29 @@ export default function App() {
           : supabase.from('activities').select('*').order('created_at', { ascending: false }),
       ])
 
-      setDb({
+      const dbPayload = {
         contacts:         contacts.data     || [],
         properties:       properties.data   || [],
         deals:            deals.data         || [],
         tasks:            tasks.data         || [],
-        agents:           agentsData,              // full roster — needed for dropdowns everywhere
+        agents:           agentsData,
         templates:        templates.data     || [],
         commissions:      commissionsRes.data || [],
         commissionsReady: !commissionsRes.error,
         activities:       activitiesRes.data || [],
         activitiesReady:  !activitiesRes.error,
-      })
+      }
+      setDb(dbPayload)
+
+      // Seed query cache so page components skip redundant fetches
+      const agentKey = matched.id
+      primeCache(`contacts:${agentKey}`,    dbPayload.contacts)
+      primeCache(`properties:${agentKey}`,  dbPayload.properties)
+      primeCache(`deals:${agentKey}`,       dbPayload.deals)
+      primeCache(`tasks:${agentKey}`,       dbPayload.tasks)
+      primeCache(`templates:${agentKey}`,   dbPayload.templates)
+      primeCache(`activities:${agentKey}`,  dbPayload.activities)
+      primeCache(`agents:all`,              dbPayload.agents)
 
       setLoading(false)
     }
@@ -619,13 +638,18 @@ export default function App() {
           {route === 'om'         && <OmPage />}
           {route === 'social'     && <SocialPage />}
           {route === 'leads'      && <LeadsPage {...props} />}
-          {route === 'integrations' && <IntegrationsPage db={db} />}
-          {route === 'settings'     && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
+          {route === 'integrations'      && <IntegrationsPage db={db} />}
+          {route === 'data-management'   && <DataManagementPage />}
+          {route === 'settings'          && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
         </ErrorBoundary>
         </React.Suspense>
       </div>
 
-      {compose && <ComposeModal ctx={compose} db={db} activeAgent={activeAgent} onClose={() => setCompose(null)} />}
+      {compose && (
+        <React.Suspense fallback={null}>
+          <ComposeModalLazy ctx={compose} db={db} activeAgent={activeAgent} onClose={() => setCompose(null)} />
+        </React.Suspense>
+      )}
 
 
       {/* ── Mobile bottom nav ── */}

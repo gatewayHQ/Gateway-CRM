@@ -3,7 +3,7 @@
 // Both keep the access token server-side.
 
 const CORS_HEADERS = {
-  'Access-Control-Allow-Origin':  process.env.ALLOWED_ORIGIN || 'https://gatewayhq.github.io',
+  'Access-Control-Allow-Origin':  process.env.ALLOWED_ORIGIN || '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, x-gateway-secret',
 }

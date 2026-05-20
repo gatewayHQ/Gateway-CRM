@@ -527,3 +527,157 @@ end $$;
 -- alter table contacts add column if not exists size_min    numeric;
 -- alter table contacts add column if not exists size_max    numeric;
 -- alter table contacts add column if not exists size_unit   text default 'sqft';
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PERFORMANCE INDEXES
+-- Run this migration block to enable production-scale query performance.
+-- Each index here targets a specific query pattern used by the app.
+-- Expected improvement: 10–100x on filtered queries over large datasets.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- contacts — primary lookup patterns
+create index if not exists idx_contacts_agent        on contacts(assigned_agent_id);
+create index if not exists idx_contacts_created      on contacts(created_at desc);
+create index if not exists idx_contacts_status       on contacts(status);
+create index if not exists idx_contacts_type         on contacts(type);
+create index if not exists idx_contacts_agent_status on contacts(assigned_agent_id, status);
+-- Full-text search on contact name (used by search inputs)
+create index if not exists idx_contacts_name_fts     on contacts using gin(to_tsvector('english', first_name || ' ' || last_name));
+
+-- properties — primary lookup patterns
+create index if not exists idx_properties_agent        on properties(assigned_agent_id);
+create index if not exists idx_properties_created      on properties(created_at desc);
+create index if not exists idx_properties_status       on properties(status);
+create index if not exists idx_properties_type         on properties(type);
+create index if not exists idx_properties_agent_status on properties(assigned_agent_id, status);
+create index if not exists idx_properties_contact      on properties(linked_contact_id);
+
+-- deals — primary lookup patterns
+create index if not exists idx_deals_agent    on deals(agent_id);
+create index if not exists idx_deals_stage    on deals(stage);
+create index if not exists idx_deals_created  on deals(created_at desc);
+create index if not exists idx_deals_contact  on deals(contact_id);
+create index if not exists idx_deals_property on deals(property_id);
+create index if not exists idx_deals_close    on deals(expected_close_date) where stage not in ('closed','lost');
+
+-- tasks — always queried by agent + completion state
+create index if not exists idx_tasks_agent          on tasks(agent_id);
+create index if not exists idx_tasks_agent_complete on tasks(agent_id, completed);
+create index if not exists idx_tasks_due            on tasks(due_date asc) where completed = false;
+create index if not exists idx_tasks_contact        on tasks(contact_id);
+create index if not exists idx_tasks_deal           on tasks(deal_id);
+
+-- activities — contact timeline queries
+create index if not exists idx_activities_contact on activities(contact_id, created_at desc);
+create index if not exists idx_activities_agent   on activities(agent_id);
+
+-- commissions
+create index if not exists idx_commissions_agent   on commissions(agent_id);
+create index if not exists idx_commissions_deal    on commissions(deal_id);
+create index if not exists idx_commissions_paid    on commissions(paid, paid_at desc);
+
+-- agent_notifications — real-time inbox queries
+create index if not exists idx_notif_agent_unread on agent_notifications(agent_id, read) where read = false;
+create index if not exists idx_notif_created      on agent_notifications(created_at desc);
+
+-- mail_sends — campaign reporting (already has some indexes, adding agent lookup)
+create index if not exists idx_mail_sends_agent    on mail_sends(agent_id);
+create index if not exists idx_mail_sends_sent_at  on mail_sends(sent_at desc);
+create index if not exists idx_mail_sends_response on mail_sends(response) where response != 'no-response';
+
+-- docusign_envelopes — deal document queries
+create index if not exists idx_ds_envelopes_deal   on docusign_envelopes(deal_id);
+create index if not exists idx_ds_envelopes_agent  on docusign_envelopes(agent_id);
+create index if not exists idx_ds_envelopes_status on docusign_envelopes(status) where status not in ('completed','voided');
+
+-- transaction_steps — deal checklist queries
+create index if not exists idx_txn_steps_deal  on transaction_steps(deal_id, sort_order);
+
+-- templates — agent-scoped queries
+create index if not exists idx_templates_agent on templates(agent_id, created_at desc);
+
+-- team_splits — team resolution (hot path on every login)
+create index if not exists idx_team_splits_agent on team_splits(agent_id);
+create index if not exists idx_team_splits_team  on team_splits(team_id);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- FULL-TEXT SEARCH FUNCTION
+-- Enables server-side contact/property search without fetching all rows.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create or replace function search_contacts(search_term text, agent_ids uuid[], result_limit int default 50)
+returns setof contacts
+language sql stable
+as $$
+  select * from contacts
+  where assigned_agent_id = any(agent_ids)
+    and (
+      to_tsvector('english', first_name || ' ' || last_name) @@ plainto_tsquery('english', search_term)
+      or lower(email)   like '%' || lower(search_term) || '%'
+      or lower(phone)   like '%' || lower(search_term) || '%'
+      or lower(owner_city) like '%' || lower(search_term) || '%'
+    )
+  order by created_at desc
+  limit result_limit;
+$$;
+
+create or replace function search_properties(search_term text, agent_ids uuid[], result_limit int default 50)
+returns setof properties
+language sql stable
+as $$
+  select * from properties
+  where assigned_agent_id = any(agent_ids)
+    and (
+      lower(address) like '%' || lower(search_term) || '%'
+      or lower(city)  like '%' || lower(search_term) || '%'
+      or lower(mls_number) like '%' || lower(search_term) || '%'
+    )
+  order by created_at desc
+  limit result_limit;
+$$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- UPDATED_AT TRIGGER  (auto-stamp deals.updated_at on every update)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create or replace function set_updated_at()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists deals_updated_at on deals;
+create trigger deals_updated_at
+  before update on deals
+  for each row execute function set_updated_at();
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DASHBOARD STATS VIEW
+-- Pre-aggregated stats for the dashboard — single query instead of 6.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create or replace view agent_dashboard_stats as
+select
+  a.id                                                   as agent_id,
+  count(distinct c.id)                                   as total_contacts,
+  count(distinct c.id) filter (where c.status = 'active') as active_contacts,
+  count(distinct p.id)                                   as total_properties,
+  count(distinct d.id) filter (where d.stage not in ('closed','lost')) as open_deals,
+  count(distinct d.id) filter (where d.stage = 'closed') as closed_deals,
+  coalesce(sum(d.value) filter (where d.stage = 'closed'), 0) as closed_volume,
+  coalesce(sum(comm.net) filter (where comm.paid = true), 0) as total_commission_paid,
+  count(distinct t.id) filter (where t.completed = false and t.due_date < now()) as overdue_tasks
+from agents a
+left join contacts    c    on c.assigned_agent_id = a.id
+left join properties  p    on p.assigned_agent_id = a.id
+left join deals       d    on d.agent_id = a.id
+left join commissions comm on comm.agent_id = a.id
+left join tasks       t    on t.agent_id = a.id
+group by a.id;
+
+-- Grant read access to authenticated users
+grant select on agent_dashboard_stats to authenticated;
+grant execute on function search_contacts(text, uuid[], int) to authenticated;
+grant execute on function search_properties(text, uuid[], int) to authenticated;

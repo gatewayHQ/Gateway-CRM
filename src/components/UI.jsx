@@ -201,24 +201,71 @@ export function SearchDropdown({ items = [], onSelect, placeholder = 'Search...'
 // ─── TOAST SYSTEM ─────────────────────────────────────────────────────────────
 let toastSetterFn = null
 export function setToastSetter(fn) { toastSetterFn = fn }
-export function pushToast(message, type = 'success') {
-  if (toastSetterFn) toastSetterFn(prev => [...prev, { id: Date.now(), message, type }])
+
+/**
+ * pushToast(message, type?)
+ * pushToast(message, type, { actionLabel, onAction, duration })
+ *
+ * Examples:
+ *   pushToast('Contact saved')
+ *   pushToast('Send failed', 'error')
+ *   pushToast('1 contact deleted', 'info', {
+ *     actionLabel: 'Undo',
+ *     onAction:    () => restoreContact(id),
+ *     duration:    8000,
+ *   })
+ */
+export function pushToast(message, type = 'success', opts = {}) {
+  if (!toastSetterFn) return
+  const id = Date.now() + Math.random()
+  toastSetterFn(prev => [...prev, {
+    id,
+    message,
+    type,
+    actionLabel: opts.actionLabel || null,
+    onAction:    opts.onAction    || null,
+    duration:    opts.duration    || 3000,
+  }])
 }
 
 export function ToastHost() {
   const [toasts, setToasts] = useState([])
   useEffect(() => { setToastSetter(setToasts) }, [])
+
+  const dismiss = (id) => setToasts(prev => prev.filter(t => t.id !== id))
+
+  // Each toast manages its own dismiss timer based on duration
   useEffect(() => {
     if (toasts.length === 0) return
-    const t = setTimeout(() => setToasts(prev => prev.slice(1)), 3000)
-    return () => clearTimeout(t)
+    const timers = toasts.map(t => setTimeout(() => dismiss(t.id), t.duration))
+    return () => timers.forEach(clearTimeout)
   }, [toasts])
+
   return (
     <div className="toast-host">
       {toasts.map(t => (
         <div key={t.id} className={`toast toast--${t.type}`}>
           <Icon name={t.type === 'success' ? 'check' : t.type === 'error' ? 'x' : 'alert'} size={14} />
-          {t.message}
+          <span style={{ flex: 1 }}>{t.message}</span>
+          {t.actionLabel && t.onAction && (
+            <button
+              onClick={() => { t.onAction(); dismiss(t.id) }}
+              style={{
+                marginLeft: 8,
+                padding: '3px 10px',
+                background: 'rgba(255,255,255,0.15)',
+                border: '1px solid rgba(255,255,255,0.3)',
+                borderRadius: 4,
+                color: 'inherit',
+                cursor: 'pointer',
+                fontSize: 12,
+                fontWeight: 600,
+                fontFamily: 'inherit',
+              }}
+            >
+              {t.actionLabel}
+            </button>
+          )}
         </div>
       ))}
     </div>
