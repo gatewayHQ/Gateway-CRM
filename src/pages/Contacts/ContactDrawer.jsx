@@ -4,6 +4,7 @@ import { Drawer, Tabs, pushToast } from '../../components/UI.jsx'
 import { normalizePhone } from '../../lib/phone.js'
 import { validateEmail, validateRequired, validateForm } from '../../lib/validation.js'
 import OptionMultiSelect from '../../components/OptionMultiSelect.jsx'
+import ChipToggleGroup from '../../components/ChipToggleGroup.jsx'
 import ActivityTab from './ActivityTab.jsx'
 import { findMatchingProperties } from '../../lib/matching.js'
 import { formatCurrency } from '../../lib/helpers.js'
@@ -305,7 +306,7 @@ export default function ContactDrawer({
             <div className="form-row">
               <div className="form-group">
                 <label className="form-label">Type</label>
-                <select className="form-control" value={form.type} onChange={(e) => set('type', e.target.value)}>
+                <select className="form-control" value={form.type} onChange={(e) => { set('type', e.target.value) }}>
                   {['buyer','seller','landlord','tenant','investor'].map(t => <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>)}
                 </select>
               </div>
@@ -333,16 +334,98 @@ export default function ContactDrawer({
               </div>
             </div>
 
+            {/* ── Buyer / Investor Criteria ───────────────────────────────────────
+                Shown right after the Type selector so agents don't have to scroll.
+                All fields optional — no match is made when left empty.           */}
+            {isBuyer && (
+              <div style={{
+                background: 'var(--gw-sky, #f0f7ff)',
+                border: '1px solid var(--gw-azure)',
+                borderRadius: 'var(--radius)',
+                padding: '12px 14px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 12,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gw-azure)' }}>
+                    {form.type === 'investor' ? 'Investment Criteria' : 'Buyer Criteria'}
+                    <span style={{ marginLeft: 6, fontWeight: 400, textTransform: 'none', letterSpacing: 0, color: 'var(--gw-mist)', fontSize: 11 }}>— all optional</span>
+                  </div>
+                </div>
+
+                {/* Asset Types — inline chip grid, scannable at a glance */}
+                <div>
+                  <label className="form-label" style={{ marginBottom: 6, display: 'block' }}>Asset Types</label>
+                  <ChipToggleGroup
+                    fieldKey="asset_type"
+                    value={Array.isArray(form.asset_types) ? form.asset_types : []}
+                    onChange={(v) => set('asset_types', v)}
+                    placeholder="Filter asset types…"
+                    allowAdd
+                    searchThreshold={12}
+                  />
+                </div>
+
+                {/* Submarkets — search-first since list can be large */}
+                <div>
+                  <label className="form-label" style={{ marginBottom: 6, display: 'block' }}>Submarkets</label>
+                  <OptionMultiSelect
+                    fieldKey="submarket"
+                    value={Array.isArray(form.submarkets) ? form.submarkets : []}
+                    onChange={(v) => set('submarkets', v)}
+                    placeholder="Search submarkets…"
+                    allowAdd
+                  />
+                </div>
+
+                {/* Size range — compact inline row */}
+                <div>
+                  <label className="form-label" style={{ marginBottom: 6, display: 'block' }}>Size Range</label>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <input
+                      className="form-control"
+                      type="number"
+                      value={form.size_min || ''}
+                      onChange={(e) => set('size_min', e.target.value)}
+                      placeholder="Min"
+                      style={{ flex: 1 }}
+                    />
+                    <span style={{ color: 'var(--gw-mist)', fontSize: 13, flexShrink: 0 }}>–</span>
+                    <input
+                      className="form-control"
+                      type="number"
+                      value={form.size_max || ''}
+                      onChange={(e) => set('size_max', e.target.value)}
+                      placeholder="Max"
+                      style={{ flex: 1 }}
+                    />
+                    <select
+                      className="form-control"
+                      value={form.size_unit || 'sqft'}
+                      onChange={(e) => set('size_unit', e.target.value)}
+                      style={{ width: 76, flexShrink: 0 }}
+                    >
+                      <option value="sqft">sqft</option>
+                      <option value="acres">acres</option>
+                      <option value="units">units</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Tags — chip grid so agents see all options without a dropdown */}
             <div className="form-group">
-              <label className="form-label">Tags</label>
-              <OptionMultiSelect
+              <label className="form-label">Tags <span style={{ fontWeight: 400, color: 'var(--gw-mist)', fontSize: 11 }}>— optional</span></label>
+              <ChipToggleGroup
                 fieldKey="tag"
                 value={Array.isArray(form.tags) ? form.tags : []}
                 onChange={(v) => set('tags', v)}
-                placeholder="Search or add tags…"
+                placeholder="Filter tags…"
                 allowAdd
+                searchThreshold={10}
               />
-              <div className="form-hint">Picked from your organization's tag list. Type to search or add a new tag.</div>
             </div>
 
             <div className="form-row">
@@ -360,59 +443,6 @@ export default function ContactDrawer({
               <label className="form-label">Notes</label>
               <textarea className="form-control form-control--textarea" value={form.notes || ''} onChange={(e) => set('notes', e.target.value)} placeholder="Add notes…" />
             </div>
-
-            {/* Investment Criteria — drives the buyer/property matching engine */}
-            {isBuyer && (
-              <div style={{ borderTop: '1px solid var(--gw-border)', marginTop: 4, paddingTop: 14 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gw-mist)', marginBottom: 4 }}>
-                  {form.type === 'investor' ? 'Investment Criteria' : 'Buyer Criteria'}
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginBottom: 12, lineHeight: 1.5 }}>
-                  This contact will only be suggested as a match for properties whose submarket <em>and</em> asset type appear below.
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Submarkets</label>
-                  <OptionMultiSelect
-                    fieldKey="submarket"
-                    value={Array.isArray(form.submarkets) ? form.submarkets : []}
-                    onChange={(v) => set('submarkets', v)}
-                    placeholder="Pick the markets they're searching…"
-                    allowAdd
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Asset Types</label>
-                  <OptionMultiSelect
-                    fieldKey="asset_type"
-                    value={Array.isArray(form.asset_types) ? form.asset_types : []}
-                    onChange={(v) => set('asset_types', v)}
-                    placeholder="Pick property types they want…"
-                    allowAdd
-                  />
-                </div>
-
-                <div className="form-row">
-                  <div className="form-group">
-                    <label className="form-label">Min Size</label>
-                    <input className="form-control" type="number" value={form.size_min || ''} onChange={(e) => set('size_min', e.target.value)} placeholder="0" />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">Max Size</label>
-                    <input className="form-control" type="number" value={form.size_max || ''} onChange={(e) => set('size_max', e.target.value)} placeholder="Any" />
-                  </div>
-                  <div className="form-group" style={{ maxWidth: 90 }}>
-                    <label className="form-label">Unit</label>
-                    <select className="form-control" value={form.size_unit || 'sqft'} onChange={(e) => set('size_unit', e.target.value)}>
-                      <option value="sqft">sqft</option>
-                      <option value="acres">acres</option>
-                      <option value="units">units</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
           <div className="drawer__foot">
             <button className="btn btn--secondary" onClick={requestClose}>Cancel</button>
