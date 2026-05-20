@@ -1,0 +1,36 @@
+# Local development convenience. The production deployment target is Vercel;
+# this file lets contributors run the full stack locally and gives us a tested
+# fallback if we ever need to migrate hosts.
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+    image: gateway-crm:local
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Optional: run `vercel dev` for the serverless API surface alongside the SPA.
+  # Enable with `docker compose --profile api up`.
+  api:
+    profiles: ["api"]
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: sh -c "npm ci && npx vercel dev --listen 0.0.0.0:3000 --yes"
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.local

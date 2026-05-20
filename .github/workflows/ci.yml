@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Verify Vercel function count (Hobby plan ≤ 12)
+        run: |
+          COUNT=$(find api -maxdepth 1 -type f \( -name '*.js' -o -name '*.ts' \) | wc -l)
+          echo "Serverless function count: $COUNT"
+          if [ "$COUNT" -gt 12 ]; then
+            echo "::error::Function count $COUNT exceeds Vercel Hobby plan limit (12)"
+            exit 1
+          fi
+
+      - name: Build production bundle
+        run: npm run build
+        env:
+          VITE_SUPABASE_URL: https://placeholder.supabase.co
+          VITE_SUPABASE_ANON_KEY: placeholder
+
+      - name: Check bundle size
+        run: |
+          MAIN_KB=$(du -k dist/assets/index-*.js 2>/dev/null | awk '{s+=$1} END {print s+0}')
+          echo "Main bundle: ${MAIN_KB} KB"
+          if [ "$MAIN_KB" -gt 250 ]; then
+            echo "::warning::Main bundle ${MAIN_KB} KB exceeds 250 KB soft limit"
+          fi
+
+      - name: Syntax-check API handlers
+        run: |
+          for f in api/*.js; do
+            node --check "$f" || { echo "::error file=$f::Syntax error"; exit 1; }
+          done
+
+      - name: Security audit (high+ only)
+        run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true
+
+  schema-lint:
+    name: Schema Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify schema.sql exists
+        run: test -f src/lib/schema.sql
+      - name: Check for forbidden destructive statements in schema
+        run: |
+          if grep -nE '^\s*(DROP TABLE|TRUNCATE)' src/lib/schema.sql; then
+            echo "::error::Destructive statements not allowed in schema.sql"
+            exit 1
+          fi

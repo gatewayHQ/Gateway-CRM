@@ -8,6 +8,32 @@ export default async function handler(req, res) {
   const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
   const ANON_KEY     = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR3Z3dlbWtpaHB3bGdsaWZ0YWdnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNjkzMjAsImV4cCI6MjA5MjY0NTMyMH0.YRaCsDpExXjuPyrssFyzXP9RQktFAW7GTuEMgQq8sZU'
 
+  // Health check — folded into this endpoint so external uptime monitors can
+  // ping /api/listings?action=health without consuming a Vercel function slot.
+  if (req.query?.action === 'health') {
+    const t0 = Date.now()
+    let supabaseOk = false
+    let supabaseLatency = null
+    try {
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/agents?select=id&limit=1`, {
+        headers: { apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` },
+      })
+      supabaseOk = r.ok
+      supabaseLatency = Date.now() - t0
+    } catch {
+      supabaseOk = false
+    }
+    return res.status(supabaseOk ? 200 : 503).json({
+      status: supabaseOk ? 'healthy' : 'degraded',
+      service: 'gateway-crm',
+      version: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || 'dev',
+      env: process.env.VERCEL_ENV || 'development',
+      region: process.env.VERCEL_REGION || null,
+      checks: { supabase: { ok: supabaseOk, latency_ms: supabaseLatency } },
+      timestamp: new Date().toISOString(),
+    })
+  }
+
   const proto = req.headers['x-forwarded-proto'] || 'https'
   const host  = req.headers.host
   const base  = `${proto}://${host}`
