@@ -14,8 +14,9 @@ const TemplatesPage    = React.lazy(() => import('./pages/Templates.jsx'))
 const TeamPage         = React.lazy(() => import('./pages/Team/index.jsx'))
 const SettingsPage     = React.lazy(() => import('./pages/Settings.jsx'))
 const LeadsPage        = React.lazy(() => import('./pages/Leads.jsx'))
-const OmPage           = React.lazy(() => import('./pages/Om.jsx'))
-const SocialPage       = React.lazy(() => import('./pages/Social.jsx'))
+const OmPage             = React.lazy(() => import('./pages/Om.jsx'))
+const SocialPage         = React.lazy(() => import('./pages/Social.jsx'))
+const DataManagementPage = React.lazy(() => import('./pages/DataManagement.jsx'))
 const ReportsPage      = React.lazy(() => import('./pages/Reports.jsx'))
 const SequencesPage    = React.lazy(() => import('./pages/Sequences.jsx'))
 const ColdCallsPage    = React.lazy(() => import('./pages/ColdCalls.jsx'))
@@ -59,8 +60,9 @@ const NAV_TOOLS = [
 
 // Always visible at the bottom — never buried
 const NAV_ADMIN = [
-  { id: 'integrations', label: 'Integrations', icon: 'pipeline' },
-  { id: 'settings',     label: 'Settings',     icon: 'settings' },
+  { id: 'integrations',   label: 'Integrations',    icon: 'pipeline'  },
+  { id: 'data-management', label: 'Data Management', icon: 'tag'      },
+  { id: 'settings',       label: 'Settings',        icon: 'settings' },
 ]
 
 const TOOLS_IDS = NAV_TOOLS.map(n => n.id)
@@ -83,6 +85,7 @@ const TITLES = {
   social:     { title: 'Social Media',     crumb: 'Tools · Content' },
   leads:      { title: 'Website Leads',    crumb: 'Marketing · Captures' },
   integrations: { title: 'Integrations',    crumb: 'Tools · Connections' },
+  'data-management': { title: 'Data Management', crumb: 'Admin · Controlled Vocabulary' },
   settings:     { title: 'Settings',        crumb: 'Workspace' },
 }
 
@@ -635,8 +638,9 @@ export default function App() {
           {route === 'om'         && <OmPage />}
           {route === 'social'     && <SocialPage />}
           {route === 'leads'      && <LeadsPage {...props} />}
-          {route === 'integrations' && <IntegrationsPage db={db} />}
-          {route === 'settings'     && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
+          {route === 'integrations'      && <IntegrationsPage db={db} />}
+          {route === 'data-management'   && <DataManagementPage />}
+          {route === 'settings'          && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
         </ErrorBoundary>
         </React.Suspense>
       </div>

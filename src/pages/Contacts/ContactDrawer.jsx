@@ -3,7 +3,7 @@ import { supabase } from '../../lib/supabase.js'
 import { Drawer, Tabs, pushToast } from '../../components/UI.jsx'
 import { normalizePhone } from '../../lib/phone.js'
 import { validateEmail, validateRequired, validateForm } from '../../lib/validation.js'
-import TagInput from './TagInput.jsx'
+import OptionMultiSelect from '../../components/OptionMultiSelect.jsx'
 import ActivityTab from './ActivityTab.jsx'
 
 const BLANK = {
@@ -12,7 +12,8 @@ const BLANK = {
   assigned_agent_id: '', notes: '', tags: [],
   owner_address: '', owner_city: '', owner_state: '', owner_zip: '',
   birthday: '', anniversary_date: '',
-  submarket: '', asset_types: [], size_min: '', size_max: '', size_unit: 'sqft',
+  submarket: '', submarkets: [], asset_types: [],
+  size_min: '', size_max: '', size_unit: 'sqft',
 }
 const BLANK_PROP = { address: '', list_price: '', type: 'residential', subtype: '', beds: '', baths: '', sqft: '', garage: '', details: {} }
 
@@ -36,7 +37,21 @@ export default function ContactDrawer({
 
   // Reset on contact change
   useEffect(() => {
-    setForm(contact ? { ...BLANK, ...contact, tags: Array.isArray(contact.tags) ? contact.tags : [] } : BLANK)
+    if (contact) {
+      // Backfill submarkets[] from legacy single-value submarket if needed
+      const submarkets = Array.isArray(contact.submarkets) && contact.submarkets.length
+        ? contact.submarkets
+        : (contact.submarket ? [contact.submarket] : [])
+      setForm({
+        ...BLANK,
+        ...contact,
+        submarkets,
+        tags:        Array.isArray(contact.tags)        ? contact.tags        : [],
+        asset_types: Array.isArray(contact.asset_types) ? contact.asset_types : [],
+      })
+    } else {
+      setForm(BLANK)
+    }
     setErrors({})
     setTab('details')
     setAddProp(false)
@@ -96,7 +111,8 @@ export default function ContactDrawer({
       return
     }
 
-    const { submarket, asset_types, size_min, size_max, size_unit, ...baseForm } = form
+    const { submarket, submarkets, asset_types, size_min, size_max, size_unit, ...baseForm } = form
+    const submarketList = Array.isArray(submarkets) ? submarkets.filter(Boolean) : []
 
     const payload = {
       ...baseForm,
@@ -107,7 +123,9 @@ export default function ContactDrawer({
       phone:             normalizedPhone,
       tags:              Array.isArray(form.tags) ? form.tags : [],
       ...(isBuyer && {
-        submarket:   submarket || null,
+        // Keep legacy single-value submarket synced for backward compatibility
+        submarket:   submarketList[0] || null,
+        submarkets:  submarketList,
         asset_types: Array.isArray(asset_types) ? asset_types : [],
         size_min:    size_min ? Number(size_min) : null,
         size_max:    size_max ? Number(size_max) : null,
@@ -124,7 +142,7 @@ export default function ContactDrawer({
     // Migration-pending fallback
     let criteriaDropped = false
     if (error?.message?.includes('schema cache') && isBuyer) {
-      const { submarket: _s, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u, ...payloadNoCriteria } = payload
+      const { submarket: _s, submarkets: _ss, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u, ...payloadNoCriteria } = payload
       ;({ data: saved, error } = await doSave(payloadNoCriteria))
       if (!error) criteriaDropped = true
     }
@@ -307,12 +325,14 @@ export default function ContactDrawer({
 
             <div className="form-group">
               <label className="form-label">Tags</label>
-              <TagInput
+              <OptionMultiSelect
+                fieldKey="tag"
                 value={Array.isArray(form.tags) ? form.tags : []}
                 onChange={(v) => set('tags', v)}
-                suggestions={allTags}
-                placeholder="vip, referral, hot-lead…"
+                placeholder="Search or add tags…"
+                allowAdd
               />
+              <div className="form-hint">Picked from your organization's tag list. Type to search or add a new tag.</div>
             </div>
 
             <div className="form-row">
@@ -331,45 +351,38 @@ export default function ContactDrawer({
               <textarea className="form-control form-control--textarea" value={form.notes || ''} onChange={(e) => set('notes', e.target.value)} placeholder="Add notes…" />
             </div>
 
-            {/* Investment Criteria */}
+            {/* Investment Criteria — drives the buyer/property matching engine */}
             {isBuyer && (
               <div style={{ borderTop: '1px solid var(--gw-border)', marginTop: 4, paddingTop: 14 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gw-mist)', marginBottom: 10 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gw-mist)', marginBottom: 4 }}>
                   {form.type === 'investor' ? 'Investment Criteria' : 'Buyer Criteria'}
                 </div>
-                <div className="form-group">
-                  <label className="form-label">Target Market / Area</label>
-                  <input className="form-control" value={form.submarket || ''} onChange={(e) => set('submarket', e.target.value)} placeholder="e.g. Austin, Travis County" />
+                <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginBottom: 12, lineHeight: 1.5 }}>
+                  This contact will only be suggested as a match for properties whose submarket <em>and</em> asset type appear below.
                 </div>
+
+                <div className="form-group">
+                  <label className="form-label">Submarkets</label>
+                  <OptionMultiSelect
+                    fieldKey="submarket"
+                    value={Array.isArray(form.submarkets) ? form.submarkets : []}
+                    onChange={(v) => set('submarkets', v)}
+                    placeholder="Pick the markets they're searching…"
+                    allowAdd
+                  />
+                </div>
+
                 <div className="form-group">
                   <label className="form-label">Asset Types</label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
-                    {['residential','rental','multifamily','office','land','retail','industrial','mixed-use'].map(t => {
-                      const on = (form.asset_types || []).includes(t)
-                      return (
-                        <label key={t} style={{
-                          display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer',
-                          fontSize: 11, fontWeight: 600, padding: '3px 10px', borderRadius: 20,
-                          color: on ? 'var(--gw-azure)' : 'var(--gw-mist)',
-                          background: on ? 'var(--gw-sky)' : '#fff',
-                          border: `1px solid ${on ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
-                          transition: 'all 120ms', userSelect: 'none',
-                        }}>
-                          <input
-                            type="checkbox"
-                            checked={on}
-                            onChange={() => {
-                              const current = form.asset_types || []
-                              set('asset_types', on ? current.filter(x => x !== t) : [...current, t])
-                            }}
-                            style={{ display: 'none' }}
-                          />
-                          {t.charAt(0).toUpperCase() + t.slice(1)}
-                        </label>
-                      )
-                    })}
-                  </div>
+                  <OptionMultiSelect
+                    fieldKey="asset_type"
+                    value={Array.isArray(form.asset_types) ? form.asset_types : []}
+                    onChange={(v) => set('asset_types', v)}
+                    placeholder="Pick property types they want…"
+                    allowAdd
+                  />
                 </div>
+
                 <div className="form-row">
                   <div className="form-group">
                     <label className="form-label">Min Size</label>
