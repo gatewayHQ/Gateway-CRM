@@ -861,6 +861,7 @@ export default function CampaignsPage({ db, isAdmin }) {
   const [saving,   setSaving]       = useState(false)
   const [dashboard, setDashboard]   = useState(null)
   const [setupNeeded, setSetupNeeded] = useState(false)
+  const [setupError,  setSetupError]  = useState('')
 
   // Filters
   const [search, setSearch]         = useState('')
@@ -875,8 +876,9 @@ export default function CampaignsPage({ db, isAdmin }) {
       api('dashboard', {}, 'GET'),
       supabase.from('contacts').select('id, first_name, last_name, email, phone, owner_address, owner_city, owner_state, owner_zip').order('last_name'),
     ])
-    if (mRes.error && /does not exist|relation/i.test(mRes.error)) {
+    if (mRes.error && /does not exist|relation|invalid path|server misconfigured/i.test(mRes.error)) {
       setSetupNeeded(true)
+      setSetupError(mRes.error)
       setLoading(false)
       return
     }
@@ -926,14 +928,31 @@ export default function CampaignsPage({ db, isAdmin }) {
   }, [mailings, statusFilter, agentFilter, search, sort])
 
   if (setupNeeded) {
+    const isEnvError = /invalid path|server misconfigured/i.test(setupError)
     return (
       <div style={{ padding:40, maxWidth:780 }}>
-        <h2 style={{ fontFamily:'var(--font-display)', margin:0 }}>Campaign Tracking — Setup</h2>
-        <p style={{ color:'var(--gw-mist)', marginTop:8 }}>
-          The mailings tables haven't been created yet. Run the migration once in your Supabase SQL editor — it's in <code>src/lib/schema.sql</code> under the <strong>MAILINGS (v2)</strong> section.
-        </p>
+        <h2 style={{ fontFamily:'var(--font-display)', margin:0 }}>Campaign Tracking — Setup Required</h2>
+        {isEnvError ? (
+          <>
+            <p style={{ color:'var(--gw-mist)', marginTop:8 }}>
+              The campaigns API can't reach the database. This is usually a missing environment variable in Vercel.
+            </p>
+            <p style={{ marginTop:8, fontSize:13 }}>
+              Go to <strong>Vercel → Project → Settings → Environment Variables</strong> and confirm these are set:
+            </p>
+            <ul style={{ fontSize:13, marginTop:8, lineHeight:1.8 }}>
+              <li><code>SUPABASE_URL</code> — your Supabase project URL (e.g. <code>https://xxxx.supabase.co</code>)</li>
+              <li><code>SUPABASE_SERVICE_KEY</code> — the <em>service_role</em> secret key from Supabase → Settings → API</li>
+            </ul>
+            {setupError && <pre style={{ marginTop:8, fontSize:11, background:'var(--gw-bone)', padding:'8px 12px', borderRadius:6, color:'var(--gw-red)', whiteSpace:'pre-wrap' }}>{setupError}</pre>}
+          </>
+        ) : (
+          <p style={{ color:'var(--gw-mist)', marginTop:8 }}>
+            The mailings tables haven't been created yet. Run the migration once in your Supabase SQL editor — it's in <code>src/lib/schema.sql</code> under the <strong>MAILINGS (v2)</strong> section.
+          </p>
+        )}
         <button className="btn btn--primary" onClick={loadAll} style={{ marginTop:16 }}>
-          I've run the migration — Reload
+          {isEnvError ? 'Retry' : "I've run the migration — Reload"}
         </button>
       </div>
     )
