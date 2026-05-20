@@ -54,7 +54,8 @@ export default function LandingValuation({ mailingId }) {
   const submit = async (e) => {
     e.preventDefault()
     if (!form.property_address.trim()) { setError('Please enter the property address'); return }
-    if (!form.phone.trim() && !form.email.trim()) { setError('Please share a phone or email so we can send your estimate'); return }
+    if (!form.name.trim()) { setError('Please enter your name'); return }
+    if (!form.phone.trim()) { setError('Please enter a phone number so we can reach you'); return }
     setError(null)
     setSubmitting(true)
     const res = await fetch('/api/campaigns', {
@@ -127,17 +128,17 @@ export default function LandingValuation({ mailingId }) {
                 <div style={{ height:1, background:'#eaecf0', margin:'4px 0' }} />
 
                 <label style={labelStyle}>
-                  Your name (optional)
-                  <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={inputStyle} />
+                  Your name *
+                  <input required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={inputStyle} />
                 </label>
 
                 <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
                   <label style={labelStyle}>
-                    Phone
-                    <input type="tel" value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} style={inputStyle} placeholder="(555) 555-5555" />
+                    Phone *
+                    <input required type="tel" value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} style={inputStyle} placeholder="(555) 555-5555" />
                   </label>
                   <label style={labelStyle}>
-                    Email
+                    Email (optional)
                     <input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} style={inputStyle} placeholder="you@example.com" />
                   </label>
                 </div>

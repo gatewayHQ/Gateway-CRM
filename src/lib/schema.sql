@@ -699,8 +699,9 @@ create table if not exists mailings (
   mailing_type           text check (mailing_type in ('postcard','letter','flyer','door-hanger','other')) default 'postcard',
   status                 text check (status in ('draft','active','sent','archived')) default 'draft',
   qr_token               text not null unique,                -- short slug → /m/{token}
-  landing_type           text check (landing_type in ('property','valuation','custom')) default 'property',
+  landing_type           text check (landing_type in ('property','valuation','custom','multifamily')) default 'property',
   landing_custom_url     text,                                -- only used when landing_type='custom'
+  landing_config         jsonb default '{}',                  -- collage/headline/highlights for custom + multifamily landings
   send_date              date,                                -- when the mailer was/will be dropped
   recipient_count        integer default 0,                   -- denormalized counter
   scan_count             integer default 0,                   -- denormalized counter
@@ -708,6 +709,21 @@ create table if not exists mailings (
   created_at             timestamptz default now(),
   updated_at             timestamptz default now()
 );
+
+-- Migration for existing installs: add landing_config + multifamily landing_type
+alter table mailings add column if not exists landing_config jsonb default '{}';
+do $$ begin
+  alter table mailings drop constraint if exists mailings_landing_type_check;
+  alter table mailings add constraint mailings_landing_type_check
+    check (landing_type in ('property','valuation','custom','multifamily'));
+exception when others then null; end $$;
+
+-- Allow 'multifamily' as a valid lead source_landing for existing installs
+do $$ begin
+  alter table mailing_leads drop constraint if exists mailing_leads_source_landing_check;
+  alter table mailing_leads add constraint mailing_leads_source_landing_check
+    check (source_landing in ('property','valuation','custom','multifamily'));
+exception when others then null; end $$;
 
 create index if not exists mailings_agent_id_idx     on mailings(agent_id);
 create index if not exists mailings_status_idx       on mailings(status);
@@ -791,7 +807,7 @@ create table if not exists mailing_leads (
   message           text,
   property_address  text,                      -- valuation requests only
   property_type     text,
-  source_landing    text check (source_landing in ('property','valuation','custom')),
+  source_landing    text check (source_landing in ('property','valuation','custom','multifamily')),
   ip_hash           text,
   created_at        timestamptz default now()
 );

@@ -52,10 +52,8 @@ export default function LandingProperty({ mailingId }) {
 
   const submit = async (e) => {
     e.preventDefault()
-    if (!form.name.trim() && !form.email.trim() && !form.phone.trim()) {
-      setError('Please share at least your name, email, or phone so we can follow up.')
-      return
-    }
+    if (!form.name.trim()) { setError('Please enter your name'); return }
+    if (!form.phone.trim()) { setError('Please enter a phone number so we can reach you'); return }
     setError(null)
     setSubmitting(true)
     const res = await fetch('/api/campaigns', {
@@ -150,17 +148,17 @@ export default function LandingProperty({ mailingId }) {
               <>
                 <h2 style={{ fontFamily:'Cormorant Garamond, serif', fontSize:22, fontWeight:600, marginTop:0 }}>Want to know more?</h2>
                 <p style={{ fontSize:13, color:'#9aa3b2', margin:'4px 0 16px' }}>
-                  Share what's most convenient — name only, phone, or email. No spam.
+                  Leave your name and number — we'll get you the details fast. No spam, ever.
                 </p>
                 <form onSubmit={submit} style={{ display:'flex', flexDirection:'column', gap:10 }}>
-                  <input className="input" placeholder="Your name (optional)"
+                  <input required className="input" placeholder="Your name *"
                          value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                         style={inputStyle} />
+                  <input required className="input" type="tel" placeholder="Phone number *"
+                         value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
                          style={inputStyle} />
                   <input className="input" type="email" placeholder="Email (optional)"
                          value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
-                         style={inputStyle} />
-                  <input className="input" type="tel" placeholder="Phone (optional)"
-                         value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
                          style={inputStyle} />
                   <textarea placeholder="Anything specific you'd like to know? (optional)"
                             rows={3} value={form.message} onChange={e => setForm(f => ({ ...f, message: e.target.value }))}

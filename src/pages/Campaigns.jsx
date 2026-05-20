@@ -24,9 +24,81 @@ const MAILING_TYPE_OPTS = [
 ]
 
 const LANDING_OPTS = [
-  { value: 'property',  label: 'Property Showcase', sub: 'Show the linked property + capture interest' },
-  { value: 'valuation', label: 'Home Valuation',    sub: 'Ask "what\'s your home worth?" + capture seller leads' },
-  { value: 'custom',    label: 'Custom URL',        sub: 'Redirect to any URL you control' },
+  { value: 'property',    label: 'Property Showcase',     icon: 'building',    sub: 'Hero photo + details of a property in your CRM. Best when you have a clean listing.' },
+  { value: 'multifamily', label: 'Multifamily Valuation', icon: 'trending-up', sub: 'Dark, premium "what\'s your multifamily worth?" page. Bring your own photos + market stats.' },
+  { value: 'valuation',   label: 'Home Valuation',        icon: 'dollar',      sub: 'Single-family / general "what\'s your home worth?" page. Captures seller leads.' },
+  { value: 'custom',      label: 'Custom URL',            icon: 'link',        sub: 'Redirect the QR to any URL you control — your own site, MLS, video, etc.' },
+]
+
+// Quick-start templates — pre-fill the form so an agent can spin up a mailing in 5 seconds
+const TEMPLATES = [
+  {
+    id:          'just-sold',
+    label:       'Just Sold',
+    description: 'Postcard to neighbors after a closing — drives valuation requests.',
+    accent:      '#10b981',
+    icon:        'check',
+    fields: {
+      name:         'Just Sold — [Address]',
+      description:  'Sent to surrounding 200 homes after a closing.',
+      mailing_type: 'postcard',
+      landing_type: 'multifamily',
+      landing_config: {
+        headline:    'Your neighbor just sold. Curious what yours is worth?',
+        subheadline: "We just closed nearby. Get the same cap-rate-driven analysis we used — no obligation, no sales pitch.",
+        cta_text:    'See my valuation',
+      },
+    },
+  },
+  {
+    id:          'just-listed',
+    label:       'Just Listed',
+    description: 'Drive showings + buyer leads for an active listing.',
+    accent:      '#2563eb',
+    icon:        'home',
+    fields: {
+      name:         'Just Listed — [Address]',
+      description:  'Postcard drop to drive showings on a new listing.',
+      mailing_type: 'postcard',
+      landing_type: 'property',
+    },
+  },
+  {
+    id:          'multifamily-farm',
+    label:       'Multifamily Farm',
+    description: 'Targeted mailer to multifamily owners in a submarket.',
+    accent:      '#c9a961',
+    icon:        'trending-up',
+    fields: {
+      name:         'Multifamily Farm — [Submarket]',
+      description:  'Quarterly touch to multifamily owners in our farm area.',
+      mailing_type: 'postcard',
+      landing_type: 'multifamily',
+      landing_config: {
+        headline:    "What's your multifamily really worth in today's market?",
+        subheadline: "Rates moved. Comps moved. Get a fresh cap-rate-driven number from a broker who actually closes deals here.",
+        cta_text:    'Get my free valuation',
+        highlights: [
+          { label: 'Closed in submarket', value: '$240M+' },
+          { label: 'Avg days on market',  value: '38' },
+          { label: 'Owners served',       value: '120+' },
+        ],
+      },
+    },
+  },
+  {
+    id:          'open-house',
+    label:       'Open House',
+    description: 'Drive foot traffic to a Saturday/Sunday open house.',
+    accent:      '#7c3aed',
+    icon:        'calendar',
+    fields: {
+      name:         'Open House — [Address]',
+      description:  'Door hangers for the weekend before an open house.',
+      mailing_type: 'door-hanger',
+      landing_type: 'property',
+    },
+  },
 ]
 
 const STATUS_CONFIG = {
@@ -39,6 +111,44 @@ const STATUS_CONFIG = {
 function StatusBadge({ status }) {
   const c = STATUS_CONFIG[status] || STATUS_CONFIG.draft
   return <span style={{ padding:'2px 9px', borderRadius:10, fontSize:11, fontWeight:700, background:c.bg, color:c.color }}>{c.label}</span>
+}
+
+function LandingTypeChip({ type }) {
+  const cfg = {
+    property:    { label: 'Property',    bg: '#dbeafe',   color: '#1d4ed8' },
+    multifamily: { label: 'Multifamily', bg: '#fef3c7',   color: '#92400e' },
+    valuation:   { label: 'Valuation',   bg: '#dcfce7',   color: '#166534' },
+    custom:      { label: 'Custom URL',  bg: '#f3e8ff',   color: '#6b21a8' },
+  }
+  const c = cfg[type] || cfg.property
+  return (
+    <span style={{ padding:'1px 7px', borderRadius:9, fontSize:10, fontWeight:700,
+                   background:c.bg, color:c.color, letterSpacing:0.3 }}>
+      {c.label}
+    </span>
+  )
+}
+
+function FunnelBar({ scanRate, leadRate }) {
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+      <FunnelRow label="Scanned" rate={scanRate} color="var(--gw-azure)" />
+      <FunnelRow label="Lead"    rate={leadRate} color="var(--gw-green)" />
+    </div>
+  )
+}
+function FunnelRow({ label, rate, color }) {
+  return (
+    <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+      <div style={{ width:48, fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase', fontWeight:600 }}>{label}</div>
+      <div style={{ flex:1, height:5, background:'var(--gw-bone)', borderRadius:3, overflow:'hidden' }}>
+        <div style={{ width:`${rate}%`, height:'100%', background:color, transition:'width 300ms' }} />
+      </div>
+      <div style={{ width:32, textAlign:'right', fontSize:10, color:'var(--gw-mist)', fontWeight:700 }}>
+        {rate > 0 ? `${rate.toFixed(rate < 10 ? 1 : 0)}%` : '—'}
+      </div>
+    </div>
+  )
 }
 
 function StatCard({ value, label, sub, color }) {
@@ -124,30 +234,42 @@ async function api(action, payload = {}, method = 'POST') {
 
 // ─── New / Edit Mailing form ──────────────────────────────────────────────────
 
-function MailingForm({ initial, agents, properties, onSave, onCancel, saving }) {
+function MailingForm({ initial, agents, properties, onSave, onCancel, saving, initialTemplate }) {
   const [form, setForm] = useState(() => ({
-    name:               initial?.name               || '',
-    description:        initial?.description        || '',
+    name:               initial?.name               || initialTemplate?.fields?.name               || '',
+    description:        initial?.description        || initialTemplate?.fields?.description        || '',
     agent_id:           initial?.agent_id           || '',
     property_id:        initial?.property_id        || '',
-    mailing_type:       initial?.mailing_type       || 'postcard',
-    landing_type:       initial?.landing_type       || 'property',
+    mailing_type:       initial?.mailing_type       || initialTemplate?.fields?.mailing_type       || 'postcard',
+    landing_type:       initial?.landing_type       || initialTemplate?.fields?.landing_type       || 'property',
     landing_custom_url: initial?.landing_custom_url || '',
+    landing_config:     initial?.landing_config     || initialTemplate?.fields?.landing_config     || {},
     send_date:          initial?.send_date          || '',
     status:             initial?.status             || 'draft',
   }))
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
+  const setCfg = (k, v) => setForm(f => ({ ...f, landing_config: { ...(f.landing_config || {}), [k]: v } }))
 
   const submit = (e) => {
     e.preventDefault()
     if (!form.name.trim()) return pushToast('Name is required', 'error')
     if (form.landing_type === 'property' && !form.property_id) {
-      return pushToast('Select a property for property-showcase landing, or change landing type', 'error')
+      return pushToast('Select a property for the property-showcase landing, or pick a different landing type', 'error')
     }
     if (form.landing_type === 'custom' && !form.landing_custom_url?.trim()) {
       return pushToast('Provide a custom URL or pick a different landing type', 'error')
     }
-    onSave(form)
+    if (form.landing_type === 'multifamily') {
+      const imgs = (form.landing_config?.images || []).filter(s => s?.trim())
+      if (imgs.length === 0) {
+        return pushToast('Add at least one photo URL for the multifamily landing page', 'error')
+      }
+    }
+    // Clean landing_config — strip empty images, trim strings
+    const cfg = { ...(form.landing_config || {}) }
+    if (Array.isArray(cfg.images))     cfg.images     = cfg.images.map(s => (s || '').trim()).filter(Boolean).slice(0, 6)
+    if (Array.isArray(cfg.highlights)) cfg.highlights = cfg.highlights.filter(h => (h.label || '').trim() && (h.value || '').trim()).slice(0, 4)
+    onSave({ ...form, landing_config: cfg })
   }
 
   return (
@@ -186,23 +308,28 @@ function MailingForm({ initial, agents, properties, onSave, onCancel, saving }) 
       </div>
 
       <div>
-        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)', display:'block', marginBottom:6 }}>
+        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)', display:'block', marginBottom:8 }}>
           Landing Page (where the QR sends people)
         </label>
-        <div style={{ display:'grid', gap:6 }}>
-          {LANDING_OPTS.map(o => (
-            <label key={o.value}
-                   style={{ display:'flex', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)',
-                            borderRadius:8, cursor:'pointer',
-                            background: form.landing_type === o.value ? '#eff6ff' : '#fff',
-                            borderColor: form.landing_type === o.value ? 'var(--gw-azure)' : 'var(--gw-border)' }}>
-              <input type="radio" checked={form.landing_type === o.value} onChange={() => set('landing_type', o.value)} />
-              <div>
-                <div style={{ fontWeight:700, fontSize:13 }}>{o.label}</div>
-                <div style={{ fontSize:11, color:'var(--gw-mist)' }}>{o.sub}</div>
-              </div>
-            </label>
-          ))}
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
+          {LANDING_OPTS.map(o => {
+            const sel = form.landing_type === o.value
+            return (
+              <button key={o.value} type="button" onClick={() => set('landing_type', o.value)}
+                      style={{ textAlign:'left', padding:'12px 14px', border:`1.5px solid ${sel ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+                               background: sel ? '#eff6ff' : '#fff', borderRadius:10, cursor:'pointer', transition:'all 150ms' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  <div style={{ width:28, height:28, borderRadius:6, background: sel ? 'var(--gw-azure)' : 'var(--gw-bone)',
+                                color: sel ? '#fff' : 'var(--gw-ink)',
+                                display:'flex', alignItems:'center', justifyContent:'center' }}>
+                    <Icon name={o.icon} size={14} />
+                  </div>
+                  <div style={{ fontWeight:700, fontSize:13.5 }}>{o.label}</div>
+                </div>
+                <div style={{ fontSize:11.5, color:'var(--gw-mist)', marginTop:6, lineHeight:1.4 }}>{o.sub}</div>
+              </button>
+            )
+          })}
         </div>
       </div>
 
@@ -229,6 +356,10 @@ function MailingForm({ initial, agents, properties, onSave, onCancel, saving }) 
         </div>
       )}
 
+      {form.landing_type === 'multifamily' && (
+        <CollageBuilder cfg={form.landing_config || {}} setCfg={setCfg} />
+      )}
+
       <div>
         <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Status</label>
         <select className="input" value={form.status} onChange={e => set('status', e.target.value)}>
@@ -248,6 +379,133 @@ function MailingForm({ initial, agents, properties, onSave, onCancel, saving }) 
     </form>
   )
 }
+
+// ─── Collage builder (multifamily landing config) ────────────────────────────
+
+function CollageBuilder({ cfg, setCfg }) {
+  const images     = Array.isArray(cfg.images)     ? cfg.images     : []
+  const highlights = Array.isArray(cfg.highlights) ? cfg.highlights : []
+
+  const setImageAt = (i, v) => {
+    const next = [...images]; next[i] = v
+    setCfg('images', next)
+  }
+  const addImage    = () => setCfg('images', [...images, ''].slice(0, 6))
+  const removeImage = (i) => setCfg('images', images.filter((_, idx) => idx !== i))
+
+  const setHighlight = (i, key, v) => {
+    const next = [...highlights]; next[i] = { ...(next[i] || {}), [key]: v }
+    setCfg('highlights', next)
+  }
+  const addHighlight    = () => setCfg('highlights', [...highlights, { label: '', value: '' }].slice(0, 4))
+  const removeHighlight = (i) => setCfg('highlights', highlights.filter((_, idx) => idx !== i))
+
+  return (
+    <div style={{ border:'1px solid var(--gw-border)', borderRadius:10, padding:14, background:'#fafaf7' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
+        <Icon name="sparkles" size={14} />
+        <div style={{ fontSize:13, fontWeight:700 }}>Landing Page Builder</div>
+        <div style={{ fontSize:11, color:'var(--gw-mist)' }}>· Customize the multifamily landing page</div>
+      </div>
+
+      <div style={{ display:'grid', gap:10 }}>
+        <div>
+          <label style={fieldLabel}>Headline</label>
+          <input className="input" maxLength={140}
+                 placeholder="What's your multifamily really worth?"
+                 value={cfg.headline || ''} onChange={e => setCfg('headline', e.target.value)} />
+        </div>
+        <div>
+          <label style={fieldLabel}>Subheadline</label>
+          <textarea className="input" rows={2} maxLength={300}
+                    placeholder="Get a cap-rate-driven valuation from a broker who actually closes deals in your submarket."
+                    value={cfg.subheadline || ''} onChange={e => setCfg('subheadline', e.target.value)} />
+        </div>
+
+        {/* Image URLs */}
+        <div>
+          <label style={fieldLabel}>
+            Photos (up to 6) — paste image URLs from Google Drive, Dropbox, your MLS, etc.
+          </label>
+          <div style={{ display:'grid', gap:6, marginTop:4 }}>
+            {images.map((src, i) => (
+              <div key={i} style={{ display:'flex', gap:6, alignItems:'center' }}>
+                <div style={{ width:42, height:42, borderRadius:4, border:'1px solid var(--gw-border)',
+                              background: src ? `url(${src}) center/cover` : 'var(--gw-bone)',
+                              flexShrink:0, fontSize:10, color:'var(--gw-mist)',
+                              display:'flex', alignItems:'center', justifyContent:'center' }}>
+                  {!src && `#${i + 1}`}
+                </div>
+                <input className="input" placeholder="https://…" value={src}
+                       onChange={e => setImageAt(i, e.target.value)} style={{ flex:1 }} />
+                <button type="button" className="btn btn--ghost" onClick={() => removeImage(i)}
+                        style={{ padding:'6px 8px' }} title="Remove">
+                  <Icon name="x" size={12} />
+                </button>
+              </div>
+            ))}
+            {images.length < 6 && (
+              <button type="button" className="btn btn--ghost"
+                      onClick={addImage}
+                      style={{ fontSize:12, alignSelf:'flex-start' }}>
+                <Icon name="plus" size={12} /> Add photo
+              </button>
+            )}
+          </div>
+          <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
+            Tip: For best results upload to your CRM contacts/Drive folder, set the link to "Anyone with link can view", then paste the direct image URL here.
+          </div>
+        </div>
+
+        {/* Highlights / stat strip */}
+        <div>
+          <label style={fieldLabel}>Highlight stats (up to 4) — your credibility strip</label>
+          <div style={{ display:'grid', gap:6, marginTop:4 }}>
+            {highlights.map((h, i) => (
+              <div key={i} style={{ display:'grid', gridTemplateColumns:'140px 1fr 30px', gap:6 }}>
+                <input className="input" placeholder="Value (e.g. $240M+)" value={h.value || ''}
+                       onChange={e => setHighlight(i, 'value', e.target.value)} />
+                <input className="input" placeholder="Label (e.g. Closed in submarket)" value={h.label || ''}
+                       onChange={e => setHighlight(i, 'label', e.target.value)} />
+                <button type="button" className="btn btn--ghost" onClick={() => removeHighlight(i)}
+                        style={{ padding:'6px 8px' }} title="Remove">
+                  <Icon name="x" size={12} />
+                </button>
+              </div>
+            ))}
+            {highlights.length < 4 && (
+              <button type="button" className="btn btn--ghost" onClick={addHighlight}
+                      style={{ fontSize:12, alignSelf:'flex-start' }}>
+                <Icon name="plus" size={12} /> Add stat
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+          <div>
+            <label style={fieldLabel}>CTA button text</label>
+            <input className="input" maxLength={40}
+                   placeholder="Get my free valuation"
+                   value={cfg.cta_text || ''} onChange={e => setCfg('cta_text', e.target.value)} />
+          </div>
+          <div>
+            <label style={fieldLabel}>Accent color</label>
+            <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+              <input type="color" value={cfg.accent || '#c9a961'}
+                     onChange={e => setCfg('accent', e.target.value)}
+                     style={{ width:42, height:36, border:'1px solid var(--gw-border)', borderRadius:6, padding:2, background:'#fff' }} />
+              <input className="input" placeholder="#c9a961" value={cfg.accent || ''}
+                     onChange={e => setCfg('accent', e.target.value)} style={{ flex:1 }} />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const fieldLabel = { fontSize: 11, fontWeight: 700, color: 'var(--gw-ink)', textTransform: 'uppercase', letterSpacing: 0.5 }
 
 // ─── Recipient picker / importer ──────────────────────────────────────────────
 
@@ -666,7 +924,12 @@ function MailingDetail({ mailing, agents, properties, contacts, onClose, onUpdat
               )}
 
               <div style={{ marginTop:18, display:'flex', gap:8 }}>
-                <button className="btn btn--ghost" onClick={() => window.open(`/lp/${mailing.landing_type === 'valuation' ? 'valuation' : 'property'}/${mailing.id}`, '_blank')}>
+                <button className="btn btn--ghost" onClick={() => {
+                  const path = mailing.landing_type === 'custom' && mailing.landing_custom_url
+                    ? mailing.landing_custom_url
+                    : `/lp/${['valuation','multifamily','property'].includes(mailing.landing_type) ? mailing.landing_type : 'property'}/${mailing.id}`
+                  window.open(path, '_blank')
+                }}>
                   <Icon name="external" size={12} /> Preview Landing Page
                 </button>
                 <button className="btn btn--ghost" onClick={() => setConfirmDelete(true)} style={{ marginLeft:'auto', color:'var(--gw-red)' }}>
@@ -857,8 +1120,9 @@ export default function CampaignsPage({ db, isAdmin }) {
   const [contacts, setContacts]     = useState([])
   const [loading,  setLoading]      = useState(true)
   const [selected, setSelected]     = useState(null)
-  const [creating, setCreating]     = useState(false)
-  const [saving,   setSaving]       = useState(false)
+  const [creating,    setCreating]    = useState(false)
+  const [templateSel, setTemplateSel] = useState(null) // pre-fill template (null = blank form)
+  const [saving,      setSaving]      = useState(false)
   const [dashboard, setDashboard]   = useState(null)
   const [setupNeeded, setSetupNeeded] = useState(false)
   const [setupError,  setSetupError]  = useState('')
@@ -984,6 +1248,52 @@ export default function CampaignsPage({ db, isAdmin }) {
         </div>
       )}
 
+      {/* Quick-start templates */}
+      <div style={{ marginBottom:20 }}>
+        <div style={{ fontSize:11, textTransform:'uppercase', letterSpacing:0.8, color:'var(--gw-mist)',
+                      fontWeight:700, marginBottom:8 }}>
+          Quick start
+        </div>
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(220px, 1fr))', gap:10 }}>
+          {TEMPLATES.map(t => (
+            <button key={t.id} type="button"
+                    onClick={() => { setTemplateSel(t); setCreating(true) }}
+                    style={{ textAlign:'left', padding:'14px 16px', background:'#fff',
+                             border:'1px solid var(--gw-border)', borderRadius:10, cursor:'pointer',
+                             transition:'all 150ms', position:'relative', overflow:'hidden' }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = t.accent; e.currentTarget.style.transform = 'translateY(-1px)' }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--gw-border)'; e.currentTarget.style.transform = 'translateY(0)' }}>
+              <div style={{ position:'absolute', top:0, left:0, right:0, height:3, background:t.accent }} />
+              <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:2 }}>
+                <div style={{ width:28, height:28, borderRadius:6, background:`${t.accent}22`, color:t.accent,
+                              display:'flex', alignItems:'center', justifyContent:'center' }}>
+                  <Icon name={t.icon} size={14} />
+                </div>
+                <div style={{ fontWeight:700, fontSize:13.5 }}>{t.label}</div>
+              </div>
+              <div style={{ fontSize:11.5, color:'var(--gw-mist)', marginTop:6, lineHeight:1.4 }}>
+                {t.description}
+              </div>
+            </button>
+          ))}
+          <button type="button" onClick={() => { setTemplateSel(null); setCreating(true) }}
+                  style={{ textAlign:'left', padding:'14px 16px', background:'transparent',
+                           border:'1.5px dashed var(--gw-border)', borderRadius:10, cursor:'pointer',
+                           transition:'all 150ms', display:'flex', alignItems:'center', gap:8 }}
+                  onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--gw-azure)'}
+                  onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--gw-border)'}>
+            <div style={{ width:28, height:28, borderRadius:6, background:'var(--gw-bone)',
+                          display:'flex', alignItems:'center', justifyContent:'center', color:'var(--gw-mist)' }}>
+              <Icon name="plus" size={14} />
+            </div>
+            <div>
+              <div style={{ fontWeight:700, fontSize:13.5 }}>Blank Mailing</div>
+              <div style={{ fontSize:11.5, color:'var(--gw-mist)' }}>Start from scratch</div>
+            </div>
+          </button>
+        </div>
+      </div>
+
       <div style={{ display:'flex', gap:8, marginBottom:14, flexWrap:'wrap' }}>
         <input className="input" placeholder="Search mailings…" value={search}
                onChange={e => setSearch(e.target.value)} style={{ flex:1, minWidth:200 }} />
@@ -1018,39 +1328,53 @@ export default function CampaignsPage({ db, isAdmin }) {
           {filtered.map(m => {
             const agent    = agents.find(a => a.id === m.agent_id)
             const property = properties.find(p => p.id === m.property_id)
+            const mailed   = m.recipient_count || 0
+            const scans    = m.scan_count || 0
+            const leads    = m.lead_count || 0
+            const scanRate = mailed > 0 ? Math.min(100, (scans / mailed) * 100) : 0
+            const leadRate = mailed > 0 ? Math.min(100, (leads / mailed) * 100) : 0
             return (
               <div key={m.id} onClick={() => setSelected(m)}
                    style={{ background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)',
                             padding:'14px 18px', cursor:'pointer', display:'grid',
-                            gridTemplateColumns:'1fr 100px 100px 100px 110px', gap:14, alignItems:'center' }}>
-                <div>
+                            gridTemplateColumns:'1fr 220px 80px 80px 80px 56px', gap:14, alignItems:'center',
+                            transition:'all 150ms' }}
+                   onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--gw-azure)'}
+                   onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--gw-border)'}>
+                <div style={{ minWidth:0 }}>
                   <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                    <div style={{ fontWeight:700, fontSize:15 }}>{m.name}</div>
+                    <div style={{ fontWeight:700, fontSize:15, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{m.name}</div>
                     <StatusBadge status={m.status} />
+                    <LandingTypeChip type={m.landing_type} />
                   </div>
-                  <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4, display:'flex', gap:12, flexWrap:'wrap' }}>
+                  <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4, display:'flex', gap:10, flexWrap:'wrap' }}>
                     {agent && <span>{agent.name}</span>}
                     {property && <span>· {property.address}</span>}
                     {m.send_date && <span>· {m.send_date}</span>}
                     <span>· {m.mailing_type}</span>
                   </div>
                 </div>
+
+                {/* Conversion funnel mini-viz */}
+                <div title={`${mailed} mailed → ${scans} scans → ${leads} leads`}>
+                  <FunnelBar scanRate={scanRate} leadRate={leadRate} />
+                </div>
+
                 <div style={{ textAlign:'center' }}>
-                  <div style={{ fontSize:18, fontWeight:700 }}>{(m.recipient_count || 0).toLocaleString()}</div>
+                  <div style={{ fontSize:17, fontWeight:700 }}>{mailed.toLocaleString()}</div>
                   <div style={{ fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase' }}>Mailed</div>
                 </div>
                 <div style={{ textAlign:'center' }}>
-                  <div style={{ fontSize:18, fontWeight:700, color:'var(--gw-azure)' }}>{m.scan_count || 0}</div>
+                  <div style={{ fontSize:17, fontWeight:700, color:'var(--gw-azure)' }}>{scans}</div>
                   <div style={{ fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase' }}>Scans</div>
                 </div>
                 <div style={{ textAlign:'center' }}>
-                  <div style={{ fontSize:18, fontWeight:700, color:'var(--gw-green)' }}>{m.lead_count || 0}</div>
+                  <div style={{ fontSize:17, fontWeight:700, color:'var(--gw-green)' }}>{leads}</div>
                   <div style={{ fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase' }}>Leads</div>
                 </div>
-                <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end', gap:6 }}>
+                <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end' }}>
                   <img src={qrImageUrl(m.qr_token, { size: 60 })} alt=""
-                       style={{ width:36, height:36, border:'1px solid var(--gw-border)', borderRadius:4 }} />
-                  <Icon name="chevronRight" size={16} color="var(--gw-mist)" />
+                       style={{ width:38, height:38, border:'1px solid var(--gw-border)', borderRadius:4 }} />
                 </div>
               </div>
             )
@@ -1059,18 +1383,31 @@ export default function CampaignsPage({ db, isAdmin }) {
       )}
 
       {creating && (
-        <Modal open={true} onClose={() => setCreating(false)} width={560}>
+        <Modal open={true} onClose={() => { setCreating(false); setTemplateSel(null) }} width={680}>
           <div className="modal__head">
-            <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:18 }}>New Mailing</h3>
-            <button className="drawer__close" onClick={() => setCreating(false)}><Icon name="x" size={18} /></button>
+            <div>
+              <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:18 }}>
+                {templateSel ? `${templateSel.label} Mailing` : 'New Mailing'}
+              </h3>
+              {templateSel && (
+                <div style={{ fontSize:11.5, color:'var(--gw-mist)', marginTop:3 }}>
+                  Pre-filled from the <strong>{templateSel.label}</strong> template — edit anything before saving.
+                </div>
+              )}
+            </div>
+            <button className="drawer__close" onClick={() => { setCreating(false); setTemplateSel(null) }}>
+              <Icon name="x" size={18} />
+            </button>
           </div>
-          <div style={{ padding:20 }}>
+          <div style={{ padding:20, maxHeight:'calc(100vh - 180px)', overflowY:'auto' }}>
             <MailingForm
+              key={templateSel?.id || 'blank'}
+              initialTemplate={templateSel}
               agents={agents}
               properties={properties}
               saving={saving}
               onSave={createMailing}
-              onCancel={() => setCreating(false)}
+              onCancel={() => { setCreating(false); setTemplateSel(null) }}
             />
           </div>
         </Modal>

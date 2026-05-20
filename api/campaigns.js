@@ -100,7 +100,7 @@ export default async function handler(req, res) {
 
       const { data: m } = await db()
         .from('mailings')
-        .select('id, landing_type, landing_custom_url, property_id, status, scan_count')
+        .select('id, landing_type, landing_custom_url, landing_config, property_id, status, scan_count')
         .eq('qr_token', token)
         .single()
       if (!m) return res.status(404).send('Mailing not found')
@@ -128,6 +128,8 @@ export default async function handler(req, res) {
         dest = m.landing_custom_url
       } else if (m.landing_type === 'valuation') {
         dest = `/lp/valuation/${m.id}`
+      } else if (m.landing_type === 'multifamily') {
+        dest = `/lp/multifamily/${m.id}`
       } else {
         dest = `/lp/property/${m.id}`
       }
@@ -296,7 +298,7 @@ export default async function handler(req, res) {
     if (action === 'create') {
       const {
         name, description, agent_id, property_id,
-        mailing_type, landing_type, landing_custom_url, send_date, status,
+        mailing_type, landing_type, landing_custom_url, landing_config, send_date, status,
       } = req.body
       if (!name?.trim()) return json(res, 400, { error: 'name is required' })
 
@@ -316,6 +318,7 @@ export default async function handler(req, res) {
         mailing_type:       mailing_type || 'postcard',
         landing_type:       landing_type || 'property',
         landing_custom_url: landing_custom_url?.trim() || null,
+        landing_config:     landing_config && typeof landing_config === 'object' ? landing_config : {},
         send_date:          send_date || null,
         status:             status || 'draft',
         qr_token:           token,
@@ -330,7 +333,7 @@ export default async function handler(req, res) {
     if (action === 'update') {
       const { id } = req.body
       if (!id) return json(res, 400, { error: 'id required' })
-      const ALLOWED = ['name','description','agent_id','property_id','mailing_type','status','landing_type','landing_custom_url','send_date']
+      const ALLOWED = ['name','description','agent_id','property_id','mailing_type','status','landing_type','landing_custom_url','landing_config','send_date']
       const patch = {}
       for (const k of ALLOWED) if (k in req.body) patch[k] = req.body[k]
       if (Object.keys(patch).length === 0) return json(res, 400, { error: 'no updatable fields' })
@@ -431,7 +434,7 @@ export default async function handler(req, res) {
         message:          message?.trim() || null,
         property_address: property_address?.trim() || null,
         property_type:    property_type || null,
-        source_landing:   source_landing || 'property',
+        source_landing:   ['property','valuation','custom','multifamily'].includes(source_landing) ? source_landing : 'property',
         ip_hash:          ipHash,
       }]).select().single()
       if (leadErr) throw leadErr
