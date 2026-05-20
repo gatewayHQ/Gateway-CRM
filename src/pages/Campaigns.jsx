@@ -383,6 +383,11 @@ function MailingForm({ initial, agents, properties, onSave, onCancel, saving, in
 // ─── Collage builder (multifamily landing config) ────────────────────────────
 
 function CollageBuilder({ cfg, setCfg }) {
+  const [aiOpen, setAiOpen]       = useState(false)
+  const [aiInput, setAiInput]     = useState('')
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiTone, setAiTone]       = useState('professional')
+
   const images     = Array.isArray(cfg.images)     ? cfg.images     : []
   const highlights = Array.isArray(cfg.highlights) ? cfg.highlights : []
 
@@ -400,13 +405,105 @@ function CollageBuilder({ cfg, setCfg }) {
   const addHighlight    = () => setCfg('highlights', [...highlights, { label: '', value: '' }].slice(0, 4))
   const removeHighlight = (i) => setCfg('highlights', highlights.filter((_, idx) => idx !== i))
 
+  const generateCopy = async (tone) => {
+    if (!aiInput.trim()) return pushToast('Describe the property or campaign first', 'error')
+    setAiLoading(true)
+    try {
+      const r = await fetch('/api/claude', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          max_tokens: 600,
+          system: 'You are an elite real estate marketing copywriter. Write landing page copy for a multifamily property valuation capture page. Return ONLY a raw JSON object — no markdown, no code fences, no explanation. Keys: headline (string, max 90 chars), subheadline (string, max 260 chars), highlights (array of exactly 3 objects, each with "label" and "value" string fields), cta_text (string, max 30 chars).',
+          messages: [{
+            role: 'user',
+            content: `Write ${tone === 'punchy' ? 'punchy, bold, and urgent' : tone === 'conversational' ? 'warm, conversational, and approachable' : 'professional, authoritative, and credible'} copy for this campaign:\n\n${aiInput}`,
+          }],
+        }),
+      })
+      const data = await r.json()
+      if (data.error) { pushToast(data.error, 'error'); return }
+      const text = data.content?.[0]?.text || ''
+      const match = text.match(/\{[\s\S]*\}/)
+      if (!match) { pushToast('AI returned an unexpected format — try again', 'error'); return }
+      const copy = JSON.parse(match[0])
+      if (copy.headline)    setCfg('headline',    copy.headline)
+      if (copy.subheadline) setCfg('subheadline', copy.subheadline)
+      if (copy.highlights)  setCfg('highlights',  copy.highlights)
+      if (copy.cta_text)    setCfg('cta_text',    copy.cta_text)
+      setAiOpen(false)
+      pushToast('AI copy applied — review and make it yours!')
+    } catch (err) {
+      pushToast('AI generation failed: ' + err.message, 'error')
+    } finally {
+      setAiLoading(false)
+    }
+  }
+
   return (
     <div style={{ border:'1px solid var(--gw-border)', borderRadius:10, padding:14, background:'#fafaf7' }}>
-      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom: aiOpen ? 8 : 10 }}>
         <Icon name="sparkles" size={14} />
         <div style={{ fontSize:13, fontWeight:700 }}>Landing Page Builder</div>
         <div style={{ fontSize:11, color:'var(--gw-mist)' }}>· Customize the multifamily landing page</div>
+        <button type="button" onClick={() => setAiOpen(o => !o)}
+                style={{ marginLeft:'auto', fontSize:11, padding:'4px 12px', borderRadius:20, cursor:'pointer',
+                         fontWeight:700, transition:'all 150ms',
+                         background: aiOpen ? 'var(--gw-azure)' : '#eff6ff',
+                         color: aiOpen ? '#fff' : 'var(--gw-azure)',
+                         border: '1px solid var(--gw-azure)' }}>
+          ✨ {aiOpen ? 'Close AI' : 'Generate with AI'}
+        </button>
       </div>
+
+      {aiOpen && (
+        <div style={{ background:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:8, padding:12, marginBottom:10 }}>
+          <div style={{ fontSize:12, fontWeight:700, color:'#1d4ed8', marginBottom:6 }}>
+            Describe the property, market, or campaign — AI writes the headline, subheadline, stats, and CTA
+          </div>
+          <textarea className="input" rows={3} value={aiInput} onChange={e => setAiInput(e.target.value)}
+                    placeholder="e.g. 'Just sold a 24-unit in East Oakland near BART. Target: apartment owners in a 3-block radius. Market cap rates compressed to 5.2%. We want owners curious about selling before rates rise.'" />
+          <div style={{ display:'flex', gap:6, alignItems:'center', marginTop:8, flexWrap:'wrap' }}>
+            <span style={{ fontSize:11, color:'var(--gw-mist)', fontWeight:700 }}>Tone:</span>
+            {[
+              { id:'professional',   label:'Professional'   },
+              { id:'punchy',         label:'Punchy'         },
+              { id:'conversational', label:'Conversational' },
+            ].map(t => (
+              <button key={t.id} type="button" onClick={() => setAiTone(t.id)}
+                      style={{ fontSize:11, padding:'3px 10px', borderRadius:12, cursor:'pointer', fontWeight:600,
+                               transition:'all 100ms',
+                               background: aiTone === t.id ? 'var(--gw-azure)' : '#fff',
+                               color: aiTone === t.id ? '#fff' : 'var(--gw-ink)',
+                               border: `1px solid ${aiTone === t.id ? 'var(--gw-azure)' : 'var(--gw-border)'}` }}>
+                {t.label}
+              </button>
+            ))}
+            <button type="button" disabled={aiLoading} onClick={() => generateCopy(aiTone)}
+                    style={{ marginLeft:'auto', padding:'6px 16px', fontSize:12, fontWeight:700, cursor:aiLoading ? 'default' : 'pointer',
+                             background: aiLoading ? '#93c5fd' : 'var(--gw-azure)', color:'#fff',
+                             border:'none', borderRadius:8, transition:'background 150ms' }}>
+              {aiLoading ? 'Generating…' : '✨ Generate Copy'}
+            </button>
+          </div>
+          {(cfg.headline || cfg.subheadline) && !aiLoading && (
+            <div style={{ display:'flex', gap:6, alignItems:'center', marginTop:8, borderTop:'1px solid #bfdbfe', paddingTop:8, flexWrap:'wrap' }}>
+              <span style={{ fontSize:11, color:'#3b82f6', fontWeight:600 }}>Refine existing copy:</span>
+              {[
+                { label:'Make it punchier',     tone:'punchy'         },
+                { label:'More professional',    tone:'professional'   },
+                { label:'More conversational',  tone:'conversational' },
+              ].map(btn => (
+                <button key={btn.tone} type="button" onClick={() => generateCopy(btn.tone)}
+                        style={{ fontSize:11, padding:'3px 10px', border:'1px solid #bfdbfe',
+                                 borderRadius:12, background:'#fff', cursor:'pointer', color:'#1d4ed8' }}>
+                  {btn.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div style={{ display:'grid', gap:10 }}>
         <div>
@@ -525,6 +622,14 @@ function RecipientImporter({ mailingId, contacts, onDone, onCancel }) {
 
   const [saving, setSaving] = useState(false)
 
+  // Deal Machine neighbor lookup state
+  const [dmAddress, setDmAddress]       = useState('')
+  const [dmRadius, setDmRadius]         = useState(500)
+  const [dmResults, setDmResults]       = useState(null)
+  const [dmPicked, setDmPicked]         = useState(new Set())
+  const [dmLoading, setDmLoading]       = useState(false)
+  const [dmSetupNeeded, setDmSetupNeeded] = useState(false)
+
   const filteredContacts = useMemo(() => {
     if (!search.trim()) return contacts.slice(0, 200)
     const q = search.toLowerCase()
@@ -603,13 +708,61 @@ function RecipientImporter({ mailingId, contacts, onDone, onCancel }) {
     onDone(1)
   }
 
+  const searchDealMachine = async () => {
+    if (!dmAddress.trim()) return pushToast('Enter a center address first', 'error')
+    setDmLoading(true)
+    setDmResults(null)
+    setDmSetupNeeded(false)
+    try {
+      const r = await fetch('/api/deal-machine', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: dmAddress, radius: dmRadius }),
+      })
+      const data = await r.json()
+      if (data.setup) { setDmSetupNeeded(true); return }
+      if (data.error) { pushToast(data.error, 'error'); return }
+      const props = data.properties || []
+      setDmResults(props)
+      setDmPicked(new Set(props.map((_, i) => i)))
+      if (props.length === 0) pushToast('No property records found in that radius', 'error')
+    } catch (err) {
+      pushToast('Search failed: ' + err.message, 'error')
+    } finally {
+      setDmLoading(false)
+    }
+  }
+
+  const submitDealMachine = async () => {
+    if (!dmResults || dmPicked.size === 0) return pushToast('Select at least one property', 'error')
+    const recipients = dmResults
+      .filter((_, i) => dmPicked.has(i))
+      .map(p => ({
+        recipient_name: p.owner_name || null,
+        address_line1:  p.address_line1 || null,
+        city:           p.city  || null,
+        state:          p.state || null,
+        zip:            p.zip   || null,
+        source:         'deal_machine',
+      }))
+      .filter(r => r.recipient_name || r.address_line1)
+    if (recipients.length === 0) return pushToast('No usable records selected', 'error')
+    setSaving(true)
+    const res = await api('add_recipients', { mailing_id: mailingId, recipients })
+    setSaving(false)
+    if (res.error) return pushToast(res.error, 'error')
+    pushToast(`Imported ${res.count} neighbor${res.count === 1 ? '' : 's'} from Deal Machine`)
+    onDone(res.count)
+  }
+
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
-      <div style={{ display:'flex', gap:6, borderBottom:'1px solid var(--gw-border)', paddingBottom:8 }}>
+      <div style={{ display:'flex', gap:6, borderBottom:'1px solid var(--gw-border)', paddingBottom:8, flexWrap:'wrap' }}>
         {[
-          { id:'database', label:'From CRM Contacts', icon:'contacts' },
-          { id:'csv',      label:'Upload CSV',         icon:'upload'   },
-          { id:'manual',   label:'Add Manually',       icon:'plus'     },
+          { id:'database',    label:'From CRM Contacts', icon:'contacts' },
+          { id:'csv',         label:'Upload CSV',         icon:'upload'   },
+          { id:'manual',      label:'Add Manually',       icon:'plus'     },
+          { id:'dealmachine', label:'Neighbor Lookup',    icon:'map-pin'  },
         ].map(t => (
           <button key={t.id} type="button"
                   className={`btn ${mode === t.id ? 'btn--primary' : 'btn--ghost'}`}
@@ -726,6 +879,112 @@ function RecipientImporter({ mailingId, contacts, onDone, onCancel }) {
               {saving ? 'Adding…' : 'Add Recipient'}
             </button>
           </div>
+        </>
+      )}
+
+      {mode === 'dealmachine' && (
+        <>
+          {dmSetupNeeded ? (
+            <div style={{ background:'#fffbeb', border:'1px solid #fcd34d', borderRadius:8, padding:16 }}>
+              <div style={{ fontWeight:700, fontSize:13, color:'#92400e', marginBottom:6 }}>Deal Machine API not configured</div>
+              <div style={{ fontSize:12, color:'#78350f', lineHeight:1.6 }}>
+                To use neighbor lookup, add your Deal Machine API key to Vercel:
+              </div>
+              <ol style={{ fontSize:12, color:'#78350f', marginTop:8, lineHeight:1.8, paddingLeft:18 }}>
+                <li>Go to <strong>Deal Machine app → Account → Integrations → API</strong> to get your key</li>
+                <li>In <strong>Vercel → Project → Settings → Environment Variables</strong>, add <code>DEAL_MACHINE_API_KEY</code></li>
+                <li>Redeploy, then come back here</li>
+              </ol>
+              <button type="button" className="btn btn--ghost" onClick={onCancel} style={{ marginTop:10 }}>Close</button>
+            </div>
+          ) : (
+            <>
+              <div style={{ fontSize:12, color:'var(--gw-mist)', lineHeight:1.5 }}>
+                Paste a center address (e.g. a property you just sold) and we'll pull the surrounding owner names + mailing addresses from Deal Machine — ready to import as recipients.
+              </div>
+              <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:8, alignItems:'flex-end' }}>
+                <div>
+                  <label style={{ fontSize:11, fontWeight:700, color:'var(--gw-ink)', display:'block', marginBottom:4 }}>Center Address</label>
+                  <input className="input" value={dmAddress} onChange={e => setDmAddress(e.target.value)}
+                         placeholder="123 Main St, Oakland CA 94612"
+                         onKeyDown={e => e.key === 'Enter' && searchDealMachine()} />
+                </div>
+                <div>
+                  <label style={{ fontSize:11, fontWeight:700, color:'var(--gw-ink)', display:'block', marginBottom:4 }}>Radius</label>
+                  <select className="input" value={dmRadius} onChange={e => setDmRadius(Number(e.target.value))} style={{ width:130 }}>
+                    <option value={200}>200 ft (~1 blk)</option>
+                    <option value={500}>500 ft</option>
+                    <option value={1000}>1,000 ft</option>
+                    <option value={2640}>½ mile</option>
+                    <option value={5280}>1 mile</option>
+                  </select>
+                </div>
+              </div>
+              <button type="button" className="btn btn--primary" disabled={dmLoading} onClick={searchDealMachine}
+                      style={{ alignSelf:'flex-start' }}>
+                {dmLoading ? 'Searching…' : '🔍 Find Neighbors'}
+              </button>
+
+              {dmResults !== null && (
+                <>
+                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                    <div style={{ fontSize:12, color:'var(--gw-mist)' }}>
+                      {dmResults.length} properties found · {dmPicked.size} selected
+                    </div>
+                    <div style={{ display:'flex', gap:6 }}>
+                      <button type="button" className="btn btn--ghost" style={{ fontSize:11 }}
+                              onClick={() => setDmPicked(new Set(dmResults.map((_, i) => i)))}>
+                        Select all
+                      </button>
+                      <button type="button" className="btn btn--ghost" style={{ fontSize:11 }}
+                              onClick={() => setDmPicked(new Set())}>
+                        Deselect all
+                      </button>
+                    </div>
+                  </div>
+                  {dmResults.length > 0 && (
+                    <div style={{ maxHeight:320, overflowY:'auto', border:'1px solid var(--gw-border)', borderRadius:8 }}>
+                      {dmResults.map((p, i) => (
+                        <label key={i} style={{ display:'flex', alignItems:'flex-start', gap:10, padding:'8px 12px',
+                                                borderBottom:'1px solid var(--gw-border)', cursor:'pointer' }}>
+                          <input type="checkbox" checked={dmPicked.has(i)} style={{ marginTop:2 }}
+                                 onChange={e => setDmPicked(s => {
+                                   const n = new Set(s)
+                                   e.target.checked ? n.add(i) : n.delete(i)
+                                   return n
+                                 })} />
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontWeight:600, fontSize:13 }}>{p.owner_name || '(Owner unknown)'}</div>
+                            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:1 }}>
+                              {[p.address_line1, p.city, p.state, p.zip].filter(Boolean).join(', ') || '—'}
+                            </div>
+                            {p.property_type && (
+                              <div style={{ fontSize:10, color:'var(--gw-mist)', marginTop:1 }}>{p.property_type}{p.estimated_value ? ` · est. ${Number(p.estimated_value).toLocaleString('en-US', { style:'currency', currency:'USD', maximumFractionDigits:0 })}` : ''}</div>
+                            )}
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ display:'flex', justifyContent:'space-between' }}>
+                    <button type="button" className="btn btn--ghost" onClick={() => setDmResults(null)}>← New search</button>
+                    <div style={{ display:'flex', gap:8 }}>
+                      <button type="button" className="btn btn--ghost" onClick={onCancel}>Cancel</button>
+                      <button type="button" className="btn btn--primary" disabled={saving || dmPicked.size === 0} onClick={submitDealMachine}>
+                        {saving ? 'Importing…' : `Import ${dmPicked.size} Recipient${dmPicked.size === 1 ? '' : 's'}`}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {dmResults === null && !dmLoading && (
+                <div style={{ display:'flex', justifyContent:'flex-end' }}>
+                  <button type="button" className="btn btn--ghost" onClick={onCancel}>Cancel</button>
+                </div>
+              )}
+            </>
+          )}
         </>
       )}
     </div>
