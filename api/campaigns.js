@@ -1,32 +1,71 @@
-import { createClient } from '@supabase/supabase-js'
+/**
+ * Gateway CRM — Mailings API (v2)
+ *
+ * Single-endpoint controller for the Campaigns/Mailings feature.
+ * Folded into one Vercel function to stay within the 12-function Hobby limit.
+ *
+ * Action map:
+ *   GET  ?action=list                          → list mailings + stats
+ *   GET  ?action=get&id=X                      → one mailing + recipient/scan counts
+ *   GET  ?action=recipients&mailing_id=X       → recipients list
+ *   GET  ?action=scans&mailing_id=X            → recent scan events
+ *   GET  ?action=leads&mailing_id=X            → captured leads
+ *   GET  ?action=analytics&mailing_id=X        → per-mailing rollups
+ *   GET  ?action=dashboard                     → org-wide stats
+ *   GET  ?action=scan&token=X                  → public QR endpoint, 302 → landing
+ *   GET  ?action=health                        → uptime probe (no DB)
+ *   POST {action:'create',...}                 → new mailing (mints qr_token)
+ *   POST {action:'update',id,...}              → patch mailing
+ *   POST {action:'delete',id}                  → delete mailing (cascades)
+ *   POST {action:'add_recipients',...}         → bulk insert recipients
+ *   POST {action:'remove_recipient',id}        → delete one recipient
+ *   POST {action:'update_recipient',id,...}    → patch response status
+ *   POST {action:'capture_lead',...}           → public landing-page form submit
+ *
+ * Auth: service role key bypasses RLS for server-side writes. The 'scan' and
+ *       'capture_lead' actions are intentionally unauthenticated (public).
+ */
 
-// Lazy singleton — resolved at first request so cold-start env vars are always
-// present. Module-level createClient(undefined, undefined) produces the
-// "Invalid path specified in request URL" error when SUPABASE_URL is missing.
+import { createClient } from '@supabase/supabase-js'
+import crypto from 'crypto'
+
+// ─── Supabase client (lazy singleton — avoids cold-start env-var crashes) ───
 let _supabase = null
-function getSupabase() {
+function db() {
   if (_supabase) return _supabase
   const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL
   const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!url || !key) throw new Error('SUPABASE_URL / SUPABASE_SERVICE_KEY env vars are not set')
-  _supabase = createClient(url, key)
+  if (!url || !key) throw new Error('Server misconfigured: SUPABASE_URL / SUPABASE_SERVICE_KEY missing')
+  _supabase = createClient(url, key, { auth: { persistSession: false } })
   return _supabase
 }
 
-// Extract missing column name from Supabase/PostgREST/Postgres errors.
-// Returns the column name or null if the error isn't a missing-column error.
-function extractMissingColumn(msg) {
-  if (!msg) return null
-  // PostgREST: "Could not find the 'foo' column of 'mail_campaigns' in the schema cache"
-  let m = msg.match(/Could not find the ['"]?([a-z_][a-z0-9_]*)['"]? column/i)
-  if (m) return m[1]
-  // Postgres: column "foo" of relation "..." does not exist
-  m = msg.match(/column ["']?([a-z_][a-z0-9_]*)["']? of relation/i)
-  if (m) return m[1]
-  // Postgres alt: column "foo" does not exist
-  m = msg.match(/column ["']?([a-z_][a-z0-9_]*)["']? does not exist/i)
-  if (m) return m[1]
-  return null
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+// URL-safe base62 token, 8 chars = 218 trillion combos — collision-proof for our scale
+const TOKEN_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789' // omits 0/O/1/I/l for legibility
+function mintToken(length = 8) {
+  const bytes = crypto.randomBytes(length * 2)
+  let out = ''
+  for (let i = 0; i < length; i++) out += TOKEN_ALPHABET[bytes[i] % TOKEN_ALPHABET.length]
+  return out
+}
+
+function hashIp(ip) {
+  if (!ip) return null
+  // Daily-rotating salt → privacy-preserving uniqueness (can't track person across days)
+  const day = new Date().toISOString().slice(0, 10)
+  return crypto.createHash('sha256').update(`${ip}|${day}|gateway-crm`).digest('hex').slice(0, 32)
+}
+
+function clientIp(req) {
+  return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
+         req.socket?.remoteAddress || null
+}
+
+function baseUrl(req) {
+  const proto = req.headers['x-forwarded-proto'] || 'https'
+  return `${proto}://${req.headers.host}`
 }
 
 const CORS = {
@@ -35,528 +74,405 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 }
 
+function json(res, status, body, headers = {}) {
+  Object.entries({ ...CORS, ...headers }).forEach(([k, v]) => res.setHeader(k, v))
+  return res.status(status).json(body)
+}
+
+// ─── Main handler ───────────────────────────────────────────────────────────
+
 export default async function handler(req, res) {
   Object.entries(CORS).forEach(([k, v]) => res.setHeader(k, v))
   if (req.method === 'OPTIONS') return res.status(200).end()
 
-  const { action } = req.body || req.query
+  const action = req.body?.action || req.query?.action
+  if (!action) return json(res, 400, { error: 'action is required' })
 
   try {
-    // ── Campaigns ─────────────────────────────────────────────────────────
+    // ── Public: QR scan tracking + redirect ─────────────────────────────────
+    if (action === 'scan') {
+      const { token } = req.query
+      if (!token) return res.status(400).send('Missing token')
 
-    if (action === 'list_campaigns') {
-      const { data, error } = await getSupabase()
-        .from('mail_campaigns')
-        .select('*')
-        .order('created_at', { ascending: false })
-      if (error) throw error
-
-      const ids = data.map(c => c.id)
-      let counts = {}
-      if (ids.length > 0) {
-        const { data: sends } = await getSupabase()
-          .from('mail_sends')
-          .select('campaign_id, response, sent_at')
-          .in('campaign_id', ids)
-          .order('sent_at', { ascending: false })
-        ;(sends || []).forEach(s => {
-          if (!counts[s.campaign_id]) counts[s.campaign_id] = { total: 0, responses: 0, last_at: null }
-          counts[s.campaign_id].total++
-          if (s.response !== 'no-response') counts[s.campaign_id].responses++
-          if (!counts[s.campaign_id].last_at) counts[s.campaign_id].last_at = s.sent_at
-        })
-      }
-      const enriched = data.map(c => ({
-        ...c,
-        total_sends:     counts[c.id]?.total     || 0,
-        total_responses: counts[c.id]?.responses || 0,
-        last_send_at:    counts[c.id]?.last_at   || null,
-      }))
-      return res.json({ campaigns: enriched })
-    }
-
-    if (action === 'create_campaign') {
-      const {
-        name, description, property_types, status, agent_id,
-        property_id, qr_target,
-        tracking_url, frequency_cap, frequency_days,
-        channel, email_subject, email_body,
-      } = req.body
-      if (!name) return res.status(400).json({ error: 'name is required' })
-
-      // Build payload — retry without optional columns if schema is missing them
-      const CORE = {
-        name,
-        description:    description    || null,
-        property_types: property_types || [],
-        status:         status         || 'active',
-        agent_id:       agent_id       || null,
-        property_id:    property_id    || null,
-        qr_target:      qr_target      || 'crm_landing',
-        tracking_url:   tracking_url   || null,
-        frequency_cap:  frequency_cap  || 0,
-        frequency_days: frequency_days || 30,
-      }
-      const OPTIONAL = {
-        channel:       channel       || 'mail',
-        email_subject: email_subject || null,
-        email_body:    email_body    || null,
-      }
-
-      let payload = { ...CORE, ...OPTIONAL }
-      let { data, error } = await getSupabase().from('mail_campaigns').insert([payload]).select().single()
-
-      // If a column doesn't exist in the user's schema, drop it and retry
-      let attempts = 0
-      while (error && attempts++ < 12) {
-        const badCol = extractMissingColumn(error.message)
-        if (!badCol || !(badCol in payload)) break
-        delete payload[badCol]
-        ;({ data, error } = await getSupabase().from('mail_campaigns').insert([payload]).select().single())
-      }
-      if (error) throw error
-      return res.json({ campaign: data })
-    }
-
-    if (action === 'update_campaign') {
-      const { id } = req.body
-      if (!id) return res.status(400).json({ error: 'id is required' })
-      const ALLOWED = [
-        'name','description','property_types','status','agent_id',
-        'property_id','qr_target',
-        'tracking_url','qr_code_url','bitly_id',
-        'frequency_cap','frequency_days',
-        'channel','email_subject','email_body',
-      ]
-      const patch = {}
-      for (const key of ALLOWED) {
-        if (Object.prototype.hasOwnProperty.call(req.body, key)) patch[key] = req.body[key]
-      }
-      if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'no updatable fields provided' })
-
-      let working = { ...patch }
-      let { data, error } = await getSupabase().from('mail_campaigns').update(working).eq('id', id).select().single()
-      let attempts = 0
-      while (error && attempts++ < 12) {
-        const badCol = extractMissingColumn(error.message)
-        if (!badCol || !(badCol in working)) break
-        delete working[badCol]
-        if (Object.keys(working).length === 0) break
-        ;({ data, error } = await getSupabase().from('mail_campaigns').update(working).eq('id', id).select().single())
-      }
-      if (error) throw error
-      return res.json({ campaign: data })
-    }
-
-    if (action === 'delete_campaign') {
-      const { id } = req.body
-      if (!id) return res.status(400).json({ error: 'id is required' })
-      const { error } = await getSupabase().from('mail_campaigns').delete().eq('id', id)
-      if (error) throw error
-      return res.json({ ok: true })
-    }
-
-    // ── Sends ──────────────────────────────────────────────────────────────
-
-    if (action === 'list_sends') {
-      const { campaign_id, contact_id, limit: lim = 500 } = req.query
-      let q = getSupabase().from('mail_sends').select('*').order('sent_at', { ascending: false }).limit(Number(lim))
-      if (campaign_id) q = q.eq('campaign_id', campaign_id)
-      if (contact_id)  q = q.eq('contact_id', contact_id)
-      const { data, error } = await q
-      if (error) throw error
-      return res.json({ sends: data })
-    }
-
-    if (action === 'log_send') {
-      const { campaign_id, contact_id, cold_lead_id, recipient_name, recipient_address,
-              recipient_city, recipient_state, recipient_zip,
-              channel, sent_at, agent_id, response, notes } = req.body
-      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
-
-      // Suppression check
-      if (contact_id) {
-        const { data: sup } = await getSupabase()
-          .from('mail_suppressions')
-          .select('id, reason')
-          .eq('contact_id', contact_id)
-          .limit(1)
-        if (sup?.length > 0) {
-          return res.status(409).json({ error: `Suppressed: ${sup[0].reason}`, suppressed: true })
-        }
-      }
-
-      // Frequency cap check
-      const { data: camp } = await getSupabase()
-        .from('mail_campaigns')
-        .select('frequency_cap, frequency_days')
-        .eq('id', campaign_id)
+      const { data: m } = await db()
+        .from('mailings')
+        .select('id, landing_type, landing_custom_url, property_id, status, scan_count')
+        .eq('qr_token', token)
         .single()
-      if (camp?.frequency_cap > 0 && contact_id) {
-        const since = new Date(Date.now() - camp.frequency_days * 86400000).toISOString()
-        const { count } = await getSupabase()
-          .from('mail_sends')
-          .select('*', { count: 'exact', head: true })
-          .eq('campaign_id', campaign_id)
-          .eq('contact_id', contact_id)
-          .gte('sent_at', since)
-        if ((count || 0) >= camp.frequency_cap) {
-          return res.status(409).json({
-            error: `Frequency cap reached: already sent ${count} times in ${camp.frequency_days} days`,
-            capped: true,
-          })
-        }
-      }
+      if (!m) return res.status(404).send('Mailing not found')
 
-      const { data, error } = await getSupabase()
-        .from('mail_sends')
-        .insert([{ campaign_id, contact_id, cold_lead_id, recipient_name, recipient_address,
-                   recipient_city, recipient_state, recipient_zip,
-                   channel: channel || 'mail', sent_at: sent_at || new Date().toISOString(),
-                   agent_id, response: response || 'no-response', notes }])
-        .select()
-        .single()
-      if (error) throw error
+      // Log the scan + bump counter. Fire-and-forget — never block the redirect.
+      // (Race condition on counter is acceptable at our scale; periodic resync
+      // could be added later via a cron-style aggregation if needed.)
+      const ip = clientIp(req)
+      db().from('mailing_scans').insert({
+        mailing_id:  m.id,
+        ip_hash:     hashIp(ip),
+        user_agent:  (req.headers['user-agent'] || '').slice(0, 500),
+        referrer:    (req.headers.referer || req.headers.referrer || '').slice(0, 500),
+        country:     req.headers['x-vercel-ip-country'] || null,
+      }).then(() => {})
 
-      if (response === 'interested' && contact_id && agent_id) {
-        await getSupabase().from('tasks').insert([{
-          title: `Follow up — interested lead from campaign`,
-          type: 'follow-up', priority: 'high',
-          due_date: new Date(Date.now() + 86400000).toISOString(),
-          contact_id, agent_id,
-          notes: `Responded to campaign outreach. Notes: ${notes || ''}`,
-        }])
-      }
+      db().from('mailings')
+        .update({ scan_count: (m.scan_count || 0) + 1 })
+        .eq('id', m.id)
+        .then(() => {})
 
-      return res.json({ send: data })
-    }
-
-    if (action === 'update_send') {
-      const { id, ...patch } = req.body
-      if (!id) return res.status(400).json({ error: 'id is required' })
-      delete patch.action
-      const SEND_ALLOWED = ['response', 'notes', 'channel', 'sent_at', 'agent_id']
-      const cleanPatch = {}
-      for (const k of SEND_ALLOWED) {
-        if (Object.prototype.hasOwnProperty.call(patch, k)) cleanPatch[k] = patch[k]
-      }
-      if (cleanPatch.response && cleanPatch.response !== 'no-response') {
-        cleanPatch.responded_at = new Date().toISOString()
-      }
-      const { data, error } = await getSupabase()
-        .from('mail_sends')
-        .update(cleanPatch)
-        .eq('id', id)
-        .select()
-        .single()
-      if (error) throw error
-
-      if (patch.response === 'interested' && patch.contact_id && patch.agent_id) {
-        await getSupabase().from('tasks').insert([{
-          title: `Follow up — interested lead from campaign`,
-          type: 'follow-up', priority: 'high',
-          due_date: new Date(Date.now() + 86400000).toISOString(),
-          contact_id: patch.contact_id, agent_id: patch.agent_id,
-        }])
-      }
-
-      return res.json({ send: data })
-    }
-
-    if (action === 'delete_send') {
-      const { id } = req.body
-      if (!id) return res.status(400).json({ error: 'id is required' })
-      const { error } = await getSupabase().from('mail_sends').delete().eq('id', id)
-      if (error) throw error
-      return res.json({ ok: true })
-    }
-
-    // ── Contact campaign history ──────────────────────────────────────────
-
-    if (action === 'contact_history') {
-      const { contact_id } = req.query
-      if (!contact_id) return res.status(400).json({ error: 'contact_id is required' })
-      const { data, error } = await getSupabase()
-        .from('mail_sends')
-        .select('*, mail_campaigns(name, property_types, channel)')
-        .eq('contact_id', contact_id)
-        .order('sent_at', { ascending: false })
-      if (error) throw error
-      return res.json({ history: data, total_sends: data.length })
-    }
-
-    // ── Batch log ─────────────────────────────────────────────────────────
-
-    if (action === 'batch_log') {
-      const { campaign_id, recipients, channel, sent_at, agent_id } = req.body
-      if (!campaign_id || !Array.isArray(recipients) || recipients.length === 0) {
-        return res.status(400).json({ error: 'campaign_id and recipients[] are required' })
-      }
-
-      // Suppress check for all contact_ids
-      const contactIds = recipients.filter(r => r.contact_id).map(r => r.contact_id)
-      let suppressedIds = new Set()
-      if (contactIds.length > 0) {
-        const { data: sups } = await getSupabase()
-          .from('mail_suppressions')
-          .select('contact_id')
-          .in('contact_id', contactIds)
-        ;(sups || []).forEach(s => suppressedIds.add(s.contact_id))
-      }
-
-      const now = sent_at || new Date().toISOString()
-      const rows = recipients
-        .filter(r => !r.contact_id || !suppressedIds.has(r.contact_id))
-        .map(r => ({
-          campaign_id,
-          contact_id:        r.contact_id        || null,
-          cold_lead_id:      r.cold_lead_id      || null,
-          recipient_name:    r.recipient_name    || null,
-          recipient_address: r.recipient_address || null,
-          recipient_city:    r.recipient_city    || null,
-          recipient_state:   r.recipient_state   || null,
-          recipient_zip:     r.recipient_zip     || null,
-          channel:           channel  || 'mail',
-          sent_at:           now,
-          agent_id:          agent_id || null,
-          response:          'no-response',
-        }))
-
-      if (rows.length === 0) return res.json({ sends: [], count: 0, skipped: suppressedIds.size })
-
-      const { data, error } = await getSupabase().from('mail_sends').insert(rows).select()
-      if (error) throw error
-      return res.json({ sends: data, count: data.length, skipped: suppressedIds.size })
-    }
-
-    // ── Email blast via Resend ────────────────────────────────────────────
-
-    if (action === 'send_email_blast') {
-      const { campaign_id, contact_ids, subject, body, agent_id, sent_at } = req.body
-      if (!campaign_id || !Array.isArray(contact_ids) || !subject || !body) {
-        return res.status(400).json({ error: 'campaign_id, contact_ids, subject, and body are required' })
-      }
-
-      const RESEND_KEY = process.env.RESEND_API_KEY
-      const FROM       = process.env.RESEND_FROM || 'noreply@example.com'
-      if (!RESEND_KEY) return res.status(500).json({ error: 'Email not configured — add RESEND_API_KEY to your environment variables' })
-
-      const { data: camp } = await getSupabase()
-        .from('mail_campaigns')
-        .select('frequency_cap, frequency_days, name')
-        .eq('id', campaign_id)
-        .single()
-
-      const { data: contacts } = await getSupabase()
-        .from('contacts')
-        .select('id, first_name, last_name, email')
-        .in('id', contact_ids)
-
-      if (!contacts?.length) return res.status(400).json({ error: 'No valid contacts found' })
-
-      // Get all suppressed contact_ids
-      const { data: sups } = await getSupabase()
-        .from('mail_suppressions')
-        .select('contact_id')
-        .in('contact_id', contact_ids)
-      const suppressedIds = new Set((sups || []).map(s => s.contact_id))
-
-      const results = { sent: 0, skipped: 0, errors: [] }
-      const sentRows = []
-      const now = sent_at || new Date().toISOString()
-
-      const applyMerge = (text, c) =>
-        text
-          .replace(/\{\{first_name\}\}/g, c.first_name || '')
-          .replace(/\{\{last_name\}\}/g,  c.last_name  || '')
-          .replace(/\{\{full_name\}\}/g,  `${c.first_name || ''} ${c.last_name || ''}`.trim())
-
-      for (const contact of contacts) {
-        if (!contact.email)             { results.skipped++; continue }
-        if (suppressedIds.has(contact.id)) { results.skipped++; continue }
-
-        // Frequency cap
-        if (camp?.frequency_cap > 0) {
-          const since = new Date(Date.now() - camp.frequency_days * 86400000).toISOString()
-          const { count } = await getSupabase()
-            .from('mail_sends')
-            .select('*', { count: 'exact', head: true })
-            .eq('campaign_id', campaign_id)
-            .eq('contact_id', contact.id)
-            .gte('sent_at', since)
-          if ((count || 0) >= camp.frequency_cap) { results.skipped++; continue }
-        }
-
-        const mergedSubject = applyMerge(subject, contact)
-        const mergedHtml    = applyMerge(body, contact).replace(/\n/g, '<br>')
-
-        try {
-          const emailRes = await fetch('https://api.resend.com/emails', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${RESEND_KEY}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ from: FROM, to: [contact.email], subject: mergedSubject, html: mergedHtml }),
-          })
-          if (!emailRes.ok) {
-            const err = await emailRes.json()
-            results.errors.push({ contact_id: contact.id, error: err.message || 'Send failed' })
-            results.skipped++
-            continue
-          }
-        } catch (e) {
-          results.errors.push({ contact_id: contact.id, error: e.message })
-          results.skipped++
-          continue
-        }
-
-        sentRows.push({ campaign_id, contact_id: contact.id, channel: 'email', sent_at: now, agent_id: agent_id || null, response: 'no-response' })
-        results.sent++
-      }
-
-      if (sentRows.length > 0) {
-        const { error: insErr } = await getSupabase().from('mail_sends').insert(sentRows)
-        if (insErr) console.error('[send_email_blast] insert error', insErr)
-      }
-
-      return res.json(results)
-    }
-
-    // ── Suppressions ───────────────────────────────────────────────────────
-
-    if (action === 'list_suppressions') {
-      const { data, error } = await getSupabase()
-        .from('mail_suppressions')
-        .select('*')
-        .order('created_at', { ascending: false })
-      if (error) throw error
-      return res.json({ suppressions: data })
-    }
-
-    if (action === 'add_suppression') {
-      const { address, email, phone, full_name, reason, contact_id, agent_id, notes } = req.body
-      const { data, error } = await getSupabase()
-        .from('mail_suppressions')
-        .insert([{ address, email, phone, full_name, reason: reason || 'dnc', contact_id, agent_id, notes }])
-        .select()
-        .single()
-      if (error) throw error
-      return res.json({ suppression: data })
-    }
-
-    if (action === 'remove_suppression') {
-      const { id } = req.body
-      const { error } = await getSupabase().from('mail_suppressions').delete().eq('id', id)
-      if (error) throw error
-      return res.json({ ok: true })
-    }
-
-    // ── Analytics ─────────────────────────────────────────────────────────
-
-    if (action === 'campaign_analytics') {
-      const { campaign_id } = req.query
-      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
-
-      const { data: sends } = await getSupabase()
-        .from('mail_sends')
-        .select('channel, response, sent_at, recipient_zip, agent_id')
-        .eq('campaign_id', campaign_id)
-
-      if (!sends) return res.json({ analytics: {} })
-
-      const byChannel  = {}
-      const byResponse = {}
-      const byZip      = {}
-      const byMonth    = {}
-      const byAgent    = {}
-
-      for (const s of sends) {
-        byChannel[s.channel]   = (byChannel[s.channel]   || 0) + 1
-        byResponse[s.response] = (byResponse[s.response] || 0) + 1
-        if (s.recipient_zip) byZip[s.recipient_zip] = (byZip[s.recipient_zip] || 0) + 1
-        const mo = s.sent_at?.slice(0, 7)
-        if (mo) byMonth[mo] = (byMonth[mo] || 0) + 1
-        if (s.agent_id) byAgent[s.agent_id] = (byAgent[s.agent_id] || 0) + 1
-      }
-
-      const total     = sends.length
-      const responded = sends.filter(s => s.response !== 'no-response').length
-      const converted = sends.filter(s => s.response === 'converted').length
-      const interested = sends.filter(s => s.response === 'interested').length
-
-      return res.json({
-        analytics: {
-          total, responded, converted, interested,
-          response_rate:   total > 0 ? Math.round(responded  / total * 100) : 0,
-          conversion_rate: total > 0 ? Math.round(converted  / total * 100) : 0,
-          interest_rate:   total > 0 ? Math.round(interested / total * 100) : 0,
-          by_channel:  byChannel,
-          by_response: byResponse,
-          by_zip:      byZip,
-          by_month:    byMonth,
-          by_agent:    byAgent,
-        },
-      })
-    }
-
-    // ── Generate QR code via Bitly ────────────────────────────────────────
-
-    if (action === 'generate_qr') {
-      const { campaign_id } = req.body
-      if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
-
-      const { data: camp, error: campErr } = await getSupabase()
-        .from('mail_campaigns')
-        .select('id, name, property_id, qr_target, tracking_url')
-        .eq('id', campaign_id)
-        .single()
-      if (campErr) throw campErr
-
-      const BITLY_TOKEN = process.env.BITLY_ACCESS_TOKEN
-      if (!BITLY_TOKEN) return res.status(500).json({ error: 'Bitly not configured (missing BITLY_ACCESS_TOKEN)' })
-
-      const proto   = req.headers['x-forwarded-proto'] || 'https'
-      const host    = req.headers.host
-      const baseUrl = `${proto}://${host}`
-
-      let longUrl
-      if (camp.qr_target === 'crm_landing' && camp.property_id) {
-        longUrl = `${baseUrl}/listing/${camp.property_id}`
-      } else if (camp.qr_target === 'custom_url' && camp.tracking_url) {
-        longUrl = camp.tracking_url
+      // Compute redirect destination
+      let dest
+      if (m.landing_type === 'custom' && m.landing_custom_url) {
+        dest = m.landing_custom_url
+      } else if (m.landing_type === 'valuation') {
+        dest = `/lp/valuation/${m.id}`
       } else {
-        longUrl = `${baseUrl}/listing`
+        dest = `/lp/property/${m.id}`
       }
 
-      const linkRes = await fetch('https://api-ssl.bitly.com/v4/shorten', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${BITLY_TOKEN}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ long_url: longUrl, title: camp.name }),
-      })
-      const linkData = await linkRes.json()
-      if (!linkRes.ok) throw new Error(linkData.message || 'Bitly link creation failed')
-
-      const shortUrl = linkData.link
-      const bitlyId  = linkData.id
-
-      const qrRes = await fetch(`https://api-ssl.bitly.com/v4/bitlinks/${bitlyId}/qr`, {
-        headers: { Authorization: `Bearer ${BITLY_TOKEN}` },
-      })
-      const qrData    = await qrRes.json()
-      const qrCodeUrl = qrRes.ok ? (qrData.qr_code || qrData.link || null) : null
-
-      const { data: updated, error: updateErr } = await getSupabase()
-        .from('mail_campaigns')
-        .update({ tracking_url: shortUrl, bitly_id: bitlyId, qr_code_url: qrCodeUrl })
-        .eq('id', campaign_id)
-        .select()
-        .single()
-      if (updateErr) throw updateErr
-
-      return res.json({ campaign: updated })
+      res.setHeader('Cache-Control', 'no-store')
+      res.setHeader('Location', dest)
+      return res.status(302).end()
     }
 
-    return res.status(400).json({ error: `Unknown action: ${action}` })
+    // ── Health check ────────────────────────────────────────────────────────
+    if (action === 'health') {
+      return json(res, 200, { ok: true, ts: new Date().toISOString() })
+    }
+
+    // ── List all mailings ───────────────────────────────────────────────────
+    if (action === 'list') {
+      const { data, error } = await db()
+        .from('mailings')
+        .select('*')
+        .order('created_at', { ascending: false })
+      if (error) throw error
+      return json(res, 200, { mailings: data })
+    }
+
+    // ── Get one mailing ─────────────────────────────────────────────────────
+    if (action === 'get') {
+      const { id } = req.query
+      if (!id) return json(res, 400, { error: 'id required' })
+      const { data, error } = await db().from('mailings').select('*').eq('id', id).single()
+      if (error) throw error
+      return json(res, 200, { mailing: data })
+    }
+
+    // ── List recipients ─────────────────────────────────────────────────────
+    if (action === 'recipients') {
+      const { mailing_id } = req.query
+      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      const { data, error } = await db()
+        .from('mailing_recipients')
+        .select('*')
+        .eq('mailing_id', mailing_id)
+        .order('created_at', { ascending: false })
+      if (error) throw error
+      return json(res, 200, { recipients: data })
+    }
+
+    // ── List scans ──────────────────────────────────────────────────────────
+    if (action === 'scans') {
+      const { mailing_id, limit = 100 } = req.query
+      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      const { data, error } = await db()
+        .from('mailing_scans')
+        .select('*')
+        .eq('mailing_id', mailing_id)
+        .order('scanned_at', { ascending: false })
+        .limit(Number(limit))
+      if (error) throw error
+      return json(res, 200, { scans: data })
+    }
+
+    // ── List leads ──────────────────────────────────────────────────────────
+    if (action === 'leads') {
+      const { mailing_id } = req.query
+      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      const { data, error } = await db()
+        .from('mailing_leads')
+        .select('*')
+        .eq('mailing_id', mailing_id)
+        .order('created_at', { ascending: false })
+      if (error) throw error
+      return json(res, 200, { leads: data })
+    }
+
+    // ── Per-mailing analytics rollup ────────────────────────────────────────
+    if (action === 'analytics') {
+      const { mailing_id } = req.query
+      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+
+      const [recRes, scanRes, leadRes] = await Promise.all([
+        db().from('mailing_recipients').select('id, responded, scan_count, response_type').eq('mailing_id', mailing_id),
+        db().from('mailing_scans').select('scanned_at, ip_hash').eq('mailing_id', mailing_id),
+        db().from('mailing_leads').select('id').eq('mailing_id', mailing_id),
+      ])
+
+      const recipients = recRes.data || []
+      const scans      = scanRes.data || []
+      const leads      = leadRes.data || []
+
+      const recipientsScanned = recipients.filter(r => (r.scan_count || 0) > 0).length
+      const uniqueScanners    = new Set(scans.map(s => s.ip_hash).filter(Boolean)).size
+
+      // Scan timeline (by day)
+      const byDay = {}
+      for (const s of scans) {
+        const d = s.scanned_at?.slice(0, 10)
+        if (d) byDay[d] = (byDay[d] || 0) + 1
+      }
+      const timeline = Object.entries(byDay)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([date, count]) => ({ date, count }))
+
+      // Response breakdown
+      const byResponse = {}
+      for (const r of recipients) {
+        if (r.response_type) byResponse[r.response_type] = (byResponse[r.response_type] || 0) + 1
+      }
+
+      return json(res, 200, {
+        recipients_total:    recipients.length,
+        recipients_scanned:  recipientsScanned,
+        recipients_responded: recipients.filter(r => r.responded).length,
+        total_scans:         scans.length,
+        unique_scanners:     uniqueScanners,
+        total_leads:         leads.length,
+        scan_rate:           recipients.length > 0 ? recipientsScanned / recipients.length : 0,
+        response_rate:       recipients.length > 0 ? recipients.filter(r => r.responded).length / recipients.length : 0,
+        timeline,
+        by_response:         byResponse,
+      })
+    }
+
+    // ── Org-wide dashboard ──────────────────────────────────────────────────
+    if (action === 'dashboard') {
+      const [mailingsRes, scansRes, leadsRes] = await Promise.all([
+        db().from('mailings').select('id, name, status, agent_id, recipient_count, scan_count, lead_count, created_at'),
+        db().from('mailing_scans').select('scanned_at').gte('scanned_at', new Date(Date.now() - 30 * 86400000).toISOString()),
+        db().from('mailing_leads').select('id, created_at').gte('created_at', new Date(Date.now() - 30 * 86400000).toISOString()),
+      ])
+      const mailings = mailingsRes.data || []
+      const scans    = scansRes.data || []
+      const leads    = leadsRes.data || []
+
+      // Daily scan trend over 30d
+      const byDay = {}
+      for (let i = 0; i < 30; i++) {
+        const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10)
+        byDay[d] = 0
+      }
+      for (const s of scans) {
+        const d = s.scanned_at?.slice(0, 10)
+        if (d in byDay) byDay[d]++
+      }
+      const trend = Object.entries(byDay).sort(([a], [b]) => a.localeCompare(b)).map(([date, count]) => ({ date, count }))
+
+      const topMailings = [...mailings]
+        .sort((a, b) => (b.scan_count || 0) - (a.scan_count || 0))
+        .slice(0, 5)
+
+      return json(res, 200, {
+        total_mailings:    mailings.length,
+        active_mailings:   mailings.filter(m => m.status === 'active' || m.status === 'sent').length,
+        total_recipients:  mailings.reduce((n, m) => n + (m.recipient_count || 0), 0),
+        total_scans_30d:   scans.length,
+        total_leads_30d:   leads.length,
+        trend,
+        top_mailings:      topMailings,
+      })
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // WRITE actions below — POST only
+    // ─────────────────────────────────────────────────────────────────────────
+    if (req.method !== 'POST') return json(res, 405, { error: 'POST required for write actions' })
+
+    // ── Create a mailing ────────────────────────────────────────────────────
+    if (action === 'create') {
+      const {
+        name, description, agent_id, property_id,
+        mailing_type, landing_type, landing_custom_url, send_date, status,
+      } = req.body
+      if (!name?.trim()) return json(res, 400, { error: 'name is required' })
+
+      // Mint a unique token (retry on the astronomically unlikely collision)
+      let token, attempts = 0
+      while (attempts++ < 5) {
+        token = mintToken(8)
+        const { data: existing } = await db().from('mailings').select('id').eq('qr_token', token).limit(1)
+        if (!existing?.length) break
+      }
+
+      const payload = {
+        name:               name.trim(),
+        description:        description?.trim() || null,
+        agent_id:           agent_id || null,
+        property_id:        property_id || null,
+        mailing_type:       mailing_type || 'postcard',
+        landing_type:       landing_type || 'property',
+        landing_custom_url: landing_custom_url?.trim() || null,
+        send_date:          send_date || null,
+        status:             status || 'draft',
+        qr_token:           token,
+      }
+
+      const { data, error } = await db().from('mailings').insert([payload]).select().single()
+      if (error) throw error
+      return json(res, 200, { mailing: data })
+    }
+
+    // ── Update mailing ──────────────────────────────────────────────────────
+    if (action === 'update') {
+      const { id } = req.body
+      if (!id) return json(res, 400, { error: 'id required' })
+      const ALLOWED = ['name','description','agent_id','property_id','mailing_type','status','landing_type','landing_custom_url','send_date']
+      const patch = {}
+      for (const k of ALLOWED) if (k in req.body) patch[k] = req.body[k]
+      if (Object.keys(patch).length === 0) return json(res, 400, { error: 'no updatable fields' })
+
+      const { data, error } = await db().from('mailings').update(patch).eq('id', id).select().single()
+      if (error) throw error
+      return json(res, 200, { mailing: data })
+    }
+
+    // ── Delete mailing ──────────────────────────────────────────────────────
+    if (action === 'delete') {
+      const { id } = req.body
+      if (!id) return json(res, 400, { error: 'id required' })
+      const { error } = await db().from('mailings').delete().eq('id', id)
+      if (error) throw error
+      return json(res, 200, { ok: true })
+    }
+
+    // ── Add recipients (bulk) ───────────────────────────────────────────────
+    if (action === 'add_recipients') {
+      const { mailing_id, recipients } = req.body
+      if (!mailing_id || !Array.isArray(recipients) || recipients.length === 0) {
+        return json(res, 400, { error: 'mailing_id and recipients[] required' })
+      }
+      const rows = recipients.slice(0, 5000).map(r => ({
+        mailing_id,
+        contact_id:     r.contact_id     || null,
+        recipient_name: r.recipient_name || r.name || null,
+        address_line1:  r.address_line1  || r.address || null,
+        address_line2:  r.address_line2  || null,
+        city:           r.city           || null,
+        state:          r.state          || null,
+        zip:            r.zip            || null,
+        source:         r.source         || (r.contact_id ? 'database' : 'csv_import'),
+      }))
+      const { data, error } = await db().from('mailing_recipients').insert(rows).select()
+      if (error) throw error
+
+      // Update denormalized counter
+      const { count } = await db()
+        .from('mailing_recipients')
+        .select('*', { count: 'exact', head: true })
+        .eq('mailing_id', mailing_id)
+      await db().from('mailings').update({ recipient_count: count || 0 }).eq('id', mailing_id)
+
+      return json(res, 200, { recipients: data, count: data.length })
+    }
+
+    // ── Remove a recipient ──────────────────────────────────────────────────
+    if (action === 'remove_recipient') {
+      const { id } = req.body
+      if (!id) return json(res, 400, { error: 'id required' })
+      const { data: removed } = await db().from('mailing_recipients').select('mailing_id').eq('id', id).single()
+      const { error } = await db().from('mailing_recipients').delete().eq('id', id)
+      if (error) throw error
+      if (removed?.mailing_id) {
+        const { count } = await db()
+          .from('mailing_recipients')
+          .select('*', { count: 'exact', head: true })
+          .eq('mailing_id', removed.mailing_id)
+        await db().from('mailings').update({ recipient_count: count || 0 }).eq('id', removed.mailing_id)
+      }
+      return json(res, 200, { ok: true })
+    }
+
+    // ── Update recipient response ───────────────────────────────────────────
+    if (action === 'update_recipient') {
+      const { id, response_type, response_notes, responded } = req.body
+      if (!id) return json(res, 400, { error: 'id required' })
+      const patch = {}
+      if (response_type !== undefined) {
+        patch.response_type = response_type
+        patch.responded     = responded ?? true
+        patch.responded_at  = new Date().toISOString()
+      }
+      if (response_notes !== undefined) patch.response_notes = response_notes
+      if (responded !== undefined && !('responded' in patch)) patch.responded = responded
+      const { data, error } = await db().from('mailing_recipients').update(patch).eq('id', id).select().single()
+      if (error) throw error
+      return json(res, 200, { recipient: data })
+    }
+
+    // ── Public: capture lead from landing page ──────────────────────────────
+    if (action === 'capture_lead') {
+      const { mailing_id, name, email, phone, message, property_address, property_type, source_landing } = req.body
+      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      if (!name && !email && !phone) return json(res, 400, { error: 'Provide at least name, email, or phone' })
+
+      const ip = clientIp(req)
+      const ipHash = hashIp(ip)
+
+      // Insert the lead
+      const { data: lead, error: leadErr } = await db().from('mailing_leads').insert([{
+        mailing_id,
+        name:             name?.trim() || null,
+        email:            email?.trim()?.toLowerCase() || null,
+        phone:            phone?.trim() || null,
+        message:          message?.trim() || null,
+        property_address: property_address?.trim() || null,
+        property_type:    property_type || null,
+        source_landing:   source_landing || 'property',
+        ip_hash:          ipHash,
+      }]).select().single()
+      if (leadErr) throw leadErr
+
+      // Upsert into contacts (best-effort — don't fail the lead capture if this errors)
+      try {
+        if (email || phone) {
+          const parts = (name || '').trim().split(/\s+/)
+          const first = parts[0] || ''
+          const last  = parts.slice(1).join(' ') || ''
+          let contactId = null
+          if (email) {
+            const { data: existing } = await db()
+              .from('contacts').select('id').eq('email', email.trim().toLowerCase()).limit(1)
+            if (existing?.length) contactId = existing[0].id
+          }
+          if (!contactId) {
+            const { data: created } = await db().from('contacts').insert([{
+              first_name: first || '—',
+              last_name:  last  || '—',
+              email:      email?.trim()?.toLowerCase() || null,
+              phone:      phone?.trim() || null,
+              source:     'mailing-landing',
+              type:       source_landing === 'valuation' ? 'seller' : 'buyer',
+              status:     'active',
+            }]).select('id').single()
+            contactId = created?.id || null
+          }
+          if (contactId) {
+            await db().from('mailing_leads').update({ contact_id: contactId }).eq('id', lead.id)
+          }
+        }
+      } catch { /* swallow — lead is already saved */ }
+
+      // Bump denormalized lead counter
+      await db().from('mailings').update({
+        lead_count: (await db().from('mailing_leads').select('*', { count: 'exact', head: true }).eq('mailing_id', mailing_id)).count || 0,
+      }).eq('id', mailing_id)
+
+      return json(res, 200, { ok: true, lead_id: lead.id })
+    }
+
+    return json(res, 400, { error: `Unknown action: ${action}` })
   } catch (err) {
-    console.error('[campaigns]', err)
-    return res.status(500).json({ error: err.message })
+    console.error('[api/campaigns]', err)
+    return json(res, 500, { error: err.message || 'Internal error' })
   }
 }

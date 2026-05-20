@@ -4,8 +4,9 @@
   "installCommand": "npm ci --no-audit --no-fund",
   "framework": "vite",
   "rewrites": [
+    { "source": "/m/:token",  "destination": "/api/campaigns?action=scan&token=:token" },
     { "source": "/share/:id", "destination": "/api/share?id=:id" },
-    { "source": "/((?!api/)(?!share/).*)", "destination": "/index.html" }
+    { "source": "/((?!api/)(?!share/)(?!m/).*)", "destination": "/index.html" }
   ],
   "headers": [
     {

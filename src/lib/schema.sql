@@ -681,3 +681,127 @@ group by a.id;
 grant select on agent_dashboard_stats to authenticated;
 grant execute on function search_contacts(text, uuid[], int) to authenticated;
 grant execute on function search_properties(text, uuid[], int) to authenticated;
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- MAILINGS (v2) — clean rebuild of campaigns/sends with QR-first tracking.
+--
+-- Deprecation path:
+--   • old mail_campaigns / mail_sends / mail_suppressions kept for now
+--   • once frontend fully migrates, drop them in a follow-up migration
+-- ═════════════════════════════════════════════════════════════════════════════
+
+create table if not exists mailings (
+  id                     uuid primary key default uuid_generate_v4(),
+  name                   text not null,
+  description            text,
+  agent_id               uuid references agents(id) on delete set null,
+  property_id            uuid references properties(id) on delete set null,
+  mailing_type           text check (mailing_type in ('postcard','letter','flyer','door-hanger','other')) default 'postcard',
+  status                 text check (status in ('draft','active','sent','archived')) default 'draft',
+  qr_token               text not null unique,                -- short slug → /m/{token}
+  landing_type           text check (landing_type in ('property','valuation','custom')) default 'property',
+  landing_custom_url     text,                                -- only used when landing_type='custom'
+  send_date              date,                                -- when the mailer was/will be dropped
+  recipient_count        integer default 0,                   -- denormalized counter
+  scan_count             integer default 0,                   -- denormalized counter
+  lead_count             integer default 0,                   -- denormalized counter
+  created_at             timestamptz default now(),
+  updated_at             timestamptz default now()
+);
+
+create index if not exists mailings_agent_id_idx     on mailings(agent_id);
+create index if not exists mailings_status_idx       on mailings(status);
+create index if not exists mailings_property_id_idx  on mailings(property_id);
+create index if not exists mailings_qr_token_idx     on mailings(qr_token);
+
+create trigger mailings_updated_at before update on mailings
+  for each row execute function set_updated_at();
+
+alter table mailings enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='mailings' and policyname='allow_all') then
+    create policy "allow_all" on mailings for all using (true) with check (true);
+  end if;
+end $$;
+
+create table if not exists mailing_recipients (
+  id                uuid primary key default uuid_generate_v4(),
+  mailing_id        uuid not null references mailings(id) on delete cascade,
+  contact_id        uuid references contacts(id) on delete set null,
+  -- Snapshotted address fields (so CSV imports work + history survives contact edits)
+  recipient_name    text,
+  address_line1     text,
+  address_line2     text,
+  city              text,
+  state             text,
+  zip               text,
+  source            text check (source in ('database','csv_import','manual')) default 'database',
+  -- Scan tracking
+  scan_count        integer default 0,
+  first_scanned_at  timestamptz,
+  last_scanned_at   timestamptz,
+  -- Response tracking
+  responded         boolean default false,
+  response_type     text check (response_type in ('lead_captured','called','emailed','interested','not_interested','converted')),
+  responded_at      timestamptz,
+  response_notes    text,
+  created_at        timestamptz default now()
+);
+
+create index if not exists mailing_recipients_mailing_idx  on mailing_recipients(mailing_id);
+create index if not exists mailing_recipients_contact_idx  on mailing_recipients(contact_id);
+create index if not exists mailing_recipients_responded_idx on mailing_recipients(mailing_id, responded);
+
+alter table mailing_recipients enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='mailing_recipients' and policyname='allow_all') then
+    create policy "allow_all" on mailing_recipients for all using (true) with check (true);
+  end if;
+end $$;
+
+create table if not exists mailing_scans (
+  id            uuid primary key default uuid_generate_v4(),
+  mailing_id    uuid not null references mailings(id) on delete cascade,
+  recipient_id  uuid references mailing_recipients(id) on delete set null,
+  ip_hash       text,                          -- sha256(ip + daily-salt) — privacy-preserving uniqueness
+  user_agent    text,
+  referrer      text,
+  country       text,                          -- inferred from Vercel headers
+  scanned_at    timestamptz default now()
+);
+
+create index if not exists mailing_scans_mailing_idx  on mailing_scans(mailing_id, scanned_at desc);
+create index if not exists mailing_scans_recipient_idx on mailing_scans(recipient_id);
+
+alter table mailing_scans enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='mailing_scans' and policyname='allow_all') then
+    create policy "allow_all" on mailing_scans for all using (true) with check (true);
+  end if;
+end $$;
+
+create table if not exists mailing_leads (
+  id                uuid primary key default uuid_generate_v4(),
+  mailing_id        uuid references mailings(id) on delete set null,
+  recipient_id      uuid references mailing_recipients(id) on delete set null,
+  contact_id        uuid references contacts(id) on delete set null,
+  name              text,
+  email             text,
+  phone             text,
+  message           text,
+  property_address  text,                      -- valuation requests only
+  property_type     text,
+  source_landing    text check (source_landing in ('property','valuation','custom')),
+  ip_hash           text,
+  created_at        timestamptz default now()
+);
+
+create index if not exists mailing_leads_mailing_idx on mailing_leads(mailing_id);
+create index if not exists mailing_leads_contact_idx on mailing_leads(contact_id);
+
+alter table mailing_leads enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='mailing_leads' and policyname='allow_all') then
+    create policy "allow_all" on mailing_leads for all using (true) with check (true);
+  end if;
+end $$;

@@ -3,6 +3,8 @@ import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
 import LeadCapturePage from './pages/LeadCapture.jsx'
 import PropertyLandingPage from './pages/PropertyLanding.jsx'
+import LandingProperty from './pages/LandingProperty.jsx'
+import LandingValuation from './pages/LandingValuation.jsx'
 import { initWebVitals } from './lib/perf.js'
 import './styles/app.css'
 
@@ -36,16 +38,19 @@ class ErrorBoundary extends React.Component {
 }
 
 const pathname = window.location.pathname
-const isLeadPage    = pathname === '/lead'
-const listingMatch  = pathname.match(/^\/listing\/([0-9a-f-]{36})/i)
+const isLeadPage     = pathname === '/lead'
+const listingMatch   = pathname.match(/^\/listing\/([0-9a-f-]{36})/i)
+const lpPropMatch    = pathname.match(/^\/lp\/property\/([0-9a-f-]{36})/i)
+const lpValMatch     = pathname.match(/^\/lp\/valuation\/([0-9a-f-]{36})/i)
+
+let publicView = null
+if (listingMatch)      publicView = <PropertyLandingPage propertyId={listingMatch[1]} />
+else if (lpPropMatch)  publicView = <LandingProperty mailingId={lpPropMatch[1]} />
+else if (lpValMatch)   publicView = <LandingValuation mailingId={lpValMatch[1]} />
+else if (isLeadPage)   publicView = <LeadCapturePage />
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <ErrorBoundary>
-    {listingMatch
-      ? <PropertyLandingPage propertyId={listingMatch[1]} />
-      : isLeadPage
-        ? <LeadCapturePage />
-        : <App />
-    }
+    {publicView || <App />}
   </ErrorBoundary>
 )
