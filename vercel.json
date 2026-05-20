@@ -7,14 +7,6 @@
     { "source": "/share/:id", "destination": "/api/share?id=:id" },
     { "source": "/((?!api/)(?!share/).*)", "destination": "/index.html" }
   ],
-  "functions": {
-    "api/docusign-webhook.js": { "maxDuration": 30 },
-    "api/sequence-run.js":     { "maxDuration": 60 },
-    "api/email-send.js":       { "maxDuration": 15 }
-  },
-  "crons": [
-    { "path": "/api/sequence-run", "schedule": "*/15 * * * *" }
-  ],
   "headers": [
     {
       "source": "/index.html",
