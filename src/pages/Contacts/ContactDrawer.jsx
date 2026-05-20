@@ -80,7 +80,9 @@ export default function ContactDrawer({
   }
 
   const isComm = propForm.type === 'commercial'
-  const isBuyer = form.type === 'buyer' || form.type === 'investor'
+  const isBuyer  = form.type === 'buyer' || form.type === 'investor'
+  const isSeller = form.type === 'seller' || form.type === 'landlord'
+  const hasCriteria = isBuyer || isSeller
 
   const save = async () => {
     // Validate
@@ -126,13 +128,14 @@ export default function ContactDrawer({
       email:             form.email?.trim() || null,
       phone:             normalizedPhone,
       tags:              Array.isArray(form.tags) ? form.tags : [],
-      ...(isBuyer && {
+      ...(hasCriteria && {
         // Keep legacy single-value submarket synced for backward compatibility
         submarket:   submarketList[0] || null,
         submarkets:  submarketList,
         asset_types: Array.isArray(asset_types) ? asset_types : [],
+        // For sellers, size_min holds the exact property size and size_max is unused.
         size_min:    size_min ? Number(size_min) : null,
-        size_max:    size_max ? Number(size_max) : null,
+        size_max:    isBuyer && size_max ? Number(size_max) : null,
         size_unit:   size_unit || 'sqft',
       }),
     }
@@ -334,97 +337,34 @@ export default function ContactDrawer({
               </div>
             </div>
 
-            {/* ── Buyer / Investor Criteria ───────────────────────────────────────
+            {/* ── Buyer / Seller Criteria ────────────────────────────────────────
                 Shown right after the Type selector so agents don't have to scroll.
-                All fields optional — no match is made when left empty.           */}
-            {isBuyer && (
-              <div style={{
-                background: 'var(--gw-sky, #f0f7ff)',
-                border: '1px solid var(--gw-azure)',
-                borderRadius: 'var(--radius)',
-                padding: '12px 14px',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 12,
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gw-azure)' }}>
-                    {form.type === 'investor' ? 'Investment Criteria' : 'Buyer Criteria'}
-                    <span style={{ marginLeft: 6, fontWeight: 400, textTransform: 'none', letterSpacing: 0, color: 'var(--gw-mist)', fontSize: 11 }}>— all optional</span>
-                  </div>
-                </div>
-
-                {/* Asset Types — inline chip grid, scannable at a glance */}
-                <div>
-                  <label className="form-label" style={{ marginBottom: 6, display: 'block' }}>Asset Types</label>
-                  <ChipToggleGroup
-                    fieldKey="asset_type"
-                    value={Array.isArray(form.asset_types) ? form.asset_types : []}
-                    onChange={(v) => set('asset_types', v)}
-                    placeholder="Filter asset types…"
-                    allowAdd
-                    searchThreshold={12}
-                  />
-                </div>
-
-                {/* Submarkets — search-first since list can be large */}
-                <div>
-                  <label className="form-label" style={{ marginBottom: 6, display: 'block' }}>Submarkets</label>
-                  <OptionMultiSelect
-                    fieldKey="submarket"
-                    value={Array.isArray(form.submarkets) ? form.submarkets : []}
-                    onChange={(v) => set('submarkets', v)}
-                    placeholder="Search submarkets…"
-                    allowAdd
-                  />
-                </div>
-
-                {/* Size range — compact inline row */}
-                <div>
-                  <label className="form-label" style={{ marginBottom: 6, display: 'block' }}>Size Range</label>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <input
-                      className="form-control"
-                      type="number"
-                      value={form.size_min || ''}
-                      onChange={(e) => set('size_min', e.target.value)}
-                      placeholder="Min"
-                      style={{ flex: 1 }}
-                    />
-                    <span style={{ color: 'var(--gw-mist)', fontSize: 13, flexShrink: 0 }}>–</span>
-                    <input
-                      className="form-control"
-                      type="number"
-                      value={form.size_max || ''}
-                      onChange={(e) => set('size_max', e.target.value)}
-                      placeholder="Max"
-                      style={{ flex: 1 }}
-                    />
-                    <select
-                      className="form-control"
-                      value={form.size_unit || 'sqft'}
-                      onChange={(e) => set('size_unit', e.target.value)}
-                      style={{ width: 76, flexShrink: 0 }}
-                    >
-                      <option value="sqft">sqft</option>
-                      <option value="acres">acres</option>
-                      <option value="units">units</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
+                Buyer/investor → submarkets + asset types they WANT + size range.
+                Seller/landlord → submarket + asset type they OWN + exact size.
+                All fields optional — no match is made when left empty.          */}
+            {hasCriteria && (
+              <CriteriaCard
+                isBuyer={isBuyer}
+                isSeller={isSeller}
+                contactType={form.type}
+                form={form}
+                set={set}
+              />
             )}
 
-            {/* Tags — chip grid so agents see all options without a dropdown */}
+            {/* Tags — compact select-style: shows selected chips + search to add */}
             <div className="form-group">
-              <label className="form-label">Tags <span style={{ fontWeight: 400, color: 'var(--gw-mist)', fontSize: 11 }}>— optional</span></label>
+              <label className="form-label">
+                Tags
+                <span style={{ fontWeight: 400, color: 'var(--gw-mist)', fontSize: 11 }}> — optional</span>
+              </label>
               <ChipToggleGroup
+                mode="select"
                 fieldKey="tag"
                 value={Array.isArray(form.tags) ? form.tags : []}
                 onChange={(v) => set('tags', v)}
-                placeholder="Filter tags…"
+                placeholder="Search or add tags…"
                 allowAdd
-                searchThreshold={10}
               />
             </div>
 
@@ -534,5 +474,141 @@ export default function ContactDrawer({
         </div>
       )}
     </Drawer>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CriteriaCard — Buyer/Investor or Seller/Landlord profile panel.
+//
+// Buyer/Investor: submarkets + asset types they WANT + size range (min–max)
+// Seller/Landlord: submarket + asset type they OWN + exact property size
+//
+// Brand-tinted card (azure for buyers, gold for sellers) makes it visually
+// distinct so the agent's eye finds it immediately.
+// ─────────────────────────────────────────────────────────────────────────────
+function CriteriaCard({ isBuyer, isSeller, contactType, form, set }) {
+  const palette = isBuyer
+    ? { bg: 'var(--gw-sky, #f0f7ff)',   border: 'var(--gw-azure)',         accent: 'var(--gw-azure)' }
+    : { bg: 'var(--gw-cream, #fdf9f0)', border: 'var(--gw-gold, #C8A84B)', accent: 'var(--gw-gold, #C8A84B)' }
+
+  const title = isBuyer
+    ? (contactType === 'investor' ? 'Investment Criteria' : 'Buyer Criteria')
+    : (contactType === 'landlord' ? 'Property Profile' : 'Seller Profile')
+
+  const subtitle = isBuyer
+    ? 'What this contact is looking for — used to match them with listings.'
+    : 'About the property they own — used to surface matching buyers.'
+
+  return (
+    <div style={{
+      background: palette.bg,
+      border: `1px solid ${palette.border}`,
+      borderRadius: 'var(--radius)',
+      padding: '12px 14px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+    }}>
+      <div>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: palette.accent }}>
+          {title}
+          <span style={{ marginLeft: 6, fontWeight: 400, textTransform: 'none', letterSpacing: 0, color: 'var(--gw-mist)', fontSize: 11 }}>
+            — all optional
+          </span>
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2, lineHeight: 1.4 }}>
+          {subtitle}
+        </div>
+      </div>
+
+      {/* Asset Types — chip grid (small finite set, visible at a glance) */}
+      <div>
+        <label className="form-label" style={{ marginBottom: 6, display: 'block' }}>
+          {isBuyer ? 'Asset Types' : 'Asset Type'}
+        </label>
+        <ChipToggleGroup
+          fieldKey="asset_type"
+          value={Array.isArray(form.asset_types) ? form.asset_types : []}
+          onChange={(v) => set('asset_types', v)}
+          placeholder="Filter asset types…"
+          allowAdd
+          searchThreshold={12}
+        />
+      </div>
+
+      {/* Submarkets — search-first; sellers usually pick one, buyers may pick many */}
+      <div>
+        <label className="form-label" style={{ marginBottom: 6, display: 'block' }}>
+          {isBuyer ? 'Submarkets' : 'Submarket'}
+        </label>
+        <OptionMultiSelect
+          fieldKey="submarket"
+          value={Array.isArray(form.submarkets) ? form.submarkets : []}
+          onChange={(v) => set('submarkets', v)}
+          placeholder={isBuyer ? 'Search submarkets…' : 'Where is the property?'}
+          allowAdd
+        />
+      </div>
+
+      {/* Size — buyer = range, seller = exact value */}
+      {isBuyer ? (
+        <div>
+          <label className="form-label" style={{ marginBottom: 6, display: 'block' }}>Size Range</label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              className="form-control"
+              type="number"
+              value={form.size_min || ''}
+              onChange={(e) => set('size_min', e.target.value)}
+              placeholder="Min"
+              style={{ flex: 1 }}
+            />
+            <span style={{ color: 'var(--gw-mist)', fontSize: 13, flexShrink: 0 }}>–</span>
+            <input
+              className="form-control"
+              type="number"
+              value={form.size_max || ''}
+              onChange={(e) => set('size_max', e.target.value)}
+              placeholder="Max"
+              style={{ flex: 1 }}
+            />
+            <select
+              className="form-control"
+              value={form.size_unit || 'sqft'}
+              onChange={(e) => set('size_unit', e.target.value)}
+              style={{ width: 76, flexShrink: 0 }}
+            >
+              <option value="sqft">sqft</option>
+              <option value="acres">acres</option>
+              <option value="units">units</option>
+            </select>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <label className="form-label" style={{ marginBottom: 6, display: 'block' }}>Property Size</label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              className="form-control"
+              type="number"
+              value={form.size_min || ''}
+              onChange={(e) => set('size_min', e.target.value)}
+              placeholder="e.g. 12,500"
+              style={{ flex: 1 }}
+            />
+            <select
+              className="form-control"
+              value={form.size_unit || 'sqft'}
+              onChange={(e) => set('size_unit', e.target.value)}
+              style={{ width: 76, flexShrink: 0 }}
+            >
+              <option value="sqft">sqft</option>
+              <option value="acres">acres</option>
+              <option value="units">units</option>
+            </select>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
