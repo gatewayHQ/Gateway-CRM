@@ -1,9 +1,17 @@
 import { createClient } from '@supabase/supabase-js'
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
-)
+// Lazy singleton — resolved at first request so cold-start env vars are always
+// present. Module-level createClient(undefined, undefined) produces the
+// "Invalid path specified in request URL" error when SUPABASE_URL is missing.
+let _supabase = null
+function getSupabase() {
+  if (_supabase) return _supabase
+  const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !key) throw new Error('SUPABASE_URL / SUPABASE_SERVICE_KEY env vars are not set')
+  _supabase = createClient(url, key)
+  return _supabase
+}
 
 // Extract missing column name from Supabase/PostgREST/Postgres errors.
 // Returns the column name or null if the error isn't a missing-column error.
@@ -37,7 +45,7 @@ export default async function handler(req, res) {
     // ── Campaigns ─────────────────────────────────────────────────────────
 
     if (action === 'list_campaigns') {
-      const { data, error } = await supabase
+      const { data, error } = await getSupabase()
         .from('mail_campaigns')
         .select('*')
         .order('created_at', { ascending: false })
@@ -46,7 +54,7 @@ export default async function handler(req, res) {
       const ids = data.map(c => c.id)
       let counts = {}
       if (ids.length > 0) {
-        const { data: sends } = await supabase
+        const { data: sends } = await getSupabase()
           .from('mail_sends')
           .select('campaign_id, response, sent_at')
           .in('campaign_id', ids)
@@ -96,7 +104,7 @@ export default async function handler(req, res) {
       }
 
       let payload = { ...CORE, ...OPTIONAL }
-      let { data, error } = await supabase.from('mail_campaigns').insert([payload]).select().single()
+      let { data, error } = await getSupabase().from('mail_campaigns').insert([payload]).select().single()
 
       // If a column doesn't exist in the user's schema, drop it and retry
       let attempts = 0
@@ -104,7 +112,7 @@ export default async function handler(req, res) {
         const badCol = extractMissingColumn(error.message)
         if (!badCol || !(badCol in payload)) break
         delete payload[badCol]
-        ;({ data, error } = await supabase.from('mail_campaigns').insert([payload]).select().single())
+        ;({ data, error } = await getSupabase().from('mail_campaigns').insert([payload]).select().single())
       }
       if (error) throw error
       return res.json({ campaign: data })
@@ -127,14 +135,14 @@ export default async function handler(req, res) {
       if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'no updatable fields provided' })
 
       let working = { ...patch }
-      let { data, error } = await supabase.from('mail_campaigns').update(working).eq('id', id).select().single()
+      let { data, error } = await getSupabase().from('mail_campaigns').update(working).eq('id', id).select().single()
       let attempts = 0
       while (error && attempts++ < 12) {
         const badCol = extractMissingColumn(error.message)
         if (!badCol || !(badCol in working)) break
         delete working[badCol]
         if (Object.keys(working).length === 0) break
-        ;({ data, error } = await supabase.from('mail_campaigns').update(working).eq('id', id).select().single())
+        ;({ data, error } = await getSupabase().from('mail_campaigns').update(working).eq('id', id).select().single())
       }
       if (error) throw error
       return res.json({ campaign: data })
@@ -143,7 +151,7 @@ export default async function handler(req, res) {
     if (action === 'delete_campaign') {
       const { id } = req.body
       if (!id) return res.status(400).json({ error: 'id is required' })
-      const { error } = await supabase.from('mail_campaigns').delete().eq('id', id)
+      const { error } = await getSupabase().from('mail_campaigns').delete().eq('id', id)
       if (error) throw error
       return res.json({ ok: true })
     }
@@ -152,7 +160,7 @@ export default async function handler(req, res) {
 
     if (action === 'list_sends') {
       const { campaign_id, contact_id, limit: lim = 500 } = req.query
-      let q = supabase.from('mail_sends').select('*').order('sent_at', { ascending: false }).limit(Number(lim))
+      let q = getSupabase().from('mail_sends').select('*').order('sent_at', { ascending: false }).limit(Number(lim))
       if (campaign_id) q = q.eq('campaign_id', campaign_id)
       if (contact_id)  q = q.eq('contact_id', contact_id)
       const { data, error } = await q
@@ -168,7 +176,7 @@ export default async function handler(req, res) {
 
       // Suppression check
       if (contact_id) {
-        const { data: sup } = await supabase
+        const { data: sup } = await getSupabase()
           .from('mail_suppressions')
           .select('id, reason')
           .eq('contact_id', contact_id)
@@ -179,14 +187,14 @@ export default async function handler(req, res) {
       }
 
       // Frequency cap check
-      const { data: camp } = await supabase
+      const { data: camp } = await getSupabase()
         .from('mail_campaigns')
         .select('frequency_cap, frequency_days')
         .eq('id', campaign_id)
         .single()
       if (camp?.frequency_cap > 0 && contact_id) {
         const since = new Date(Date.now() - camp.frequency_days * 86400000).toISOString()
-        const { count } = await supabase
+        const { count } = await getSupabase()
           .from('mail_sends')
           .select('*', { count: 'exact', head: true })
           .eq('campaign_id', campaign_id)
@@ -200,7 +208,7 @@ export default async function handler(req, res) {
         }
       }
 
-      const { data, error } = await supabase
+      const { data, error } = await getSupabase()
         .from('mail_sends')
         .insert([{ campaign_id, contact_id, cold_lead_id, recipient_name, recipient_address,
                    recipient_city, recipient_state, recipient_zip,
@@ -211,7 +219,7 @@ export default async function handler(req, res) {
       if (error) throw error
 
       if (response === 'interested' && contact_id && agent_id) {
-        await supabase.from('tasks').insert([{
+        await getSupabase().from('tasks').insert([{
           title: `Follow up — interested lead from campaign`,
           type: 'follow-up', priority: 'high',
           due_date: new Date(Date.now() + 86400000).toISOString(),
@@ -235,7 +243,7 @@ export default async function handler(req, res) {
       if (cleanPatch.response && cleanPatch.response !== 'no-response') {
         cleanPatch.responded_at = new Date().toISOString()
       }
-      const { data, error } = await supabase
+      const { data, error } = await getSupabase()
         .from('mail_sends')
         .update(cleanPatch)
         .eq('id', id)
@@ -244,7 +252,7 @@ export default async function handler(req, res) {
       if (error) throw error
 
       if (patch.response === 'interested' && patch.contact_id && patch.agent_id) {
-        await supabase.from('tasks').insert([{
+        await getSupabase().from('tasks').insert([{
           title: `Follow up — interested lead from campaign`,
           type: 'follow-up', priority: 'high',
           due_date: new Date(Date.now() + 86400000).toISOString(),
@@ -258,7 +266,7 @@ export default async function handler(req, res) {
     if (action === 'delete_send') {
       const { id } = req.body
       if (!id) return res.status(400).json({ error: 'id is required' })
-      const { error } = await supabase.from('mail_sends').delete().eq('id', id)
+      const { error } = await getSupabase().from('mail_sends').delete().eq('id', id)
       if (error) throw error
       return res.json({ ok: true })
     }
@@ -268,7 +276,7 @@ export default async function handler(req, res) {
     if (action === 'contact_history') {
       const { contact_id } = req.query
       if (!contact_id) return res.status(400).json({ error: 'contact_id is required' })
-      const { data, error } = await supabase
+      const { data, error } = await getSupabase()
         .from('mail_sends')
         .select('*, mail_campaigns(name, property_types, channel)')
         .eq('contact_id', contact_id)
@@ -289,7 +297,7 @@ export default async function handler(req, res) {
       const contactIds = recipients.filter(r => r.contact_id).map(r => r.contact_id)
       let suppressedIds = new Set()
       if (contactIds.length > 0) {
-        const { data: sups } = await supabase
+        const { data: sups } = await getSupabase()
           .from('mail_suppressions')
           .select('contact_id')
           .in('contact_id', contactIds)
@@ -316,7 +324,7 @@ export default async function handler(req, res) {
 
       if (rows.length === 0) return res.json({ sends: [], count: 0, skipped: suppressedIds.size })
 
-      const { data, error } = await supabase.from('mail_sends').insert(rows).select()
+      const { data, error } = await getSupabase().from('mail_sends').insert(rows).select()
       if (error) throw error
       return res.json({ sends: data, count: data.length, skipped: suppressedIds.size })
     }
@@ -333,13 +341,13 @@ export default async function handler(req, res) {
       const FROM       = process.env.RESEND_FROM || 'noreply@example.com'
       if (!RESEND_KEY) return res.status(500).json({ error: 'Email not configured — add RESEND_API_KEY to your environment variables' })
 
-      const { data: camp } = await supabase
+      const { data: camp } = await getSupabase()
         .from('mail_campaigns')
         .select('frequency_cap, frequency_days, name')
         .eq('id', campaign_id)
         .single()
 
-      const { data: contacts } = await supabase
+      const { data: contacts } = await getSupabase()
         .from('contacts')
         .select('id, first_name, last_name, email')
         .in('id', contact_ids)
@@ -347,7 +355,7 @@ export default async function handler(req, res) {
       if (!contacts?.length) return res.status(400).json({ error: 'No valid contacts found' })
 
       // Get all suppressed contact_ids
-      const { data: sups } = await supabase
+      const { data: sups } = await getSupabase()
         .from('mail_suppressions')
         .select('contact_id')
         .in('contact_id', contact_ids)
@@ -370,7 +378,7 @@ export default async function handler(req, res) {
         // Frequency cap
         if (camp?.frequency_cap > 0) {
           const since = new Date(Date.now() - camp.frequency_days * 86400000).toISOString()
-          const { count } = await supabase
+          const { count } = await getSupabase()
             .from('mail_sends')
             .select('*', { count: 'exact', head: true })
             .eq('campaign_id', campaign_id)
@@ -405,7 +413,7 @@ export default async function handler(req, res) {
       }
 
       if (sentRows.length > 0) {
-        const { error: insErr } = await supabase.from('mail_sends').insert(sentRows)
+        const { error: insErr } = await getSupabase().from('mail_sends').insert(sentRows)
         if (insErr) console.error('[send_email_blast] insert error', insErr)
       }
 
@@ -415,7 +423,7 @@ export default async function handler(req, res) {
     // ── Suppressions ───────────────────────────────────────────────────────
 
     if (action === 'list_suppressions') {
-      const { data, error } = await supabase
+      const { data, error } = await getSupabase()
         .from('mail_suppressions')
         .select('*')
         .order('created_at', { ascending: false })
@@ -425,7 +433,7 @@ export default async function handler(req, res) {
 
     if (action === 'add_suppression') {
       const { address, email, phone, full_name, reason, contact_id, agent_id, notes } = req.body
-      const { data, error } = await supabase
+      const { data, error } = await getSupabase()
         .from('mail_suppressions')
         .insert([{ address, email, phone, full_name, reason: reason || 'dnc', contact_id, agent_id, notes }])
         .select()
@@ -436,7 +444,7 @@ export default async function handler(req, res) {
 
     if (action === 'remove_suppression') {
       const { id } = req.body
-      const { error } = await supabase.from('mail_suppressions').delete().eq('id', id)
+      const { error } = await getSupabase().from('mail_suppressions').delete().eq('id', id)
       if (error) throw error
       return res.json({ ok: true })
     }
@@ -447,7 +455,7 @@ export default async function handler(req, res) {
       const { campaign_id } = req.query
       if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
 
-      const { data: sends } = await supabase
+      const { data: sends } = await getSupabase()
         .from('mail_sends')
         .select('channel, response, sent_at, recipient_zip, agent_id')
         .eq('campaign_id', campaign_id)
@@ -495,7 +503,7 @@ export default async function handler(req, res) {
       const { campaign_id } = req.body
       if (!campaign_id) return res.status(400).json({ error: 'campaign_id is required' })
 
-      const { data: camp, error: campErr } = await supabase
+      const { data: camp, error: campErr } = await getSupabase()
         .from('mail_campaigns')
         .select('id, name, property_id, qr_target, tracking_url')
         .eq('id', campaign_id)
@@ -535,7 +543,7 @@ export default async function handler(req, res) {
       const qrData    = await qrRes.json()
       const qrCodeUrl = qrRes.ok ? (qrData.qr_code || qrData.link || null) : null
 
-      const { data: updated, error: updateErr } = await supabase
+      const { data: updated, error: updateErr } = await getSupabase()
         .from('mail_campaigns')
         .update({ tracking_url: shortUrl, bitly_id: bitlyId, qr_code_url: qrCodeUrl })
         .eq('id', campaign_id)
