@@ -100,7 +100,7 @@ export default async function handler(req, res) {
 
       const { data: m } = await db()
         .from('mailings')
-        .select('id, landing_type, landing_custom_url, property_id, status, scan_count')
+        .select('id, landing_type, landing_custom_url, landing_config, property_id, status, scan_count')
         .eq('qr_token', token)
         .single()
       if (!m) return res.status(404).send('Mailing not found')
@@ -128,6 +128,8 @@ export default async function handler(req, res) {
         dest = m.landing_custom_url
       } else if (m.landing_type === 'valuation') {
         dest = `/lp/valuation/${m.id}`
+      } else if (m.landing_type === 'multifamily') {
+        dest = `/lp/multifamily/${m.id}`
       } else {
         dest = `/lp/property/${m.id}`
       }
@@ -296,7 +298,7 @@ export default async function handler(req, res) {
     if (action === 'create') {
       const {
         name, description, agent_id, property_id,
-        mailing_type, landing_type, landing_custom_url, send_date, status,
+        mailing_type, landing_type, landing_custom_url, landing_config, send_date, status,
       } = req.body
       if (!name?.trim()) return json(res, 400, { error: 'name is required' })
 
@@ -316,6 +318,7 @@ export default async function handler(req, res) {
         mailing_type:       mailing_type || 'postcard',
         landing_type:       landing_type || 'property',
         landing_custom_url: landing_custom_url?.trim() || null,
+        landing_config:     landing_config && typeof landing_config === 'object' ? landing_config : {},
         send_date:          send_date || null,
         status:             status || 'draft',
         qr_token:           token,
@@ -330,7 +333,7 @@ export default async function handler(req, res) {
     if (action === 'update') {
       const { id } = req.body
       if (!id) return json(res, 400, { error: 'id required' })
-      const ALLOWED = ['name','description','agent_id','property_id','mailing_type','status','landing_type','landing_custom_url','send_date']
+      const ALLOWED = ['name','description','agent_id','property_id','mailing_type','status','landing_type','landing_custom_url','landing_config','send_date']
       const patch = {}
       for (const k of ALLOWED) if (k in req.body) patch[k] = req.body[k]
       if (Object.keys(patch).length === 0) return json(res, 400, { error: 'no updatable fields' })
@@ -431,7 +434,7 @@ export default async function handler(req, res) {
         message:          message?.trim() || null,
         property_address: property_address?.trim() || null,
         property_type:    property_type || null,
-        source_landing:   source_landing || 'property',
+        source_landing:   ['property','valuation','custom','multifamily'].includes(source_landing) ? source_landing : 'property',
         ip_hash:          ipHash,
       }]).select().single()
       if (leadErr) throw leadErr
@@ -472,6 +475,59 @@ export default async function handler(req, res) {
       }).eq('id', mailing_id)
 
       return json(res, 200, { ok: true, lead_id: lead.id })
+    }
+
+    // ── Deal Machine neighbor lookup ────────────────────────────────────────
+    // Proxies a property-search request to Deal Machine so the API key never
+    // touches the browser. Folded into campaigns.js to stay under the 12-fn
+    // Vercel Hobby limit.
+    if (action === 'deal_machine') {
+      const apiKey = (process.env.DEAL_MACHINE_API_KEY || '').trim()
+      if (!apiKey) return json(res, 200, { setup: true, error: 'DEAL_MACHINE_API_KEY is not configured.' })
+
+      const { address, radius = 500 } = req.body || {}
+      if (!address?.trim()) return json(res, 400, { error: 'address is required' })
+      const radiusNum = Math.min(5280, Math.max(100, Number(radius) || 500))
+
+      const dmRes = await fetch('https://app.dealmachine.com/api/v2/property_list', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type':  'application/json',
+          'Accept':        'application/json',
+        },
+        body: JSON.stringify({ address, radius: radiusNum, limit: 500, include_owner_info: true }),
+      })
+
+      if (!dmRes.ok) {
+        const ct = dmRes.headers.get('content-type') || ''
+        const body = ct.includes('json') ? await dmRes.json() : await dmRes.text()
+        const msg = typeof body === 'object'
+          ? (body.message || body.error || JSON.stringify(body))
+          : String(body).slice(0, 300)
+        return json(res, dmRes.status, { error: `Deal Machine error: ${msg}` })
+      }
+
+      const data = await dmRes.json()
+      const raw  = data.properties || data.results || data.data || data.items || []
+
+      const properties = raw.map(p => {
+        const ownerFirst = p.owner_first_name || p.mailing_first_name || ''
+        const ownerLast  = p.owner_last_name  || p.mailing_last_name  || ''
+        const ownerFull  = p.owner_name || p.mailing_name || [ownerFirst, ownerLast].filter(Boolean).join(' ') || null
+        return {
+          owner_name:       ownerFull,
+          address_line1:    p.mailing_street  || p.mailing_address || p.property_street  || p.address || null,
+          city:             p.mailing_city    || p.property_city   || p.city    || null,
+          state:            p.mailing_state   || p.property_state  || p.state   || null,
+          zip:              p.mailing_zip     || p.property_zip    || p.zip     || null,
+          property_address: p.property_street || p.property_address || p.address || null,
+          property_type:    p.property_type   || p.type            || null,
+          estimated_value:  p.estimated_value || p.avm             || p.value   || null,
+        }
+      }).filter(p => p.owner_name || p.address_line1)
+
+      return json(res, 200, { properties, count: properties.length })
     }
 
     return json(res, 400, { error: `Unknown action: ${action}` })

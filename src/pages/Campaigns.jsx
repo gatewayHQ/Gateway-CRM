@@ -24,9 +24,81 @@ const MAILING_TYPE_OPTS = [
 ]
 
 const LANDING_OPTS = [
-  { value: 'property',  label: 'Property Showcase', sub: 'Show the linked property + capture interest' },
-  { value: 'valuation', label: 'Home Valuation',    sub: 'Ask "what\'s your home worth?" + capture seller leads' },
-  { value: 'custom',    label: 'Custom URL',        sub: 'Redirect to any URL you control' },
+  { value: 'property',    label: 'Property Showcase',     icon: 'building',    sub: 'Hero photo + details of a property in your CRM. Best when you have a clean listing.' },
+  { value: 'multifamily', label: 'Multifamily Valuation', icon: 'trending-up', sub: 'Dark, premium "what\'s your multifamily worth?" page. Bring your own photos + market stats.' },
+  { value: 'valuation',   label: 'Home Valuation',        icon: 'dollar',      sub: 'Single-family / general "what\'s your home worth?" page. Captures seller leads.' },
+  { value: 'custom',      label: 'Custom URL',            icon: 'link',        sub: 'Redirect the QR to any URL you control — your own site, MLS, video, etc.' },
+]
+
+// Quick-start templates — pre-fill the form so an agent can spin up a mailing in 5 seconds
+const TEMPLATES = [
+  {
+    id:          'just-sold',
+    label:       'Just Sold',
+    description: 'Postcard to neighbors after a closing — drives valuation requests.',
+    accent:      '#10b981',
+    icon:        'check',
+    fields: {
+      name:         'Just Sold — [Address]',
+      description:  'Sent to surrounding 200 homes after a closing.',
+      mailing_type: 'postcard',
+      landing_type: 'multifamily',
+      landing_config: {
+        headline:    'Your neighbor just sold. Curious what yours is worth?',
+        subheadline: "We just closed nearby. Get the same cap-rate-driven analysis we used — no obligation, no sales pitch.",
+        cta_text:    'See my valuation',
+      },
+    },
+  },
+  {
+    id:          'just-listed',
+    label:       'Just Listed',
+    description: 'Drive showings + buyer leads for an active listing.',
+    accent:      '#2563eb',
+    icon:        'home',
+    fields: {
+      name:         'Just Listed — [Address]',
+      description:  'Postcard drop to drive showings on a new listing.',
+      mailing_type: 'postcard',
+      landing_type: 'property',
+    },
+  },
+  {
+    id:          'multifamily-farm',
+    label:       'Multifamily Farm',
+    description: 'Targeted mailer to multifamily owners in a submarket.',
+    accent:      '#c9a961',
+    icon:        'trending-up',
+    fields: {
+      name:         'Multifamily Farm — [Submarket]',
+      description:  'Quarterly touch to multifamily owners in our farm area.',
+      mailing_type: 'postcard',
+      landing_type: 'multifamily',
+      landing_config: {
+        headline:    "What's your multifamily really worth in today's market?",
+        subheadline: "Rates moved. Comps moved. Get a fresh cap-rate-driven number from a broker who actually closes deals here.",
+        cta_text:    'Get my free valuation',
+        highlights: [
+          { label: 'Closed in submarket', value: '$240M+' },
+          { label: 'Avg days on market',  value: '38' },
+          { label: 'Owners served',       value: '120+' },
+        ],
+      },
+    },
+  },
+  {
+    id:          'open-house',
+    label:       'Open House',
+    description: 'Drive foot traffic to a Saturday/Sunday open house.',
+    accent:      '#7c3aed',
+    icon:        'calendar',
+    fields: {
+      name:         'Open House — [Address]',
+      description:  'Door hangers for the weekend before an open house.',
+      mailing_type: 'door-hanger',
+      landing_type: 'property',
+    },
+  },
 ]
 
 const STATUS_CONFIG = {
@@ -39,6 +111,44 @@ const STATUS_CONFIG = {
 function StatusBadge({ status }) {
   const c = STATUS_CONFIG[status] || STATUS_CONFIG.draft
   return <span style={{ padding:'2px 9px', borderRadius:10, fontSize:11, fontWeight:700, background:c.bg, color:c.color }}>{c.label}</span>
+}
+
+function LandingTypeChip({ type }) {
+  const cfg = {
+    property:    { label: 'Property',    bg: '#dbeafe',   color: '#1d4ed8' },
+    multifamily: { label: 'Multifamily', bg: '#fef3c7',   color: '#92400e' },
+    valuation:   { label: 'Valuation',   bg: '#dcfce7',   color: '#166534' },
+    custom:      { label: 'Custom URL',  bg: '#f3e8ff',   color: '#6b21a8' },
+  }
+  const c = cfg[type] || cfg.property
+  return (
+    <span style={{ padding:'1px 7px', borderRadius:9, fontSize:10, fontWeight:700,
+                   background:c.bg, color:c.color, letterSpacing:0.3 }}>
+      {c.label}
+    </span>
+  )
+}
+
+function FunnelBar({ scanRate, leadRate }) {
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+      <FunnelRow label="Scanned" rate={scanRate} color="var(--gw-azure)" />
+      <FunnelRow label="Lead"    rate={leadRate} color="var(--gw-green)" />
+    </div>
+  )
+}
+function FunnelRow({ label, rate, color }) {
+  return (
+    <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+      <div style={{ width:48, fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase', fontWeight:600 }}>{label}</div>
+      <div style={{ flex:1, height:5, background:'var(--gw-bone)', borderRadius:3, overflow:'hidden' }}>
+        <div style={{ width:`${rate}%`, height:'100%', background:color, transition:'width 300ms' }} />
+      </div>
+      <div style={{ width:32, textAlign:'right', fontSize:10, color:'var(--gw-mist)', fontWeight:700 }}>
+        {rate > 0 ? `${rate.toFixed(rate < 10 ? 1 : 0)}%` : '—'}
+      </div>
+    </div>
+  )
 }
 
 function StatCard({ value, label, sub, color }) {
@@ -124,30 +234,49 @@ async function api(action, payload = {}, method = 'POST') {
 
 // ─── New / Edit Mailing form ──────────────────────────────────────────────────
 
-function MailingForm({ initial, agents, properties, onSave, onCancel, saving }) {
+function MailingForm({ initial, agents, properties, onSave, onCancel, saving, initialTemplate }) {
   const [form, setForm] = useState(() => ({
-    name:               initial?.name               || '',
-    description:        initial?.description        || '',
+    name:               initial?.name               || initialTemplate?.fields?.name               || '',
+    description:        initial?.description        || initialTemplate?.fields?.description        || '',
     agent_id:           initial?.agent_id           || '',
     property_id:        initial?.property_id        || '',
-    mailing_type:       initial?.mailing_type       || 'postcard',
-    landing_type:       initial?.landing_type       || 'property',
+    mailing_type:       initial?.mailing_type       || initialTemplate?.fields?.mailing_type       || 'postcard',
+    landing_type:       initial?.landing_type       || initialTemplate?.fields?.landing_type       || 'property',
     landing_custom_url: initial?.landing_custom_url || '',
+    landing_config:     initial?.landing_config     || initialTemplate?.fields?.landing_config     || {},
     send_date:          initial?.send_date          || '',
     status:             initial?.status             || 'draft',
   }))
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
+  const setCfg = (k, v) => setForm(f => ({ ...f, landing_config: { ...(f.landing_config || {}), [k]: v } }))
 
   const submit = (e) => {
     e.preventDefault()
     if (!form.name.trim()) return pushToast('Name is required', 'error')
-    if (form.landing_type === 'property' && !form.property_id) {
-      return pushToast('Select a property for property-showcase landing, or change landing type', 'error')
+    if (form.landing_type === 'property') {
+      const hasHeadline = form.landing_config?.headline?.trim()
+      const hasImages   = (form.landing_config?.images || []).some(img => (typeof img === 'string' ? img : img?.url)?.trim())
+      if (!hasHeadline && !hasImages) return pushToast('Add a headline or at least one photo for the property showcase', 'error')
     }
     if (form.landing_type === 'custom' && !form.landing_custom_url?.trim()) {
       return pushToast('Provide a custom URL or pick a different landing type', 'error')
     }
-    onSave(form)
+    const getUrl = img => (typeof img === 'string' ? img : img?.url || '').trim()
+    if (form.landing_type === 'multifamily') {
+      if (!(form.landing_config?.images || []).some(img => getUrl(img))) {
+        return pushToast('Add at least one photo for the multifamily landing page', 'error')
+      }
+    }
+    const cfg = { ...(form.landing_config || {}) }
+    if (Array.isArray(cfg.images)) {
+      cfg.images = cfg.images.map(img => {
+        if (typeof img === 'string') return { url: img.trim(), units: '', price: '', caption: '' }
+        return { url: (img.url || '').trim(), units: (img.units || '').trim(), price: (img.price || '').trim(), caption: (img.caption || '').trim() }
+      }).filter(img => img.url)
+    }
+    if (Array.isArray(cfg.highlights)) cfg.highlights = cfg.highlights.filter(h => (h.label || '').trim() && (h.value || '').trim()).slice(0, 4)
+    if (Array.isArray(cfg.features))   cfg.features   = cfg.features.map(f => (f || '').trim()).filter(Boolean)
+    onSave({ ...form, landing_config: cfg })
   }
 
   return (
@@ -186,38 +315,34 @@ function MailingForm({ initial, agents, properties, onSave, onCancel, saving }) 
       </div>
 
       <div>
-        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)', display:'block', marginBottom:6 }}>
+        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)', display:'block', marginBottom:8 }}>
           Landing Page (where the QR sends people)
         </label>
-        <div style={{ display:'grid', gap:6 }}>
-          {LANDING_OPTS.map(o => (
-            <label key={o.value}
-                   style={{ display:'flex', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)',
-                            borderRadius:8, cursor:'pointer',
-                            background: form.landing_type === o.value ? '#eff6ff' : '#fff',
-                            borderColor: form.landing_type === o.value ? 'var(--gw-azure)' : 'var(--gw-border)' }}>
-              <input type="radio" checked={form.landing_type === o.value} onChange={() => set('landing_type', o.value)} />
-              <div>
-                <div style={{ fontWeight:700, fontSize:13 }}>{o.label}</div>
-                <div style={{ fontSize:11, color:'var(--gw-mist)' }}>{o.sub}</div>
-              </div>
-            </label>
-          ))}
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
+          {LANDING_OPTS.map(o => {
+            const sel = form.landing_type === o.value
+            return (
+              <button key={o.value} type="button" onClick={() => set('landing_type', o.value)}
+                      style={{ textAlign:'left', padding:'12px 14px', border:`1.5px solid ${sel ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+                               background: sel ? '#eff6ff' : '#fff', borderRadius:10, cursor:'pointer', transition:'all 150ms' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  <div style={{ width:28, height:28, borderRadius:6, background: sel ? 'var(--gw-azure)' : 'var(--gw-bone)',
+                                color: sel ? '#fff' : 'var(--gw-ink)',
+                                display:'flex', alignItems:'center', justifyContent:'center' }}>
+                    <Icon name={o.icon} size={14} />
+                  </div>
+                  <div style={{ fontWeight:700, fontSize:13.5 }}>{o.label}</div>
+                </div>
+                <div style={{ fontSize:11.5, color:'var(--gw-mist)', marginTop:6, lineHeight:1.4 }}>{o.sub}</div>
+              </button>
+            )
+          })}
         </div>
       </div>
 
       {form.landing_type === 'property' && (
-        <div>
-          <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Property to Showcase *</label>
-          <select className="input" value={form.property_id} onChange={e => set('property_id', e.target.value)}>
-            <option value="">— select a property —</option>
-            {properties.map(p => (
-              <option key={p.id} value={p.id}>
-                {p.address}{p.city ? `, ${p.city}` : ''}{p.state ? `, ${p.state}` : ''}
-              </option>
-            ))}
-          </select>
-        </div>
+        <PropertyLandingBuilder cfg={form.landing_config || {}} setCfg={setCfg}
+                                properties={properties} form={form} set={set} />
       )}
 
       {form.landing_type === 'custom' && (
@@ -227,6 +352,14 @@ function MailingForm({ initial, agents, properties, onSave, onCancel, saving }) 
                  onChange={e => set('landing_custom_url', e.target.value)}
                  placeholder="https://yourdomain.com/special-offer" />
         </div>
+      )}
+
+      {form.landing_type === 'valuation' && (
+        <CollageBuilder cfg={form.landing_config || {}} setCfg={setCfg} variant="valuation" />
+      )}
+
+      {form.landing_type === 'multifamily' && (
+        <CollageBuilder cfg={form.landing_config || {}} setCfg={setCfg} variant="multifamily" />
       )}
 
       <div>
@@ -249,6 +382,450 @@ function MailingForm({ initial, agents, properties, onSave, onCancel, saving }) 
   )
 }
 
+// ─── Shared image-upload helper ──────────────────────────────────────────────
+
+async function uploadImageToStorage(file, setUploading, idx) {
+  setUploading(u => ({ ...u, [idx]: true }))
+  try {
+    const ext  = (file.name.split('.').pop() || 'jpg').toLowerCase()
+    const path = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
+    const { error: upErr } = await supabase.storage
+      .from('campaign-images')
+      .upload(path, file, { contentType: file.type, upsert: false })
+    if (upErr) throw upErr
+    const { data: { publicUrl } } = supabase.storage.from('campaign-images').getPublicUrl(path)
+    return publicUrl
+  } finally {
+    setUploading(u => { const n = { ...u }; delete n[idx]; return n })
+  }
+}
+
+const normImg = v => typeof v === 'string' || !v
+  ? { url: v || '', units: '', price: '', caption: '' }
+  : { url: v.url || '', units: v.units || '', price: v.price || '', caption: v.caption || '' }
+
+// ─── Image row with upload (shared between builders) ─────────────────────────
+
+function ImageRow({ img, index, uploading, onField, onUpload, onRemove, maxPhotos, unitsLabel = 'Units', priceLabel = 'Sale price / note' }) {
+  return (
+    <div style={{ border:'1px solid var(--gw-border)', borderRadius:8, padding:10, background:'#fff' }}>
+      <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+        <div style={{ width:52, height:52, borderRadius:6, border:'1px solid var(--gw-border)',
+                      flexShrink:0, overflow:'hidden', background:'var(--gw-bone)',
+                      display:'flex', alignItems:'center', justifyContent:'center' }}>
+          {img.url
+            ? <img src={img.url} alt="" style={{ width:'100%', height:'100%', objectFit:'cover' }}
+                   onError={e => { e.currentTarget.style.display = 'none' }} />
+            : <span style={{ fontSize:10, color:'var(--gw-mist)' }}>#{index + 1}</span>}
+        </div>
+        <input className="input" placeholder="Paste image URL…" value={img.url}
+               onChange={e => onField('url', e.target.value)} style={{ flex:1 }} />
+        <label title="Upload from your computer"
+               style={{ display:'flex', alignItems:'center', gap:4,
+                        cursor: uploading[index] ? 'wait' : 'pointer',
+                        padding:'7px 10px', border:'1px solid var(--gw-border)', borderRadius:6,
+                        fontSize:11.5, fontWeight:600, background:'#fff', flexShrink:0, whiteSpace:'nowrap' }}>
+          {uploading[index]
+            ? <><Icon name="loader" size={11} /> Uploading…</>
+            : <><Icon name="upload" size={11} /> Upload</>}
+          <input type="file" accept="image/*" style={{ display:'none' }}
+                 onChange={e => { onUpload(e.target.files?.[0]); e.target.value = '' }} />
+        </label>
+        <button type="button" className="btn btn--ghost" onClick={onRemove}
+                style={{ padding:'6px 8px', flexShrink:0 }} title="Remove">
+          <Icon name="x" size={12} />
+        </button>
+      </div>
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:6, marginTop:8 }}>
+        <input className="input" placeholder={unitsLabel} value={img.units || img.caption || ''}
+               onChange={e => onField('units', e.target.value)} style={{ fontSize:12 }} />
+        <input className="input" placeholder={priceLabel} value={img.price || ''}
+               onChange={e => onField('price', e.target.value)} style={{ fontSize:12 }} />
+      </div>
+    </div>
+  )
+}
+
+// ─── CollageBuilder — multifamily + valuation landing config ─────────────────
+
+function CollageBuilder({ cfg, setCfg, variant = 'multifamily' }) {
+  const [aiOpen, setAiOpen]       = useState(false)
+  const [aiInput, setAiInput]     = useState('')
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiTone, setAiTone]       = useState('professional')
+  const [uploading, setUploading] = useState({})
+
+  const images     = Array.isArray(cfg.images)     ? cfg.images.map(normImg) : []
+  const highlights = Array.isArray(cfg.highlights) ? cfg.highlights           : []
+
+  const setImageField = (i, field, val) => {
+    const next = images.map((img, idx) => idx === i ? { ...img, [field]: val } : img)
+    setCfg('images', next)
+  }
+  const addImage    = () => setCfg('images', [...images, { url:'', units:'', price:'', caption:'' }].slice(0, 6))
+  const removeImage = (i) => setCfg('images', images.filter((_, idx) => idx !== i))
+
+  const uploadFile = async (i, file) => {
+    if (!file) return
+    try {
+      const url = await uploadImageToStorage(file, setUploading, i)
+      setImageField(i, 'url', url)
+    } catch (err) { pushToast('Upload failed: ' + err.message, 'error') }
+  }
+
+  const setHighlight = (i, key, v) => {
+    const next = [...highlights]; next[i] = { ...(next[i] || {}), [key]: v }
+    setCfg('highlights', next)
+  }
+  const addHighlight    = () => setCfg('highlights', [...highlights, { label: '', value: '' }].slice(0, 4))
+  const removeHighlight = (i) => setCfg('highlights', highlights.filter((_, idx) => idx !== i))
+
+  const generateCopy = async (tone) => {
+    if (!aiInput.trim()) return pushToast('Describe the property or campaign first', 'error')
+    setAiLoading(true)
+    try {
+      const r = await fetch('/api/claude', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          max_tokens: 600,
+          system: `You are an elite real estate marketing copywriter. Write landing page copy for a ${variant === 'valuation' ? 'home valuation' : 'multifamily property valuation'} capture page. Return ONLY a raw JSON object — no markdown, no code fences. Keys: headline (max 90 chars), subheadline (max 260 chars), highlights (array of 3 objects each with "label" and "value"), cta_text (max 30 chars).`,
+          messages: [{ role:'user', content:`Write ${tone === 'punchy' ? 'punchy, bold, and urgent' : tone === 'conversational' ? 'warm, conversational, and approachable' : 'professional, authoritative, and credible'} copy:\n\n${aiInput}` }],
+        }),
+      })
+      const data = await r.json()
+      if (data.error) { pushToast(data.error, 'error'); return }
+      const text  = data.content?.[0]?.text || ''
+      const match = text.match(/\{[\s\S]*\}/)
+      if (!match) { pushToast('AI returned unexpected format — try again', 'error'); return }
+      const copy = JSON.parse(match[0])
+      if (copy.headline)    setCfg('headline',    copy.headline)
+      if (copy.subheadline) setCfg('subheadline', copy.subheadline)
+      if (copy.highlights)  setCfg('highlights',  copy.highlights)
+      if (copy.cta_text)    setCfg('cta_text',    copy.cta_text)
+      setAiOpen(false)
+      pushToast('AI copy applied — review and make it yours!')
+    } catch (err) {
+      pushToast('AI generation failed: ' + err.message, 'error')
+    } finally {
+      setAiLoading(false)
+    }
+  }
+
+  const isVal    = variant === 'valuation'
+  const hlHint   = isVal
+    ? '"120+ homeowners served", "18 days avg close", "12 neighborhoods"'
+    : '"$240M+ closed", "38 days avg sale", "14 sub-markets"'
+
+  return (
+    <div style={{ border:'1px solid var(--gw-border)', borderRadius:10, padding:14, background:'#fafaf7' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom: aiOpen ? 8 : 10 }}>
+        <Icon name="sparkles" size={14} />
+        <div style={{ fontSize:13, fontWeight:700 }}>
+          {isVal ? 'Home Valuation Page Builder' : 'Multifamily Landing Page Builder'}
+        </div>
+        <button type="button" onClick={() => setAiOpen(o => !o)}
+                style={{ marginLeft:'auto', fontSize:11, padding:'4px 12px', borderRadius:20, cursor:'pointer',
+                         fontWeight:700, background: aiOpen ? 'var(--gw-azure)' : '#eff6ff',
+                         color: aiOpen ? '#fff' : 'var(--gw-azure)', border:'1px solid var(--gw-azure)' }}>
+          ✨ {aiOpen ? 'Close AI' : 'Generate with AI'}
+        </button>
+      </div>
+
+      {aiOpen && (
+        <div style={{ background:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:8, padding:12, marginBottom:10 }}>
+          <div style={{ fontSize:12, fontWeight:700, color:'#1d4ed8', marginBottom:6 }}>
+            Describe the property or campaign — AI writes headline, subheadline, stats, and CTA
+          </div>
+          <textarea className="input" rows={3} value={aiInput} onChange={e => setAiInput(e.target.value)}
+                    placeholder={isVal
+                      ? "e.g. 'Just sold a home in East Oakland. Targeting neighboring homeowners. Market moving fast — under 3 weeks.'"
+                      : "e.g. 'Just sold 24-unit in Oakland near BART. Targeting apartment owners nearby. Cap rates at 5.2%.'"}  />
+          <div style={{ display:'flex', gap:6, alignItems:'center', marginTop:8, flexWrap:'wrap' }}>
+            <span style={{ fontSize:11, color:'var(--gw-mist)', fontWeight:700 }}>Tone:</span>
+            {['professional','punchy','conversational'].map(t => (
+              <button key={t} type="button" onClick={() => setAiTone(t)}
+                      style={{ fontSize:11, padding:'3px 10px', borderRadius:12, cursor:'pointer', fontWeight:600,
+                               background: aiTone === t ? 'var(--gw-azure)' : '#fff',
+                               color: aiTone === t ? '#fff' : 'var(--gw-ink)',
+                               border:`1px solid ${aiTone === t ? 'var(--gw-azure)' : 'var(--gw-border)'}` }}>
+                {t[0].toUpperCase() + t.slice(1)}
+              </button>
+            ))}
+            <button type="button" disabled={aiLoading} onClick={() => generateCopy(aiTone)}
+                    style={{ marginLeft:'auto', padding:'6px 16px', fontSize:12, fontWeight:700,
+                             background: aiLoading ? '#93c5fd' : 'var(--gw-azure)', color:'#fff',
+                             border:'none', borderRadius:8, cursor: aiLoading ? 'default' : 'pointer' }}>
+              {aiLoading ? 'Generating…' : '✨ Generate Copy'}
+            </button>
+          </div>
+          {(cfg.headline || cfg.subheadline) && !aiLoading && (
+            <div style={{ display:'flex', gap:6, alignItems:'center', marginTop:8, borderTop:'1px solid #bfdbfe', paddingTop:8, flexWrap:'wrap' }}>
+              <span style={{ fontSize:11, color:'#3b82f6', fontWeight:600 }}>Refine:</span>
+              {[['Make it punchier','punchy'],['More professional','professional'],['Conversational','conversational']].map(([lbl, t]) => (
+                <button key={t} type="button" onClick={() => generateCopy(t)}
+                        style={{ fontSize:11, padding:'3px 10px', border:'1px solid #bfdbfe', borderRadius:12, background:'#fff', cursor:'pointer', color:'#1d4ed8' }}>
+                  {lbl}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ display:'grid', gap:10 }}>
+        <div>
+          <label style={fieldLabel}>Headline</label>
+          <input className="input" maxLength={140} value={cfg.headline || ''}
+                 placeholder={isVal ? "What's your home worth in today's market?" : "What's your multifamily really worth?"}
+                 onChange={e => setCfg('headline', e.target.value)} />
+        </div>
+        <div>
+          <label style={fieldLabel}>Subheadline</label>
+          <textarea className="input" rows={2} maxLength={300} value={cfg.subheadline || ''}
+                    placeholder={isVal
+                      ? "Get a private, no-obligation valuation from a licensed broker who knows your neighborhood."
+                      : "Get a cap-rate-driven valuation from a broker who actually closes deals in your submarket."}
+                    onChange={e => setCfg('subheadline', e.target.value)} />
+        </div>
+
+        <div>
+          <label style={fieldLabel}>Photos (up to 6) — upload from computer or paste URL</label>
+          <div style={{ display:'grid', gap:8, marginTop:4 }}>
+            {images.map((img, i) => (
+              <ImageRow key={i} img={img} index={i} uploading={uploading}
+                        onField={(f, v) => setImageField(i, f, v)}
+                        onUpload={file => uploadFile(i, file)}
+                        onRemove={() => removeImage(i)}
+                        unitsLabel="Units (e.g. 24 units)"
+                        priceLabel="Sale price / note (e.g. $4.2M)" />
+            ))}
+            {images.length < 6 && (
+              <button type="button" className="btn btn--ghost" onClick={addImage} style={{ fontSize:12, alignSelf:'flex-start' }}>
+                <Icon name="plus" size={12} /> Add photo
+              </button>
+            )}
+          </div>
+          <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
+            Units and sale price appear as a caption under each photo on the live page.
+          </div>
+        </div>
+
+        <div>
+          <label style={fieldLabel}>Highlight stats (up to 4) — your credibility strip</label>
+          {highlights.length === 0 && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'4px 0 6px' }}>
+              Try: {hlHint}
+            </div>
+          )}
+          <div style={{ display:'grid', gap:6, marginTop:4 }}>
+            {highlights.map((h, i) => (
+              <div key={i} style={{ display:'grid', gridTemplateColumns:'140px 1fr 30px', gap:6 }}>
+                <input className="input" placeholder="Value (e.g. $240M+)" value={h.value || ''}
+                       onChange={e => setHighlight(i, 'value', e.target.value)} />
+                <input className="input" placeholder="Label (e.g. Closed in submarket)" value={h.label || ''}
+                       onChange={e => setHighlight(i, 'label', e.target.value)} />
+                <button type="button" className="btn btn--ghost" onClick={() => removeHighlight(i)} style={{ padding:'6px 8px' }}>
+                  <Icon name="x" size={12} />
+                </button>
+              </div>
+            ))}
+            {highlights.length < 4 && (
+              <button type="button" className="btn btn--ghost" onClick={addHighlight} style={{ fontSize:12, alignSelf:'flex-start' }}>
+                <Icon name="plus" size={12} /> Add stat
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+          <div>
+            <label style={fieldLabel}>CTA button text</label>
+            <input className="input" maxLength={40} placeholder="Get my free valuation" value={cfg.cta_text || ''}
+                   onChange={e => setCfg('cta_text', e.target.value)} />
+          </div>
+          <div>
+            <label style={fieldLabel}>Accent color</label>
+            <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+              <input type="color" value={cfg.accent || '#c9a961'} onChange={e => setCfg('accent', e.target.value)}
+                     style={{ width:42, height:36, border:'1px solid var(--gw-border)', borderRadius:6, padding:2, background:'#fff' }} />
+              <input className="input" placeholder="#c9a961" value={cfg.accent || ''} onChange={e => setCfg('accent', e.target.value)} style={{ flex:1 }} />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Property Showcase landing config builder ─────────────────────────────────
+
+function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
+  const [uploading, setUploading] = useState({})
+
+  const images   = Array.isArray(cfg.images)   ? cfg.images.map(normImg) : []
+  const features = Array.isArray(cfg.features) ? cfg.features             : []
+
+  const handlePropertySelect = (pid) => {
+    set('property_id', pid)
+    if (!pid) return
+    const p = properties.find(x => x.id === pid)
+    if (!p) return
+    if (!cfg.headline)                 setCfg('headline',    [p.address, p.city, p.state].filter(Boolean).join(', '))
+    if (!cfg.price    && p.list_price) setCfg('price',       String(p.list_price))
+    if (!cfg.beds     && p.beds)       setCfg('beds',        String(p.beds))
+    if (!cfg.baths    && p.baths)      setCfg('baths',       String(p.baths))
+    if (!cfg.sqft     && p.sqft)       setCfg('sqft',        String(p.sqft))
+    if (!cfg.year_built && p.year_built) setCfg('year_built', String(p.year_built))
+  }
+
+  const setImageField = (i, field, val) => {
+    const next = images.map((img, idx) => idx === i ? { ...img, [field]: val } : img)
+    setCfg('images', next)
+  }
+  const addImage    = () => setCfg('images', [...images, { url:'', caption:'', price:'' }].slice(0, 10))
+  const removeImage = (i) => setCfg('images', images.filter((_, idx) => idx !== i))
+
+  const uploadFile = async (i, file) => {
+    if (!file) return
+    try {
+      const url = await uploadImageToStorage(file, setUploading, i)
+      setImageField(i, 'url', url)
+    } catch (err) { pushToast('Upload failed: ' + err.message, 'error') }
+  }
+
+  const setFeatureAt    = (i, v) => { const n = [...features]; n[i] = v; setCfg('features', n) }
+  const addFeature      = ()     => setCfg('features', [...features, ''])
+  const removeFeature   = (i)    => setCfg('features', features.filter((_, idx) => idx !== i))
+
+  return (
+    <div style={{ border:'1px solid var(--gw-border)', borderRadius:10, padding:14, background:'#fafaf7' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12 }}>
+        <Icon name="building" size={14} />
+        <div style={{ fontSize:13, fontWeight:700 }}>Property Showcase Builder</div>
+        <div style={{ fontSize:11, color:'#10b981', fontWeight:600 }}>· Your private CRM notes are never shown</div>
+      </div>
+
+      <div style={{ display:'grid', gap:10 }}>
+        {properties.length > 0 && (
+          <div>
+            <label style={fieldLabel}>Link to CRM Property (auto-fills details below)</label>
+            <select className="input" value={form.property_id || ''} onChange={e => handlePropertySelect(e.target.value)}>
+              <option value="">— select to auto-fill, or fill manually below —</option>
+              {properties.map(p => (
+                <option key={p.id} value={p.id}>
+                  {p.address}{p.city ? `, ${p.city}` : ''}{p.state ? `, ${p.state}` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div>
+          <label style={fieldLabel}>Headline *</label>
+          <input className="input" maxLength={160} value={cfg.headline || ''}
+                 onChange={e => setCfg('headline', e.target.value)}
+                 placeholder="123 Oak Street, Oakland — A Rare Opportunity" />
+        </div>
+
+        <div>
+          <label style={fieldLabel}>Opening Copy</label>
+          <textarea className="input" rows={3} value={cfg.subheadline || ''}
+                    onChange={e => setCfg('subheadline', e.target.value)}
+                    placeholder="Describe what makes this property special. Your private CRM notes never appear here." />
+        </div>
+
+        <div>
+          <label style={fieldLabel}>Key Property Details</label>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:8, marginTop:4 }}>
+            {[
+              { key:'price',      label:'List Price',     ph:'$895,000' },
+              { key:'beds',       label:'Bedrooms',       ph:'3' },
+              { key:'baths',      label:'Bathrooms',      ph:'2' },
+              { key:'sqft',       label:'Sq Ft',          ph:'1,850' },
+              { key:'lot_size',   label:'Lot Size (sqft)',ph:'5,200' },
+              { key:'year_built', label:'Year Built',     ph:'1928' },
+            ].map(f => (
+              <div key={f.key}>
+                <label style={{ fontSize:10, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:0.4, display:'block', marginBottom:3 }}>
+                  {f.label}
+                </label>
+                <input className="input" placeholder={f.ph} value={cfg[f.key] || ''}
+                       onChange={e => setCfg(f.key, e.target.value)} />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <label style={fieldLabel}>Public Description (visible to visitors)</label>
+          <textarea className="input" rows={4} value={cfg.description || ''}
+                    onChange={e => setCfg('description', e.target.value)}
+                    placeholder="Write a compelling marketing description. Your private CRM notes will never appear here." />
+        </div>
+
+        <div>
+          <label style={fieldLabel}>Key Features / Selling Points</label>
+          <div style={{ display:'grid', gap:6, marginTop:4 }}>
+            {features.map((feat, i) => (
+              <div key={i} style={{ display:'flex', gap:6 }}>
+                <input className="input" placeholder="e.g. Chef's kitchen with quartz counters"
+                       value={feat} onChange={e => setFeatureAt(i, e.target.value)} style={{ flex:1 }} />
+                <button type="button" className="btn btn--ghost" onClick={() => removeFeature(i)} style={{ padding:'6px 8px' }}>
+                  <Icon name="x" size={12} />
+                </button>
+              </div>
+            ))}
+            {features.length < 10 && (
+              <button type="button" className="btn btn--ghost" onClick={addFeature} style={{ fontSize:12, alignSelf:'flex-start' }}>
+                <Icon name="plus" size={12} /> Add feature
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <label style={fieldLabel}>Photos (up to 10) — upload or paste URL</label>
+          <div style={{ display:'grid', gap:8, marginTop:4 }}>
+            {images.map((img, i) => (
+              <ImageRow key={i} img={img} index={i} uploading={uploading}
+                        onField={(f, v) => setImageField(i, f, v)}
+                        onUpload={file => uploadFile(i, file)}
+                        onRemove={() => removeImage(i)}
+                        unitsLabel="Caption / label"
+                        priceLabel="Sold price (optional)" />
+            ))}
+            {images.length < 10 && (
+              <button type="button" className="btn btn--ghost" onClick={addImage} style={{ fontSize:12, alignSelf:'flex-start' }}>
+                <Icon name="plus" size={12} /> Add photo
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+          <div>
+            <label style={fieldLabel}>CTA button text</label>
+            <input className="input" maxLength={40} placeholder="Schedule a showing"
+                   value={cfg.cta_text || ''} onChange={e => setCfg('cta_text', e.target.value)} />
+          </div>
+          <div>
+            <label style={fieldLabel}>Accent color</label>
+            <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+              <input type="color" value={cfg.accent || '#1e2642'} onChange={e => setCfg('accent', e.target.value)}
+                     style={{ width:42, height:36, border:'1px solid var(--gw-border)', borderRadius:6, padding:2, background:'#fff' }} />
+              <input className="input" placeholder="#1e2642" value={cfg.accent || ''}
+                     onChange={e => setCfg('accent', e.target.value)} style={{ flex:1 }} />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const fieldLabel = { fontSize: 11, fontWeight: 700, color: 'var(--gw-ink)', textTransform: 'uppercase', letterSpacing: 0.5 }
+
 // ─── Recipient picker / importer ──────────────────────────────────────────────
 
 function RecipientImporter({ mailingId, contacts, onDone, onCancel }) {
@@ -266,6 +843,14 @@ function RecipientImporter({ mailingId, contacts, onDone, onCancel }) {
   const [manual, setManual] = useState({ recipient_name:'', address_line1:'', city:'', state:'', zip:'' })
 
   const [saving, setSaving] = useState(false)
+
+  // Deal Machine neighbor lookup state
+  const [dmAddress, setDmAddress]       = useState('')
+  const [dmRadius, setDmRadius]         = useState(500)
+  const [dmResults, setDmResults]       = useState(null)
+  const [dmPicked, setDmPicked]         = useState(new Set())
+  const [dmLoading, setDmLoading]       = useState(false)
+  const [dmSetupNeeded, setDmSetupNeeded] = useState(false)
 
   const filteredContacts = useMemo(() => {
     if (!search.trim()) return contacts.slice(0, 200)
@@ -345,13 +930,56 @@ function RecipientImporter({ mailingId, contacts, onDone, onCancel }) {
     onDone(1)
   }
 
+  const searchDealMachine = async () => {
+    if (!dmAddress.trim()) return pushToast('Enter a center address first', 'error')
+    setDmLoading(true)
+    setDmResults(null)
+    setDmSetupNeeded(false)
+    try {
+      const data = await api('deal_machine', { address: dmAddress, radius: dmRadius })
+      if (data.setup) { setDmSetupNeeded(true); return }
+      if (data.error) { pushToast(data.error, 'error'); return }
+      const props = data.properties || []
+      setDmResults(props)
+      setDmPicked(new Set(props.map((_, i) => i)))
+      if (props.length === 0) pushToast('No property records found in that radius', 'error')
+    } catch (err) {
+      pushToast('Search failed: ' + err.message, 'error')
+    } finally {
+      setDmLoading(false)
+    }
+  }
+
+  const submitDealMachine = async () => {
+    if (!dmResults || dmPicked.size === 0) return pushToast('Select at least one property', 'error')
+    const recipients = dmResults
+      .filter((_, i) => dmPicked.has(i))
+      .map(p => ({
+        recipient_name: p.owner_name || null,
+        address_line1:  p.address_line1 || null,
+        city:           p.city  || null,
+        state:          p.state || null,
+        zip:            p.zip   || null,
+        source:         'deal_machine',
+      }))
+      .filter(r => r.recipient_name || r.address_line1)
+    if (recipients.length === 0) return pushToast('No usable records selected', 'error')
+    setSaving(true)
+    const res = await api('add_recipients', { mailing_id: mailingId, recipients })
+    setSaving(false)
+    if (res.error) return pushToast(res.error, 'error')
+    pushToast(`Imported ${res.count} neighbor${res.count === 1 ? '' : 's'} from Deal Machine`)
+    onDone(res.count)
+  }
+
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
-      <div style={{ display:'flex', gap:6, borderBottom:'1px solid var(--gw-border)', paddingBottom:8 }}>
+      <div style={{ display:'flex', gap:6, borderBottom:'1px solid var(--gw-border)', paddingBottom:8, flexWrap:'wrap' }}>
         {[
-          { id:'database', label:'From CRM Contacts', icon:'contacts' },
-          { id:'csv',      label:'Upload CSV',         icon:'upload'   },
-          { id:'manual',   label:'Add Manually',       icon:'plus'     },
+          { id:'database',    label:'From CRM Contacts', icon:'contacts' },
+          { id:'csv',         label:'Upload CSV',         icon:'upload'   },
+          { id:'manual',      label:'Add Manually',       icon:'plus'     },
+          { id:'dealmachine', label:'Neighbor Lookup',    icon:'map-pin'  },
         ].map(t => (
           <button key={t.id} type="button"
                   className={`btn ${mode === t.id ? 'btn--primary' : 'btn--ghost'}`}
@@ -468,6 +1096,112 @@ function RecipientImporter({ mailingId, contacts, onDone, onCancel }) {
               {saving ? 'Adding…' : 'Add Recipient'}
             </button>
           </div>
+        </>
+      )}
+
+      {mode === 'dealmachine' && (
+        <>
+          {dmSetupNeeded ? (
+            <div style={{ background:'#fffbeb', border:'1px solid #fcd34d', borderRadius:8, padding:16 }}>
+              <div style={{ fontWeight:700, fontSize:13, color:'#92400e', marginBottom:6 }}>Deal Machine API not configured</div>
+              <div style={{ fontSize:12, color:'#78350f', lineHeight:1.6 }}>
+                To use neighbor lookup, add your Deal Machine API key to Vercel:
+              </div>
+              <ol style={{ fontSize:12, color:'#78350f', marginTop:8, lineHeight:1.8, paddingLeft:18 }}>
+                <li>Go to <strong>Deal Machine app → Account → Integrations → API</strong> to get your key</li>
+                <li>In <strong>Vercel → Project → Settings → Environment Variables</strong>, add <code>DEAL_MACHINE_API_KEY</code></li>
+                <li>Redeploy, then come back here</li>
+              </ol>
+              <button type="button" className="btn btn--ghost" onClick={onCancel} style={{ marginTop:10 }}>Close</button>
+            </div>
+          ) : (
+            <>
+              <div style={{ fontSize:12, color:'var(--gw-mist)', lineHeight:1.5 }}>
+                Paste a center address (e.g. a property you just sold) and we'll pull the surrounding owner names + mailing addresses from Deal Machine — ready to import as recipients.
+              </div>
+              <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:8, alignItems:'flex-end' }}>
+                <div>
+                  <label style={{ fontSize:11, fontWeight:700, color:'var(--gw-ink)', display:'block', marginBottom:4 }}>Center Address</label>
+                  <input className="input" value={dmAddress} onChange={e => setDmAddress(e.target.value)}
+                         placeholder="123 Main St, Oakland CA 94612"
+                         onKeyDown={e => e.key === 'Enter' && searchDealMachine()} />
+                </div>
+                <div>
+                  <label style={{ fontSize:11, fontWeight:700, color:'var(--gw-ink)', display:'block', marginBottom:4 }}>Radius</label>
+                  <select className="input" value={dmRadius} onChange={e => setDmRadius(Number(e.target.value))} style={{ width:130 }}>
+                    <option value={200}>200 ft (~1 blk)</option>
+                    <option value={500}>500 ft</option>
+                    <option value={1000}>1,000 ft</option>
+                    <option value={2640}>½ mile</option>
+                    <option value={5280}>1 mile</option>
+                  </select>
+                </div>
+              </div>
+              <button type="button" className="btn btn--primary" disabled={dmLoading} onClick={searchDealMachine}
+                      style={{ alignSelf:'flex-start' }}>
+                {dmLoading ? 'Searching…' : '🔍 Find Neighbors'}
+              </button>
+
+              {dmResults !== null && (
+                <>
+                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                    <div style={{ fontSize:12, color:'var(--gw-mist)' }}>
+                      {dmResults.length} properties found · {dmPicked.size} selected
+                    </div>
+                    <div style={{ display:'flex', gap:6 }}>
+                      <button type="button" className="btn btn--ghost" style={{ fontSize:11 }}
+                              onClick={() => setDmPicked(new Set(dmResults.map((_, i) => i)))}>
+                        Select all
+                      </button>
+                      <button type="button" className="btn btn--ghost" style={{ fontSize:11 }}
+                              onClick={() => setDmPicked(new Set())}>
+                        Deselect all
+                      </button>
+                    </div>
+                  </div>
+                  {dmResults.length > 0 && (
+                    <div style={{ maxHeight:320, overflowY:'auto', border:'1px solid var(--gw-border)', borderRadius:8 }}>
+                      {dmResults.map((p, i) => (
+                        <label key={i} style={{ display:'flex', alignItems:'flex-start', gap:10, padding:'8px 12px',
+                                                borderBottom:'1px solid var(--gw-border)', cursor:'pointer' }}>
+                          <input type="checkbox" checked={dmPicked.has(i)} style={{ marginTop:2 }}
+                                 onChange={e => setDmPicked(s => {
+                                   const n = new Set(s)
+                                   e.target.checked ? n.add(i) : n.delete(i)
+                                   return n
+                                 })} />
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontWeight:600, fontSize:13 }}>{p.owner_name || '(Owner unknown)'}</div>
+                            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:1 }}>
+                              {[p.address_line1, p.city, p.state, p.zip].filter(Boolean).join(', ') || '—'}
+                            </div>
+                            {p.property_type && (
+                              <div style={{ fontSize:10, color:'var(--gw-mist)', marginTop:1 }}>{p.property_type}{p.estimated_value ? ` · est. ${Number(p.estimated_value).toLocaleString('en-US', { style:'currency', currency:'USD', maximumFractionDigits:0 })}` : ''}</div>
+                            )}
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ display:'flex', justifyContent:'space-between' }}>
+                    <button type="button" className="btn btn--ghost" onClick={() => setDmResults(null)}>← New search</button>
+                    <div style={{ display:'flex', gap:8 }}>
+                      <button type="button" className="btn btn--ghost" onClick={onCancel}>Cancel</button>
+                      <button type="button" className="btn btn--primary" disabled={saving || dmPicked.size === 0} onClick={submitDealMachine}>
+                        {saving ? 'Importing…' : `Import ${dmPicked.size} Recipient${dmPicked.size === 1 ? '' : 's'}`}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {dmResults === null && !dmLoading && (
+                <div style={{ display:'flex', justifyContent:'flex-end' }}>
+                  <button type="button" className="btn btn--ghost" onClick={onCancel}>Cancel</button>
+                </div>
+              )}
+            </>
+          )}
         </>
       )}
     </div>
@@ -666,7 +1400,12 @@ function MailingDetail({ mailing, agents, properties, contacts, onClose, onUpdat
               )}
 
               <div style={{ marginTop:18, display:'flex', gap:8 }}>
-                <button className="btn btn--ghost" onClick={() => window.open(`/lp/${mailing.landing_type === 'valuation' ? 'valuation' : 'property'}/${mailing.id}`, '_blank')}>
+                <button className="btn btn--ghost" onClick={() => {
+                  const path = mailing.landing_type === 'custom' && mailing.landing_custom_url
+                    ? mailing.landing_custom_url
+                    : `/lp/${['valuation','multifamily','property'].includes(mailing.landing_type) ? mailing.landing_type : 'property'}/${mailing.id}`
+                  window.open(path, '_blank')
+                }}>
                   <Icon name="external" size={12} /> Preview Landing Page
                 </button>
                 <button className="btn btn--ghost" onClick={() => setConfirmDelete(true)} style={{ marginLeft:'auto', color:'var(--gw-red)' }}>
@@ -857,8 +1596,9 @@ export default function CampaignsPage({ db, isAdmin }) {
   const [contacts, setContacts]     = useState([])
   const [loading,  setLoading]      = useState(true)
   const [selected, setSelected]     = useState(null)
-  const [creating, setCreating]     = useState(false)
-  const [saving,   setSaving]       = useState(false)
+  const [creating,    setCreating]    = useState(false)
+  const [templateSel, setTemplateSel] = useState(null) // pre-fill template (null = blank form)
+  const [saving,      setSaving]      = useState(false)
   const [dashboard, setDashboard]   = useState(null)
   const [setupNeeded, setSetupNeeded] = useState(false)
   const [setupError,  setSetupError]  = useState('')
@@ -984,6 +1724,52 @@ export default function CampaignsPage({ db, isAdmin }) {
         </div>
       )}
 
+      {/* Quick-start templates */}
+      <div style={{ marginBottom:20 }}>
+        <div style={{ fontSize:11, textTransform:'uppercase', letterSpacing:0.8, color:'var(--gw-mist)',
+                      fontWeight:700, marginBottom:8 }}>
+          Quick start
+        </div>
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(220px, 1fr))', gap:10 }}>
+          {TEMPLATES.map(t => (
+            <button key={t.id} type="button"
+                    onClick={() => { setTemplateSel(t); setCreating(true) }}
+                    style={{ textAlign:'left', padding:'14px 16px', background:'#fff',
+                             border:'1px solid var(--gw-border)', borderRadius:10, cursor:'pointer',
+                             transition:'all 150ms', position:'relative', overflow:'hidden' }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = t.accent; e.currentTarget.style.transform = 'translateY(-1px)' }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--gw-border)'; e.currentTarget.style.transform = 'translateY(0)' }}>
+              <div style={{ position:'absolute', top:0, left:0, right:0, height:3, background:t.accent }} />
+              <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:2 }}>
+                <div style={{ width:28, height:28, borderRadius:6, background:`${t.accent}22`, color:t.accent,
+                              display:'flex', alignItems:'center', justifyContent:'center' }}>
+                  <Icon name={t.icon} size={14} />
+                </div>
+                <div style={{ fontWeight:700, fontSize:13.5 }}>{t.label}</div>
+              </div>
+              <div style={{ fontSize:11.5, color:'var(--gw-mist)', marginTop:6, lineHeight:1.4 }}>
+                {t.description}
+              </div>
+            </button>
+          ))}
+          <button type="button" onClick={() => { setTemplateSel(null); setCreating(true) }}
+                  style={{ textAlign:'left', padding:'14px 16px', background:'transparent',
+                           border:'1.5px dashed var(--gw-border)', borderRadius:10, cursor:'pointer',
+                           transition:'all 150ms', display:'flex', alignItems:'center', gap:8 }}
+                  onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--gw-azure)'}
+                  onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--gw-border)'}>
+            <div style={{ width:28, height:28, borderRadius:6, background:'var(--gw-bone)',
+                          display:'flex', alignItems:'center', justifyContent:'center', color:'var(--gw-mist)' }}>
+              <Icon name="plus" size={14} />
+            </div>
+            <div>
+              <div style={{ fontWeight:700, fontSize:13.5 }}>Blank Mailing</div>
+              <div style={{ fontSize:11.5, color:'var(--gw-mist)' }}>Start from scratch</div>
+            </div>
+          </button>
+        </div>
+      </div>
+
       <div style={{ display:'flex', gap:8, marginBottom:14, flexWrap:'wrap' }}>
         <input className="input" placeholder="Search mailings…" value={search}
                onChange={e => setSearch(e.target.value)} style={{ flex:1, minWidth:200 }} />
@@ -1018,39 +1804,53 @@ export default function CampaignsPage({ db, isAdmin }) {
           {filtered.map(m => {
             const agent    = agents.find(a => a.id === m.agent_id)
             const property = properties.find(p => p.id === m.property_id)
+            const mailed   = m.recipient_count || 0
+            const scans    = m.scan_count || 0
+            const leads    = m.lead_count || 0
+            const scanRate = mailed > 0 ? Math.min(100, (scans / mailed) * 100) : 0
+            const leadRate = mailed > 0 ? Math.min(100, (leads / mailed) * 100) : 0
             return (
               <div key={m.id} onClick={() => setSelected(m)}
                    style={{ background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)',
                             padding:'14px 18px', cursor:'pointer', display:'grid',
-                            gridTemplateColumns:'1fr 100px 100px 100px 110px', gap:14, alignItems:'center' }}>
-                <div>
+                            gridTemplateColumns:'1fr 220px 80px 80px 80px 56px', gap:14, alignItems:'center',
+                            transition:'all 150ms' }}
+                   onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--gw-azure)'}
+                   onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--gw-border)'}>
+                <div style={{ minWidth:0 }}>
                   <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                    <div style={{ fontWeight:700, fontSize:15 }}>{m.name}</div>
+                    <div style={{ fontWeight:700, fontSize:15, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{m.name}</div>
                     <StatusBadge status={m.status} />
+                    <LandingTypeChip type={m.landing_type} />
                   </div>
-                  <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4, display:'flex', gap:12, flexWrap:'wrap' }}>
+                  <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4, display:'flex', gap:10, flexWrap:'wrap' }}>
                     {agent && <span>{agent.name}</span>}
                     {property && <span>· {property.address}</span>}
                     {m.send_date && <span>· {m.send_date}</span>}
                     <span>· {m.mailing_type}</span>
                   </div>
                 </div>
+
+                {/* Conversion funnel mini-viz */}
+                <div title={`${mailed} mailed → ${scans} scans → ${leads} leads`}>
+                  <FunnelBar scanRate={scanRate} leadRate={leadRate} />
+                </div>
+
                 <div style={{ textAlign:'center' }}>
-                  <div style={{ fontSize:18, fontWeight:700 }}>{(m.recipient_count || 0).toLocaleString()}</div>
+                  <div style={{ fontSize:17, fontWeight:700 }}>{mailed.toLocaleString()}</div>
                   <div style={{ fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase' }}>Mailed</div>
                 </div>
                 <div style={{ textAlign:'center' }}>
-                  <div style={{ fontSize:18, fontWeight:700, color:'var(--gw-azure)' }}>{m.scan_count || 0}</div>
+                  <div style={{ fontSize:17, fontWeight:700, color:'var(--gw-azure)' }}>{scans}</div>
                   <div style={{ fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase' }}>Scans</div>
                 </div>
                 <div style={{ textAlign:'center' }}>
-                  <div style={{ fontSize:18, fontWeight:700, color:'var(--gw-green)' }}>{m.lead_count || 0}</div>
+                  <div style={{ fontSize:17, fontWeight:700, color:'var(--gw-green)' }}>{leads}</div>
                   <div style={{ fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase' }}>Leads</div>
                 </div>
-                <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end', gap:6 }}>
+                <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end' }}>
                   <img src={qrImageUrl(m.qr_token, { size: 60 })} alt=""
-                       style={{ width:36, height:36, border:'1px solid var(--gw-border)', borderRadius:4 }} />
-                  <Icon name="chevronRight" size={16} color="var(--gw-mist)" />
+                       style={{ width:38, height:38, border:'1px solid var(--gw-border)', borderRadius:4 }} />
                 </div>
               </div>
             )
@@ -1059,18 +1859,31 @@ export default function CampaignsPage({ db, isAdmin }) {
       )}
 
       {creating && (
-        <Modal open={true} onClose={() => setCreating(false)} width={560}>
+        <Modal open={true} onClose={() => { setCreating(false); setTemplateSel(null) }} width={680}>
           <div className="modal__head">
-            <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:18 }}>New Mailing</h3>
-            <button className="drawer__close" onClick={() => setCreating(false)}><Icon name="x" size={18} /></button>
+            <div>
+              <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:18 }}>
+                {templateSel ? `${templateSel.label} Mailing` : 'New Mailing'}
+              </h3>
+              {templateSel && (
+                <div style={{ fontSize:11.5, color:'var(--gw-mist)', marginTop:3 }}>
+                  Pre-filled from the <strong>{templateSel.label}</strong> template — edit anything before saving.
+                </div>
+              )}
+            </div>
+            <button className="drawer__close" onClick={() => { setCreating(false); setTemplateSel(null) }}>
+              <Icon name="x" size={18} />
+            </button>
           </div>
-          <div style={{ padding:20 }}>
+          <div style={{ padding:20, maxHeight:'calc(100vh - 180px)', overflowY:'auto' }}>
             <MailingForm
+              key={templateSel?.id || 'blank'}
+              initialTemplate={templateSel}
               agents={agents}
               properties={properties}
               saving={saving}
               onSave={createMailing}
-              onCancel={() => setCreating(false)}
+              onCancel={() => { setCreating(false); setTemplateSel(null) }}
             />
           </div>
         </Modal>

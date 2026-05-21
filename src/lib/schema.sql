@@ -699,8 +699,9 @@ create table if not exists mailings (
   mailing_type           text check (mailing_type in ('postcard','letter','flyer','door-hanger','other')) default 'postcard',
   status                 text check (status in ('draft','active','sent','archived')) default 'draft',
   qr_token               text not null unique,                -- short slug → /m/{token}
-  landing_type           text check (landing_type in ('property','valuation','custom')) default 'property',
+  landing_type           text check (landing_type in ('property','valuation','custom','multifamily')) default 'property',
   landing_custom_url     text,                                -- only used when landing_type='custom'
+  landing_config         jsonb default '{}',                  -- collage/headline/highlights for custom + multifamily landings
   send_date              date,                                -- when the mailer was/will be dropped
   recipient_count        integer default 0,                   -- denormalized counter
   scan_count             integer default 0,                   -- denormalized counter
@@ -708,6 +709,21 @@ create table if not exists mailings (
   created_at             timestamptz default now(),
   updated_at             timestamptz default now()
 );
+
+-- Migration for existing installs: add landing_config + multifamily landing_type
+alter table mailings add column if not exists landing_config jsonb default '{}';
+do $$ begin
+  alter table mailings drop constraint if exists mailings_landing_type_check;
+  alter table mailings add constraint mailings_landing_type_check
+    check (landing_type in ('property','valuation','custom','multifamily'));
+exception when others then null; end $$;
+
+-- Allow 'multifamily' as a valid lead source_landing for existing installs
+do $$ begin
+  alter table mailing_leads drop constraint if exists mailing_leads_source_landing_check;
+  alter table mailing_leads add constraint mailing_leads_source_landing_check
+    check (source_landing in ('property','valuation','custom','multifamily'));
+exception when others then null; end $$;
 
 create index if not exists mailings_agent_id_idx     on mailings(agent_id);
 create index if not exists mailings_status_idx       on mailings(status);
@@ -791,7 +807,7 @@ create table if not exists mailing_leads (
   message           text,
   property_address  text,                      -- valuation requests only
   property_type     text,
-  source_landing    text check (source_landing in ('property','valuation','custom')),
+  source_landing    text check (source_landing in ('property','valuation','custom','multifamily')),
   ip_hash           text,
   created_at        timestamptz default now()
 );
@@ -803,5 +819,58 @@ alter table mailing_leads enable row level security;
 do $$ begin
   if not exists (select 1 from pg_policies where tablename='mailing_leads' and policyname='allow_all') then
     create policy "allow_all" on mailing_leads for all using (true) with check (true);
+  end if;
+end $$;
+
+-- ─── Campaign Images Storage (run once in Supabase SQL Editor) ───────────────
+-- Creates a public bucket for direct browser uploads from the landing page
+-- builder. Agents upload photos; the public URL is stored in landing_config.
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'campaign-images',
+  'campaign-images',
+  true,
+  10485760,  -- 10 MB per file
+  array['image/jpeg','image/png','image/webp','image/gif','image/avif']
+)
+on conflict (id) do nothing;
+
+-- Authenticated users (agents) can upload
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename='objects' and schemaname='storage'
+    and policyname='campaign-images: authenticated upload'
+  ) then
+    create policy "campaign-images: authenticated upload"
+      on storage.objects for insert to authenticated
+      with check (bucket_id = 'campaign-images');
+  end if;
+end $$;
+
+-- Public can read (needed for landing pages served to anonymous visitors)
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename='objects' and schemaname='storage'
+    and policyname='campaign-images: public read'
+  ) then
+    create policy "campaign-images: public read"
+      on storage.objects for select to public
+      using (bucket_id = 'campaign-images');
+  end if;
+end $$;
+
+-- Authenticated users can delete their own uploads
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename='objects' and schemaname='storage'
+    and policyname='campaign-images: authenticated delete'
+  ) then
+    create policy "campaign-images: authenticated delete"
+      on storage.objects for delete to authenticated
+      using (bucket_id = 'campaign-images');
   end if;
 end $$;
