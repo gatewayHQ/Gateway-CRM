@@ -1,14 +1,56 @@
-/**
- * Property Showcase Landing — public-facing, served at /lp/property/:mailingId
- *
- * Renders entirely from mailings.landing_config — no private CRM notes ever shown.
- * landing_config shape:
- *   { headline, subheadline, price, beds, baths, sqft, lot_size, year_built,
- *     description, features[], images[{url,caption,price}], cta_text, accent }
- */
-
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
+
+const TYPE_META = {
+  single_family: { badge: 'Home For Sale' },
+  multifamily:   { badge: 'Multifamily Investment' },
+  condo:         { badge: 'Condo / Townhome For Sale' },
+  commercial:    { badge: 'Commercial Property' },
+  land:          { badge: 'Land For Sale' },
+  other:         { badge: 'Property For Sale' },
+}
+
+function buildDetails(cfg, fmtPrice, fmtNum) {
+  const t = cfg.property_type || 'single_family'
+  if (t === 'multifamily') return [
+    cfg.price      && { label:'Asking Price', value: fmtPrice(cfg.price) },
+    cfg.units      && { label:'Units',        value: cfg.units },
+    cfg.cap_rate   && { label:'Cap Rate',     value: cfg.cap_rate },
+    cfg.noi        && { label:'NOI / Year',   value: fmtPrice(cfg.noi) },
+    cfg.sqft       && { label:'Total Sq Ft',  value: fmtNum(cfg.sqft) },
+    cfg.year_built && { label:'Year Built',   value: cfg.year_built },
+  ].filter(Boolean)
+  if (t === 'condo') return [
+    cfg.price      && { label:'Price',        value: fmtPrice(cfg.price) },
+    cfg.beds       && { label:'Bedrooms',     value: cfg.beds },
+    cfg.baths      && { label:'Bathrooms',    value: cfg.baths },
+    cfg.sqft       && { label:'Sq Ft',        value: fmtNum(cfg.sqft) },
+    cfg.hoa_fee    && { label:'HOA / Mo',     value: fmtPrice(cfg.hoa_fee) },
+    cfg.year_built && { label:'Year Built',   value: cfg.year_built },
+  ].filter(Boolean)
+  if (t === 'commercial') return [
+    cfg.price      && { label:'Asking Price', value: fmtPrice(cfg.price) },
+    cfg.sqft       && { label:'Building Sq Ft', value: fmtNum(cfg.sqft) },
+    cfg.lot_size   && { label:'Lot',          value: fmtNum(cfg.lot_size) + ' sqft' },
+    cfg.zoning     && { label:'Zoning',       value: cfg.zoning },
+    cfg.year_built && { label:'Year Built',   value: cfg.year_built },
+  ].filter(Boolean)
+  if (t === 'land') return [
+    cfg.price    && { label:'Asking Price', value: fmtPrice(cfg.price) },
+    cfg.acreage  && { label:'Acreage',      value: cfg.acreage + ' acres' },
+    cfg.lot_size && { label:'Lot (sqft)',   value: fmtNum(cfg.lot_size) },
+    cfg.zoning   && { label:'Zoning',      value: cfg.zoning },
+  ].filter(Boolean)
+  // single_family / other / default
+  return [
+    cfg.price      && { label:'Price',       value: fmtPrice(cfg.price) },
+    cfg.beds       && { label:'Bedrooms',    value: cfg.beds },
+    cfg.baths      && { label:'Bathrooms',   value: cfg.baths },
+    cfg.sqft       && { label:'Sq Ft',       value: fmtNum(cfg.sqft) },
+    cfg.lot_size   && { label:'Lot',         value: fmtNum(cfg.lot_size) + ' sqft' },
+    cfg.year_built && { label:'Year Built',  value: cfg.year_built },
+  ].filter(Boolean)
+}
 
 function useMosaicLayout(n) {
   return useMemo(() => {
@@ -75,14 +117,9 @@ export default function LandingProperty({ mailingId }) {
   const fmtNum   = v => { const n = Number(String(v).replace(/[^0-9.]/g,'')); return isNaN(n) ? String(v) : n.toLocaleString() }
   const fmtPrice = v => { if (!v) return null; const n = Number(String(v).replace(/[^0-9.]/g,'')); return isNaN(n) ? String(v) : '$' + n.toLocaleString() }
 
-  const details = [
-    cfg.price      && { label:'Price',       value: fmtPrice(cfg.price) },
-    cfg.beds       && { label:'Bedrooms',     value: cfg.beds },
-    cfg.baths      && { label:'Bathrooms',    value: cfg.baths },
-    cfg.sqft       && { label:'Sq Ft',        value: fmtNum(cfg.sqft) },
-    cfg.lot_size   && { label:'Lot',          value: fmtNum(cfg.lot_size) + ' sqft' },
-    cfg.year_built && { label:'Year Built',   value: cfg.year_built },
-  ].filter(Boolean)
+  const propType  = cfg.property_type || 'single_family'
+  const heroBadge = (TYPE_META[propType] || TYPE_META.other).badge
+  const details   = buildDetails(cfg, fmtPrice, fmtNum)
 
   const submit = async (e) => {
     e.preventDefault()
@@ -130,7 +167,7 @@ export default function LandingProperty({ mailingId }) {
         <div style={{ maxWidth:980, margin:'0 auto' }}>
           <div style={{ display:'inline-block', fontSize:11, letterSpacing:1.8, textTransform:'uppercase',
                         padding:'3px 10px', border:'1px solid rgba(255,255,255,0.4)', borderRadius:99, marginBottom:14 }}>
-            Property For Sale
+            {heroBadge}
           </div>
           <h1 style={{ fontFamily:'Cormorant Garamond, serif', fontSize:'clamp(30px,4.8vw,56px)',
                        fontWeight:600, lineHeight:1.08, margin:'0 0 16px' }}>

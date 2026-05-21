@@ -707,19 +707,29 @@ function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
       </div>
 
       <div style={{ display:'grid', gap:10 }}>
-        {properties.length > 0 && (
+        {/* Property type selector */}
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
           <div>
-            <label style={fieldLabel}>Link to CRM Property (auto-fills details below)</label>
-            <select className="input" value={form.property_id || ''} onChange={e => handlePropertySelect(e.target.value)}>
-              <option value="">— select to auto-fill, or fill manually below —</option>
-              {properties.map(p => (
-                <option key={p.id} value={p.id}>
-                  {p.address}{p.city ? `, ${p.city}` : ''}{p.state ? `, ${p.state}` : ''}
-                </option>
-              ))}
+            <label style={fieldLabel}>Property Type</label>
+            <select className="input" value={cfg.property_type || 'single_family'}
+                    onChange={e => setCfg('property_type', e.target.value)}>
+              {PROP_TYPE_OPTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </div>
-        )}
+          {properties.length > 0 && (
+            <div>
+              <label style={fieldLabel}>Link to CRM Property (auto-fills below)</label>
+              <select className="input" value={form.property_id || ''} onChange={e => handlePropertySelect(e.target.value)}>
+                <option value="">— select to auto-fill, or fill manually —</option>
+                {properties.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.address}{p.city ? `, ${p.city}` : ''}{p.state ? `, ${p.state}` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
 
         <div>
           <label style={fieldLabel}>Headline *</label>
@@ -738,14 +748,7 @@ function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
         <div>
           <label style={fieldLabel}>Key Property Details</label>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:8, marginTop:4 }}>
-            {[
-              { key:'price',      label:'List Price',     ph:'$895,000' },
-              { key:'beds',       label:'Bedrooms',       ph:'3' },
-              { key:'baths',      label:'Bathrooms',      ph:'2' },
-              { key:'sqft',       label:'Sq Ft',          ph:'1,850' },
-              { key:'lot_size',   label:'Lot Size (sqft)',ph:'5,200' },
-              { key:'year_built', label:'Year Built',     ph:'1928' },
-            ].map(f => (
+            {(PROP_FIELDS[cfg.property_type || 'single_family'] || PROP_FIELDS.single_family).map(f => (
               <div key={f.key}>
                 <label style={{ fontSize:10, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:0.4, display:'block', marginBottom:3 }}>
                   {f.label}
@@ -825,6 +828,63 @@ function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
 }
 
 const fieldLabel = { fontSize: 11, fontWeight: 700, color: 'var(--gw-ink)', textTransform: 'uppercase', letterSpacing: 0.5 }
+
+const PROP_TYPE_OPTS = [
+  { value: 'single_family', label: 'Single Family' },
+  { value: 'multifamily',   label: 'Multifamily' },
+  { value: 'condo',         label: 'Condo / Townhome' },
+  { value: 'commercial',    label: 'Commercial' },
+  { value: 'land',          label: 'Land' },
+  { value: 'other',         label: 'Other' },
+]
+
+const PROP_FIELDS = {
+  single_family: [
+    { key:'price',      label:'List Price',      ph:'$895,000' },
+    { key:'beds',       label:'Bedrooms',        ph:'3' },
+    { key:'baths',      label:'Bathrooms',       ph:'2' },
+    { key:'sqft',       label:'Sq Ft',           ph:'1,850' },
+    { key:'lot_size',   label:'Lot Size (sqft)', ph:'5,200' },
+    { key:'year_built', label:'Year Built',      ph:'1928' },
+  ],
+  multifamily: [
+    { key:'price',      label:'Asking Price',    ph:'$2,400,000' },
+    { key:'units',      label:'# of Units',      ph:'12' },
+    { key:'cap_rate',   label:'Cap Rate',        ph:'5.2%' },
+    { key:'noi',        label:'NOI / Year',      ph:'$124,000' },
+    { key:'sqft',       label:'Total Sq Ft',     ph:'9,600' },
+    { key:'year_built', label:'Year Built',      ph:'1972' },
+  ],
+  condo: [
+    { key:'price',      label:'List Price',      ph:'$450,000' },
+    { key:'beds',       label:'Bedrooms',        ph:'2' },
+    { key:'baths',      label:'Bathrooms',       ph:'2' },
+    { key:'sqft',       label:'Sq Ft',           ph:'1,100' },
+    { key:'hoa_fee',    label:'HOA / Month',     ph:'$420' },
+    { key:'year_built', label:'Year Built',      ph:'2005' },
+  ],
+  commercial: [
+    { key:'price',      label:'Asking Price',    ph:'$1,200,000' },
+    { key:'sqft',       label:'Building Sq Ft',  ph:'4,800' },
+    { key:'lot_size',   label:'Lot Size (sqft)', ph:'12,000' },
+    { key:'zoning',     label:'Zoning',          ph:'C-2' },
+    { key:'year_built', label:'Year Built',      ph:'1998' },
+  ],
+  land: [
+    { key:'price',      label:'Asking Price',    ph:'$350,000' },
+    { key:'acreage',    label:'Acreage',         ph:'2.4' },
+    { key:'lot_size',   label:'Lot Size (sqft)', ph:'104,544' },
+    { key:'zoning',     label:'Zoning',          ph:'R-1' },
+  ],
+  other: [
+    { key:'price',      label:'Price',           ph:'$500,000' },
+    { key:'beds',       label:'Bedrooms',        ph:'—' },
+    { key:'baths',      label:'Bathrooms',       ph:'—' },
+    { key:'sqft',       label:'Sq Ft',           ph:'—' },
+    { key:'lot_size',   label:'Lot Size (sqft)', ph:'—' },
+    { key:'year_built', label:'Year Built',      ph:'—' },
+  ],
+}
 
 // ─── Recipient picker / importer ──────────────────────────────────────────────
 
