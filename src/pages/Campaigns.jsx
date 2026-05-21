@@ -253,22 +253,29 @@ function MailingForm({ initial, agents, properties, onSave, onCancel, saving, in
   const submit = (e) => {
     e.preventDefault()
     if (!form.name.trim()) return pushToast('Name is required', 'error')
-    if (form.landing_type === 'property' && !form.property_id) {
-      return pushToast('Select a property for the property-showcase landing, or pick a different landing type', 'error')
+    if (form.landing_type === 'property') {
+      const hasHeadline = form.landing_config?.headline?.trim()
+      const hasImages   = (form.landing_config?.images || []).some(img => (typeof img === 'string' ? img : img?.url)?.trim())
+      if (!hasHeadline && !hasImages) return pushToast('Add a headline or at least one photo for the property showcase', 'error')
     }
     if (form.landing_type === 'custom' && !form.landing_custom_url?.trim()) {
       return pushToast('Provide a custom URL or pick a different landing type', 'error')
     }
+    const getUrl = img => (typeof img === 'string' ? img : img?.url || '').trim()
     if (form.landing_type === 'multifamily') {
-      const imgs = (form.landing_config?.images || []).filter(s => s?.trim())
-      if (imgs.length === 0) {
-        return pushToast('Add at least one photo URL for the multifamily landing page', 'error')
+      if (!(form.landing_config?.images || []).some(img => getUrl(img))) {
+        return pushToast('Add at least one photo for the multifamily landing page', 'error')
       }
     }
-    // Clean landing_config — strip empty images, trim strings
     const cfg = { ...(form.landing_config || {}) }
-    if (Array.isArray(cfg.images))     cfg.images     = cfg.images.map(s => (s || '').trim()).filter(Boolean).slice(0, 6)
+    if (Array.isArray(cfg.images)) {
+      cfg.images = cfg.images.map(img => {
+        if (typeof img === 'string') return { url: img.trim(), units: '', price: '', caption: '' }
+        return { url: (img.url || '').trim(), units: (img.units || '').trim(), price: (img.price || '').trim(), caption: (img.caption || '').trim() }
+      }).filter(img => img.url)
+    }
     if (Array.isArray(cfg.highlights)) cfg.highlights = cfg.highlights.filter(h => (h.label || '').trim() && (h.value || '').trim()).slice(0, 4)
+    if (Array.isArray(cfg.features))   cfg.features   = cfg.features.map(f => (f || '').trim()).filter(Boolean)
     onSave({ ...form, landing_config: cfg })
   }
 
@@ -334,17 +341,8 @@ function MailingForm({ initial, agents, properties, onSave, onCancel, saving, in
       </div>
 
       {form.landing_type === 'property' && (
-        <div>
-          <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Property to Showcase *</label>
-          <select className="input" value={form.property_id} onChange={e => set('property_id', e.target.value)}>
-            <option value="">— select a property —</option>
-            {properties.map(p => (
-              <option key={p.id} value={p.id}>
-                {p.address}{p.city ? `, ${p.city}` : ''}{p.state ? `, ${p.state}` : ''}
-              </option>
-            ))}
-          </select>
-        </div>
+        <PropertyLandingBuilder cfg={form.landing_config || {}} setCfg={setCfg}
+                                properties={properties} form={form} set={set} />
       )}
 
       {form.landing_type === 'custom' && (
@@ -356,8 +354,12 @@ function MailingForm({ initial, agents, properties, onSave, onCancel, saving, in
         </div>
       )}
 
+      {form.landing_type === 'valuation' && (
+        <CollageBuilder cfg={form.landing_config || {}} setCfg={setCfg} variant="valuation" />
+      )}
+
       {form.landing_type === 'multifamily' && (
-        <CollageBuilder cfg={form.landing_config || {}} setCfg={setCfg} />
+        <CollageBuilder cfg={form.landing_config || {}} setCfg={setCfg} variant="multifamily" />
       )}
 
       <div>
@@ -380,23 +382,96 @@ function MailingForm({ initial, agents, properties, onSave, onCancel, saving, in
   )
 }
 
-// ─── Collage builder (multifamily landing config) ────────────────────────────
+// ─── Shared image-upload helper ──────────────────────────────────────────────
 
-function CollageBuilder({ cfg, setCfg }) {
+async function uploadImageToStorage(file, setUploading, idx) {
+  setUploading(u => ({ ...u, [idx]: true }))
+  try {
+    const ext  = (file.name.split('.').pop() || 'jpg').toLowerCase()
+    const path = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
+    const { error: upErr } = await supabase.storage
+      .from('campaign-images')
+      .upload(path, file, { contentType: file.type, upsert: false })
+    if (upErr) throw upErr
+    const { data: { publicUrl } } = supabase.storage.from('campaign-images').getPublicUrl(path)
+    return publicUrl
+  } finally {
+    setUploading(u => { const n = { ...u }; delete n[idx]; return n })
+  }
+}
+
+const normImg = v => typeof v === 'string' || !v
+  ? { url: v || '', units: '', price: '', caption: '' }
+  : { url: v.url || '', units: v.units || '', price: v.price || '', caption: v.caption || '' }
+
+// ─── Image row with upload (shared between builders) ─────────────────────────
+
+function ImageRow({ img, index, uploading, onField, onUpload, onRemove, maxPhotos, unitsLabel = 'Units', priceLabel = 'Sale price / note' }) {
+  return (
+    <div style={{ border:'1px solid var(--gw-border)', borderRadius:8, padding:10, background:'#fff' }}>
+      <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+        <div style={{ width:52, height:52, borderRadius:6, border:'1px solid var(--gw-border)',
+                      flexShrink:0, overflow:'hidden', background:'var(--gw-bone)',
+                      display:'flex', alignItems:'center', justifyContent:'center' }}>
+          {img.url
+            ? <img src={img.url} alt="" style={{ width:'100%', height:'100%', objectFit:'cover' }}
+                   onError={e => { e.currentTarget.style.display = 'none' }} />
+            : <span style={{ fontSize:10, color:'var(--gw-mist)' }}>#{index + 1}</span>}
+        </div>
+        <input className="input" placeholder="Paste image URL…" value={img.url}
+               onChange={e => onField('url', e.target.value)} style={{ flex:1 }} />
+        <label title="Upload from your computer"
+               style={{ display:'flex', alignItems:'center', gap:4,
+                        cursor: uploading[index] ? 'wait' : 'pointer',
+                        padding:'7px 10px', border:'1px solid var(--gw-border)', borderRadius:6,
+                        fontSize:11.5, fontWeight:600, background:'#fff', flexShrink:0, whiteSpace:'nowrap' }}>
+          {uploading[index]
+            ? <><Icon name="loader" size={11} /> Uploading…</>
+            : <><Icon name="upload" size={11} /> Upload</>}
+          <input type="file" accept="image/*" style={{ display:'none' }}
+                 onChange={e => { onUpload(e.target.files?.[0]); e.target.value = '' }} />
+        </label>
+        <button type="button" className="btn btn--ghost" onClick={onRemove}
+                style={{ padding:'6px 8px', flexShrink:0 }} title="Remove">
+          <Icon name="x" size={12} />
+        </button>
+      </div>
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:6, marginTop:8 }}>
+        <input className="input" placeholder={unitsLabel} value={img.units || img.caption || ''}
+               onChange={e => onField('units', e.target.value)} style={{ fontSize:12 }} />
+        <input className="input" placeholder={priceLabel} value={img.price || ''}
+               onChange={e => onField('price', e.target.value)} style={{ fontSize:12 }} />
+      </div>
+    </div>
+  )
+}
+
+// ─── CollageBuilder — multifamily + valuation landing config ─────────────────
+
+function CollageBuilder({ cfg, setCfg, variant = 'multifamily' }) {
   const [aiOpen, setAiOpen]       = useState(false)
   const [aiInput, setAiInput]     = useState('')
   const [aiLoading, setAiLoading] = useState(false)
   const [aiTone, setAiTone]       = useState('professional')
+  const [uploading, setUploading] = useState({})
 
-  const images     = Array.isArray(cfg.images)     ? cfg.images     : []
-  const highlights = Array.isArray(cfg.highlights) ? cfg.highlights : []
+  const images     = Array.isArray(cfg.images)     ? cfg.images.map(normImg) : []
+  const highlights = Array.isArray(cfg.highlights) ? cfg.highlights           : []
 
-  const setImageAt = (i, v) => {
-    const next = [...images]; next[i] = v
+  const setImageField = (i, field, val) => {
+    const next = images.map((img, idx) => idx === i ? { ...img, [field]: val } : img)
     setCfg('images', next)
   }
-  const addImage    = () => setCfg('images', [...images, ''].slice(0, 6))
+  const addImage    = () => setCfg('images', [...images, { url:'', units:'', price:'', caption:'' }].slice(0, 6))
   const removeImage = (i) => setCfg('images', images.filter((_, idx) => idx !== i))
+
+  const uploadFile = async (i, file) => {
+    if (!file) return
+    try {
+      const url = await uploadImageToStorage(file, setUploading, i)
+      setImageField(i, 'url', url)
+    } catch (err) { pushToast('Upload failed: ' + err.message, 'error') }
+  }
 
   const setHighlight = (i, key, v) => {
     const next = [...highlights]; next[i] = { ...(next[i] || {}), [key]: v }
@@ -414,18 +489,15 @@ function CollageBuilder({ cfg, setCfg }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           max_tokens: 600,
-          system: 'You are an elite real estate marketing copywriter. Write landing page copy for a multifamily property valuation capture page. Return ONLY a raw JSON object — no markdown, no code fences, no explanation. Keys: headline (string, max 90 chars), subheadline (string, max 260 chars), highlights (array of exactly 3 objects, each with "label" and "value" string fields), cta_text (string, max 30 chars).',
-          messages: [{
-            role: 'user',
-            content: `Write ${tone === 'punchy' ? 'punchy, bold, and urgent' : tone === 'conversational' ? 'warm, conversational, and approachable' : 'professional, authoritative, and credible'} copy for this campaign:\n\n${aiInput}`,
-          }],
+          system: `You are an elite real estate marketing copywriter. Write landing page copy for a ${variant === 'valuation' ? 'home valuation' : 'multifamily property valuation'} capture page. Return ONLY a raw JSON object — no markdown, no code fences. Keys: headline (max 90 chars), subheadline (max 260 chars), highlights (array of 3 objects each with "label" and "value"), cta_text (max 30 chars).`,
+          messages: [{ role:'user', content:`Write ${tone === 'punchy' ? 'punchy, bold, and urgent' : tone === 'conversational' ? 'warm, conversational, and approachable' : 'professional, authoritative, and credible'} copy:\n\n${aiInput}` }],
         }),
       })
       const data = await r.json()
       if (data.error) { pushToast(data.error, 'error'); return }
-      const text = data.content?.[0]?.text || ''
+      const text  = data.content?.[0]?.text || ''
       const match = text.match(/\{[\s\S]*\}/)
-      if (!match) { pushToast('AI returned an unexpected format — try again', 'error'); return }
+      if (!match) { pushToast('AI returned unexpected format — try again', 'error'); return }
       const copy = JSON.parse(match[0])
       if (copy.headline)    setCfg('headline',    copy.headline)
       if (copy.subheadline) setCfg('subheadline', copy.subheadline)
@@ -440,18 +512,22 @@ function CollageBuilder({ cfg, setCfg }) {
     }
   }
 
+  const isVal    = variant === 'valuation'
+  const hlHint   = isVal
+    ? '"120+ homeowners served", "18 days avg close", "12 neighborhoods"'
+    : '"$240M+ closed", "38 days avg sale", "14 sub-markets"'
+
   return (
     <div style={{ border:'1px solid var(--gw-border)', borderRadius:10, padding:14, background:'#fafaf7' }}>
       <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom: aiOpen ? 8 : 10 }}>
         <Icon name="sparkles" size={14} />
-        <div style={{ fontSize:13, fontWeight:700 }}>Landing Page Builder</div>
-        <div style={{ fontSize:11, color:'var(--gw-mist)' }}>· Customize the multifamily landing page</div>
+        <div style={{ fontSize:13, fontWeight:700 }}>
+          {isVal ? 'Home Valuation Page Builder' : 'Multifamily Landing Page Builder'}
+        </div>
         <button type="button" onClick={() => setAiOpen(o => !o)}
                 style={{ marginLeft:'auto', fontSize:11, padding:'4px 12px', borderRadius:20, cursor:'pointer',
-                         fontWeight:700, transition:'all 150ms',
-                         background: aiOpen ? 'var(--gw-azure)' : '#eff6ff',
-                         color: aiOpen ? '#fff' : 'var(--gw-azure)',
-                         border: '1px solid var(--gw-azure)' }}>
+                         fontWeight:700, background: aiOpen ? 'var(--gw-azure)' : '#eff6ff',
+                         color: aiOpen ? '#fff' : 'var(--gw-azure)', border:'1px solid var(--gw-azure)' }}>
           ✨ {aiOpen ? 'Close AI' : 'Generate with AI'}
         </button>
       </div>
@@ -459,45 +535,37 @@ function CollageBuilder({ cfg, setCfg }) {
       {aiOpen && (
         <div style={{ background:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:8, padding:12, marginBottom:10 }}>
           <div style={{ fontSize:12, fontWeight:700, color:'#1d4ed8', marginBottom:6 }}>
-            Describe the property, market, or campaign — AI writes the headline, subheadline, stats, and CTA
+            Describe the property or campaign — AI writes headline, subheadline, stats, and CTA
           </div>
           <textarea className="input" rows={3} value={aiInput} onChange={e => setAiInput(e.target.value)}
-                    placeholder="e.g. 'Just sold a 24-unit in East Oakland near BART. Target: apartment owners in a 3-block radius. Market cap rates compressed to 5.2%. We want owners curious about selling before rates rise.'" />
+                    placeholder={isVal
+                      ? "e.g. 'Just sold a home in East Oakland. Targeting neighboring homeowners. Market moving fast — under 3 weeks.'"
+                      : "e.g. 'Just sold 24-unit in Oakland near BART. Targeting apartment owners nearby. Cap rates at 5.2%.'"}  />
           <div style={{ display:'flex', gap:6, alignItems:'center', marginTop:8, flexWrap:'wrap' }}>
             <span style={{ fontSize:11, color:'var(--gw-mist)', fontWeight:700 }}>Tone:</span>
-            {[
-              { id:'professional',   label:'Professional'   },
-              { id:'punchy',         label:'Punchy'         },
-              { id:'conversational', label:'Conversational' },
-            ].map(t => (
-              <button key={t.id} type="button" onClick={() => setAiTone(t.id)}
+            {['professional','punchy','conversational'].map(t => (
+              <button key={t} type="button" onClick={() => setAiTone(t)}
                       style={{ fontSize:11, padding:'3px 10px', borderRadius:12, cursor:'pointer', fontWeight:600,
-                               transition:'all 100ms',
-                               background: aiTone === t.id ? 'var(--gw-azure)' : '#fff',
-                               color: aiTone === t.id ? '#fff' : 'var(--gw-ink)',
-                               border: `1px solid ${aiTone === t.id ? 'var(--gw-azure)' : 'var(--gw-border)'}` }}>
-                {t.label}
+                               background: aiTone === t ? 'var(--gw-azure)' : '#fff',
+                               color: aiTone === t ? '#fff' : 'var(--gw-ink)',
+                               border:`1px solid ${aiTone === t ? 'var(--gw-azure)' : 'var(--gw-border)'}` }}>
+                {t[0].toUpperCase() + t.slice(1)}
               </button>
             ))}
             <button type="button" disabled={aiLoading} onClick={() => generateCopy(aiTone)}
-                    style={{ marginLeft:'auto', padding:'6px 16px', fontSize:12, fontWeight:700, cursor:aiLoading ? 'default' : 'pointer',
+                    style={{ marginLeft:'auto', padding:'6px 16px', fontSize:12, fontWeight:700,
                              background: aiLoading ? '#93c5fd' : 'var(--gw-azure)', color:'#fff',
-                             border:'none', borderRadius:8, transition:'background 150ms' }}>
+                             border:'none', borderRadius:8, cursor: aiLoading ? 'default' : 'pointer' }}>
               {aiLoading ? 'Generating…' : '✨ Generate Copy'}
             </button>
           </div>
           {(cfg.headline || cfg.subheadline) && !aiLoading && (
             <div style={{ display:'flex', gap:6, alignItems:'center', marginTop:8, borderTop:'1px solid #bfdbfe', paddingTop:8, flexWrap:'wrap' }}>
-              <span style={{ fontSize:11, color:'#3b82f6', fontWeight:600 }}>Refine existing copy:</span>
-              {[
-                { label:'Make it punchier',     tone:'punchy'         },
-                { label:'More professional',    tone:'professional'   },
-                { label:'More conversational',  tone:'conversational' },
-              ].map(btn => (
-                <button key={btn.tone} type="button" onClick={() => generateCopy(btn.tone)}
-                        style={{ fontSize:11, padding:'3px 10px', border:'1px solid #bfdbfe',
-                                 borderRadius:12, background:'#fff', cursor:'pointer', color:'#1d4ed8' }}>
-                  {btn.label}
+              <span style={{ fontSize:11, color:'#3b82f6', fontWeight:600 }}>Refine:</span>
+              {[['Make it punchier','punchy'],['More professional','professional'],['Conversational','conversational']].map(([lbl, t]) => (
+                <button key={t} type="button" onClick={() => generateCopy(t)}
+                        style={{ fontSize:11, padding:'3px 10px', border:'1px solid #bfdbfe', borderRadius:12, background:'#fff', cursor:'pointer', color:'#1d4ed8' }}>
+                  {lbl}
                 </button>
               ))}
             </div>
@@ -508,55 +576,48 @@ function CollageBuilder({ cfg, setCfg }) {
       <div style={{ display:'grid', gap:10 }}>
         <div>
           <label style={fieldLabel}>Headline</label>
-          <input className="input" maxLength={140}
-                 placeholder="What's your multifamily really worth?"
-                 value={cfg.headline || ''} onChange={e => setCfg('headline', e.target.value)} />
+          <input className="input" maxLength={140} value={cfg.headline || ''}
+                 placeholder={isVal ? "What's your home worth in today's market?" : "What's your multifamily really worth?"}
+                 onChange={e => setCfg('headline', e.target.value)} />
         </div>
         <div>
           <label style={fieldLabel}>Subheadline</label>
-          <textarea className="input" rows={2} maxLength={300}
-                    placeholder="Get a cap-rate-driven valuation from a broker who actually closes deals in your submarket."
-                    value={cfg.subheadline || ''} onChange={e => setCfg('subheadline', e.target.value)} />
+          <textarea className="input" rows={2} maxLength={300} value={cfg.subheadline || ''}
+                    placeholder={isVal
+                      ? "Get a private, no-obligation valuation from a licensed broker who knows your neighborhood."
+                      : "Get a cap-rate-driven valuation from a broker who actually closes deals in your submarket."}
+                    onChange={e => setCfg('subheadline', e.target.value)} />
         </div>
 
-        {/* Image URLs */}
         <div>
-          <label style={fieldLabel}>
-            Photos (up to 6) — paste image URLs from Google Drive, Dropbox, your MLS, etc.
-          </label>
-          <div style={{ display:'grid', gap:6, marginTop:4 }}>
-            {images.map((src, i) => (
-              <div key={i} style={{ display:'flex', gap:6, alignItems:'center' }}>
-                <div style={{ width:42, height:42, borderRadius:4, border:'1px solid var(--gw-border)',
-                              background: src ? `url(${src}) center/cover` : 'var(--gw-bone)',
-                              flexShrink:0, fontSize:10, color:'var(--gw-mist)',
-                              display:'flex', alignItems:'center', justifyContent:'center' }}>
-                  {!src && `#${i + 1}`}
-                </div>
-                <input className="input" placeholder="https://…" value={src}
-                       onChange={e => setImageAt(i, e.target.value)} style={{ flex:1 }} />
-                <button type="button" className="btn btn--ghost" onClick={() => removeImage(i)}
-                        style={{ padding:'6px 8px' }} title="Remove">
-                  <Icon name="x" size={12} />
-                </button>
-              </div>
+          <label style={fieldLabel}>Photos (up to 6) — upload from computer or paste URL</label>
+          <div style={{ display:'grid', gap:8, marginTop:4 }}>
+            {images.map((img, i) => (
+              <ImageRow key={i} img={img} index={i} uploading={uploading}
+                        onField={(f, v) => setImageField(i, f, v)}
+                        onUpload={file => uploadFile(i, file)}
+                        onRemove={() => removeImage(i)}
+                        unitsLabel="Units (e.g. 24 units)"
+                        priceLabel="Sale price / note (e.g. $4.2M)" />
             ))}
             {images.length < 6 && (
-              <button type="button" className="btn btn--ghost"
-                      onClick={addImage}
-                      style={{ fontSize:12, alignSelf:'flex-start' }}>
+              <button type="button" className="btn btn--ghost" onClick={addImage} style={{ fontSize:12, alignSelf:'flex-start' }}>
                 <Icon name="plus" size={12} /> Add photo
               </button>
             )}
           </div>
           <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
-            Tip: For best results upload to your CRM contacts/Drive folder, set the link to "Anyone with link can view", then paste the direct image URL here.
+            Units and sale price appear as a caption under each photo on the live page.
           </div>
         </div>
 
-        {/* Highlights / stat strip */}
         <div>
           <label style={fieldLabel}>Highlight stats (up to 4) — your credibility strip</label>
+          {highlights.length === 0 && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'4px 0 6px' }}>
+              Try: {hlHint}
+            </div>
+          )}
           <div style={{ display:'grid', gap:6, marginTop:4 }}>
             {highlights.map((h, i) => (
               <div key={i} style={{ display:'grid', gridTemplateColumns:'140px 1fr 30px', gap:6 }}>
@@ -564,15 +625,13 @@ function CollageBuilder({ cfg, setCfg }) {
                        onChange={e => setHighlight(i, 'value', e.target.value)} />
                 <input className="input" placeholder="Label (e.g. Closed in submarket)" value={h.label || ''}
                        onChange={e => setHighlight(i, 'label', e.target.value)} />
-                <button type="button" className="btn btn--ghost" onClick={() => removeHighlight(i)}
-                        style={{ padding:'6px 8px' }} title="Remove">
+                <button type="button" className="btn btn--ghost" onClick={() => removeHighlight(i)} style={{ padding:'6px 8px' }}>
                   <Icon name="x" size={12} />
                 </button>
               </div>
             ))}
             {highlights.length < 4 && (
-              <button type="button" className="btn btn--ghost" onClick={addHighlight}
-                      style={{ fontSize:12, alignSelf:'flex-start' }}>
+              <button type="button" className="btn btn--ghost" onClick={addHighlight} style={{ fontSize:12, alignSelf:'flex-start' }}>
                 <Icon name="plus" size={12} /> Add stat
               </button>
             )}
@@ -582,17 +641,180 @@ function CollageBuilder({ cfg, setCfg }) {
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
           <div>
             <label style={fieldLabel}>CTA button text</label>
-            <input className="input" maxLength={40}
-                   placeholder="Get my free valuation"
+            <input className="input" maxLength={40} placeholder="Get my free valuation" value={cfg.cta_text || ''}
+                   onChange={e => setCfg('cta_text', e.target.value)} />
+          </div>
+          <div>
+            <label style={fieldLabel}>Accent color</label>
+            <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+              <input type="color" value={cfg.accent || '#c9a961'} onChange={e => setCfg('accent', e.target.value)}
+                     style={{ width:42, height:36, border:'1px solid var(--gw-border)', borderRadius:6, padding:2, background:'#fff' }} />
+              <input className="input" placeholder="#c9a961" value={cfg.accent || ''} onChange={e => setCfg('accent', e.target.value)} style={{ flex:1 }} />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Property Showcase landing config builder ─────────────────────────────────
+
+function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
+  const [uploading, setUploading] = useState({})
+
+  const images   = Array.isArray(cfg.images)   ? cfg.images.map(normImg) : []
+  const features = Array.isArray(cfg.features) ? cfg.features             : []
+
+  const handlePropertySelect = (pid) => {
+    set('property_id', pid)
+    if (!pid) return
+    const p = properties.find(x => x.id === pid)
+    if (!p) return
+    if (!cfg.headline)                 setCfg('headline',    [p.address, p.city, p.state].filter(Boolean).join(', '))
+    if (!cfg.price    && p.list_price) setCfg('price',       String(p.list_price))
+    if (!cfg.beds     && p.beds)       setCfg('beds',        String(p.beds))
+    if (!cfg.baths    && p.baths)      setCfg('baths',       String(p.baths))
+    if (!cfg.sqft     && p.sqft)       setCfg('sqft',        String(p.sqft))
+    if (!cfg.year_built && p.year_built) setCfg('year_built', String(p.year_built))
+  }
+
+  const setImageField = (i, field, val) => {
+    const next = images.map((img, idx) => idx === i ? { ...img, [field]: val } : img)
+    setCfg('images', next)
+  }
+  const addImage    = () => setCfg('images', [...images, { url:'', caption:'', price:'' }].slice(0, 10))
+  const removeImage = (i) => setCfg('images', images.filter((_, idx) => idx !== i))
+
+  const uploadFile = async (i, file) => {
+    if (!file) return
+    try {
+      const url = await uploadImageToStorage(file, setUploading, i)
+      setImageField(i, 'url', url)
+    } catch (err) { pushToast('Upload failed: ' + err.message, 'error') }
+  }
+
+  const setFeatureAt    = (i, v) => { const n = [...features]; n[i] = v; setCfg('features', n) }
+  const addFeature      = ()     => setCfg('features', [...features, ''])
+  const removeFeature   = (i)    => setCfg('features', features.filter((_, idx) => idx !== i))
+
+  return (
+    <div style={{ border:'1px solid var(--gw-border)', borderRadius:10, padding:14, background:'#fafaf7' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12 }}>
+        <Icon name="building" size={14} />
+        <div style={{ fontSize:13, fontWeight:700 }}>Property Showcase Builder</div>
+        <div style={{ fontSize:11, color:'#10b981', fontWeight:600 }}>· Your private CRM notes are never shown</div>
+      </div>
+
+      <div style={{ display:'grid', gap:10 }}>
+        {properties.length > 0 && (
+          <div>
+            <label style={fieldLabel}>Link to CRM Property (auto-fills details below)</label>
+            <select className="input" value={form.property_id || ''} onChange={e => handlePropertySelect(e.target.value)}>
+              <option value="">— select to auto-fill, or fill manually below —</option>
+              {properties.map(p => (
+                <option key={p.id} value={p.id}>
+                  {p.address}{p.city ? `, ${p.city}` : ''}{p.state ? `, ${p.state}` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div>
+          <label style={fieldLabel}>Headline *</label>
+          <input className="input" maxLength={160} value={cfg.headline || ''}
+                 onChange={e => setCfg('headline', e.target.value)}
+                 placeholder="123 Oak Street, Oakland — A Rare Opportunity" />
+        </div>
+
+        <div>
+          <label style={fieldLabel}>Opening Copy</label>
+          <textarea className="input" rows={3} value={cfg.subheadline || ''}
+                    onChange={e => setCfg('subheadline', e.target.value)}
+                    placeholder="Describe what makes this property special. Your private CRM notes never appear here." />
+        </div>
+
+        <div>
+          <label style={fieldLabel}>Key Property Details</label>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:8, marginTop:4 }}>
+            {[
+              { key:'price',      label:'List Price',     ph:'$895,000' },
+              { key:'beds',       label:'Bedrooms',       ph:'3' },
+              { key:'baths',      label:'Bathrooms',      ph:'2' },
+              { key:'sqft',       label:'Sq Ft',          ph:'1,850' },
+              { key:'lot_size',   label:'Lot Size (sqft)',ph:'5,200' },
+              { key:'year_built', label:'Year Built',     ph:'1928' },
+            ].map(f => (
+              <div key={f.key}>
+                <label style={{ fontSize:10, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:0.4, display:'block', marginBottom:3 }}>
+                  {f.label}
+                </label>
+                <input className="input" placeholder={f.ph} value={cfg[f.key] || ''}
+                       onChange={e => setCfg(f.key, e.target.value)} />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <label style={fieldLabel}>Public Description (visible to visitors)</label>
+          <textarea className="input" rows={4} value={cfg.description || ''}
+                    onChange={e => setCfg('description', e.target.value)}
+                    placeholder="Write a compelling marketing description. Your private CRM notes will never appear here." />
+        </div>
+
+        <div>
+          <label style={fieldLabel}>Key Features / Selling Points</label>
+          <div style={{ display:'grid', gap:6, marginTop:4 }}>
+            {features.map((feat, i) => (
+              <div key={i} style={{ display:'flex', gap:6 }}>
+                <input className="input" placeholder="e.g. Chef's kitchen with quartz counters"
+                       value={feat} onChange={e => setFeatureAt(i, e.target.value)} style={{ flex:1 }} />
+                <button type="button" className="btn btn--ghost" onClick={() => removeFeature(i)} style={{ padding:'6px 8px' }}>
+                  <Icon name="x" size={12} />
+                </button>
+              </div>
+            ))}
+            {features.length < 10 && (
+              <button type="button" className="btn btn--ghost" onClick={addFeature} style={{ fontSize:12, alignSelf:'flex-start' }}>
+                <Icon name="plus" size={12} /> Add feature
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <label style={fieldLabel}>Photos (up to 10) — upload or paste URL</label>
+          <div style={{ display:'grid', gap:8, marginTop:4 }}>
+            {images.map((img, i) => (
+              <ImageRow key={i} img={img} index={i} uploading={uploading}
+                        onField={(f, v) => setImageField(i, f, v)}
+                        onUpload={file => uploadFile(i, file)}
+                        onRemove={() => removeImage(i)}
+                        unitsLabel="Caption / label"
+                        priceLabel="Sold price (optional)" />
+            ))}
+            {images.length < 10 && (
+              <button type="button" className="btn btn--ghost" onClick={addImage} style={{ fontSize:12, alignSelf:'flex-start' }}>
+                <Icon name="plus" size={12} /> Add photo
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+          <div>
+            <label style={fieldLabel}>CTA button text</label>
+            <input className="input" maxLength={40} placeholder="Schedule a showing"
                    value={cfg.cta_text || ''} onChange={e => setCfg('cta_text', e.target.value)} />
           </div>
           <div>
             <label style={fieldLabel}>Accent color</label>
             <div style={{ display:'flex', gap:6, alignItems:'center' }}>
-              <input type="color" value={cfg.accent || '#c9a961'}
-                     onChange={e => setCfg('accent', e.target.value)}
+              <input type="color" value={cfg.accent || '#1e2642'} onChange={e => setCfg('accent', e.target.value)}
                      style={{ width:42, height:36, border:'1px solid var(--gw-border)', borderRadius:6, padding:2, background:'#fff' }} />
-              <input className="input" placeholder="#c9a961" value={cfg.accent || ''}
+              <input className="input" placeholder="#1e2642" value={cfg.accent || ''}
                      onChange={e => setCfg('accent', e.target.value)} style={{ flex:1 }} />
             </div>
           </div>

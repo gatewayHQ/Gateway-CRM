@@ -821,3 +821,56 @@ do $$ begin
     create policy "allow_all" on mailing_leads for all using (true) with check (true);
   end if;
 end $$;
+
+-- ─── Campaign Images Storage (run once in Supabase SQL Editor) ───────────────
+-- Creates a public bucket for direct browser uploads from the landing page
+-- builder. Agents upload photos; the public URL is stored in landing_config.
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'campaign-images',
+  'campaign-images',
+  true,
+  10485760,  -- 10 MB per file
+  array['image/jpeg','image/png','image/webp','image/gif','image/avif']
+)
+on conflict (id) do nothing;
+
+-- Authenticated users (agents) can upload
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename='objects' and schemaname='storage'
+    and policyname='campaign-images: authenticated upload'
+  ) then
+    create policy "campaign-images: authenticated upload"
+      on storage.objects for insert to authenticated
+      with check (bucket_id = 'campaign-images');
+  end if;
+end $$;
+
+-- Public can read (needed for landing pages served to anonymous visitors)
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename='objects' and schemaname='storage'
+    and policyname='campaign-images: public read'
+  ) then
+    create policy "campaign-images: public read"
+      on storage.objects for select to public
+      using (bucket_id = 'campaign-images');
+  end if;
+end $$;
+
+-- Authenticated users can delete their own uploads
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename='objects' and schemaname='storage'
+    and policyname='campaign-images: authenticated delete'
+  ) then
+    create policy "campaign-images: authenticated delete"
+      on storage.objects for delete to authenticated
+      using (bucket_id = 'campaign-images');
+  end if;
+end $$;

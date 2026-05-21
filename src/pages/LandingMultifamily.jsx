@@ -76,7 +76,12 @@ export default function LandingMultifamily({ mailingId }) {
   const subheadline = cfg.subheadline || "Get a private, cap-rate-driven valuation from a broker who actually closes deals in your submarket — not a software guess."
   const ctaText     = cfg.cta_text    || 'Get my free valuation'
   const accent      = cfg.accent      || '#c9a961'
-  const images      = Array.isArray(cfg.images) ? cfg.images.filter(Boolean).slice(0, 6) : []
+  const images      = Array.isArray(cfg.images)
+    ? cfg.images
+        .map(v => typeof v === 'string' ? { url:v, units:'', price:'' } : v)
+        .filter(v => v?.url)
+        .slice(0, 6)
+    : []
   const highlights  = Array.isArray(cfg.highlights) && cfg.highlights.length > 0
     ? cfg.highlights.slice(0, 4)
     : DEFAULT_HIGHLIGHTS
@@ -159,13 +164,22 @@ export default function LandingMultifamily({ mailingId }) {
             {/* Collage */}
             {images.length > 0 && (
               <div style={{ marginTop:32, display:'grid', gap:6, ...mosaic.gridStyle }}>
-                {images.map((src, i) => (
+                {images.map((img, i) => (
                   <div key={i} style={{
                     ...mosaic.cells[i],
-                    backgroundImage: `url(${src})`, backgroundSize:'cover', backgroundPosition:'center',
-                    borderRadius:6, overflow:'hidden',
-                    boxShadow:'0 8px 24px rgba(0,0,0,0.35)',
-                  }} />
+                    backgroundImage:`url(${img.url})`, backgroundSize:'cover', backgroundPosition:'center',
+                    borderRadius:6, overflow:'hidden', boxShadow:'0 8px 24px rgba(0,0,0,0.35)',
+                    position:'relative',
+                  }}>
+                    {(img.units || img.price) && (
+                      <div style={{ position:'absolute', bottom:0, left:0, right:0,
+                                    background:'linear-gradient(transparent, rgba(0,0,0,0.65))',
+                                    padding:'20px 10px 8px', color:'#fff' }}>
+                        {img.units && <div style={{ fontSize:11, fontWeight:600 }}>{img.units}</div>}
+                        {img.price && <div style={{ fontSize:13, fontWeight:700, color:accent }}>{img.price}</div>}
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
             )}
