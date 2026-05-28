@@ -9,10 +9,11 @@ export default async function handler(req, res) {
     propertyId,
     name, first_name, last_name,
     email, phone,
-    agent_id, session_key, message, property_address,
+    agent_id,           // set when lead comes from a specific agent's page/listing
+    session_key, message, property_address,
+    property_type,      // 'residential' | 'commercial' — drives round-robin pool
   } = req.body || {}
 
-  // Support either combined `name` or separate first/last
   const resolvedFirst = first_name?.trim() || name?.trim().split(/\s+/)[0] || ''
   const resolvedLast  = last_name?.trim()  || name?.trim().split(/\s+/).slice(1).join(' ') || '—'
 
@@ -36,9 +37,13 @@ export default async function handler(req, res) {
     Authorization: `Bearer ${SERVICE_KEY}`,
   }
 
-  const normalEmail = email.trim().toLowerCase()
+  // ── Lead assignment ───────────────────────────────────────────────────────
+  // Priority 1: explicit agent link (their profile page, their listing)
+  // Priority 2: round-robin within the matching specialty pool
+  const assignedAgentId = agent_id || await pickRoundRobinAgent(SUPABASE_URL, headers, property_type)
 
-  // Check for existing contact to avoid duplicates
+  // ── Deduplicate contact ───────────────────────────────────────────────────
+  const normalEmail = email.trim().toLowerCase()
   const checkRes = await fetch(
     `${SUPABASE_URL}/rest/v1/contacts?email=eq.${encodeURIComponent(normalEmail)}&select=id&limit=1`,
     { headers }
@@ -60,15 +65,15 @@ export default async function handler(req, res) {
       method: 'POST',
       headers: { ...headers, Prefer: 'return=representation' },
       body: JSON.stringify({
-        first_name:          resolvedFirst,
-        last_name:           resolvedLast,
-        email:               normalEmail,
-        phone:               phone?.trim() || null,
-        source:              'website',
-        type:                'buyer',
-        status:              'active',
-        assigned_agent_id:   agent_id || null,
-        notes:               noteParts.join('\n') || null,
+        first_name:        resolvedFirst,
+        last_name:         resolvedLast,
+        email:             normalEmail,
+        phone:             phone?.trim() || null,
+        source:            'website',
+        type:              'buyer',
+        status:            'active',
+        assigned_agent_id: assignedAgentId,
+        notes:             noteParts.join('\n') || null,
       }),
     })
     if (!createRes.ok) {
@@ -80,7 +85,7 @@ export default async function handler(req, res) {
     isNew = true
   }
 
-  // Log an activity note — property inquiry or lead form
+  // ── Activity note ─────────────────────────────────────────────────────────
   if (contactId) {
     const activityBody = property_address
       ? `Website lead form submitted — interested in: ${property_address}${message ? `\nMessage: ${message}` : ''}`
@@ -93,22 +98,21 @@ export default async function handler(req, res) {
       headers: { ...headers, Prefer: 'return=minimal' },
       body: JSON.stringify({
         contact_id: contactId,
-        agent_id:   agent_id || null,
+        agent_id:   assignedAgentId,
         type:       'note',
         body:       activityBody,
       }),
     }).catch(() => {})
   }
 
-  // Write the lead_captures row with converted_contact_id already set so it
-  // shows as "In CRM" immediately in the Leads page — no manual conversion needed.
+  // ── Lead capture record (already marked as converted) ────────────────────
   if (session_key && contactId) {
     await fetch(`${SUPABASE_URL}/rest/v1/lead_captures`, {
       method: 'POST',
       headers: { ...headers, Prefer: 'return=minimal' },
       body: JSON.stringify({
         session_key,
-        agent_id:             agent_id || null,
+        agent_id:             assignedAgentId,
         first_name:           resolvedFirst,
         last_name:            resolvedLast,
         email:                normalEmail,
@@ -120,5 +124,55 @@ export default async function handler(req, res) {
     }).catch(() => {})
   }
 
-  return res.json({ ok: true, contactId, isNew })
+  return res.json({ ok: true, contactId, isNew, assignedAgentId })
+}
+
+// ── Round-robin logic ─────────────────────────────────────────────────────────
+// Pulls agents by specialty, checks the most recently assigned lead in that
+// pool, and returns the next agent ID in alphabetical rotation.
+// Falls back: if specialty pool is empty, tries the other specialty, then any agent.
+async function pickRoundRobinAgent(supabaseUrl, headers, propertyType) {
+  const specialty = propertyType === 'commercial' ? 'commercial' : 'residential'
+
+  // Try the matching specialty pool first, fall back to the other, then unfiltered
+  const pools = [
+    `specialty=eq.${specialty}`,
+    `specialty=eq.${specialty === 'residential' ? 'commercial' : 'residential'}`,
+    '',  // all agents
+  ]
+
+  for (const filter of pools) {
+    const qs = filter ? `${filter}&` : ''
+    const agentsRes = await fetch(
+      `${supabaseUrl}/rest/v1/agents?${qs}select=id,name&order=name.asc`,
+      { headers }
+    )
+    if (!agentsRes.ok) continue
+    const agents = await agentsRes.json()
+    if (!agents.length) continue
+
+    // Single agent in pool — always assign them
+    if (agents.length === 1) return agents[0].id
+
+    // Find most recently assigned agent within this exact pool
+    const idList = agents.map(a => a.id).join(',')
+    const lastRes = await fetch(
+      `${supabaseUrl}/rest/v1/lead_captures?agent_id=in.(${idList})&select=agent_id&order=created_at.desc&limit=1`,
+      { headers }
+    )
+    const last = lastRes.ok ? await lastRes.json() : []
+
+    if (!last.length) {
+      // No prior assignments in this pool — start at the first agent
+      return agents[0].id
+    }
+
+    const lastIdx = agents.findIndex(a => a.id === last[0].agent_id)
+    // lastIdx === -1 means the last lead went to an agent now outside the pool;
+    // treat as "start over" so no one gets skipped.
+    const nextIdx = (lastIdx === -1 ? 0 : lastIdx + 1) % agents.length
+    return agents[nextIdx].id
+  }
+
+  return null  // no agents configured at all
 }

@@ -9,8 +9,10 @@ function getSessionKey() {
 
 export default function LeadCapturePage() {
   const params = new URLSearchParams(window.location.search)
-  const agentId = params.get('agent')
+  const agentId       = params.get('agent')
   const propertyAddress = params.get('property') || ''
+  // 'residential' | 'commercial' — drives round-robin pool when no agent is specified
+  const propertyType  = params.get('type') || 'residential'
 
   const [agent, setAgent] = useState(null)
   const [form, setForm] = useState({ first_name: '', last_name: '', email: '', phone: '', message: '' })
@@ -49,6 +51,7 @@ export default function LeadCapturePage() {
           agent_id:         agentId || null,
           session_key:      getSessionKey(),
           property_address: propertyAddress || null,
+          property_type:    propertyType,
           message:          form.message.trim() || null,
         }),
       })
