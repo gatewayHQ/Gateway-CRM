@@ -1,6 +1,12 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 
+function getSessionKey() {
+  let s = localStorage.getItem('_gwsid')
+  if (!s) { s = Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem('_gwsid', s) }
+  return s
+}
+
 export default function LeadCapturePage() {
   const params = new URLSearchParams(window.location.search)
   const agentId = params.get('agent')
@@ -31,23 +37,26 @@ export default function LeadCapturePage() {
     if (Object.keys(e2).length) return
 
     setSubmitting(true)
-    const sessionKey = (() => {
-      let s = localStorage.getItem('_gwsid')
-      if (!s) { s = Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem('_gwsid', s) }
-      return s
-    })()
-
-    await supabase.from('lead_captures').insert([{
-      session_key: sessionKey,
-      agent_id: agentId || null,
-      first_name: form.first_name.trim(),
-      last_name: form.last_name.trim(),
-      email: form.email.trim(),
-      phone: form.phone.trim(),
-      property_address: propertyAddress || null,
-      message: form.message.trim(),
-    }])
-
+    try {
+      const res = await fetch('/api/property-gate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          first_name:       form.first_name.trim(),
+          last_name:        form.last_name.trim(),
+          email:            form.email.trim(),
+          phone:            form.phone.trim(),
+          agent_id:         agentId || null,
+          session_key:      getSessionKey(),
+          property_address: propertyAddress || null,
+          message:          form.message.trim() || null,
+        }),
+      })
+      if (!res.ok) throw new Error('Submission failed')
+    } catch {
+      // Fail silently — the thank-you screen still shows so the visitor isn't confused,
+      // and the error will surface in Vercel logs / Logtrail.
+    }
     setSubmitting(false)
     setDone(true)
   }
