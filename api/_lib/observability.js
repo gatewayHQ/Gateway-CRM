@@ -1,14 +1,43 @@
 // Lightweight observability helpers — structured logging + handler wrapping.
 //
-// Why no Sentry SDK? It would push us over the Vercel Hobby 12-function limit
-// indirectly via cold-start budget. Instead we emit structured JSON to stdout
-// where Vercel/Datadog/Logflare/Better Stack can ingest it via log drains.
+// Log destinations:
+//   1. stdout (always) — Vercel captures this; configure a log drain in
+//      Vercel Dashboard → Team Settings → Log Drains to forward to Better Stack.
+//      Better Stack source URL: https://in.logs.betterstack.com  (use "Vercel" source type)
+//
+//   2. Better Stack HTTP ingest (when LOGTAIL_SOURCE_TOKEN is set) — used for
+//      Docker/self-hosted deployments or when you want richer structured metadata
+//      without a log drain.  Set the token from Better Stack → Sources → your source → Token.
 
-const SERVICE = process.env.VERCEL_PROJECT_NAME || 'gateway-crm'
-const ENV     = process.env.VERCEL_ENV || process.env.NODE_ENV || 'development'
+const SERVICE       = process.env.VERCEL_PROJECT_NAME || 'gateway-crm'
+const ENV           = process.env.VERCEL_ENV || process.env.NODE_ENV || 'development'
+const LOGTAIL_TOKEN = process.env.LOGTAIL_SOURCE_TOKEN || null
+
+// Fire-and-forget HTTP send to Better Stack ingest.
+// Better Stack expects { dt, message, level, ...fields }.
+// We never await this — logging must not slow down or crash the handler.
+function sendToLogtail(payload) {
+  if (!LOGTAIL_TOKEN) return
+  const body = JSON.stringify({
+    dt:      payload.ts,
+    message: payload.msg,
+    level:   payload.level,
+    service: payload.service,
+    env:     payload.env,
+    region:  payload.region,
+    ...Object.fromEntries(
+      Object.entries(payload).filter(([k]) => !['ts','msg','level','service','env','region'].includes(k))
+    ),
+  })
+  fetch('https://in.logs.betterstack.com', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LOGTAIL_TOKEN}` },
+    body,
+  }).catch(() => {}) // swallow — a logging failure must never surface to the user
+}
 
 function emit(level, message, meta = {}) {
-  const line = JSON.stringify({
+  const payload = {
     ts: new Date().toISOString(),
     level,
     service: SERVICE,
@@ -16,9 +45,11 @@ function emit(level, message, meta = {}) {
     region: process.env.VERCEL_REGION || null,
     msg: message,
     ...meta,
-  })
+  }
+  const line = JSON.stringify(payload)
   if (level === 'error') console.error(line)
   else                   console.log(line)
+  sendToLogtail(payload)
 }
 
 export const log = {
