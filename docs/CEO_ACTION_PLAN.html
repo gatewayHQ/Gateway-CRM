@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Gateway CRM — Executive Action Plan</title>
+<style>
+  @page {
+    size: Letter;
+    margin: 0.75in;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 11pt;
+    line-height: 1.5;
+    color: #1a1a1a;
+    max-width: 7.5in;
+    margin: 0 auto;
+    padding: 0.5in;
+    background: #fff;
+  }
+  h1 {
+    font-size: 24pt;
+    border-bottom: 3px solid #1a4d8f;
+    padding-bottom: 8pt;
+    margin-top: 0;
+    color: #1a4d8f;
+  }
+  h2 {
+    font-size: 16pt;
+    color: #1a4d8f;
+    margin-top: 28pt;
+    border-bottom: 1px solid #ccc;
+    padding-bottom: 4pt;
+    page-break-after: avoid;
+  }
+  h3 {
+    font-size: 13pt;
+    color: #2c3e50;
+    margin-top: 18pt;
+    page-break-after: avoid;
+  }
+  h4 {
+    font-size: 11.5pt;
+    color: #2c3e50;
+    margin-bottom: 4pt;
+    page-break-after: avoid;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12pt 0;
+    font-size: 10pt;
+    page-break-inside: avoid;
+  }
+  th {
+    background: #1a4d8f;
+    color: #fff;
+    text-align: left;
+    padding: 6pt 8pt;
+    font-weight: bold;
+  }
+  td {
+    border-bottom: 1px solid #ddd;
+    padding: 5pt 8pt;
+    vertical-align: top;
+  }
+  tr:nth-child(even) td { background: #f7f9fc; }
+  ul, ol { padding-left: 22pt; }
+  li { margin-bottom: 4pt; }
+  .header-block {
+    background: #f0f4fa;
+    border-left: 4px solid #1a4d8f;
+    padding: 12pt 16pt;
+    margin-bottom: 18pt;
+  }
+  .header-block p { margin: 4pt 0; }
+  .summary-box {
+    background: #fff8e7;
+    border: 1px solid #e0c878;
+    border-radius: 4pt;
+    padding: 12pt 16pt;
+    margin: 14pt 0;
+  }
+  .summary-box strong { color: #8a6d1a; }
+  .checklist li { list-style-type: none; position: relative; padding-left: 22pt; }
+  .checklist li::before {
+    content: "☐";
+    position: absolute;
+    left: 0;
+    font-size: 14pt;
+    line-height: 1;
+  }
+  .tier-card {
+    border: 1px solid #d4dae4;
+    border-radius: 4pt;
+    padding: 10pt 14pt;
+    margin: 10pt 0;
+    page-break-inside: avoid;
+  }
+  .tier-card .impact {
+    font-style: italic;
+    color: #4a5568;
+    font-size: 10pt;
+  }
+  .pagebreak { page-break-before: always; }
+  hr {
+    border: 0;
+    border-top: 1px solid #ccc;
+    margin: 24pt 0;
+  }
+  .footer {
+    margin-top: 36pt;
+    padding-top: 12pt;
+    border-top: 1px solid #ccc;
+    font-size: 9pt;
+    color: #666;
+    text-align: center;
+    font-style: italic;
+  }
+  @media print {
+    body { padding: 0; }
+    h2 { page-break-after: avoid; }
+    table, .tier-card, .summary-box { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Gateway CRM — Executive Action Plan</h1>
+
+<div class="header-block">
+  <p><strong>Prepared for:</strong> CEO, Gateway Real Estate Advisors</p>
+  <p><strong>Date:</strong> May 28, 2026</p>
+  <p><strong>Prepared by:</strong> DevOps &amp; Engineering</p>
+  <p><strong>Document Purpose:</strong> Production readiness, ongoing operations, and growth strategy</p>
+</div>
+
+<h2>Executive Summary</h2>
+<p>Gateway CRM is a modern, cloud-native real estate CRM built on best-in-class infrastructure (Vercel + Supabase + Anthropic Claude AI). The platform is <strong>85% production-ready</strong> and supports 8 active third-party integrations including AI-assisted communications, e-signatures, SMS, email marketing, and social media automation.</p>
+
+<p>This document outlines:</p>
+<ol>
+  <li>What must be completed before full production launch</li>
+  <li>The monthly operating cadence required to keep the brokerage running smoothly</li>
+  <li>Strategic growth opportunities to make Gateway the best CRM in the business</li>
+</ol>
+
+<div class="summary-box">
+  <p><strong>Recommended monthly operating budget:</strong> $120 – $245 per month</p>
+  <p><strong>Estimated time to full production launch:</strong> 2 – 3 weeks</p>
+  <p><strong>Cost vs. commercial CRMs:</strong> ~10% of Follow Up Boss, kvCORE, or Lofty pricing</p>
+</div>
+
+<h2>Part 1: Current Platform Status</h2>
+
+<h3>What Is Already Built and Working</h3>
+<table>
+  <tr><th>Capability</th><th>Status</th><th>Notes</th></tr>
+  <tr><td>Contact &amp; Lead Management</td><td>Live</td><td>Full CRM database with search</td></tr>
+  <tr><td>Property Listings</td><td>Live</td><td>MLS-style data with photos</td></tr>
+  <tr><td>Deal Pipeline</td><td>Live</td><td>Stage-based tracking</td></tr>
+  <tr><td>Email Sending</td><td>Live</td><td>Via Resend</td></tr>
+  <tr><td>SMS Messaging</td><td>Live</td><td>Via Twilio</td></tr>
+  <tr><td>AI Email Drafting</td><td>Live</td><td>Via Claude AI</td></tr>
+  <tr><td>E-Signature</td><td>Live</td><td>Via DocuSign</td></tr>
+  <tr><td>Mail Campaigns + QR Tracking</td><td>Live</td><td>Custom-built</td></tr>
+  <tr><td>Social Media Posting</td><td>Live</td><td>Via Buffer</td></tr>
+  <tr><td>Mailchimp Sync</td><td>Live</td><td>Per-agent API keys</td></tr>
+  <tr><td>Commission Tracking</td><td>Live</td><td>Splits &amp; team support</td></tr>
+  <tr><td>Document Storage</td><td>Live</td><td>Via Supabase</td></tr>
+  <tr><td>Activity Timeline</td><td>Live</td><td>Notes, calls, meetings</td></tr>
+</table>
+
+<h3>What Needs to Be Completed Before Full Launch</h3>
+<table>
+  <tr><th>Item</th><th>Owner</th><th>Effort</th><th>Cost</th></tr>
+  <tr><td>Add 11 missing database tables</td><td>Engineering</td><td>1 day</td><td>Free</td></tr>
+  <tr><td>Tighten data access policies (per-agent isolation)</td><td>Engineering</td><td>2 days</td><td>Free</td></tr>
+  <tr><td>Verify sending domain in Resend</td><td>Operations</td><td>30 min</td><td>Free</td></tr>
+  <tr><td>Register Twilio A2P 10DLC for business SMS</td><td>Operations</td><td>1 – 2 weeks</td><td>$4/mo</td></tr>
+  <tr><td>Move DocuSign from sandbox to production</td><td>Operations</td><td>1 hour</td><td>Included</td></tr>
+  <tr><td>Set up uptime monitoring</td><td>Engineering</td><td>15 min</td><td>Free</td></tr>
+  <tr><td>Upgrade Vercel to Pro plan</td><td>CEO/Finance</td><td>5 min</td><td>$20/mo</td></tr>
+  <tr><td>Upgrade Supabase to Pro plan</td><td>CEO/Finance</td><td>5 min</td><td>$25/mo</td></tr>
+</table>
+
+<div class="pagebreak"></div>
+
+<h2>Part 2: Production Launch Action Plan</h2>
+
+<h3>Week 1 — Infrastructure &amp; Security</h3>
+<ul class="checklist">
+  <li>Upgrade Vercel account to Pro plan ($20/mo)</li>
+  <li>Upgrade Supabase account to Pro plan ($25/mo)</li>
+  <li>Enable Point-in-Time Recovery (PITR) on Supabase</li>
+  <li>Set all production API keys in Vercel dashboard</li>
+  <li>Rotate any keys that were used in testing</li>
+  <li>Add custom domain and configure DNS</li>
+  <li>Configure CORS to lock requests to your domain only</li>
+</ul>
+
+<h3>Week 2 — Communications &amp; Compliance</h3>
+<ul class="checklist">
+  <li>Verify sending domain in Resend (SPF, DKIM, DMARC records)</li>
+  <li>Submit A2P 10DLC registration for Twilio</li>
+  <li>Move DocuSign integration from demo to production</li>
+  <li>Set spend alerts on Anthropic, Twilio, Resend</li>
+  <li>Set up UptimeRobot health check pinging every 5 minutes</li>
+</ul>
+
+<h3>Week 3 — Data, Monitoring, Training</h3>
+<ul class="checklist">
+  <li>Run schema migration to add missing tables</li>
+  <li>Implement per-agent data isolation policies</li>
+  <li>Set up log aggregation (LogTail free tier)</li>
+  <li>Train agents on full feature set</li>
+  <li>Document standard operating procedures</li>
+  <li>Conduct a final security review</li>
+</ul>
+
+<h3>Launch Day</h3>
+<ul class="checklist">
+  <li>Verify all health checks green</li>
+  <li>Confirm backup is running</li>
+  <li>Send team announcement</li>
+  <li>Monitor dashboards for first 48 hours</li>
+</ul>
+
+<div class="pagebreak"></div>
+
+<h2>Part 3: Monthly Operating Checklist</h2>
+<p>The following must be performed by the brokerage every month to keep the platform healthy, secure, and growing.</p>
+
+<h3>Operations Team — Monthly Tasks</h3>
+<table>
+  <tr><th>Task</th><th>Frequency</th><th>Time</th><th>Owner</th></tr>
+  <tr><td>Review uptime report and incident log</td><td>1st of month</td><td>15 min</td><td>Ops Manager</td></tr>
+  <tr><td>Review API spend (Claude, Resend, Twilio, DocuSign)</td><td>1st of month</td><td>20 min</td><td>Ops Manager</td></tr>
+  <tr><td>Verify database backups completed successfully</td><td>1st of month</td><td>10 min</td><td>Ops Manager</td></tr>
+  <tr><td>Review email deliverability stats</td><td>Weekly</td><td>10 min</td><td>Marketing</td></tr>
+  <tr><td>Review SMS opt-outs &amp; update suppression list</td><td>Weekly</td><td>15 min</td><td>Marketing</td></tr>
+  <tr><td>Audit user accounts (remove departed agents)</td><td>Monthly</td><td>20 min</td><td>HR/Admin</td></tr>
+  <tr><td>Review pending DocuSign envelopes >30 days</td><td>Monthly</td><td>30 min</td><td>Transactions</td></tr>
+  <tr><td>Export &amp; archive prior month's activity logs</td><td>Monthly</td><td>15 min</td><td>Compliance</td></tr>
+</table>
+
+<h3>Engineering — Monthly Tasks</h3>
+<table>
+  <tr><th>Task</th><th>Frequency</th><th>Time</th></tr>
+  <tr><td>Apply security updates to dependencies</td><td>Monthly</td><td>1 hour</td></tr>
+  <tr><td>Review error logs and fix recurring issues</td><td>Monthly</td><td>2 hours</td></tr>
+  <tr><td>Rotate API keys and secrets</td><td>Quarterly</td><td>1 hour</td></tr>
+  <tr><td>Performance review (database query speed)</td><td>Monthly</td><td>1 hour</td></tr>
+  <tr><td>Backup restoration drill</td><td>Quarterly</td><td>2 hours</td></tr>
+  <tr><td>Review feature usage analytics</td><td>Monthly</td><td>1 hour</td></tr>
+</table>
+
+<h3>Leadership — Monthly Review</h3>
+<table>
+  <tr><th>Task</th><th>Frequency</th><th>Time</th></tr>
+  <tr><td>Review CRM adoption metrics</td><td>Monthly</td><td>30 min</td></tr>
+  <tr><td>Review pipeline velocity</td><td>Monthly</td><td>30 min</td></tr>
+  <tr><td>Review commission reports</td><td>Monthly</td><td>30 min</td></tr>
+  <tr><td>Review feature requests from agents</td><td>Monthly</td><td>30 min</td></tr>
+  <tr><td>Strategic roadmap update</td><td>Quarterly</td><td>2 hours</td></tr>
+</table>
+
+<div class="pagebreak"></div>
+
+<h2>Part 4: Recurring Monthly Costs</h2>
+
+<h3>Required (Production Baseline)</h3>
+<table>
+  <tr><th>Service</th><th>Plan</th><th>Monthly Cost</th></tr>
+  <tr><td>Vercel</td><td>Pro</td><td>$20</td></tr>
+  <tr><td>Supabase</td><td>Pro</td><td>$25</td></tr>
+  <tr><td>Resend</td><td>Pro</td><td>$20</td></tr>
+  <tr><td>Twilio</td><td>A2P 10DLC fee</td><td>~$4</td></tr>
+  <tr><td>Twilio</td><td>SMS usage</td><td>~$10 – $50</td></tr>
+  <tr><td>DocuSign</td><td>eSignature Standard</td><td>~$25</td></tr>
+  <tr><td>Anthropic Claude API</td><td>Usage-based</td><td>~$20 – $100</td></tr>
+  <tr><th>Required Total</th><th></th><th>~$120 – $245/mo</th></tr>
+</table>
+
+<h3>Optional Growth Add-ons</h3>
+<table>
+  <tr><th>Service</th><th>Purpose</th><th>Monthly Cost</th></tr>
+  <tr><td>Buffer Pro</td><td>Social scheduling for >3 channels</td><td>$6</td></tr>
+  <tr><td>RentCast / ATTOM Data</td><td>MLS &amp; property enrichment</td><td>$50 – $200</td></tr>
+  <tr><td>LogTail</td><td>Centralized logging beyond free tier</td><td>$0 – $25</td></tr>
+  <tr><td>Sendoso / Postal</td><td>Automated client gifts</td><td>Per-send</td></tr>
+</table>
+
+<div class="summary-box">
+  <p><strong>Cost per agent:</strong> $5 – $15 per agent per month at brokerage scale</p>
+  <p><strong>Comparison:</strong> Follow Up Boss is $69/agent, kvCORE base is $499/mo, Lofty base is $499/mo</p>
+  <p>Gateway CRM operates at roughly <strong>10% of commercial CRM cost.</strong></p>
+</div>
+
+<div class="pagebreak"></div>
+
+<h2>Part 5: Strategic Growth Opportunities</h2>
+
+<h3>Tier 1 — Quick Wins (1 – 2 weeks each)</h3>
+
+<div class="tier-card">
+  <h4>1. AI Deal Intelligence Briefings</h4>
+  <p>Claude AI auto-analyzes every deal and outputs a health score, risk factors, and recommended next action. Agents get a daily 3-sentence briefing on each active client before calls.</p>
+  <p class="impact">Estimated business impact: 15 – 25% increase in deal close rate</p>
+</div>
+
+<div class="tier-card">
+  <h4>2. Automated Lead Nurturing Sequences</h4>
+  <p>Multi-step drip campaigns (email + SMS) triggered by lead source or behavior. Infrastructure is half-built — needs database tables and a visual sequence builder.</p>
+  <p class="impact">Estimated business impact: Recover 20 – 30% of cold leads that would otherwise go stale</p>
+</div>
+
+<div class="tier-card">
+  <h4>3. Web Push Notifications</h4>
+  <p>Instant browser alerts when a QR code is scanned, lead form is submitted, or DocuSign envelope is signed.</p>
+  <p class="impact">Estimated business impact: Cut lead response time from hours to seconds</p>
+</div>
+
+<h3>Tier 2 — Differentiators (2 – 4 weeks each)</h3>
+
+<div class="tier-card">
+  <h4>4. MLS &amp; Property Data Enrichment</h4>
+  <p>Integrate with RentCast or ATTOM Data for automatic property valuations, comps, tax records, neighborhood stats. Auto-populates listings; feeds AI analysis and client reports.</p>
+  <p class="impact">Estimated business impact: Saves agents 2 – 3 hours per listing on research</p>
+</div>
+
+<div class="tier-card">
+  <h4>5. Client Portal</h4>
+  <p>Each buyer/seller gets a private URL showing deal progress, documents to sign, next steps. Eliminates "where are we?" calls and emails.</p>
+  <p class="impact">Estimated business impact: Increases client satisfaction; reduces back-office time by 30%</p>
+</div>
+
+<div class="tier-card">
+  <h4>6. Branded Market Report Generator</h4>
+  <p>One-click generation of branded PDF/PowerPoint market reports for any neighborhood or property. Agents email these to their sphere monthly to stay top-of-mind.</p>
+  <p class="impact">Estimated business impact: Drives 5 – 10% lift in referral/repeat business</p>
+</div>
+
+<h3>Tier 3 — Industry-Leading Features (1 – 2 months each)</h3>
+
+<div class="tier-card">
+  <h4>7. Voice AI for Call Logging</h4>
+  <p>Twilio Voice + speech-to-text + Claude AI auto-transcribes every call and writes a structured activity note. Captures key points, next steps, sentiment, and follow-up tasks automatically.</p>
+  <p class="impact">Estimated business impact: Eliminates 2 – 4 hours of admin work per agent per week</p>
+</div>
+
+<div class="tier-card">
+  <h4>8. Referral Tracking System</h4>
+  <p>Tracks the social graph of who referred whom. Calculates lifetime referral value per contact. Triggers automated thank-you gifts via Sendoso.</p>
+  <p class="impact">Estimated business impact: 2x – 3x referral revenue within 12 months</p>
+</div>
+
+<div class="tier-card">
+  <h4>9. Predictive Lead Scoring</h4>
+  <p>Machine learning model scores every lead's likelihood to close. Sorts agent's daily call list by score.</p>
+  <p class="impact">Estimated business impact: 25 – 40% increase in agent productivity</p>
+</div>
+
+<div class="pagebreak"></div>
+
+<h2>Part 6: Recommended 90-Day Roadmap</h2>
+
+<h3>Month 1 — Foundation</h3>
+<ul>
+  <li>Complete Production Launch Action Plan (Part 2)</li>
+  <li>Onboard all agents to the platform</li>
+  <li>Establish monthly operating rhythm</li>
+</ul>
+<p><strong>Outcome:</strong> Stable, secure, fully operational CRM</p>
+
+<h3>Month 2 — Quick Wins</h3>
+<ul>
+  <li>Ship AI Deal Intelligence Briefings</li>
+  <li>Ship Automated Lead Nurturing Sequences</li>
+  <li>Ship Web Push Notifications</li>
+</ul>
+<p><strong>Outcome:</strong> Measurable lift in close rates and lead response times</p>
+
+<h3>Month 3 — Differentiation</h3>
+<ul>
+  <li>Integrate MLS/property data enrichment</li>
+  <li>Launch Client Portal beta</li>
+  <li>Begin Branded Market Report Generator</li>
+</ul>
+<p><strong>Outcome:</strong> Feature parity with $499/agent commercial platforms at a fraction of the cost</p>
+
+<h2>Part 7: Key Performance Indicators</h2>
+<p>Track these monthly to measure CRM success:</p>
+<table>
+  <tr><th>KPI</th><th>Target</th><th>Why It Matters</th></tr>
+  <tr><td>Active Agents (logged in >5x/week)</td><td>90%+</td><td>Adoption = ROI</td></tr>
+  <tr><td>Deals Logged per Agent</td><td>5+ per month</td><td>Pipeline visibility</td></tr>
+  <tr><td>Average Deal Stage Time</td><td>Down 10% MoM</td><td>Pipeline velocity</td></tr>
+  <tr><td>Email Deliverability Rate</td><td>&gt;98%</td><td>Marketing effectiveness</td></tr>
+  <tr><td>SMS Opt-out Rate</td><td>&lt;2%</td><td>Compliance &amp; reputation</td></tr>
+  <tr><td>Average Lead Response Time</td><td>&lt;5 minutes</td><td>Conversion driver</td></tr>
+  <tr><td>Platform Uptime</td><td>&gt;99.9%</td><td>Operational reliability</td></tr>
+  <tr><td>API Spend per Active Agent</td><td>&lt;$10/mo</td><td>Cost efficiency</td></tr>
+</table>
+
+<h2>Part 8: Risk Mitigation</h2>
+<table>
+  <tr><th>Risk</th><th>Probability</th><th>Mitigation</th></tr>
+  <tr><td>Vercel or Supabase outage</td><td>Low</td><td>Redundant managed services; status page monitoring</td></tr>
+  <tr><td>Data loss</td><td>Very Low</td><td>Daily backups + Point-in-Time Recovery on Pro plan</td></tr>
+  <tr><td>API key compromise</td><td>Low</td><td>Quarterly key rotation; secret scanning enabled</td></tr>
+  <tr><td>SMS carrier blocking</td><td>Medium</td><td>A2P 10DLC registration ensures compliance</td></tr>
+  <tr><td>Email landing in spam</td><td>Medium</td><td>SPF/DKIM/DMARC configured; reputation monitored</td></tr>
+  <tr><td>Agent leaves with client data</td><td>Medium</td><td>Audit logs; per-agent data isolation policies</td></tr>
+  <tr><td>Sudden cost spike</td><td>Low</td><td>Spend alerts set on all paid services</td></tr>
+</table>
+
+<div class="pagebreak"></div>
+
+<h2>Decision Required From CEO</h2>
+<p>To proceed with full production launch, the following approvals are needed:</p>
+<ol>
+  <li><strong>Approve monthly operating budget of ~$120 – $245/mo</strong> for required infrastructure</li>
+  <li><strong>Approve 2 – 3 week production launch timeline</strong></li>
+  <li><strong>Designate Operations Owner</strong> to handle monthly recurring tasks</li>
+  <li><strong>Approve Tier 1 quick-win features</strong> for Month 2 (AI briefings, nurture sequences, push notifications)</li>
+  <li><strong>Optional:</strong> Approve $50 – $200/mo budget for MLS data enrichment in Month 3</li>
+</ol>
+
+<div class="summary-box" style="margin-top: 28pt;">
+  <h3 style="margin-top: 0; color: #8a6d1a;">Closing Note</h3>
+  <p>Gateway CRM is built on the same modern stack as companies like Linear, Vercel, and Notion — best-in-class infrastructure at a fraction of the cost of legacy real estate platforms. With the action plan above executed over the next 90 days, Gateway will operate a CRM platform that is <strong>technically superior to every off-the-shelf option</strong> in the real estate industry, fully customized to the brokerage's specific workflow, and at roughly <strong>10% of the cost</strong> of equivalent commercial systems.</p>
+  <p>The platform is ready. The decision is whether to invest the next 90 days in completing the launch and shipping the differentiating features.</p>
+</div>
+
+<div style="margin-top: 36pt; text-align: center;">
+  <p style="font-size: 10pt; color: #666;">
+    Signature: ___________________________________ &nbsp;&nbsp;&nbsp; Date: _______________
+  </p>
+</div>
+
+<div class="footer">
+  Gateway Real Estate Advisors — Internal Document — Confidential<br>
+  To print: Open this file in a browser and use File → Print (or Ctrl+P / Cmd+P)
+</div>
+
+</body>
+</html>
