@@ -54,7 +54,7 @@ const NAV_OFFICE = [
 const NAV_TOOLS = [
   { id: 'templates',    label: 'Email Templates', icon: 'mail' },
   { id: 'sequences',    label: 'Drip Sequences',  icon: 'sequences' },
-  { id: 'form-library', label: 'Form Library',    icon: 'file' },
+  { id: 'form-library', label: 'Form Library',    icon: 'document' },
   { id: 'om',           label: 'OM Generator',    icon: 'om' },
   { id: 'social',       label: 'Social Media',    icon: 'social' },
   { id: 'leads',        label: 'Website Leads',   icon: 'leads' },

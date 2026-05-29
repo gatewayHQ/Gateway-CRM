@@ -328,7 +328,7 @@ function RequiredFormsPanel() {
         style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', cursor: 'pointer', background: open ? 'var(--gw-bone)' : '#fff' }}
         onClick={() => setOpen(o => !o)}
       >
-        <Icon name="file" size={15} style={{ color: 'var(--gw-azure)', flexShrink: 0 }} />
+        <Icon name="document" size={15} style={{ color: 'var(--gw-azure)', flexShrink: 0 }} />
         <div style={{ flex: 1, fontWeight: 600, fontSize: 13 }}>Required Forms</div>
         <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>Get state-specific form packets</div>
         <Icon name={open ? 'chevronDown' : 'chevronRight'} size={13} style={{ color: 'var(--gw-mist)' }} />
@@ -378,9 +378,29 @@ function DocumentsTab({ deal }) {
   const [uploading, setUploading] = useState(false)
   const [bucketReady, setBucketReady] = useState(true)
   const [dragOver, setDragOver]   = useState(false)
+  const [sharedDocs, setSharedDocs] = useState([])   // filenames shared to the client portal
   const fileRef                   = React.useRef()
 
-  React.useEffect(() => { if (deal?.id) loadFiles() }, [deal?.id])
+  React.useEffect(() => {
+    if (!deal?.id) return
+    loadFiles()
+    // Load which docs are shared with the client portal (fresh from DB)
+    supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+      .then(({ data }) => setSharedDocs(Array.isArray(data?.comp_data?.portal_docs) ? data.comp_data.portal_docs : []))
+  }, [deal?.id])
+
+  const toggleShare = async (fileName) => {
+    const next = sharedDocs.includes(fileName)
+      ? sharedDocs.filter(n => n !== fileName)
+      : [...sharedDocs, fileName]
+    setSharedDocs(next)
+    // Re-fetch comp_data so we don't clobber concurrent edits (key dates, etc.)
+    const { data } = await supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+    const comp_data = { ...(data?.comp_data || {}), portal_docs: next }
+    const { error } = await supabase.from('deals').update({ comp_data }).eq('id', deal.id)
+    if (error) { pushToast(error.message, 'error'); return }
+    pushToast(next.includes(fileName) ? 'Shared with client' : 'Removed from client portal', 'info')
+  }
 
   const loadFiles = async () => {
     setLoading(true)
@@ -478,12 +498,25 @@ with check (bucket_id = 'deal-documents');`}
                 {ext.slice(0, 4)}
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={displayName}>{displayName}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={displayName}>{displayName}</span>
+                  {sharedDocs.includes(file.name) && (
+                    <span style={{ fontSize: 9, fontWeight: 700, background: 'var(--gw-green-light)', color: 'var(--gw-green)', padding: '1px 6px', borderRadius: 8, flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Client</span>
+                  )}
+                </div>
                 <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>
                   {formatBytes(file.metadata?.size)}
                   {file.created_at && <> · {new Date(file.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</>}
                 </div>
               </div>
+              <button
+                className="btn btn--ghost btn--icon btn--sm"
+                title={sharedDocs.includes(file.name) ? 'Shared with client — click to unshare' : 'Share with client portal'}
+                onClick={() => toggleShare(file.name)}
+                style={{ color: sharedDocs.includes(file.name) ? 'var(--gw-green)' : undefined }}
+              >
+                <Icon name="eye" size={13} />
+              </button>
               <button className="btn btn--ghost btn--icon btn--sm" title="Download" onClick={() => download(file.name)}>
                 <Icon name="download" size={13} />
               </button>
@@ -1284,6 +1317,93 @@ create policy "agent_notifications_policy" on agent_notifications
   )
 }
 
+// ── Client Portal tab — enable a shareable read-only link for the client ──────
+function PortalTab({ deal }) {
+  const [enabled, setEnabled] = React.useState(false)
+  const [token, setToken]     = React.useState(null)
+  const [loading, setLoading] = React.useState(true)
+  const [busy, setBusy]       = React.useState(false)
+  const [copied, setCopied]   = React.useState(false)
+
+  React.useEffect(() => {
+    if (!deal?.id) return
+    supabase.from('deals').select('portal_token, portal_enabled').eq('id', deal.id).single()
+      .then(({ data, error }) => {
+        if (!error && data) { setEnabled(!!data.portal_enabled); setToken(data.portal_token || null) }
+        setLoading(false)
+      })
+  }, [deal?.id])
+
+  const portalUrl = token ? `${window.location.origin}/portal/${token}` : ''
+
+  const enable = async () => {
+    setBusy(true)
+    const newToken = token || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`)
+    const { error } = await supabase.from('deals').update({ portal_token: newToken, portal_enabled: true }).eq('id', deal.id)
+    setBusy(false)
+    if (error) { pushToast(error.message, 'error'); return }
+    setToken(newToken); setEnabled(true)
+    pushToast('Client portal enabled')
+  }
+
+  const disable = async () => {
+    setBusy(true)
+    const { error } = await supabase.from('deals').update({ portal_enabled: false }).eq('id', deal.id)
+    setBusy(false)
+    if (error) { pushToast(error.message, 'error'); return }
+    setEnabled(false)
+    pushToast('Client portal disabled', 'info')
+  }
+
+  const copy = () => {
+    navigator.clipboard.writeText(portalUrl)
+    setCopied(true); setTimeout(() => setCopied(false), 1800)
+  }
+
+  if (loading) return <div style={{ padding: 24, color: 'var(--gw-mist)', fontSize: 13 }}>Loading…</div>
+
+  return (
+    <div style={{ padding: 16, overflowY: 'auto', flex: 1 }}>
+      <div style={{ fontSize: 13, color: 'var(--gw-mist)', lineHeight: 1.6, marginBottom: 16 }}>
+        Give your client a private, read-only link to track their transaction — closing progress,
+        key dates, shared documents, and your contact info. Updates in real time as you work the deal.
+      </div>
+
+      {!enabled ? (
+        <button className="btn btn--primary" onClick={enable} disabled={busy} style={{ width: '100%', justifyContent: 'center' }}>
+          <Icon name="link" size={14} /> {busy ? 'Enabling…' : 'Enable Client Portal'}
+        </button>
+      ) : (
+        <>
+          <div style={{ background: 'var(--gw-green-light)', border: '1px solid var(--gw-green)', borderRadius: 'var(--radius)', padding: '10px 12px', fontSize: 12, color: 'var(--gw-green)', fontWeight: 600, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Icon name="check" size={13} /> Portal is live
+          </div>
+
+          <label className="form-label">Shareable Link</label>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            <input className="form-control" readOnly value={portalUrl} style={{ flex: 1, fontSize: 12 }} onFocus={e => e.target.select()} />
+            <button className="btn btn--secondary btn--sm" onClick={copy}>{copied ? 'Copied!' : 'Copy'}</button>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <a className="btn btn--secondary btn--sm" href={portalUrl} target="_blank" rel="noopener noreferrer" style={{ flex: 1, justifyContent: 'center' }}>
+              <Icon name="eye" size={12} /> Preview
+            </a>
+            <button className="btn btn--ghost btn--sm" onClick={disable} disabled={busy} style={{ color: 'var(--gw-red)' }}>
+              Disable
+            </button>
+          </div>
+
+          <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 14, lineHeight: 1.6, borderTop: '1px solid var(--gw-border)', paddingTop: 12 }}>
+            Anyone with this link can view the portal — no login required. Only documents you mark
+            <strong> “Share with client”</strong> on the Documents tab appear. Disable any time to revoke access.
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave }) {
   const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
   const [form, setForm]     = useState(deal || blank)
@@ -1350,7 +1470,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
       {/* Tab bar — only for existing deals */}
       {isExisting && (
         <div className="drawer-tabs">
-          {[['details','Details'],['dates','Key Dates'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures']].map(([id, label]) => (
+          {[['details','Details'],['dates','Key Dates'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
             <button key={id} className={`drawer-tab${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}>
               {label}
             </button>
@@ -1527,6 +1647,11 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
         <SignaturesTab deal={deal} contacts={contacts} activeAgent={activeAgent} />
+      )}
+
+      {/* Client Portal tab */}
+      {tab === 'portal' && isExisting && (
+        <PortalTab deal={deal} />
       )}
     </Drawer>
   )

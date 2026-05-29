@@ -93,7 +93,7 @@ function UploadModal({ packet, onClose, onSaved }) {
             style={{ border: '2px dashed var(--gw-border)', borderRadius: 'var(--radius)', padding: '16px', textAlign: 'center', cursor: 'pointer', background: file ? 'var(--gw-green-light)' : 'var(--gw-bone)' }}
           >
             {file
-              ? <><Icon name="file" size={16} style={{ color: 'var(--gw-green)', verticalAlign: 'middle', marginRight: 6 }} />{file.name} <span style={{ color: 'var(--gw-mist)', fontSize: 11 }}>({formatBytes(file.size)})</span></>
+              ? <><Icon name="document" size={16} style={{ color: 'var(--gw-green)', verticalAlign: 'middle', marginRight: 6 }} />{file.name} <span style={{ color: 'var(--gw-mist)', fontSize: 11 }}>({formatBytes(file.size)})</span></>
               : <span style={{ color: 'var(--gw-mist)', fontSize: 13 }}>{packet?.storage_path ? 'Click to replace PDF' : 'Click to choose PDF'}</span>
             }
           </div>
@@ -214,7 +214,7 @@ create policy "form_packets_all" on form_packets
         <div style={{ color: 'var(--gw-mist)', fontSize: 13 }}>Loading…</div>
       ) : filtered.length === 0 ? (
         <EmptyState
-          icon="file"
+          icon="document"
           title="No form packets yet"
           message={isAdmin
             ? 'Add your first packet — upload a PDF bundle for a state + transaction type.'

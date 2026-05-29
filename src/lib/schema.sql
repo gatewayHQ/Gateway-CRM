@@ -99,9 +99,13 @@ create table if not exists deals (
   probability         integer default 0,
   expected_close_date date,
   notes               text,
+  portal_token        uuid,                 -- client portal share token (unguessable)
+  portal_enabled      boolean default false,
   created_at          timestamptz default now(),
   updated_at          timestamptz default now()
 );
+create unique index if not exists deals_portal_token_idx
+  on deals(portal_token) where portal_token is not null;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- TASKS
