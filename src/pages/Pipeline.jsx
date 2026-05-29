@@ -183,12 +183,16 @@ function KeyDatesTab({ deal }) {
 
   React.useEffect(() => {
     if (!deal?.id) return
-    const existing = deal.comp_data?.key_dates
-    if (existing && existing.length > 0) {
-      setDates(existing)
-    } else {
-      setDates(DEFAULT_KEY_DATE_TYPES.map(type => ({ type, date: '' })))
-    }
+    // Always fetch fresh from DB so custom dates survive tab switches
+    supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+      .then(({ data }) => {
+        const existing = data?.comp_data?.key_dates
+        if (existing && existing.length > 0) {
+          setDates(existing)
+        } else {
+          setDates(DEFAULT_KEY_DATE_TYPES.map(type => ({ type, date: '' })))
+        }
+      })
   }, [deal?.id])
 
   const persist = async (updated) => {
@@ -289,6 +293,85 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+const FORM_PACKET_BUCKET = 'form-packets'
+const TX_TYPE_LABELS = { buyer: 'Buyer Contract', seller: 'Listing / Seller', lease: 'Lease / Rental', general: 'General / Other' }
+
+function RequiredFormsPanel() {
+  const [open, setOpen]           = React.useState(false)
+  const [state, setState]         = React.useState('')
+  const [txType, setTxType]       = React.useState('buyer')
+  const [packets, setPackets]     = React.useState([])
+  const [searching, setSearching] = React.useState(false)
+  const [downloading, setDownloading] = React.useState({})
+
+  const search = async () => {
+    if (!state.trim()) { pushToast('Enter a state abbreviation', 'error'); return }
+    setSearching(true)
+    const { data } = await supabase.from('form_packets').select('*')
+      .eq('state', state.trim().toUpperCase()).eq('transaction_type', txType)
+    setPackets(data || [])
+    setSearching(false)
+  }
+
+  const downloadPacket = async (packet) => {
+    if (!packet.storage_path) { pushToast('No file uploaded for this packet yet', 'error'); return }
+    setDownloading(p => ({ ...p, [packet.id]: true }))
+    const { data, error } = await supabase.storage.from(FORM_PACKET_BUCKET).createSignedUrl(packet.storage_path, 300)
+    setDownloading(p => ({ ...p, [packet.id]: false }))
+    if (error) { pushToast(error.message, 'error'); return }
+    window.open(data.signedUrl, '_blank')
+  }
+
+  return (
+    <div style={{ border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', marginBottom: 14, background: '#fff', overflow: 'hidden' }}>
+      <div
+        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', cursor: 'pointer', background: open ? 'var(--gw-bone)' : '#fff' }}
+        onClick={() => setOpen(o => !o)}
+      >
+        <Icon name="file" size={15} style={{ color: 'var(--gw-azure)', flexShrink: 0 }} />
+        <div style={{ flex: 1, fontWeight: 600, fontSize: 13 }}>Required Forms</div>
+        <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>Get state-specific form packets</div>
+        <Icon name={open ? 'chevronDown' : 'chevronRight'} size={13} style={{ color: 'var(--gw-mist)' }} />
+      </div>
+      {open && (
+        <div style={{ borderTop: '1px solid var(--gw-border)', padding: '12px 12px 14px' }}>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+            <input
+              className="form-control"
+              style={{ width: 70, fontSize: 13, textTransform: 'uppercase' }}
+              placeholder="State"
+              maxLength={2}
+              value={state}
+              onChange={e => setState(e.target.value.toUpperCase())}
+              onKeyDown={e => e.key === 'Enter' && search()}
+            />
+            <select className="form-control" style={{ fontSize: 13, flex: 1, minWidth: 140 }} value={txType} onChange={e => setTxType(e.target.value)}>
+              {Object.entries(TX_TYPE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+            <button className="btn btn--primary btn--sm" onClick={search} disabled={searching}>
+              {searching ? 'Searching…' : 'Find Forms'}
+            </button>
+          </div>
+          {packets.length === 0 && !searching && state && (
+            <div style={{ fontSize: 12, color: 'var(--gw-mist)', padding: '6px 0' }}>No packets found for {state} / {TX_TYPE_LABELS[txType]}. Ask your admin to upload one in the Form Library.</div>
+          )}
+          {packets.map(p => (
+            <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', background: 'var(--gw-bone)', borderRadius: 'var(--radius)', marginBottom: 6 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 13 }}>{p.name}</div>
+                {p.description && <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2 }}>{p.description}</div>}
+              </div>
+              <button className="btn btn--primary btn--sm" onClick={() => downloadPacket(p)} disabled={!p.storage_path || downloading[p.id]}>
+                <Icon name="download" size={12} /> {downloading[p.id] ? 'Opening…' : 'Get Forms'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function DocumentsTab({ deal }) {
   const [files, setFiles]         = useState([])
   const [loading, setLoading]     = useState(true)
@@ -358,6 +441,9 @@ with check (bucket_id = 'deal-documents');`}
 
   return (
     <div style={{ padding: 16, overflowY: 'auto', flex: 1 }}>
+      {/* Required Forms — state-specific packet lookup */}
+      <RequiredFormsPanel />
+
       {/* Drop zone */}
       <div
         style={{ border: `2px dashed ${dragOver ? 'var(--gw-azure)' : 'var(--gw-border)'}`, borderRadius: 'var(--radius)', padding: '20px 16px', textAlign: 'center', cursor: 'pointer', marginBottom: 16, background: dragOver ? 'var(--gw-sky)' : 'transparent', transition: 'all 150ms' }}
@@ -603,7 +689,7 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
 function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, onSent }) {
   const contact     = contacts?.find(c => c.id === deal?.contact_id)
   const defaultName = `${contact?.first_name || ''} ${contact?.last_name || ''}`.trim()
-  const defaultEmail= (contact?.emails || [])[0] || ''
+  const defaultEmail= contact?.email || ''
 
   const [step,          setStep]        = React.useState(1)
   const [subject,       setSubject]     = React.useState(`Please sign: ${deal?.title || 'Document'}`)

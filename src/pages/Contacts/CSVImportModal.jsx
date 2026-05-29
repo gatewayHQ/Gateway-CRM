@@ -102,8 +102,8 @@ export default function CSVImportModal({ onClose, onImported, agents, activeAgen
   const doImport = async () => {
     setStep(4); setProgress(0); setErrors([])
     const validTypes   = ['buyer','seller','landlord','tenant','investor']
-    const validSources = ['referral','website','open house','social','cold call','other']
-    const validStatus  = ['active','cold','closed']
+    const validSources = ['referral','website','open house','social','cold call','team','paid service','other']
+    const validStatus  = ['active','cold','closed','lead','opportunity','pending']
     const CHUNK = 50
     let done = 0
     const errs = []

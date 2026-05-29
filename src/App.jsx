@@ -22,6 +22,7 @@ const SequencesPage    = React.lazy(() => import('./pages/Sequences.jsx'))
 const ColdCallsPage    = React.lazy(() => import('./pages/ColdCalls.jsx'))
 const IntegrationsPage = React.lazy(() => import('./pages/Integrations.jsx'))
 const CampaignsPage    = React.lazy(() => import('./pages/Campaigns.jsx'))
+const FormLibraryPage  = React.lazy(() => import('./pages/FormLibrary.jsx'))
 import LoginPage from './pages/Login.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
 import { Analytics } from '@vercel/analytics/react'
@@ -51,11 +52,12 @@ const NAV_OFFICE = [
 
 // Marketing & Tools: power features, collapsed for new users
 const NAV_TOOLS = [
-  { id: 'templates',  label: 'Email Templates', icon: 'mail' },
-  { id: 'sequences',  label: 'Drip Sequences',  icon: 'sequences' },
-  { id: 'om',         label: 'OM Generator',    icon: 'om' },
-  { id: 'social',     label: 'Social Media',    icon: 'social' },
-  { id: 'leads',      label: 'Website Leads',   icon: 'leads' },
+  { id: 'templates',    label: 'Email Templates', icon: 'mail' },
+  { id: 'sequences',    label: 'Drip Sequences',  icon: 'sequences' },
+  { id: 'form-library', label: 'Form Library',    icon: 'file' },
+  { id: 'om',           label: 'OM Generator',    icon: 'om' },
+  { id: 'social',       label: 'Social Media',    icon: 'social' },
+  { id: 'leads',        label: 'Website Leads',   icon: 'leads' },
 ]
 
 // Always visible at the bottom — never buried
@@ -81,6 +83,7 @@ const TITLES = {
   templates:  { title: 'Email Templates',  crumb: 'Communications · Library' },
   sequences:  { title: 'Drip Sequences',   crumb: 'Marketing · Automation' },
   reports:    { title: 'Reports',          crumb: 'Analytics · ROI' },
+  'form-library': { title: 'Form Library',  crumb: 'Documents · State Forms' },
   om:         { title: 'OM Generator',     crumb: 'Tools · Documents' },
   social:     { title: 'Social Media',     crumb: 'Tools · Content' },
   leads:      { title: 'Website Leads',    crumb: 'Marketing · Captures' },
@@ -635,6 +638,7 @@ export default function App() {
           {route === 'templates'  && <TemplatesPage {...props} />}
           {route === 'sequences'  && <SequencesPage {...props} />}
           {route === 'reports'    && <ReportsPage {...props} />}
+          {route === 'form-library' && <FormLibraryPage isAdmin={isAdmin} />}
           {route === 'om'         && <OmPage />}
           {route === 'social'     && <SocialPage />}
           {route === 'leads'      && <LeadsPage {...props} />}

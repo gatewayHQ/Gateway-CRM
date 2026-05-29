@@ -29,8 +29,8 @@ create table if not exists contacts (
   email             text,
   phone             text,
   type              text check (type in ('buyer','seller','landlord','tenant','investor')) default 'buyer',
-  status            text check (status in ('active','cold','closed')) default 'active',
-  source            text check (source in ('referral','website','open house','social','cold call','other')) default 'other',
+  status            text check (status in ('active','cold','closed','lead','opportunity','pending')) default 'active',
+  source            text check (source in ('referral','website','open house','social','cold call','team','paid service','other')) default 'other',
   assigned_agent_id uuid references agents(id) on delete set null,
   notes             text,
   tags              text[],
@@ -874,3 +874,19 @@ do $$ begin
       using (bucket_id = 'campaign-images');
   end if;
 end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- FORM PACKETS (BoldTrail-style document library)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists form_packets (
+  id               uuid primary key default uuid_generate_v4(),
+  state            text not null,
+  transaction_type text not null check (transaction_type in ('buyer','seller','lease','general')),
+  name             text not null,
+  description      text,
+  storage_path     text,
+  created_at       timestamptz default now()
+);
+alter table form_packets enable row level security;
+create policy "form_packets_all" on form_packets
+  for all to authenticated using (true) with check (true);
