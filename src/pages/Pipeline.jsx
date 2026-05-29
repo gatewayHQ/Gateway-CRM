@@ -174,12 +174,27 @@ function ChecklistTab({ deal }) {
   )
 }
 
+// Urgency: returns 'urgent' (≤1d), 'warning' (2-3d), 'ok' (4-7d), null (>7d or past)
+function dateUrgency(dateStr) {
+  if (!dateStr) return null
+  const days = Math.ceil((new Date(dateStr + 'T00:00:00') - new Date().setHours(0,0,0,0)) / 86400000)
+  if (days < 0) return null
+  if (days <= 1) return 'urgent'
+  if (days <= 3) return 'warning'
+  if (days <= 7) return 'ok'
+  return null
+}
+
+const URGENCY_COLORS = { urgent: 'var(--gw-red)', warning: 'var(--gw-amber)', ok: 'var(--gw-green)' }
+
 function KeyDatesTab({ deal }) {
   const [dates, setDates]         = useState([])
   const [saving, setSaving]       = useState(false)
   const [newType, setNewType]     = useState('')
   const [customType, setCustomType] = useState('')
   const [showCustom, setShowCustom] = useState(false)
+  const [sentReminders, setSentReminders] = useState([])   // [{date_type, threshold}]
+  const [testSending, setTestSending]     = useState(false)
 
   React.useEffect(() => {
     if (!deal?.id) return
@@ -193,7 +208,26 @@ function KeyDatesTab({ deal }) {
           setDates(DEFAULT_KEY_DATE_TYPES.map(type => ({ type, date: '' })))
         }
       })
+    // Load sent reminders for this deal
+    supabase.from('deadline_reminders').select('date_type, threshold').eq('deal_id', deal.id)
+      .then(({ data }) => setSentReminders(data || []))
   }, [deal?.id])
+
+  const sendTestReminder = async () => {
+    setTestSending(true)
+    try {
+      const resp = await fetch('/api/reminders?secret=' + encodeURIComponent(window.__gwCronSecret || ''))
+      const data = await resp.json()
+      pushToast(`Test run: ${data.sent || 0} sent, ${data.skipped || 0} skipped`)
+      // Refresh sent status
+      const { data: fresh } = await supabase.from('deadline_reminders').select('date_type, threshold').eq('deal_id', deal.id)
+      setSentReminders(fresh || [])
+    } catch (e) {
+      pushToast('Could not run reminders: ' + e.message, 'error')
+    } finally {
+      setTestSending(false)
+    }
+  }
 
   const persist = async (updated) => {
     setSaving(true)
@@ -230,25 +264,45 @@ function KeyDatesTab({ deal }) {
     <div style={{ padding: 16, overflowY: 'auto', flex: 1 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>{saving ? 'Saving…' : 'Changes auto-saved'}</div>
+        <button className="btn btn--ghost btn--sm" style={{ fontSize: 11 }} onClick={sendTestReminder} disabled={testSending}>
+          <Icon name="send" size={11} /> {testSending ? 'Checking…' : 'Run Reminders'}
+        </button>
       </div>
 
-      {dates.map((row, i) => (
-        <div key={row.type} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-          <div style={{ flex: '0 0 160px', fontSize: 13, fontWeight: 600, color: 'var(--gw-ink)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {row.type}
+      {dates.map((row, i) => {
+        const urgency = dateUrgency(row.date)
+        const thresholdsSent = sentReminders.filter(r => r.date_type === row.type).map(r => r.threshold)
+        return (
+          <div key={row.type} style={{ marginBottom: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              {urgency && <div style={{ width: 6, height: 6, borderRadius: '50%', background: URGENCY_COLORS[urgency], flexShrink: 0 }} />}
+              {!urgency && <div style={{ width: 6, flexShrink: 0 }} />}
+              <div style={{ flex: '0 0 148px', fontSize: 13, fontWeight: 600, color: urgency ? URGENCY_COLORS[urgency] : 'var(--gw-ink)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {row.type}
+              </div>
+              <input
+                type="date"
+                className="form-control"
+                style={{ flex: 1, fontSize: 13 }}
+                value={row.date || ''}
+                onChange={e => updateDate(i, e.target.value)}
+              />
+              <button className="btn btn--ghost btn--icon btn--sm" title="Remove" onClick={() => removeRow(i)} style={{ opacity: 0.5 }}>
+                <Icon name="x" size={12} />
+              </button>
+            </div>
+            {thresholdsSent.length > 0 && (
+              <div style={{ marginLeft: 22, marginTop: 3, display: 'flex', gap: 4 }}>
+                {thresholdsSent.map(t => (
+                  <span key={t} style={{ fontSize: 9, fontWeight: 700, background: 'var(--gw-green-light)', color: 'var(--gw-green)', padding: '1px 6px', borderRadius: 8, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    {t} ✓
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
-          <input
-            type="date"
-            className="form-control"
-            style={{ flex: 1, fontSize: 13 }}
-            value={row.date || ''}
-            onChange={e => updateDate(i, e.target.value)}
-          />
-          <button className="btn btn--ghost btn--icon btn--sm" title="Remove" onClick={() => removeRow(i)} style={{ opacity: 0.5 }}>
-            <Icon name="x" size={12} />
-          </button>
-        </div>
-      ))}
+        )
+      })}
 
       {/* Add date row */}
       <div style={{ marginTop: 16, borderTop: '1px solid var(--gw-border)', paddingTop: 14 }}>
