@@ -163,14 +163,22 @@ function StatCard({ value, label, sub, color }) {
 
 // ─── QR code utilities ────────────────────────────────────────────────────────
 
+// Branded short-link domain. Set VITE_PUBLIC_LINK_DOMAIN (e.g. https://gatewayre.link)
+// in Vercel to make QR codes point at a clean, professional domain instead of the
+// CRM's own URL. Falls back to the current origin when unset.
+function linkBase() {
+  const custom = import.meta.env.VITE_PUBLIC_LINK_DOMAIN
+  return (custom && custom.trim() ? custom.trim().replace(/\/+$/, '') : window.location.origin)
+}
+
 function qrImageUrl(token, opts = {}) {
   const { size = 400, format = 'png', margin = 1 } = opts
-  const target = `${window.location.origin}/m/${token}`
+  const target = `${linkBase()}/m/${token}`
   return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&format=${format}&margin=${margin}&data=${encodeURIComponent(target)}`
 }
 
 function shortUrl(token) {
-  return `${window.location.origin}/m/${token}`
+  return `${linkBase()}/m/${token}`
 }
 
 // ─── CSV parser (handles quoted fields with commas/newlines) ──────────────────
@@ -666,18 +674,76 @@ function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
   const images   = Array.isArray(cfg.images)   ? cfg.images.map(normImg) : []
   const features = Array.isArray(cfg.features) ? cfg.features             : []
 
+  // 'residential' shows beds/baths/sqft; 'commercial' shows units/cap rate/NOI etc.
+  const detailMode = cfg.detail_mode || 'residential'
+  const COMMERCIAL_TYPES = ['multifamily','office','land','retail','industrial','mixed-use','commercial']
+
+  // Pull photo URLs off a CRM property record (stored on details.photos)
+  const propertyPhotos = (p) => Array.isArray(p?.details?.photos) ? p.details.photos.filter(Boolean) : []
+
+  const importPhotosFrom = (p) => {
+    const photos = propertyPhotos(p)
+    if (!photos.length) return false
+    setCfg('images', photos.map(url => ({ url, units:'', price:'', caption:'' })))
+    return true
+  }
+
   const handlePropertySelect = (pid) => {
     set('property_id', pid)
     if (!pid) return
     const p = properties.find(x => x.id === pid)
     if (!p) return
-    if (!cfg.headline)                 setCfg('headline',    [p.address, p.city, p.state].filter(Boolean).join(', '))
-    if (!cfg.price    && p.list_price) setCfg('price',       String(p.list_price))
-    if (!cfg.beds     && p.beds)       setCfg('beds',        String(p.beds))
-    if (!cfg.baths    && p.baths)      setCfg('baths',       String(p.baths))
-    if (!cfg.sqft     && p.sqft)       setCfg('sqft',        String(p.sqft))
-    if (!cfg.year_built && p.year_built) setCfg('year_built', String(p.year_built))
+
+    const commercial = COMMERCIAL_TYPES.includes(p.type)
+    const d = p.details || {}
+
+    if (!cfg.headline)                   setCfg('headline',    [p.address, p.city, p.state].filter(Boolean).join(', '))
+    if (!cfg.price      && p.list_price) setCfg('price',       String(p.list_price))
+
+    if (commercial) {
+      setCfg('detail_mode', 'commercial')
+      if (!cfg.units        && d.total_units) setCfg('units',        String(d.total_units))
+      if (!cfg.building_sqft && p.sqft)       setCfg('building_sqft', String(p.sqft))
+      if (!cfg.year_built   && d.year_built)  setCfg('year_built',   String(d.year_built))
+      if (!cfg.price_per_unit && p.list_price && d.total_units)
+        setCfg('price_per_unit', String(Math.round(Number(p.list_price) / Number(d.total_units))))
+    } else {
+      if (!cfg.beds       && p.beds)       setCfg('beds',        String(p.beds))
+      if (!cfg.baths      && p.baths)      setCfg('baths',       String(p.baths))
+      if (!cfg.sqft       && p.sqft)       setCfg('sqft',        String(p.sqft))
+      if (!cfg.year_built && p.year_built) setCfg('year_built',  String(p.year_built))
+    }
+
+    // Auto-import the property's photos into the showcase if none added yet
+    const hasImages = (cfg.images || []).some(im => (typeof im === 'string' ? im : im?.url)?.trim())
+    if (!hasImages) {
+      const imported = importPhotosFrom(p)
+      if (imported) pushToast(`${propertyPhotos(p).length} photo(s) imported from the property`, 'success')
+    }
   }
+
+  const RESIDENTIAL_FIELDS = [
+    { key:'price',      label:'List Price',      ph:'$895,000' },
+    { key:'beds',       label:'Bedrooms',        ph:'3' },
+    { key:'baths',      label:'Bathrooms',       ph:'2' },
+    { key:'sqft',       label:'Sq Ft',           ph:'1,850' },
+    { key:'lot_size',   label:'Lot Size (sqft)', ph:'5,200' },
+    { key:'year_built', label:'Year Built',      ph:'1928' },
+  ]
+  const COMMERCIAL_FIELDS = [
+    { key:'price',         label:'Asking Price',  ph:'$3,200,000' },
+    { key:'units',         label:'Units',         ph:'24' },
+    { key:'price_per_unit',label:'Price / Unit',  ph:'$133,000' },
+    { key:'cap_rate',      label:'Cap Rate',      ph:'6.1%' },
+    { key:'noi',           label:'NOI',           ph:'$195,000' },
+    { key:'gross_income',  label:'Gross Income',  ph:'$320,000' },
+    { key:'building_sqft', label:'Building Sq Ft',ph:'18,000' },
+    { key:'occupancy',     label:'Occupancy',     ph:'94%' },
+    { key:'year_built',    label:'Year Built',    ph:'1998' },
+  ]
+  const detailFields = detailMode === 'commercial' ? COMMERCIAL_FIELDS : RESIDENTIAL_FIELDS
+
+  const selectedProperty = properties.find(x => x.id === form.property_id)
 
   const setImageField = (i, field, val) => {
     const next = images.map((img, idx) => idx === i ? { ...img, [field]: val } : img)
@@ -736,16 +802,24 @@ function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
         </div>
 
         <div>
-          <label style={fieldLabel}>Key Property Details</label>
-          <div style={{ display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:8, marginTop:4 }}>
-            {[
-              { key:'price',      label:'List Price',     ph:'$895,000' },
-              { key:'beds',       label:'Bedrooms',       ph:'3' },
-              { key:'baths',      label:'Bathrooms',      ph:'2' },
-              { key:'sqft',       label:'Sq Ft',          ph:'1,850' },
-              { key:'lot_size',   label:'Lot Size (sqft)',ph:'5,200' },
-              { key:'year_built', label:'Year Built',     ph:'1928' },
-            ].map(f => (
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:8 }}>
+            <label style={fieldLabel}>Key Property Details</label>
+            {/* Residential / Commercial toggle — swaps which detail fields are shown */}
+            <div style={{ display:'flex', border:'1px solid var(--gw-border)', borderRadius:7, overflow:'hidden' }}>
+              {[['residential','Residential'],['commercial','Commercial · Multifamily']].map(([val, lbl]) => {
+                const sel = detailMode === val
+                return (
+                  <button key={val} type="button" onClick={() => setCfg('detail_mode', val)}
+                          style={{ padding:'5px 12px', border:'none', cursor:'pointer', fontSize:11.5, fontWeight:700,
+                                   background: sel ? 'var(--gw-azure)' : '#fff', color: sel ? '#fff' : 'var(--gw-mist)' }}>
+                    {lbl}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:8, marginTop:8 }}>
+            {detailFields.map(f => (
               <div key={f.key}>
                 <label style={{ fontSize:10, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:0.4, display:'block', marginBottom:3 }}>
                   {f.label}
@@ -755,6 +829,12 @@ function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
               </div>
             ))}
           </div>
+          {detailMode === 'commercial' && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6, lineHeight:1.4 }}>
+              Leave any field blank to hide it on the live page. Cap rate, NOI &amp; gross income aren't stored on the
+              CRM property record — enter the figures you want to advertise.
+            </div>
+          )}
         </div>
 
         <div>
@@ -785,7 +865,18 @@ function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
         </div>
 
         <div>
-          <label style={fieldLabel}>Photos (up to 10) — upload or paste URL</label>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:8 }}>
+            <label style={fieldLabel}>Photos (up to 10) — upload or paste URL</label>
+            {selectedProperty && propertyPhotos(selectedProperty).length > 0 && (
+              <button type="button" className="btn btn--ghost" style={{ fontSize:11.5 }}
+                      onClick={() => {
+                        if (importPhotosFrom(selectedProperty))
+                          pushToast(`${propertyPhotos(selectedProperty).length} photo(s) pulled from the property`, 'success')
+                      }}>
+                <Icon name="download" size={12} /> Use property's {propertyPhotos(selectedProperty).length} photo(s)
+              </button>
+            )}
+          </div>
           <div style={{ display:'grid', gap:8, marginTop:4 }}>
             {images.map((img, i) => (
               <ImageRow key={i} img={img} index={i} uploading={uploading}
@@ -800,6 +891,9 @@ function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
                 <Icon name="plus" size={12} /> Add photo
               </button>
             )}
+          </div>
+          <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6, lineHeight:1.4 }}>
+            The first photo becomes the page's hero banner; the rest fill the gallery below it.
           </div>
         </div>
 

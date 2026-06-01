@@ -74,15 +74,26 @@ export default function LandingProperty({ mailingId }) {
 
   const fmtNum   = v => { const n = Number(String(v).replace(/[^0-9.]/g,'')); return isNaN(n) ? String(v) : n.toLocaleString() }
   const fmtPrice = v => { if (!v) return null; const n = Number(String(v).replace(/[^0-9.]/g,'')); return isNaN(n) ? String(v) : '$' + n.toLocaleString() }
+  const fmtPct   = v => { if (!v) return null; const s = String(v).trim(); return s.endsWith('%') ? s : s + '%' }
 
-  const details = [
+  const details = (cfg.detail_mode === 'commercial' ? [
+    cfg.price          && { label:'Price',        value: fmtPrice(cfg.price) },
+    cfg.units          && { label:'Units',        value: cfg.units },
+    cfg.price_per_unit && { label:'Price / Unit', value: fmtPrice(cfg.price_per_unit) },
+    cfg.cap_rate       && { label:'Cap Rate',     value: fmtPct(cfg.cap_rate) },
+    cfg.noi            && { label:'NOI',          value: fmtPrice(cfg.noi) },
+    cfg.gross_income   && { label:'Gross Income', value: fmtPrice(cfg.gross_income) },
+    cfg.building_sqft  && { label:'Building SF',  value: fmtNum(cfg.building_sqft) },
+    cfg.occupancy      && { label:'Occupancy',    value: fmtPct(cfg.occupancy) },
+    cfg.year_built     && { label:'Year Built',   value: cfg.year_built },
+  ] : [
     cfg.price      && { label:'Price',       value: fmtPrice(cfg.price) },
     cfg.beds       && { label:'Bedrooms',     value: cfg.beds },
     cfg.baths      && { label:'Bathrooms',    value: cfg.baths },
     cfg.sqft       && { label:'Sq Ft',        value: fmtNum(cfg.sqft) },
     cfg.lot_size   && { label:'Lot',          value: fmtNum(cfg.lot_size) + ' sqft' },
     cfg.year_built && { label:'Year Built',   value: cfg.year_built },
-  ].filter(Boolean)
+  ]).filter(Boolean)
 
   const submit = async (e) => {
     e.preventDefault()
@@ -214,9 +225,9 @@ export default function LandingProperty({ mailingId }) {
                              margin:'0 0 14px', color:'#1e2642' }}>
                   Gallery
                 </h3>
-                <div style={{ display:'grid', gap:8, ...mosaic.gridStyle }}>
+                <div className="prop-gallery" style={{ display:'grid', gap:8, ...mosaic.gridStyle }}>
                   {galleryImages.slice(0, 5).map((img, i) => (
-                    <div key={i} style={{
+                    <div key={i} className="prop-gallery__cell" style={{
                       ...(mosaic.cells[i] || {}),
                       backgroundImage:`url(${img.url})`, backgroundSize:'cover', backgroundPosition:'center',
                       borderRadius:8, overflow:'hidden', position:'relative',
@@ -325,6 +336,10 @@ export default function LandingProperty({ mailingId }) {
 
       <style>{`
         @media (max-width: 820px) { .prop-grid { grid-template-columns: 1fr !important; } }
+        @media (max-width: 640px) {
+          .prop-gallery { grid-template-columns: 1fr 1fr !important; grid-template-areas: none !important; }
+          .prop-gallery__cell { grid-area: auto !important; min-height: 150px !important; }
+        }
         input:focus, textarea:focus { outline:none; border-color: ${accent} !important; box-shadow: 0 0 0 3px ${accent}18; }
       `}</style>
     </div>
