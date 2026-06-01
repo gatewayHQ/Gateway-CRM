@@ -388,19 +388,430 @@ function PossibleBuyers({ form, contacts }) {
   )
 }
 
+// ─── Listing drawer tab components ───────────────────────────────────────────
+
+function PriceHistoryTab({ property }) {
+  const history = Array.isArray(property?.price_history) ? property.price_history : []
+  if (history.length === 0) return (
+    <div style={{ padding:24, textAlign:'center', color:'var(--gw-mist)', fontSize:13 }}>
+      No price changes recorded yet.<br/>
+      <span style={{ fontSize:11 }}>Changes are tracked automatically when you update the list price and save.</span>
+    </div>
+  )
+  return (
+    <div style={{ padding:16, overflowY:'auto', flex:1 }}>
+      <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:12 }}>Price History</div>
+      {[...history].reverse().map((entry, i) => {
+        const reduction = Number(entry.previous_price) - Number(entry.price)
+        const pct = entry.previous_price > 0 ? Math.abs(reduction / entry.previous_price * 100).toFixed(1) : 0
+        return (
+          <div key={i} style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:6, background:'#fff' }}>
+            <div style={{ width:32, height:32, borderRadius:6, background: reduction > 0 ? '#fee2e2' : '#dcfce7', display:'flex', alignItems:'center', justifyContent:'center', fontSize:18, flexShrink:0 }}>
+              {reduction > 0 ? '↓' : '↑'}
+            </div>
+            <div style={{ flex:1 }}>
+              <div style={{ fontSize:13, fontWeight:700, color: reduction > 0 ? '#dc2626' : '#16a34a' }}>
+                {formatCurrency(entry.price)}
+                <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)', marginLeft:8 }}>from {formatCurrency(entry.previous_price)}</span>
+              </div>
+              <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
+                {reduction > 0 ? `↓ ${formatCurrency(Math.abs(reduction))} (${pct}% reduction)` : `↑ ${formatCurrency(Math.abs(reduction))} increase`}
+              </div>
+            </div>
+            <div style={{ fontSize:11, color:'var(--gw-mist)', whiteSpace:'nowrap' }}>
+              {entry.date ? new Date(entry.date).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' }) : ''}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function ShowingsTab({ property }) {
+  const [showings, setShowings]   = useState([])
+  const [loading, setLoading]     = useState(true)
+  const [tableReady, setTableReady] = useState(true)
+  const [showForm, setShowForm]   = useState(false)
+  const [adding, setAdding]       = useState(false)
+  const [form, setForm]           = useState({ showing_date:'', buyer_agent_name:'', feedback:'', rating:'' })
+
+  React.useEffect(() => { if (property?.id) loadShowings() }, [property?.id])
+
+  const loadShowings = async () => {
+    setLoading(true)
+    const { data, error } = await supabase.from('property_showings').select('*').eq('property_id', property.id).order('showing_date', { ascending:false })
+    if (error?.code === '42P01') { setTableReady(false); setLoading(false); return }
+    setShowings(data || [])
+    setLoading(false)
+  }
+
+  const add = async () => {
+    if (!form.showing_date) { pushToast('Date is required', 'error'); return }
+    setAdding(true)
+    const { data, error } = await supabase.from('property_showings').insert([{
+      property_id: property.id,
+      showing_date: form.showing_date,
+      buyer_agent_name: form.buyer_agent_name || null,
+      feedback: form.feedback || null,
+      rating: form.rating ? Number(form.rating) : null,
+    }]).select().single()
+    setAdding(false)
+    if (error) { pushToast(error.message, 'error'); return }
+    setShowings(p => [data, ...p])
+    setForm({ showing_date:'', buyer_agent_name:'', feedback:'', rating:'' })
+    setShowForm(false)
+    pushToast('Showing logged')
+  }
+
+  const remove = async (id) => {
+    await supabase.from('property_showings').delete().eq('id', id)
+    setShowings(p => p.filter(s => s.id !== id))
+  }
+
+  if (!tableReady) return (
+    <div style={{ padding:20 }}>
+      <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:16, fontSize:13, lineHeight:1.7 }}>
+        <strong>Run this SQL in Supabase Dashboard → SQL Editor:</strong>
+        <pre style={{ background:'var(--gw-slate)', color:'#e2e8f0', padding:10, borderRadius:6, fontSize:11, marginTop:8, overflowX:'auto' }}>
+{`create table if not exists property_showings (
+  id                uuid primary key default gen_random_uuid(),
+  property_id       uuid references properties(id) on delete cascade,
+  agent_id          uuid references agents(id) on delete set null,
+  showing_date      timestamptz not null,
+  buyer_agent_name  text,
+  feedback          text,
+  rating            int check (rating between 1 and 5),
+  created_at        timestamptz default now()
+);
+alter table property_showings enable row level security;
+create policy "agents_showings" on property_showings
+  for all to authenticated using (true) with check (true);`}
+        </pre>
+        <button className="btn btn--secondary btn--sm" style={{ marginTop:8 }} onClick={() => { setTableReady(true); loadShowings() }}>
+          <Icon name="refresh" size={12} /> Retry
+        </button>
+      </div>
+    </div>
+  )
+
+  return (
+    <div style={{ padding:16, overflowY:'auto', flex:1 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
+        <div style={{ fontSize:12, color:'var(--gw-mist)' }}>{showings.length} showing{showings.length !== 1 ? 's' : ''}</div>
+        <button className="btn btn--primary btn--sm" onClick={() => setShowForm(p => !p)}>
+          <Icon name="plus" size={13} /> Log Showing
+        </button>
+      </div>
+      {showForm && (
+        <div style={{ background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:14, marginBottom:14 }}>
+          <div className="form-row">
+            <div className="form-group"><label className="form-label">Date &amp; Time</label><input className="form-control" type="datetime-local" value={form.showing_date} onChange={e=>setForm(p=>({...p,showing_date:e.target.value}))} /></div>
+            <div className="form-group"><label className="form-label">Buyer's Agent</label><input className="form-control" value={form.buyer_agent_name} onChange={e=>setForm(p=>({...p,buyer_agent_name:e.target.value}))} placeholder="Agent name" /></div>
+          </div>
+          <div className="form-row">
+            <div className="form-group"><label className="form-label">Feedback</label><input className="form-control" value={form.feedback} onChange={e=>setForm(p=>({...p,feedback:e.target.value}))} placeholder="Buyer's reaction…" /></div>
+            <div className="form-group"><label className="form-label">Rating (1–5)</label>
+              <select className="form-control" value={form.rating} onChange={e=>setForm(p=>({...p,rating:e.target.value}))}>
+                <option value="">—</option>{[1,2,3,4,5].map(r=><option key={r} value={r}>{r}</option>)}
+              </select>
+            </div>
+          </div>
+          <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
+            <button className="btn btn--secondary btn--sm" onClick={() => setShowForm(false)}>Cancel</button>
+            <button className="btn btn--primary btn--sm" onClick={add} disabled={adding}>{adding ? 'Saving…' : 'Log Showing'}</button>
+          </div>
+        </div>
+      )}
+      {loading ? <div style={{ fontSize:13, color:'var(--gw-mist)' }}>Loading…</div>
+        : showings.length === 0 ? <div style={{ textAlign:'center', color:'var(--gw-mist)', fontSize:13, padding:'24px 0' }}>No showings logged yet.</div>
+        : showings.map(s => (
+          <div key={s.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:8, background:'#fff' }}>
+            <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:8 }}>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:13, fontWeight:600 }}>
+                  {new Date(s.showing_date).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' })}
+                  {s.rating && <span style={{ marginLeft:8, fontSize:12 }}>{'★'.repeat(s.rating)}{'☆'.repeat(5-s.rating)}</span>}
+                </div>
+                {s.buyer_agent_name && <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:2 }}>{s.buyer_agent_name}</div>}
+                {s.feedback && <div style={{ fontSize:12, color:'var(--gw-ink)', marginTop:4, fontStyle:'italic' }}>"{s.feedback}"</div>}
+              </div>
+              <button className="btn btn--ghost btn--icon btn--sm" onClick={() => remove(s.id)}><Icon name="trash" size={12} /></button>
+            </div>
+          </div>
+        ))
+      }
+    </div>
+  )
+}
+
+const DEFAULT_MARKETING_STEPS = [
+  'Professional photos uploaded','Virtual tour created','Listed on MLS',
+  'Syndicated to Zillow/Realtor.com','Social media posts scheduled',
+  'Open house scheduled','Lockbox installed','Yard sign placed',
+]
+
+function MarketingChecklistTab({ property }) {
+  const [steps, setSteps]         = useState([])
+  const [loading, setLoading]     = useState(true)
+  const [tableReady, setTableReady] = useState(true)
+  const [newTitle, setNewTitle]   = useState('')
+  const [adding, setAdding]       = useState(false)
+
+  React.useEffect(() => { if (property?.id) loadSteps() }, [property?.id])
+
+  const loadSteps = async () => {
+    setLoading(true)
+    const { data, error } = await supabase.from('listing_checklist_steps').select('*').eq('property_id', property.id).order('sort_order', { ascending:true })
+    if (error?.code === '42P01') { setTableReady(false); setLoading(false); return }
+    if ((data||[]).length === 0 && property.status === 'active') {
+      const rows = DEFAULT_MARKETING_STEPS.map((title, i) => ({ property_id:property.id, title, completed:false, sort_order:i }))
+      const { data: created } = await supabase.from('listing_checklist_steps').insert(rows).select()
+      setSteps(created || [])
+      pushToast('Marketing checklist created', 'info')
+    } else {
+      setSteps(data || [])
+    }
+    setLoading(false)
+  }
+
+  const toggle = async (step) => {
+    const now = new Date().toISOString()
+    const patch = { completed:!step.completed, completed_at:!step.completed ? now : null }
+    await supabase.from('listing_checklist_steps').update(patch).eq('id', step.id)
+    setSteps(p => p.map(s => s.id === step.id ? { ...s, ...patch } : s))
+  }
+
+  const addStep = async () => {
+    if (!newTitle.trim()) return
+    setAdding(true)
+    const { data, error } = await supabase.from('listing_checklist_steps').insert([{
+      property_id:property.id, title:newTitle.trim(), completed:false, sort_order:steps.length,
+    }]).select().single()
+    setAdding(false)
+    if (error) { pushToast(error.message, 'error'); return }
+    setSteps(p => [...p, data]); setNewTitle('')
+  }
+
+  const removeStep = async (id) => {
+    await supabase.from('listing_checklist_steps').delete().eq('id', id)
+    setSteps(p => p.filter(s => s.id !== id))
+  }
+
+  if (!tableReady) return (
+    <div style={{ padding:20 }}>
+      <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:16, fontSize:13, lineHeight:1.7 }}>
+        <strong>Run this SQL in Supabase Dashboard → SQL Editor:</strong>
+        <pre style={{ background:'var(--gw-slate)', color:'#e2e8f0', padding:10, borderRadius:6, fontSize:11, marginTop:8, overflowX:'auto' }}>
+{`create table if not exists listing_checklist_steps (
+  id           uuid primary key default gen_random_uuid(),
+  property_id  uuid references properties(id) on delete cascade,
+  title        text not null,
+  completed    boolean default false,
+  completed_at timestamptz,
+  sort_order   int default 0,
+  created_at   timestamptz default now()
+);
+alter table listing_checklist_steps enable row level security;
+create policy "agents_listing_checklist" on listing_checklist_steps
+  for all to authenticated using (true) with check (true);`}
+        </pre>
+        <button className="btn btn--secondary btn--sm" style={{ marginTop:8 }} onClick={() => { setTableReady(true); loadSteps() }}>
+          <Icon name="refresh" size={12} /> Retry
+        </button>
+      </div>
+    </div>
+  )
+
+  if (loading) return <div style={{ padding:24, fontSize:13, color:'var(--gw-mist)' }}>Loading checklist…</div>
+
+  const doneCount = steps.filter(s => s.completed).length
+  const pct = steps.length > 0 ? Math.round(doneCount / steps.length * 100) : 0
+
+  return (
+    <div style={{ padding:16, overflowY:'auto', flex:1 }}>
+      {steps.length > 0 && (
+        <div style={{ marginBottom:16 }}>
+          <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, fontWeight:600, marginBottom:6 }}>
+            <span>{doneCount}/{steps.length} complete</span>
+            <span style={{ color: pct === 100 ? 'var(--gw-green)' : 'var(--gw-mist)' }}>{pct}%</span>
+          </div>
+          <div style={{ height:6, background:'var(--gw-border)', borderRadius:3, overflow:'hidden' }}>
+            <div style={{ width:`${pct}%`, height:'100%', background: pct === 100 ? 'var(--gw-green)' : 'var(--gw-azure)', borderRadius:3, transition:'width 300ms ease' }} />
+          </div>
+        </div>
+      )}
+      {steps.length === 0 && property.status !== 'active' && (
+        <div style={{ textAlign:'center', padding:'20px 0', color:'var(--gw-mist)', fontSize:13 }}>
+          Checklist auto-creates when status is <strong>Active</strong>.<br/>Or add steps manually below.
+        </div>
+      )}
+      {steps.map(step => (
+        <div key={step.id} onClick={() => toggle(step)}
+          style={{ display:'flex', alignItems:'center', gap:10, padding:'9px 10px', borderRadius:'var(--radius)', cursor:'pointer', marginBottom:3, transition:'background 120ms' }}
+          onMouseEnter={e=>e.currentTarget.style.background='var(--gw-bone)'}
+          onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+          <div style={{ width:20, height:20, borderRadius:4, border:`2px solid ${step.completed?'var(--gw-green)':'var(--gw-border)'}`, background:step.completed?'var(--gw-green)':'#fff', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, transition:'all 150ms' }}>
+            {step.completed && <Icon name="check" size={11} style={{ color:'#fff' }} />}
+          </div>
+          <span style={{ flex:1, fontSize:13, textDecoration:step.completed?'line-through':'none', color:step.completed?'var(--gw-mist)':'var(--gw-ink)' }}>{step.title}</span>
+          {step.completed && step.completed_at && (
+            <span style={{ fontSize:10, color:'var(--gw-mist)', whiteSpace:'nowrap' }}>
+              {new Date(step.completed_at).toLocaleDateString('en-US', { month:'short', day:'numeric' })}
+            </span>
+          )}
+          <button className="btn btn--ghost btn--icon" style={{ padding:2, opacity:0.4 }}
+            onClick={e=>{e.stopPropagation();removeStep(step.id)}}><Icon name="x" size={11} /></button>
+        </div>
+      ))}
+      <div style={{ display:'flex', gap:8, marginTop:12 }}>
+        <input className="form-control" style={{ flex:1, fontSize:13 }} placeholder="Add a step…"
+          value={newTitle} onChange={e=>setNewTitle(e.target.value)}
+          onKeyDown={e=>e.key==='Enter'&&addStep()} disabled={adding} />
+        <button className="btn btn--secondary btn--sm" onClick={addStep} disabled={adding||!newTitle.trim()}>Add</button>
+      </div>
+    </div>
+  )
+}
+
+function CompsTab({ property, onUpdateComps }) {
+  const comps = Array.isArray(property?.comps) ? property.comps : []
+  const [showForm, setShowForm] = useState(false)
+  const [saving, setSaving]     = useState(false)
+  const [form, setForm]         = useState({ address:'', sold_price:'', sold_date:'', sqft:'', beds:'', baths:'', distance:'' })
+
+  const set = (k, v) => setForm(p => ({ ...p, [k]: v }))
+
+  const add = async () => {
+    if (!form.address.trim() || !form.sold_price) { pushToast('Address and sale price are required', 'error'); return }
+    setSaving(true)
+    const newComp = {
+      id: Date.now(),
+      address: form.address.trim(),
+      sold_price: Number(form.sold_price),
+      sold_date: form.sold_date || null,
+      sqft: form.sqft ? Number(form.sqft) : null,
+      beds: form.beds ? Number(form.beds) : null,
+      baths: form.baths ? Number(form.baths) : null,
+      distance: form.distance ? Number(form.distance) : null,
+    }
+    const newComps = [...comps, newComp]
+    const { error } = await supabase.from('properties').update({ comps: newComps }).eq('id', property.id)
+    setSaving(false)
+    if (error) { pushToast(error.message, 'error'); return }
+    onUpdateComps(newComps)
+    setForm({ address:'', sold_price:'', sold_date:'', sqft:'', beds:'', baths:'', distance:'' })
+    setShowForm(false)
+    pushToast('Comp added')
+  }
+
+  const remove = async (id) => {
+    const newComps = comps.filter(c => c.id !== id)
+    await supabase.from('properties').update({ comps: newComps }).eq('id', property.id)
+    onUpdateComps(newComps)
+  }
+
+  const avgSoldPrice   = comps.length > 0 ? comps.reduce((s, c) => s + (c.sold_price || 0), 0) / comps.length : 0
+  const compsWithSqft  = comps.filter(c => c.sqft > 0)
+  const avgPricePerSqft = compsWithSqft.length > 0
+    ? compsWithSqft.reduce((s, c) => s + c.sold_price / c.sqft, 0) / compsWithSqft.length : 0
+
+  return (
+    <div style={{ padding:16, overflowY:'auto', flex:1 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
+        <div style={{ fontSize:12, color:'var(--gw-mist)' }}>{comps.length} comp{comps.length!==1?'s':''}</div>
+        <button className="btn btn--primary btn--sm" onClick={() => setShowForm(p => !p)}>
+          <Icon name="plus" size={13} /> Add Comp
+        </button>
+      </div>
+      {comps.length > 0 && (
+        <div style={{ display:'flex', gap:12, marginBottom:16, padding:'12px 14px', background:'var(--gw-sky)', borderRadius:'var(--radius)', border:'1px solid var(--gw-azure)' }}>
+          <div style={{ flex:1 }}>
+            <div style={{ fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.07em', color:'var(--gw-azure)', marginBottom:2 }}>Avg Comp Value</div>
+            <div style={{ fontSize:18, fontWeight:700 }}>{formatCurrency(avgSoldPrice)}</div>
+          </div>
+          {avgPricePerSqft > 0 && (
+            <div style={{ flex:1 }}>
+              <div style={{ fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.07em', color:'var(--gw-azure)', marginBottom:2 }}>Avg $/sqft</div>
+              <div style={{ fontSize:18, fontWeight:700 }}>${Math.round(avgPricePerSqft)}</div>
+            </div>
+          )}
+          {property.list_price > 0 && avgSoldPrice > 0 && (
+            <div style={{ flex:1 }}>
+              <div style={{ fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.07em', color:'var(--gw-azure)', marginBottom:2 }}>vs List Price</div>
+              <div style={{ fontSize:18, fontWeight:700, color: avgSoldPrice >= property.list_price ? 'var(--gw-green)' : '#dc2626' }}>
+                {avgSoldPrice >= property.list_price ? '+' : ''}{formatCurrency(avgSoldPrice - property.list_price)}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      {showForm && (
+        <div style={{ background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:14, marginBottom:14 }}>
+          <div className="form-group"><label className="form-label required">Address</label><input className="form-control" value={form.address} onChange={e=>set('address',e.target.value)} placeholder="123 Oak Street" /></div>
+          <div className="form-row">
+            <div className="form-group"><label className="form-label required">Sale Price</label><input className="form-control" type="number" value={form.sold_price} onChange={e=>set('sold_price',e.target.value)} placeholder="450000" /></div>
+            <div className="form-group"><label className="form-label">Sale Date</label><input className="form-control" type="date" value={form.sold_date} onChange={e=>set('sold_date',e.target.value)} /></div>
+          </div>
+          <div className="form-row">
+            <div className="form-group"><label className="form-label">Beds</label><input className="form-control" type="number" value={form.beds} onChange={e=>set('beds',e.target.value)} /></div>
+            <div className="form-group"><label className="form-label">Baths</label><input className="form-control" type="number" step="0.5" value={form.baths} onChange={e=>set('baths',e.target.value)} /></div>
+          </div>
+          <div className="form-row">
+            <div className="form-group"><label className="form-label">Sq Ft</label><input className="form-control" type="number" value={form.sqft} onChange={e=>set('sqft',e.target.value)} /></div>
+            <div className="form-group"><label className="form-label">Distance (mi)</label><input className="form-control" type="number" step="0.1" value={form.distance} onChange={e=>set('distance',e.target.value)} placeholder="0.5" /></div>
+          </div>
+          <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
+            <button className="btn btn--secondary btn--sm" onClick={() => setShowForm(false)}>Cancel</button>
+            <button className="btn btn--primary btn--sm" onClick={add} disabled={saving}>{saving?'Saving…':'Add Comp'}</button>
+          </div>
+        </div>
+      )}
+      {comps.length === 0 && !showForm
+        ? <div style={{ textAlign:'center', color:'var(--gw-mist)', fontSize:13, padding:'24px 0' }}>No comps yet. Add comparable sales to analyze market position.</div>
+        : comps.map(c => (
+          <div key={c.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:8, background:'#fff' }}>
+            <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:8 }}>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:13, fontWeight:600 }}>{c.address}</div>
+                <div style={{ fontSize:13, fontWeight:700, marginTop:2 }}>
+                  {formatCurrency(c.sold_price)}
+                  {c.sqft > 0 && <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)', marginLeft:8 }}>${Math.round(c.sold_price/c.sqft)}/sqft</span>}
+                </div>
+                <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2, display:'flex', gap:8, flexWrap:'wrap' }}>
+                  {c.beds && <span>{c.beds} bd</span>}
+                  {c.baths && <span>{c.baths} ba</span>}
+                  {c.sqft && <span>{Number(c.sqft).toLocaleString()} sqft</span>}
+                  {c.sold_date && <span>{new Date(c.sold_date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</span>}
+                  {c.distance && <span>{c.distance} mi away</span>}
+                </div>
+              </div>
+              <button className="btn btn--ghost btn--icon btn--sm" onClick={() => remove(c.id)}><Icon name="trash" size={12} /></button>
+            </div>
+          </div>
+        ))
+      }
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave, go, setDb }) {
-  const blank = { address:'', city:'', state:'', zip:'', county:'', submarket:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{} }
+  const blank = { address:'', city:'', state:'', zip:'', county:'', submarket:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{}, listing_expiry_date:'', price_history:[], comps:[] }
   const [form, setForm]             = useState(property || blank)
   const [errors, setErrors]         = useState({})
   const [saving, setSaving]         = useState(false)
   const [startingDeal, setStartingDeal] = useState(false)
+  const [tab, setTab]               = useState('details')
   const [tempId] = useState(() => property?.id || crypto.randomUUID())
 
   React.useEffect(() => {
     setForm(property
-      ? { ...blank, ...property, details: property.details || {} }
+      ? { ...blank, ...property, details: property.details || {}, price_history: property.price_history || [], comps: property.comps || [], listing_expiry_date: property.listing_expiry_date ? property.listing_expiry_date.slice(0,10) : '' }
       : { ...blank, assigned_agent_id: activeAgent?.id || '' })
     setErrors({})
+    setTab('details')
   }, [property, open, activeAgent?.id])
 
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
@@ -443,16 +854,32 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
     if (Object.keys(e).length > 0) return
     setSaving(true)
     const resolvedId = property?.id || tempId
+
+    // Track price reductions automatically
+    const oldPrice = property?.list_price ? Number(property.list_price) : null
+    const newPrice = form.list_price ? Number(form.list_price) : null
+    let updatedHistory = Array.isArray(form.price_history) ? form.price_history : []
+    if (property?.id && oldPrice && newPrice && oldPrice !== newPrice) {
+      updatedHistory = [...updatedHistory, {
+        price: newPrice,
+        previous_price: oldPrice,
+        date: new Date().toISOString().slice(0, 10),
+      }]
+    }
+
     const payload = {
       ...form,
-      id:                resolvedId,
-      list_price:        form.list_price ? Number(form.list_price) : null,
-      sqft:              form.sqft       ? Number(form.sqft)       : null,
-      beds:              form.beds       ? Number(form.beds)       : null,
-      baths:             form.baths      ? Number(form.baths)      : null,
-      garage:            form.garage != null ? Number(form.garage) : 0,
-      linked_contact_id: form.linked_contact_id || null,
-      assigned_agent_id: form.assigned_agent_id || activeAgent?.id || null,
+      id:                   resolvedId,
+      list_price:           form.list_price ? Number(form.list_price) : null,
+      sqft:                 form.sqft       ? Number(form.sqft)       : null,
+      beds:                 form.beds       ? Number(form.beds)       : null,
+      baths:                form.baths      ? Number(form.baths)      : null,
+      garage:               form.garage != null ? Number(form.garage) : 0,
+      linked_contact_id:    form.linked_contact_id || null,
+      assigned_agent_id:    form.assigned_agent_id || activeAgent?.id || null,
+      listing_expiry_date:  form.listing_expiry_date || null,
+      price_history:        updatedHistory,
+      comps:                form.comps || [],
     }
     let error, data
     if (property?.id) {
@@ -489,8 +916,37 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
 
   const commercial = isCommercial(form.type)
 
+  const isExisting = !!property?.id
+
   return (
     <Drawer open={open} onClose={onClose} title={property?.id ? 'Edit Property' : 'Add Property'} width={520}>
+      {/* Tab bar — only for existing properties */}
+      {isExisting && (
+        <div className="drawer-tabs">
+          {[['details','Details'],['history','Price History'],['showings','Showings'],['marketing','Marketing'],['comps','Comps']].map(([id, label]) => (
+            <button key={id} className={`drawer-tab${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Non-details tabs */}
+      {tab === 'history'   && isExisting && <PriceHistoryTab property={{ ...property, price_history: form.price_history }} />}
+      {tab === 'showings'  && isExisting && <ShowingsTab property={property} />}
+      {tab === 'marketing' && isExisting && <MarketingChecklistTab property={property} />}
+      {tab === 'comps'     && isExisting && (
+        <CompsTab
+          property={{ ...property, comps: form.comps, list_price: form.list_price ? Number(form.list_price) : property.list_price }}
+          onUpdateComps={(newComps) => {
+            set('comps', newComps)
+            if (onSave) onSave({ ...property, comps: newComps })
+          }}
+        />
+      )}
+
+      {/* Details tab (also shown for new properties) */}
+      {(tab === 'details' || !isExisting) && (<>
       <div className="drawer__body">
         {/* Photos */}
         <div className="form-group">
@@ -566,10 +1022,16 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
           </div>
         </div>
 
-        {/* Price */}
-        <div className="form-group">
-          <label className="form-label">{commercial ? 'Asking Price / Value' : 'List Price'}</label>
-          <input className="form-control" type="number" value={form.list_price||''} onChange={e=>set('list_price',e.target.value)} placeholder="0" />
+        {/* Price + Expiry */}
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">{commercial ? 'Asking Price / Value' : 'List Price'}</label>
+            <input className="form-control" type="number" value={form.list_price||''} onChange={e=>set('list_price',e.target.value)} placeholder="0" />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Listing Expiry Date</label>
+            <input className="form-control" type="date" value={form.listing_expiry_date||''} onChange={e=>set('listing_expiry_date',e.target.value)} />
+          </div>
         </div>
 
         {/* Dynamic fields based on type */}
@@ -608,6 +1070,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
         <PossibleBuyers form={form} contacts={contacts} />
       </div>
       <div className="drawer__foot">
+
         {property?.id && (
           <div style={{ display:'flex', gap:6, marginRight:'auto' }}>
             <button
@@ -635,6 +1098,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
         <button className="btn btn--primary" onClick={save} disabled={saving}>{saving?'Saving…':'Save Property'}</button>
       </div>
+      </>)}
     </Drawer>
   )
 }
