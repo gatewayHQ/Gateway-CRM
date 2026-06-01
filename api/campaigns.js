@@ -337,6 +337,10 @@ export default async function handler(req, res) {
       const patch = {}
       for (const k of ALLOWED) if (k in req.body) patch[k] = req.body[k]
       if (Object.keys(patch).length === 0) return json(res, 400, { error: 'no updatable fields' })
+      // Coerce empty-string UUID fields to null (Supabase rejects "" as a UUID value)
+      for (const k of ['agent_id', 'property_id']) {
+        if (k in patch && !patch[k]) patch[k] = null
+      }
 
       const { data, error } = await db().from('mailings').update(patch).eq('id', id).select().single()
       if (error) throw error

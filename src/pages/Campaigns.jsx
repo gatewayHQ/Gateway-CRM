@@ -284,7 +284,7 @@ function MailingForm({ initial, agents, properties, onSave, onCancel, saving, in
     }
     if (Array.isArray(cfg.highlights)) cfg.highlights = cfg.highlights.filter(h => (h.label || '').trim() && (h.value || '').trim()).slice(0, 4)
     if (Array.isArray(cfg.features))   cfg.features   = cfg.features.map(f => (f || '').trim()).filter(Boolean)
-    onSave({ ...form, landing_config: cfg })
+    onSave({ ...form, landing_config: cfg, agent_id: form.agent_id || null, property_id: form.property_id || null })
   }
 
   return (
