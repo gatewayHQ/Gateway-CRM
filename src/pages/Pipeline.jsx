@@ -1463,7 +1463,7 @@ function daysOnMarket(dateStr) {
   return Math.max(0, Math.floor((Date.now() - new Date(dateStr)) / 86_400_000))
 }
 
-function ListingCard({ property, agent, deals = [], onClick }) {
+function ListingCard({ property, agent, deals = [], onClick, ...dragProps }) {
   const dom         = daysOnMarket(property.created_at)
   const isRes       = ['residential','rental'].includes(property.type)
   const statusColor = LISTING_STATUS_COLORS[property.status] || '#9ca3af'
@@ -1487,7 +1487,7 @@ function ListingCard({ property, agent, deals = [], onClick }) {
   const lastReduction = priceHistory.length > 0 ? priceHistory[priceHistory.length - 1] : null
 
   return (
-    <div className="deal-card" style={{ cursor: onClick ? 'pointer' : 'default' }} onClick={onClick}>
+    <div className="deal-card" style={{ cursor: 'grab' }} {...dragProps} onClick={onClick}>
       {expiryAlert && (
         <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:5, fontSize:10, fontWeight:700, color: daysToExpiry === 0 ? '#dc2626' : '#d97706' }}>
           <span>⚠</span>
@@ -1536,15 +1536,126 @@ function ListingCard({ property, agent, deals = [], onClick }) {
   )
 }
 
+/**
+ * ListingQuickEditModal — click a listing card to change status or view quick stats.
+ * Drag-and-drop is the primary mechanism; this modal is the fallback / detail view.
+ */
+function ListingQuickEditModal({ property, onClose, onStatusChange }) {
+  const [status,  setStatus]  = useState(property?.status || 'active')
+  const [saving,  setSaving]  = useState(false)
+
+  const dom = property?.created_at
+    ? Math.max(0, Math.floor((Date.now() - new Date(property.created_at)) / 86_400_000))
+    : null
+
+  const handleStatus = async (s) => {
+    if (s === status || saving) return
+    setSaving(true)
+    setStatus(s)
+    await onStatusChange(s)
+    setSaving(false)
+  }
+
+  return (
+    <Modal open={true} onClose={onClose} width={460}>
+      <div className="modal__head">
+        <div>
+          <div className="eyebrow-label">Listing</div>
+          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:18 }}>{property.address}</h3>
+          {(property.city || property.state) && (
+            <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:2 }}>
+              {[property.city, property.state].filter(Boolean).join(', ')}
+            </div>
+          )}
+        </div>
+        <button className="drawer__close" onClick={onClose}><Icon name="x" size={18} /></button>
+      </div>
+
+      <div className="modal__body">
+        {/* Status picker */}
+        <div className="form-group">
+          <label className="form-label">Listing Status</label>
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginTop:4 }}>
+            {LISTING_STATUS_ORDER.map(s => {
+              const active = status === s
+              const color  = LISTING_STATUS_COLORS[s]
+              return (
+                <button key={s} type="button" disabled={saving} onClick={() => handleStatus(s)}
+                  style={{
+                    padding:'7px 14px', border:`2px solid ${active ? color : 'var(--gw-border)'}`,
+                    borderRadius:'var(--radius)', background: active ? color + '1a' : '#fff',
+                    color: active ? color : 'var(--gw-mist)', fontWeight: active ? 700 : 400,
+                    fontSize:13, cursor:'pointer', transition:'all 150ms',
+                    display:'flex', alignItems:'center', gap:5,
+                  }}>
+                  <span style={{ width:7, height:7, borderRadius:'50%', background:color, flexShrink:0 }} />
+                  {LISTING_STATUS_LABELS[s]}
+                </button>
+              )
+            })}
+          </div>
+          {saving && <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>Saving…</div>}
+        </div>
+
+        {/* Quick stats */}
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(118px,1fr))', gap:10, marginTop:4 }}>
+          {property.list_price > 0 && (
+            <div style={lqStatCell}>
+              <div style={lqStatLbl}>List Price</div>
+              <div style={lqStatVal}>{formatCurrency(property.list_price)}</div>
+            </div>
+          )}
+          {(property.beds > 0 || property.baths > 0) && (
+            <div style={lqStatCell}>
+              <div style={lqStatLbl}>Bed / Bath</div>
+              <div style={lqStatVal}>{property.beds || '—'} / {property.baths || '—'}</div>
+            </div>
+          )}
+          {property.sqft > 0 && (
+            <div style={lqStatCell}>
+              <div style={lqStatLbl}>Sq Ft</div>
+              <div style={lqStatVal}>{Number(property.sqft).toLocaleString()}</div>
+            </div>
+          )}
+          {dom !== null && (
+            <div style={lqStatCell}>
+              <div style={lqStatLbl}>Days on Market</div>
+              <div style={{ ...lqStatVal, color: dom > 30 ? '#dc2626' : 'var(--gw-ink)' }}>{dom}d</div>
+            </div>
+          )}
+          {property.mls_number && (
+            <div style={lqStatCell}>
+              <div style={lqStatLbl}>MLS#</div>
+              <div style={lqStatVal}>{property.mls_number}</div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="modal__foot">
+        <button className="btn btn--secondary" onClick={onClose}>Close</button>
+      </div>
+    </Modal>
+  )
+}
+
+const lqStatCell = { background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:'10px 12px' }
+const lqStatLbl  = { fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.06em', color:'var(--gw-mist)', marginBottom:2 }
+const lqStatVal  = { fontSize:15, fontWeight:700, color:'var(--gw-ink)' }
+
 export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
   const [drawer, setDrawer] = useState(false)
   const [editing, setEditing] = useState(null)
   const [defaultStage, setDefaultStage] = useState('lead')
-  const [pipelineTab, setPipelineTab] = useState('deals')
   const [confirm, setConfirm] = useState(null)
   const [dragging, setDragging] = useState(null)
   const [dragOver, setDragOver] = useState(null)
   const [agentFilter, setAgentFilter] = useState('all')
+
+  // Listings-specific state
+  const [listingModal,     setListingModal]     = useState(null)
+  const [draggingListing,  setDraggingListing]  = useState(null)
+  const [dragOverListing,  setDragOverListing]  = useState(null)
 
   const deals      = db.deals      || []
   const agents     = db.agents     || []
@@ -1647,55 +1758,172 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     }
   }, [setDb, deals])
 
+  const moveListingStatus = useCallback(async (propertyId, newStatus) => {
+    await supabase.from('properties').update({ status: newStatus }).eq('id', propertyId)
+    setDb(p => ({
+      ...p,
+      properties: p.properties.map(prop =>
+        prop.id === propertyId ? { ...prop, status: newStatus } : prop
+      ),
+    }))
+    pushToast(`Moved to ${LISTING_STATUS_LABELS[newStatus]}`)
+  }, [setDb])
+
   return (
-    <div className="page-content" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-      <div className="page-header">
-        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-          <div style={{ display:'flex', alignItems:'center', gap:12 }}>
-            <div className="page-title">Pipeline{isAdmin ? ' — Admin View' : ''}</div>
-            {/* Tab toggle */}
-            <div style={{ display:'flex', background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:3, gap:2 }}>
-              {[['deals','Deals'],['listings','Listings']].map(([id, label]) => (
-                <button key={id} onClick={() => setPipelineTab(id)} style={{
-                  padding:'5px 14px', border:'none', borderRadius:'var(--radius)', cursor:'pointer',
-                  fontFamily:'var(--font-body)', fontSize:12, fontWeight:600,
-                  background: pipelineTab === id ? 'var(--gw-slate)' : 'transparent',
-                  color: pipelineTab === id ? '#fff' : 'var(--gw-mist)',
-                  transition:'all 150ms ease',
-                }}>{label}</button>
-              ))}
-            </div>
+    <div className="page-content" style={{ overflowY:'auto', overflowX:'hidden', display:'flex', flexDirection:'column' }}>
+
+      {/* ── Page header ──────────────────────────────────────────── */}
+      <div className="page-header" style={{ flexShrink:0 }}>
+        <div style={{ display:'flex', flexDirection:'column', gap:2 }}>
+          <div className="page-title">Pipeline{isAdmin ? ' — Admin View' : ''}</div>
+          <div className="page-sub">
+            {visibleListings.length} listing{visibleListings.length !== 1 ? 's' : ''} · {formatCurrency(totalListingValue)} listed
+            &nbsp;&nbsp;·&nbsp;&nbsp;
+            {visibleDeals.length} deal{visibleDeals.length !== 1 ? 's' : ''} · {formatCurrency(totalValue)} in pipeline
           </div>
-          {pipelineTab === 'deals'
-            ? <div className="page-sub">{visibleDeals.length} deal{visibleDeals.length !== 1 ? 's' : ''} · {formatCurrency(totalValue)} total value</div>
-            : <div className="page-sub">{visibleListings.length} listing{visibleListings.length !== 1 ? 's' : ''} · {formatCurrency(totalListingValue)} total listed</div>
-          }
         </div>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
           {isAdmin && (
-            <select
-              value={agentFilter}
-              onChange={e => setAgentFilter(e.target.value)}
-              className="form-control"
-              style={{ fontSize:13, minWidth:160 }}
-            >
+            <select value={agentFilter} onChange={e => setAgentFilter(e.target.value)}
+              className="form-control" style={{ fontSize:13, minWidth:160 }}>
               <option value="all">All Agents</option>
               {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
           )}
-          {!isAdmin && pipelineTab === 'deals' && (
-            <button className="btn btn--primary" onClick={() => { setEditing(null); setDefaultStage('lead'); setDrawer(true) }}>
+          {!isAdmin && (
+            <button className="btn btn--primary"
+              onClick={() => { setEditing(null); setDefaultStage('lead'); setDrawer(true) }}>
               <Icon name="plus" size={14} /> Add Deal
             </button>
           )}
         </div>
       </div>
 
-      {pipelineTab === 'deals' && (
-        deals.length === 0 ? (
-          <EmptyState icon="pipeline" title="No deals yet" message="Add your first deal to start tracking your pipeline." action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Deal</button>} />
+      {/* ── Listings board ───────────────────────────────────────── */}
+      <section style={{ flexShrink:0 }} aria-label="Listings">
+        {/* Section sub-header */}
+        <div style={{
+          display:'flex', alignItems:'center', justifyContent:'space-between',
+          padding:'10px 24px 8px', borderBottom:'1px solid var(--gw-border)',
+          background:'var(--gw-bone)',
+        }}>
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            <span style={{ fontSize:11, fontWeight:800, textTransform:'uppercase', letterSpacing:'0.09em', color:'var(--gw-slate)' }}>
+              Listings
+            </span>
+            <span style={{ fontSize:11, color:'var(--gw-mist)', fontWeight:400 }}>
+              {visibleListings.length} {visibleListings.length !== 1 ? 'properties' : 'property'}
+              {totalListingValue > 0 && <> · {formatCurrency(totalListingValue)}</>}
+            </span>
+          </div>
+          <span style={{ fontSize:10, color:'var(--gw-mist)' }}>Drag cards between columns to change status · Click to edit</span>
+        </div>
+
+        {visibleListings.length === 0 ? (
+          <div style={{ padding:'32px 24px' }}>
+            <EmptyState icon="properties" title="No listings yet"
+              message="Add properties in the Properties page and they'll appear here grouped by status." />
+          </div>
         ) : (
-          <div className="kanban-board">
+          /* Horizontal scroll wrapper keeps the kanban board from overflowing the page */
+          <div style={{ overflowX:'auto', overflowY:'visible' }}>
+            <div className="kanban-board" style={{ minWidth:`${LISTING_STATUS_ORDER.length * 248}px`, flex:'none', padding:'12px 16px' }}>
+              {LISTING_STATUS_ORDER.map(status => (
+                <div key={status} className="kanban-col">
+                  {/* Column header */}
+                  <div className="kanban-col__head">
+                    <div>
+                      <div className="kanban-col__label" style={{ display:'flex', alignItems:'center', gap:6 }}>
+                        <span style={{ width:8, height:8, borderRadius:'50%', background:LISTING_STATUS_COLORS[status], display:'inline-block', flexShrink:0 }} />
+                        {LISTING_STATUS_LABELS[status]}
+                      </div>
+                      {listingTotals[status] > 0 && (
+                        <div style={{ fontSize:10, color:'var(--gw-mist)', marginTop:1 }}>{formatCurrency(listingTotals[status])}</div>
+                      )}
+                    </div>
+                    <span className="kanban-col__count">{listingGroups[status].length}</span>
+                  </div>
+
+                  {/* Droppable column body */}
+                  <div
+                    className={`kanban-col__body${dragOverListing === status ? ' drag-over' : ''}`}
+                    style={{ maxHeight:288, overflowY:'auto' }}
+                    onDragOver={e => { e.preventDefault(); setDragOverListing(status) }}
+                    onDragLeave={e => {
+                      // Only clear when leaving the column — not when crossing child boundaries
+                      if (!e.currentTarget.contains(e.relatedTarget)) setDragOverListing(null)
+                    }}
+                    onDrop={e => {
+                      e.preventDefault()
+                      if (draggingListing) {
+                        const prop = properties.find(x => x.id === draggingListing)
+                        if (prop?.status !== status) moveListingStatus(draggingListing, status)
+                      }
+                      setDragOverListing(null)
+                      setDraggingListing(null)
+                    }}
+                  >
+                    {listingGroups[status].length === 0 ? (
+                      <div style={{ fontSize:12, color:'var(--gw-border)', textAlign:'center', padding:'20px 0', fontStyle:'italic', userSelect:'none' }}>
+                        Drop here
+                      </div>
+                    ) : (
+                      listingGroups[status].map(property => (
+                        <ListingCard
+                          key={property.id}
+                          property={property}
+                          agent={agentMap[property.assigned_agent_id]}
+                          deals={deals}
+                          draggable
+                          onDragStart={() => setDraggingListing(property.id)}
+                          onDragEnd={() => { setDraggingListing(null); setDragOverListing(null) }}
+                          onClick={() => setListingModal(property)}
+                        />
+                      ))
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* ── Section divider ──────────────────────────────────────── */}
+      <div role="separator" style={{ height:3, background:'var(--gw-border)', flexShrink:0 }} />
+
+      {/* ── Deals board ──────────────────────────────────────────── */}
+      <section style={{ flex:1, minHeight:0, display:'flex', flexDirection:'column' }} aria-label="Deals">
+        {/* Section sub-header */}
+        <div style={{
+          display:'flex', alignItems:'center', justifyContent:'space-between',
+          padding:'10px 24px 8px', borderBottom:'1px solid var(--gw-border)',
+          background:'var(--gw-bone)', flexShrink:0,
+        }}>
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            <span style={{ fontSize:11, fontWeight:800, textTransform:'uppercase', letterSpacing:'0.09em', color:'var(--gw-slate)' }}>
+              Deals
+            </span>
+            <span style={{ fontSize:11, color:'var(--gw-mist)', fontWeight:400 }}>
+              {visibleDeals.length} deal{visibleDeals.length !== 1 ? 's' : ''}
+              {totalValue > 0 && <> · {formatCurrency(totalValue)}</>}
+            </span>
+          </div>
+          {!isAdmin && (
+            <button className="btn btn--ghost btn--sm" style={{ fontSize:11 }}
+              onClick={() => { setEditing(null); setDefaultStage('lead'); setDrawer(true) }}>
+              <Icon name="plus" size={12} /> Add Deal
+            </button>
+          )}
+        </div>
+
+        {deals.length === 0 ? (
+          <div style={{ padding:'32px 24px', flex:1 }}>
+            <EmptyState icon="pipeline" title="No deals yet" message="Add your first deal to start tracking your pipeline."
+              action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Deal</button>} />
+          </div>
+        ) : (
+          <div className="kanban-board" style={{ flex:1 }}>
             {STAGE_ORDER.map(stage => (
               <div key={stage} className="kanban-col">
                 <div className="kanban-col__head">
@@ -1708,8 +1936,8 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                 <div
                   className={`kanban-col__body${dragOver === stage ? ' drag-over' : ''}`}
                   onDragOver={e => { e.preventDefault(); setDragOver(stage) }}
-                  onDragLeave={() => setDragOver(null)}
-                  onDrop={e => { e.preventDefault(); if (dragging && dragging !== stage) moveStage(dragging, stage); setDragOver(null); setDragging(null) }}
+                  onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDragOver(null) }}
+                  onDrop={e => { e.preventDefault(); if (dragging) { const d = deals.find(x => x.id === dragging); if (d?.stage !== stage) moveStage(dragging, stage) }; setDragOver(null); setDragging(null) }}
                 >
                   {stageGroups[stage].map(deal => {
                     const contact    = contactMap[deal.contact_id]
@@ -1726,7 +1954,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                     const cardBg     = urgency === 'urgent' ? '#fef2f2' : urgency === 'warning' ? '#fffbeb' : undefined
                     return (
                       <div key={deal.id} className={`deal-card${dragging === deal.id ? ' dragging' : ''}`}
-                        style={{ border: cardBorder, background: cardBg }}
+                        style={{ border:cardBorder, background:cardBg }}
                         draggable
                         onDragStart={() => setDragging(deal.id)}
                         onDragEnd={() => { setDragging(null); setDragOver(null) }}
@@ -1755,7 +1983,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                             {deal.probability > 0 && <span style={{ fontSize:10, color:'var(--gw-mist)' }}>{deal.probability}%</span>}
                             <div style={{ display:'flex', alignItems:'center' }}>
                               {allAgents.slice(0, 3).map((a, i) => (
-                                <div key={a.id} style={{ marginLeft: i > 0 ? -5 : 0, zIndex: 10 - i, position: 'relative' }}>
+                                <div key={a.id} style={{ marginLeft: i > 0 ? -5 : 0, zIndex: 10 - i, position:'relative' }}>
                                   <Avatar agent={a} size={20} />
                                 </div>
                               ))}
@@ -1767,7 +1995,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                     )
                   })}
                   {!isAdmin && (
-                    <button className="btn btn--ghost" style={{ width:'100%', justifyContent:'center', fontSize:12, marginTop:'auto', borderStyle:'dashed', border:'1px dashed var(--gw-border)' }}
+                    <button className="btn btn--ghost" style={{ width:'100%', justifyContent:'center', fontSize:12, marginTop:'auto', border:'1px dashed var(--gw-border)' }}
                       onClick={() => { setEditing(null); setDefaultStage(stage); setDrawer(true) }}>
                       <Icon name="plus" size={13} /> Add deal
                     </button>
@@ -1776,46 +2004,19 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
               </div>
             ))}
           </div>
-        )
-      )}
+        )}
+      </section>
 
-      {pipelineTab === 'listings' && (
-        visibleListings.length === 0 ? (
-          <EmptyState icon="properties" title="No listings yet" message="Add properties in the Properties page and they'll appear here grouped by status." />
-        ) : (
-          <div className="kanban-board">
-            {LISTING_STATUS_ORDER.map(status => (
-              <div key={status} className="kanban-col">
-                <div className="kanban-col__head">
-                  <div>
-                    <div className="kanban-col__label" style={{ display:'flex', alignItems:'center', gap:6 }}>
-                      <span style={{ width:8, height:8, borderRadius:'50%', background: LISTING_STATUS_COLORS[status], flexShrink:0, display:'inline-block' }} />
-                      {LISTING_STATUS_LABELS[status]}
-                    </div>
-                    {listingTotals[status] > 0 && (
-                      <div style={{ fontSize:10, color:'var(--gw-mist)', marginTop:1 }}>{formatCurrency(listingTotals[status])}</div>
-                    )}
-                  </div>
-                  <span className="kanban-col__count">{listingGroups[status].length}</span>
-                </div>
-                <div className="kanban-col__body">
-                  {listingGroups[status].length === 0 ? (
-                    <div style={{ fontSize:12, color:'var(--gw-border)', textAlign:'center', padding:'20px 0', fontStyle:'italic' }}>No listings</div>
-                  ) : (
-                    listingGroups[status].map(property => (
-                      <ListingCard
-                        key={property.id}
-                        property={property}
-                        agent={agentMap[property.assigned_agent_id]}
-                        deals={deals}
-                      />
-                    ))
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )
+      {/* ── Listing quick-edit modal ─────────────────────────────── */}
+      {listingModal && (
+        <ListingQuickEditModal
+          property={listingModal}
+          onClose={() => setListingModal(null)}
+          onStatusChange={async (newStatus) => {
+            await moveListingStatus(listingModal.id, newStatus)
+            setListingModal(p => ({ ...p, status: newStatus }))
+          }}
+        />
       )}
 
       <DealDrawer open={drawer} onClose={() => setDrawer(false)} deal={editing ? editing : { stage: defaultStage }} agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} onSave={reload} />
