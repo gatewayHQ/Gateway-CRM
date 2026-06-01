@@ -16,6 +16,7 @@ create table if not exists agents (
   email      text unique not null,
   color      text default '#2d3561',
   team_id    uuid,                         -- future: multi-team support
+  specialty  text check (specialty in ('residential', 'commercial')),
   created_at timestamptz default now()
 );
 

@@ -1454,10 +1454,93 @@ const AUTO_TASKS = {
   closed:           { title: d => `Request referral — ${d.title}`,            type: 'follow-up', priority: 'low',    daysOut: 7 },
 }
 
+const LISTING_STATUS_ORDER  = ['active','pending','off-market','sold','leased']
+const LISTING_STATUS_LABELS = { active:'Active', pending:'Pending', 'off-market':'Off Market', sold:'Sold', leased:'Leased' }
+const LISTING_STATUS_COLORS = { active:'#10b981', pending:'#f59e0b', 'off-market':'#9ca3af', sold:'#3b82f6', leased:'#8b5cf6' }
+
+function daysOnMarket(dateStr) {
+  if (!dateStr) return null
+  return Math.max(0, Math.floor((Date.now() - new Date(dateStr)) / 86_400_000))
+}
+
+function ListingCard({ property, agent, deals = [], onClick }) {
+  const dom         = daysOnMarket(property.created_at)
+  const isRes       = ['residential','rental'].includes(property.type)
+  const statusColor = LISTING_STATUS_COLORS[property.status] || '#9ca3af'
+  const domAlert    = dom !== null && dom > 30 && property.status === 'active'
+
+  // Expiry alert
+  let daysToExpiry = null
+  let expiryAlert  = false
+  if (property.listing_expiry_date && property.status === 'active') {
+    daysToExpiry = Math.ceil((new Date(property.listing_expiry_date) - Date.now()) / 86_400_000)
+    expiryAlert  = daysToExpiry >= 0 && daysToExpiry <= 14
+  }
+
+  // Offer / under-contract badge from linked deals
+  const linkedDeals    = deals.filter(d => d.property_id === property.id)
+  const underContract  = linkedDeals.some(d => d.stage === 'under-contract')
+  const offerCount     = linkedDeals.filter(d => ['offer','under-contract'].includes(d.stage)).length
+
+  // Most recent price reduction
+  const priceHistory  = Array.isArray(property.price_history) ? property.price_history : []
+  const lastReduction = priceHistory.length > 0 ? priceHistory[priceHistory.length - 1] : null
+
+  return (
+    <div className="deal-card" style={{ cursor: onClick ? 'pointer' : 'default' }} onClick={onClick}>
+      {expiryAlert && (
+        <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:5, fontSize:10, fontWeight:700, color: daysToExpiry === 0 ? '#dc2626' : '#d97706' }}>
+          <span>⚠</span>
+          <span>Listing expires {daysToExpiry === 0 ? 'today' : `in ${daysToExpiry}d`}</span>
+        </div>
+      )}
+      <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:6, marginBottom:4 }}>
+        <div style={{ fontSize:12, fontWeight:600, color:'var(--gw-ink)', lineHeight:1.35 }}>{property.address}</div>
+        <span style={{ fontSize:10, fontWeight:700, color: statusColor, whiteSpace:'nowrap', flexShrink:0 }}>
+          {LISTING_STATUS_LABELS[property.status] || property.status}
+        </span>
+      </div>
+      <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:4, flexWrap:'wrap' }}>
+        <Badge variant="neutral" style={{ fontSize:10 }}>{property.type}</Badge>
+        {property.list_price > 0 && (
+          <span style={{ fontSize:12, fontWeight:700, color:'var(--gw-slate)' }}>{formatCurrency(property.list_price)}</span>
+        )}
+        {offerCount > 0 && (
+          <span style={{ fontSize:10, fontWeight:700, padding:'1px 6px', borderRadius:10, background: underContract ? '#dcfce7' : '#fef3c7', color: underContract ? '#16a34a' : '#d97706', whiteSpace:'nowrap' }}>
+            {underContract ? 'Under contract' : `${offerCount} offer${offerCount !== 1 ? 's' : ''}`}
+          </span>
+        )}
+      </div>
+      {isRes && (property.beds || property.baths) && (
+        <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:3 }}>
+          {property.beds ? `${property.beds} bd` : ''}{property.beds && property.baths ? ' · ' : ''}{property.baths ? `${property.baths} ba` : ''}
+          {property.sqft ? ` · ${Number(property.sqft).toLocaleString()} sqft` : ''}
+        </div>
+      )}
+      {lastReduction && (
+        <div style={{ fontSize:10, color:'#dc2626', marginBottom:3, fontWeight:600 }}>
+          ↓ {formatCurrency(Math.abs(Number(lastReduction.previous_price) - Number(lastReduction.price)))}
+          {' · '}{Math.floor((Date.now() - new Date(lastReduction.date)) / 86_400_000)}d ago
+        </div>
+      )}
+      <div className="deal-card__meta" style={{ marginTop:4 }}>
+        <div style={{ fontSize:10, color: domAlert ? '#dc2626' : 'var(--gw-mist)', fontWeight: domAlert ? 700 : 400 }}>
+          {property.mls_number ? `MLS# ${property.mls_number}` : ''}
+          {property.mls_number && dom !== null ? ' · ' : ''}
+          {dom !== null ? `${dom}d on market` : ''}
+          {domAlert ? ' ⚠' : ''}
+        </div>
+        {agent && <Avatar agent={agent} size={20} />}
+      </div>
+    </div>
+  )
+}
+
 export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
   const [drawer, setDrawer] = useState(false)
   const [editing, setEditing] = useState(null)
   const [defaultStage, setDefaultStage] = useState('lead')
+  const [pipelineTab, setPipelineTab] = useState('deals')
   const [confirm, setConfirm] = useState(null)
   const [dragging, setDragging] = useState(null)
   const [dragOver, setDragOver] = useState(null)
@@ -1493,6 +1576,31 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     })
     return { stageGroups: groups, stageTotals: totals, totalValue: total }
   }, [visibleDeals])
+
+  // Listings board — filter by agent if needed, group by property status
+  const visibleListings = useMemo(() => {
+    const all = properties
+    if (!isAdmin || agentFilter === 'all') {
+      if (!isAdmin && activeAgent) return all.filter(p => p.assigned_agent_id === activeAgent.id)
+      return all
+    }
+    return all.filter(p => p.assigned_agent_id === agentFilter)
+  }, [properties, isAdmin, agentFilter, activeAgent])
+
+  const { listingGroups, listingTotals, totalListingValue } = useMemo(() => {
+    const groups = Object.fromEntries(LISTING_STATUS_ORDER.map(s => [s, []]))
+    const totals = Object.fromEntries(LISTING_STATUS_ORDER.map(s => [s, 0]))
+    let total = 0
+    visibleListings.forEach(p => {
+      const key = p.status || 'active'
+      if (groups[key]) {
+        groups[key].push(p)
+        totals[key] += p.list_price || 0
+        total += p.list_price || 0
+      }
+    })
+    return { listingGroups: groups, listingTotals: totals, totalListingValue: total }
+  }, [visibleListings])
 
   const reload = useCallback(async () => {
     let q = supabase.from('deals').select('*').order('created_at', { ascending: false })
@@ -1542,9 +1650,26 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   return (
     <div className="page-content" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
       <div className="page-header">
-        <div>
-          <div className="page-title">Pipeline{isAdmin ? ' — Admin View' : ''}</div>
-          <div className="page-sub">{visibleDeals.length} deal{visibleDeals.length !== 1 ? 's' : ''} · {formatCurrency(totalValue)} total value</div>
+        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+            <div className="page-title">Pipeline{isAdmin ? ' — Admin View' : ''}</div>
+            {/* Tab toggle */}
+            <div style={{ display:'flex', background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:3, gap:2 }}>
+              {[['deals','Deals'],['listings','Listings']].map(([id, label]) => (
+                <button key={id} onClick={() => setPipelineTab(id)} style={{
+                  padding:'5px 14px', border:'none', borderRadius:'var(--radius)', cursor:'pointer',
+                  fontFamily:'var(--font-body)', fontSize:12, fontWeight:600,
+                  background: pipelineTab === id ? 'var(--gw-slate)' : 'transparent',
+                  color: pipelineTab === id ? '#fff' : 'var(--gw-mist)',
+                  transition:'all 150ms ease',
+                }}>{label}</button>
+              ))}
+            </div>
+          </div>
+          {pipelineTab === 'deals'
+            ? <div className="page-sub">{visibleDeals.length} deal{visibleDeals.length !== 1 ? 's' : ''} · {formatCurrency(totalValue)} total value</div>
+            : <div className="page-sub">{visibleListings.length} listing{visibleListings.length !== 1 ? 's' : ''} · {formatCurrency(totalListingValue)} total listed</div>
+          }
         </div>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
           {isAdmin && (
@@ -1558,7 +1683,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
               {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
           )}
-          {!isAdmin && (
+          {!isAdmin && pipelineTab === 'deals' && (
             <button className="btn btn--primary" onClick={() => { setEditing(null); setDefaultStage('lead'); setDrawer(true) }}>
               <Icon name="plus" size={14} /> Add Deal
             </button>
@@ -1566,90 +1691,131 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
         </div>
       </div>
 
-      {deals.length === 0 ? (
-        <EmptyState icon="pipeline" title="No deals yet" message="Add your first deal to start tracking your pipeline." action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Deal</button>} />
-      ) : (
-        <div className="kanban-board">
-          {STAGE_ORDER.map(stage => (
-            <div key={stage} className="kanban-col">
-              <div className="kanban-col__head">
-                <div>
-                  <div className="kanban-col__label">{STAGE_LABELS[stage]}</div>
-                  {stageTotals[stage] > 0 && <div style={{ fontSize:10, color:'var(--gw-mist)', marginTop:1 }}>{formatCurrency(stageTotals[stage])}</div>}
+      {pipelineTab === 'deals' && (
+        deals.length === 0 ? (
+          <EmptyState icon="pipeline" title="No deals yet" message="Add your first deal to start tracking your pipeline." action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Deal</button>} />
+        ) : (
+          <div className="kanban-board">
+            {STAGE_ORDER.map(stage => (
+              <div key={stage} className="kanban-col">
+                <div className="kanban-col__head">
+                  <div>
+                    <div className="kanban-col__label">{STAGE_LABELS[stage]}</div>
+                    {stageTotals[stage] > 0 && <div style={{ fontSize:10, color:'var(--gw-mist)', marginTop:1 }}>{formatCurrency(stageTotals[stage])}</div>}
+                  </div>
+                  <span className="kanban-col__count">{stageGroups[stage].length}</span>
                 </div>
-                <span className="kanban-col__count">{stageGroups[stage].length}</span>
-              </div>
-              <div
-                className={`kanban-col__body${dragOver === stage ? ' drag-over' : ''}`}
-                onDragOver={e => { e.preventDefault(); setDragOver(stage) }}
-                onDragLeave={() => setDragOver(null)}
-                onDrop={e => { e.preventDefault(); if (dragging && dragging !== stage) moveStage(dragging, stage); setDragOver(null); setDragging(null) }}
-              >
-                {stageGroups[stage].map(deal => {
-                  const contact    = contactMap[deal.contact_id]
-                  const agent      = agentMap[deal.agent_id]
-                  const dealProp   = deal.property_id ? propertyMap[deal.property_id] : null
-                  const coAgIds    = dealProp?.details?.co_agent_ids || []
-                  const allAgents  = [deal.agent_id, ...coAgIds].filter(Boolean)
-                    .map(id => agentMap[id]).filter(Boolean)
-                    .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
-                  const overdue    = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
-                  const urgency    = getKeyDateUrgency(deal)
-                  const nearestKD  = urgency ? getNearestKeyDate(deal) : null
-                  const cardBorder = urgency === 'urgent' ? '2px solid #ef4444' : urgency === 'warning' ? '2px solid #f59e0b' : undefined
-                  const cardBg     = urgency === 'urgent' ? '#fef2f2' : urgency === 'warning' ? '#fffbeb' : undefined
-                  return (
-                    <div key={deal.id} className={`deal-card${dragging === deal.id ? ' dragging' : ''}`}
-                      style={{ border: cardBorder, background: cardBg }}
-                      draggable
-                      onDragStart={() => setDragging(deal.id)}
-                      onDragEnd={() => { setDragging(null); setDragOver(null) }}
-                      onClick={() => { setEditing(deal); setDrawer(true) }}
-                    >
-                      {urgency && nearestKD && (
-                        <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:5, fontSize:10, fontWeight:700, color: urgency === 'urgent' ? '#dc2626' : '#d97706' }}>
-                          <span style={{ fontSize:11 }}>⚠</span>
-                          <span>{nearestKD.type}: {nearestKD.daysUntil === 0 ? 'Today' : nearestKD.daysUntil === 1 ? 'Tomorrow' : `${nearestKD.daysUntil} days`}</span>
-                        </div>
-                      )}
-                      <div className="deal-card__title">{deal.title}</div>
-                      {isAdmin && agent && (
-                        <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:2 }}>
-                          <Avatar agent={agent} size={14} />
-                          <span style={{ fontSize:10, color:'var(--gw-mist)' }}>{agent.name}</span>
-                        </div>
-                      )}
-                      {contact && <div className="deal-card__contact">{contact.first_name} {contact.last_name}</div>}
-                      {deal.value > 0 && <div className="deal-card__value">{formatCurrency(deal.value)}</div>}
-                      <div className="deal-card__meta">
-                        <div style={{ fontSize:11, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)' }}>
-                          {deal.expected_close_date ? formatDate(deal.expected_close_date) : ''}
-                        </div>
-                        <div style={{ display:'flex', alignItems:'center', gap:4 }}>
-                          {deal.probability > 0 && <span style={{ fontSize:10, color:'var(--gw-mist)' }}>{deal.probability}%</span>}
-                          <div style={{ display:'flex', alignItems:'center' }}>
-                            {allAgents.slice(0, 3).map((a, i) => (
-                              <div key={a.id} style={{ marginLeft: i > 0 ? -5 : 0, zIndex: 10 - i, position: 'relative' }}>
-                                <Avatar agent={a} size={20} />
-                              </div>
-                            ))}
+                <div
+                  className={`kanban-col__body${dragOver === stage ? ' drag-over' : ''}`}
+                  onDragOver={e => { e.preventDefault(); setDragOver(stage) }}
+                  onDragLeave={() => setDragOver(null)}
+                  onDrop={e => { e.preventDefault(); if (dragging && dragging !== stage) moveStage(dragging, stage); setDragOver(null); setDragging(null) }}
+                >
+                  {stageGroups[stage].map(deal => {
+                    const contact    = contactMap[deal.contact_id]
+                    const agent      = agentMap[deal.agent_id]
+                    const dealProp   = deal.property_id ? propertyMap[deal.property_id] : null
+                    const coAgIds    = dealProp?.details?.co_agent_ids || []
+                    const allAgents  = [deal.agent_id, ...coAgIds].filter(Boolean)
+                      .map(id => agentMap[id]).filter(Boolean)
+                      .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
+                    const overdue    = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
+                    const urgency    = getKeyDateUrgency(deal)
+                    const nearestKD  = urgency ? getNearestKeyDate(deal) : null
+                    const cardBorder = urgency === 'urgent' ? '2px solid #ef4444' : urgency === 'warning' ? '2px solid #f59e0b' : undefined
+                    const cardBg     = urgency === 'urgent' ? '#fef2f2' : urgency === 'warning' ? '#fffbeb' : undefined
+                    return (
+                      <div key={deal.id} className={`deal-card${dragging === deal.id ? ' dragging' : ''}`}
+                        style={{ border: cardBorder, background: cardBg }}
+                        draggable
+                        onDragStart={() => setDragging(deal.id)}
+                        onDragEnd={() => { setDragging(null); setDragOver(null) }}
+                        onClick={() => { setEditing(deal); setDrawer(true) }}
+                      >
+                        {urgency && nearestKD && (
+                          <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:5, fontSize:10, fontWeight:700, color: urgency === 'urgent' ? '#dc2626' : '#d97706' }}>
+                            <span style={{ fontSize:11 }}>⚠</span>
+                            <span>{nearestKD.type}: {nearestKD.daysUntil === 0 ? 'Today' : nearestKD.daysUntil === 1 ? 'Tomorrow' : `${nearestKD.daysUntil} days`}</span>
                           </div>
-                          {!isAdmin && <button className="btn btn--ghost btn--icon" style={{ padding:2 }} onClick={e=>{e.stopPropagation(); setConfirm(deal.id)}}><Icon name="trash" size={11} /></button>}
+                        )}
+                        <div className="deal-card__title">{deal.title}</div>
+                        {isAdmin && agent && (
+                          <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:2 }}>
+                            <Avatar agent={agent} size={14} />
+                            <span style={{ fontSize:10, color:'var(--gw-mist)' }}>{agent.name}</span>
+                          </div>
+                        )}
+                        {contact && <div className="deal-card__contact">{contact.first_name} {contact.last_name}</div>}
+                        {deal.value > 0 && <div className="deal-card__value">{formatCurrency(deal.value)}</div>}
+                        <div className="deal-card__meta">
+                          <div style={{ fontSize:11, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)' }}>
+                            {deal.expected_close_date ? formatDate(deal.expected_close_date) : ''}
+                          </div>
+                          <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+                            {deal.probability > 0 && <span style={{ fontSize:10, color:'var(--gw-mist)' }}>{deal.probability}%</span>}
+                            <div style={{ display:'flex', alignItems:'center' }}>
+                              {allAgents.slice(0, 3).map((a, i) => (
+                                <div key={a.id} style={{ marginLeft: i > 0 ? -5 : 0, zIndex: 10 - i, position: 'relative' }}>
+                                  <Avatar agent={a} size={20} />
+                                </div>
+                              ))}
+                            </div>
+                            {!isAdmin && <button className="btn btn--ghost btn--icon" style={{ padding:2 }} onClick={e=>{e.stopPropagation(); setConfirm(deal.id)}}><Icon name="trash" size={11} /></button>}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  )
-                })}
-                {!isAdmin && (
-                  <button className="btn btn--ghost" style={{ width:'100%', justifyContent:'center', fontSize:12, marginTop:'auto', borderStyle:'dashed', border:'1px dashed var(--gw-border)' }}
-                    onClick={() => { setEditing(null); setDefaultStage(stage); setDrawer(true) }}>
-                    <Icon name="plus" size={13} /> Add deal
-                  </button>
-                )}
+                    )
+                  })}
+                  {!isAdmin && (
+                    <button className="btn btn--ghost" style={{ width:'100%', justifyContent:'center', fontSize:12, marginTop:'auto', borderStyle:'dashed', border:'1px dashed var(--gw-border)' }}
+                      onClick={() => { setEditing(null); setDefaultStage(stage); setDrawer(true) }}>
+                      <Icon name="plus" size={13} /> Add deal
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )
+      )}
+
+      {pipelineTab === 'listings' && (
+        visibleListings.length === 0 ? (
+          <EmptyState icon="properties" title="No listings yet" message="Add properties in the Properties page and they'll appear here grouped by status." />
+        ) : (
+          <div className="kanban-board">
+            {LISTING_STATUS_ORDER.map(status => (
+              <div key={status} className="kanban-col">
+                <div className="kanban-col__head">
+                  <div>
+                    <div className="kanban-col__label" style={{ display:'flex', alignItems:'center', gap:6 }}>
+                      <span style={{ width:8, height:8, borderRadius:'50%', background: LISTING_STATUS_COLORS[status], flexShrink:0, display:'inline-block' }} />
+                      {LISTING_STATUS_LABELS[status]}
+                    </div>
+                    {listingTotals[status] > 0 && (
+                      <div style={{ fontSize:10, color:'var(--gw-mist)', marginTop:1 }}>{formatCurrency(listingTotals[status])}</div>
+                    )}
+                  </div>
+                  <span className="kanban-col__count">{listingGroups[status].length}</span>
+                </div>
+                <div className="kanban-col__body">
+                  {listingGroups[status].length === 0 ? (
+                    <div style={{ fontSize:12, color:'var(--gw-border)', textAlign:'center', padding:'20px 0', fontStyle:'italic' }}>No listings</div>
+                  ) : (
+                    listingGroups[status].map(property => (
+                      <ListingCard
+                        key={property.id}
+                        property={property}
+                        agent={agentMap[property.assigned_agent_id]}
+                        deals={deals}
+                      />
+                    ))
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )
       )}
 
       <DealDrawer open={drawer} onClose={() => setDrawer(false)} deal={editing ? editing : { stage: defaultStage }} agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} onSave={reload} />
