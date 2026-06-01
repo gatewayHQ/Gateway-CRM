@@ -7,28 +7,73 @@
  *     description, features[], images[{url,caption,price}], cta_text, accent }
  */
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 
-function useMosaicLayout(n) {
-  return useMemo(() => {
-    const L = {
-      1: { cols:1, rows:1, areas:[['a']] },
-      2: { cols:2, rows:1, areas:[['a','b']] },
-      3: { cols:3, rows:2, areas:[['a','a','b'],['a','a','c']] },
-      4: { cols:4, rows:2, areas:[['a','a','b','c'],['a','a','d','b']] },
-      5: { cols:4, rows:2, areas:[['a','a','b','c'],['a','a','d','e']] },
-    }[Math.min(n, 5)]
-    if (!L) return { gridStyle:{}, cells:[] }
-    const unique = [...new Set(L.areas.flat())]
-    return {
-      gridStyle: {
-        gridTemplateColumns:`repeat(${L.cols}, 1fr)`,
-        gridTemplateAreas: L.areas.map(r => `"${r.join(' ')}"`).join(' '),
-      },
-      cells: unique.map(letter => ({ gridArea:letter, minHeight: n===1 ? 320 : n<=2 ? 240 : 160 })),
-    }
-  }, [n])
+/**
+ * PhotoGallery — responsive, accessible image grid for property showcases.
+ *
+ * Why <img> over CSS background-image: real images get alt text (a11y + SEO),
+ * native lazy-loading, and graceful onError handling. The previous grid-area
+ * mosaic relied on cells painting a CSS background at a computed min-height,
+ * which could collapse to zero height and render nothing — that was the
+ * "photos don't show in the gallery" bug.
+ *
+ * Layout: the first photo is featured (spans two columns / 16:9); the rest fill
+ * a uniform 4:3 grid. `aspect-ratio` guarantees every cell has height with no
+ * JS measurement. Fully responsive (1→2→3 columns) and renders any 1–N images.
+ *
+ * Props:
+ *   images  {Array<{url, caption?, units?, price?}>}  required — empty renders nothing
+ *   accent  {string}                                  optional — overlay accent (hex)
+ *   title   {string}                                  optional — section heading
+ *
+ * Usage:
+ *   <PhotoGallery images={galleryImages} accent="#1e2642" />
+ */
+function PhotoGallery({ images, accent = '#1e2642', title = 'Gallery' }) {
+  const valid = (Array.isArray(images) ? images : []).filter(im => im?.url)
+  if (valid.length === 0) return null // empty state: hide the section entirely
+
+  const overlayAccent = accent === '#1e2642' ? '#c9a961' : accent
+
+  return (
+    <section aria-label={title}>
+      <h3 style={{ fontFamily:'Cormorant Garamond, serif', fontSize:20, fontWeight:600,
+                   margin:'0 0 14px', color:'#1e2642' }}>
+        {title}
+      </h3>
+      <div className="lp-gallery">
+        {valid.map((img, i) => {
+          const caption = img.caption || img.units || ''
+          return (
+            <figure
+              key={i}
+              className={`lp-gallery__item${i === 0 && valid.length > 1 ? ' lp-gallery__item--featured' : ''}`}
+            >
+              <img
+                src={img.url}
+                alt={caption || `Property photo ${i + 1}`}
+                loading="lazy"
+                decoding="async"
+                className="lp-gallery__img"
+                // Hide a broken image instead of showing the browser's broken-link glyph
+                onError={(e) => { const f = e.currentTarget.closest('figure'); if (f) f.style.display = 'none' }}
+              />
+              {(caption || img.price) && (
+                <figcaption className="lp-gallery__cap">
+                  {caption && <div style={{ fontSize:12, fontWeight:600 }}>{caption}</div>}
+                  {img.price && (
+                    <div style={{ fontSize:13, fontWeight:700, color: overlayAccent }}>{img.price}</div>
+                  )}
+                </figcaption>
+              )}
+            </figure>
+          )
+        })}
+      </div>
+    </section>
+  )
 }
 
 export default function LandingProperty({ mailingId }) {
@@ -69,14 +114,15 @@ export default function LandingProperty({ mailingId }) {
     .map(v => typeof v === 'string' ? { url:v, caption:'', price:'' } : v)
     .filter(v => v?.url)
 
+  // First image is the hero banner; the rest populate the gallery.
   const galleryImages = images.slice(1)
-  const mosaic = useMosaicLayout(Math.min(galleryImages.length, 5))
+  const isCommercial  = cfg.detail_mode === 'commercial'
 
   const fmtNum   = v => { const n = Number(String(v).replace(/[^0-9.]/g,'')); return isNaN(n) ? String(v) : n.toLocaleString() }
   const fmtPrice = v => { if (!v) return null; const n = Number(String(v).replace(/[^0-9.]/g,'')); return isNaN(n) ? String(v) : '$' + n.toLocaleString() }
   const fmtPct   = v => { if (!v) return null; const s = String(v).trim(); return s.endsWith('%') ? s : s + '%' }
 
-  const details = (cfg.detail_mode === 'commercial' ? [
+  const details = (isCommercial ? [
     cfg.price          && { label:'Price',        value: fmtPrice(cfg.price) },
     cfg.units          && { label:'Units',        value: cfg.units },
     cfg.price_per_unit && { label:'Price / Unit', value: fmtPrice(cfg.price_per_unit) },
@@ -94,6 +140,13 @@ export default function LandingProperty({ mailingId }) {
     cfg.lot_size   && { label:'Lot',          value: fmtNum(cfg.lot_size) + ' sqft' },
     cfg.year_built && { label:'Year Built',   value: cfg.year_built },
   ]).filter(Boolean)
+
+  // The hero stays clean and price-forward. Commercial listings carry up to nine
+  // metrics — cramming them all into the hero banner reads as noise, so we surface
+  // only the price there and let the full figures live in the stat card below.
+  const heroDetails = isCommercial
+    ? details.filter(d => d.label === 'Price')
+    : details
 
   const submit = async (e) => {
     e.preventDefault()
@@ -147,11 +200,11 @@ export default function LandingProperty({ mailingId }) {
                        fontWeight:600, lineHeight:1.08, margin:'0 0 16px' }}>
             {headline}
           </h1>
-          {details.length > 0 && (
-            <div style={{ display:'flex', gap:24, flexWrap:'wrap', fontSize:15, fontWeight:500 }}>
-              {details.map((d, i) => (
+          {heroDetails.length > 0 && (
+            <div style={{ display:'flex', gap:24, flexWrap:'wrap', fontSize:15, fontWeight:500, alignItems:'baseline' }}>
+              {heroDetails.map((d, i) => (
                 <span key={i} style={{ opacity:0.95 }}>
-                  <strong style={{ fontWeight:700 }}>{d.value}</strong>{' '}{d.label}
+                  <strong style={{ fontWeight:700, fontSize: isCommercial ? 22 : 15 }}>{d.value}</strong>{' '}{d.label}
                 </span>
               ))}
             </div>
@@ -219,38 +272,7 @@ export default function LandingProperty({ mailingId }) {
             )}
 
             {/* Gallery */}
-            {galleryImages.length > 0 && (
-              <div>
-                <h3 style={{ fontFamily:'Cormorant Garamond, serif', fontSize:20, fontWeight:600,
-                             margin:'0 0 14px', color:'#1e2642' }}>
-                  Gallery
-                </h3>
-                <div className="prop-gallery" style={{ display:'grid', gap:8, ...mosaic.gridStyle }}>
-                  {galleryImages.slice(0, 5).map((img, i) => (
-                    <div key={i} className="prop-gallery__cell" style={{
-                      ...(mosaic.cells[i] || {}),
-                      backgroundImage:`url(${img.url})`, backgroundSize:'cover', backgroundPosition:'center',
-                      borderRadius:8, overflow:'hidden', position:'relative',
-                    }}>
-                      {(img.caption || img.units || img.price) && (
-                        <div style={{ position:'absolute', bottom:0, left:0, right:0,
-                                      background:'linear-gradient(transparent, rgba(10,12,20,0.6))',
-                                      padding:'18px 10px 8px', color:'#fff' }}>
-                          {(img.caption || img.units) && (
-                            <div style={{ fontSize:11, fontWeight:600 }}>{img.caption || img.units}</div>
-                          )}
-                          {img.price && (
-                            <div style={{ fontSize:13, fontWeight:700, color: accent === '#1e2642' ? '#c9a961' : accent }}>
-                              {img.price}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            <PhotoGallery images={galleryImages} accent={accent} />
           </div>
 
           {/* Right — sticky lead form */}
@@ -336,10 +358,41 @@ export default function LandingProperty({ mailingId }) {
 
       <style>{`
         @media (max-width: 820px) { .prop-grid { grid-template-columns: 1fr !important; } }
-        @media (max-width: 640px) {
-          .prop-gallery { grid-template-columns: 1fr 1fr !important; grid-template-areas: none !important; }
-          .prop-gallery__cell { grid-area: auto !important; min-height: 150px !important; }
+
+        /* ── Photo gallery: responsive, height-guaranteed via aspect-ratio ── */
+        .lp-gallery {
+          display: grid;
+          grid-template-columns: repeat(2, 1fr);
+          gap: 8px;
         }
+        @media (min-width: 560px) { .lp-gallery { grid-template-columns: repeat(3, 1fr); } }
+        .lp-gallery__item {
+          position: relative;
+          margin: 0;
+          border-radius: 8px;
+          overflow: hidden;
+          background: #eef0f4;            /* placeholder while the image loads */
+        }
+        .lp-gallery__item--featured { grid-column: span 2; }
+        .lp-gallery__img {
+          display: block;
+          width: 100%;
+          height: 100%;
+          aspect-ratio: 4 / 3;
+          object-fit: cover;
+        }
+        .lp-gallery__item--featured .lp-gallery__img { aspect-ratio: 16 / 9; }
+        @media (max-width: 559px) {
+          /* On the narrowest screens the featured tile drops back to a normal cell */
+          .lp-gallery__item--featured { grid-column: span 2; }
+          .lp-gallery__item--featured .lp-gallery__img { aspect-ratio: 16 / 9; }
+        }
+        .lp-gallery__cap {
+          position: absolute; left: 0; right: 0; bottom: 0;
+          padding: 18px 10px 8px; color: #fff;
+          background: linear-gradient(transparent, rgba(10,12,20,0.62));
+        }
+
         input:focus, textarea:focus { outline:none; border-color: ${accent} !important; box-shadow: 0 0 0 3px ${accent}18; }
       `}</style>
     </div>
