@@ -23,6 +23,13 @@ const BLANK_PROP = { address: '', list_price: '', type: 'residential', subtype: 
 
 const COMM_SUBTYPES = ['multifamily', 'office', 'land', 'retail', 'industrial', 'mixed-use']
 
+// A transport-level failure (status 0 / "Failed to fetch") means the request never
+// reached the server — transient network, offline, or a blocking browser extension.
+// These are worth retrying; PostgREST/validation errors (4xx/5xx) are not.
+const isTransportError = (error, status) =>
+  status === 0 ||
+  /failed to fetch|fetcherror|networkerror|network request failed|load failed/i.test(error?.message || '')
+
 export default function ContactDrawer({
   open, onClose, contact, agents,
   deals, tasks, activities, activeAgent,
@@ -153,7 +160,19 @@ export default function ContactDrawer({
       ? supabase.from('contacts').update(p).eq('id', contact.id).select().single()
       : supabase.from('contacts').insert([p]).select().single()
 
-    let { data: saved, error } = await doSave(payload)
+    // Retry transient transport failures ("Failed to fetch") with short backoff before
+    // giving up — a dropped/blocked request usually succeeds on a second attempt.
+    const saveWithRetry = async (p, attempts = 3) => {
+      let res
+      for (let i = 0; i < attempts; i++) {
+        res = await doSave(p)
+        if (!res.error || !isTransportError(res.error, res.status)) return res
+        if (i < attempts - 1) await new Promise(r => setTimeout(r, 400 * 2 ** i))
+      }
+      return res
+    }
+
+    let { data: saved, error, status } = await saveWithRetry(payload)
 
     // Migration-pending fallback: drop columns an older DB may not have yet, then retry.
     let criteriaDropped = false
@@ -165,13 +184,18 @@ export default function ContactDrawer({
         const { submarket: _s, submarkets: _ss, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u, ...payloadNoCriteria } = next
         next = payloadNoCriteria
       }
-      ;({ data: saved, error } = await doSave(next))
+      ;({ data: saved, error, status } = await saveWithRetry(next))
       if (!error && isBuyer) criteriaDropped = true
     }
 
     if (error) {
       setSaving(false)
-      pushToast(error.message, 'error')
+      pushToast(
+        isTransportError(error, status)
+          ? "Couldn't reach the server — check your connection and try again. If you use an ad or privacy blocker, allow this site."
+          : error.message,
+        'error'
+      )
       return
     }
 
