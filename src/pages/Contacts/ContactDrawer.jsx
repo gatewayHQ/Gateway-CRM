@@ -15,6 +15,7 @@ const BLANK = {
   assigned_agent_id: '', notes: '', tags: [],
   owner_address: '', owner_city: '', owner_state: '', owner_zip: '',
   birthday: '', anniversary_date: '',
+  spouse_name: '', spouse_phone: '', spouse_notes: '',
   submarket: '', submarkets: [], asset_types: [],
   size_min: '', size_max: '', size_unit: 'sqft',
 }
@@ -38,6 +39,7 @@ export default function ContactDrawer({
   const [propForm, setPropForm] = useState(BLANK_PROP)
   const [dirty, setDirty] = useState(false)
   const [duplicateWarn, setDuplicateWarn] = useState(null)
+  const [showSpouse, setShowSpouse] = useState(false)
 
   // Reset on contact change
   useEffect(() => {
@@ -53,8 +55,11 @@ export default function ContactDrawer({
         tags:        Array.isArray(contact.tags)        ? contact.tags        : [],
         asset_types: Array.isArray(contact.asset_types) ? contact.asset_types : [],
       })
+      // Expand the spouse/partner section automatically when there's data to show
+      setShowSpouse(Boolean(contact.spouse_name || contact.spouse_phone || contact.spouse_notes))
     } else {
       setForm(BLANK)
+      setShowSpouse(false)
     }
     setErrors({})
     setTab('details')
@@ -127,6 +132,10 @@ export default function ContactDrawer({
       assigned_agent_id: form.assigned_agent_id || null,
       email:             form.email?.trim() || null,
       phone:             normalizedPhone,
+      // Spouse / significant other — phone normalized when parseable, raw otherwise
+      spouse_name:       form.spouse_name?.trim() || null,
+      spouse_phone:      form.spouse_phone ? (normalizePhone(form.spouse_phone) || form.spouse_phone.trim()) : null,
+      spouse_notes:      form.spouse_notes?.trim() || null,
       tags:              Array.isArray(form.tags) ? form.tags : [],
       ...(hasCriteria && {
         // Keep legacy single-value submarket synced for backward compatibility
@@ -146,12 +155,18 @@ export default function ContactDrawer({
 
     let { data: saved, error } = await doSave(payload)
 
-    // Migration-pending fallback
+    // Migration-pending fallback: drop columns an older DB may not have yet, then retry.
     let criteriaDropped = false
-    if (error?.message?.includes('schema cache') && isBuyer) {
-      const { submarket: _s, submarkets: _ss, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u, ...payloadNoCriteria } = payload
-      ;({ data: saved, error } = await doSave(payloadNoCriteria))
-      if (!error) criteriaDropped = true
+    if (error?.message?.includes('schema cache')) {
+      // Spouse columns are newest — strip them regardless of contact type.
+      const { spouse_name: _sn, spouse_phone: _sp, spouse_notes: _snt, ...retryPayload } = payload
+      let next = retryPayload
+      if (isBuyer) {
+        const { submarket: _s, submarkets: _ss, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u, ...payloadNoCriteria } = next
+        next = payloadNoCriteria
+      }
+      ;({ data: saved, error } = await doSave(next))
+      if (!error && isBuyer) criteriaDropped = true
     }
 
     if (error) {
@@ -378,6 +393,61 @@ export default function ContactDrawer({
                 <input className="form-control" type="date" value={form.anniversary_date || ''} onChange={(e) => set('anniversary_date', e.target.value)} />
               </div>
             </div>
+
+            {/* ── Spouse / Significant Other ──────────────────────────────────
+                Collapsed by default so it never clutters the form; expands
+                inline on demand (and auto-expands when data already exists). */}
+            {!showSpouse ? (
+              <button
+                type="button"
+                onClick={() => setShowSpouse(true)}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  background: 'none', border: 'none', padding: '4px 0',
+                  color: 'var(--gw-azure)', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }}
+              >
+                + Add spouse / partner
+              </button>
+            ) : (
+              <div style={{ borderTop: '1px solid var(--gw-border)', marginTop: 4, paddingTop: 14 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gw-mist)' }}>
+                    Spouse / Partner
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { setShowSpouse(false); set('spouse_name', ''); set('spouse_phone', ''); set('spouse_notes', '') }}
+                    style={{ background: 'none', border: 'none', padding: 0, color: 'var(--gw-mist)', fontSize: 11, cursor: 'pointer' }}
+                  >
+                    Remove
+                  </button>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">Name</label>
+                    <input className="form-control" value={form.spouse_name || ''} onChange={(e) => set('spouse_name', e.target.value)} placeholder="Partner's name" />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Phone</label>
+                    <input className="form-control" value={form.spouse_phone || ''} onChange={(e) => set('spouse_phone', e.target.value)} placeholder="(555) 000-0000" />
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">
+                    Notes
+                    <span style={{ fontWeight: 400, color: 'var(--gw-mist)', fontSize: 11 }}> — optional</span>
+                  </label>
+                  <textarea
+                    className="form-control form-control--textarea"
+                    value={form.spouse_notes || ''}
+                    onChange={(e) => set('spouse_notes', e.target.value)}
+                    placeholder="Anniversary, kids' names, preferences…"
+                    style={{ minHeight: 60 }}
+                  />
+                </div>
+              </div>
+            )}
 
             <div className="form-group">
               <label className="form-label">Notes</label>

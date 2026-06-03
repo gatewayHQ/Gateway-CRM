@@ -44,6 +44,10 @@ create table if not exists contacts (
   -- Annual reminders
   birthday          date,
   anniversary_date  date,
+  -- Spouse / significant other (household relationship)
+  spouse_name       text,
+  spouse_phone      text,
+  spouse_notes      text,
   -- Buyer / investor search criteria (for matching)
   submarket         text,          -- target area / county
   asset_types       text[],        -- e.g. ['multifamily','office']
@@ -496,6 +500,9 @@ end $$;
 -- alter table contacts    add column if not exists owner_zip        text;
 -- alter table contacts    add column if not exists birthday         date;
 -- alter table contacts    add column if not exists anniversary_date date;
+-- alter table contacts    add column if not exists spouse_name      text;
+-- alter table contacts    add column if not exists spouse_phone     text;
+-- alter table contacts    add column if not exists spouse_notes     text;
 -- alter table properties  add column if not exists county  text;
 -- alter table properties  add column if not exists garage  integer default 0;
 -- alter table properties  add column if not exists details jsonb   default '{}';
