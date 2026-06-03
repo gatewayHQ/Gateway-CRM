@@ -172,9 +172,10 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
     const dupePhoneSet = new Set()
     const allImportPhones = importLeads.flatMap(l => l.phones).map(p => p.replace(/\D/g,''))
     if (allImportPhones.length > 0) {
-      const { data: existingContacts } = await supabase.from('contacts').select('phones')
+      // contacts stores a single phone (text), not a phones[] array.
+      const { data: existingContacts } = await supabase.from('contacts').select('phone')
       for (const c of (existingContacts || [])) {
-        for (const p of (c.phones || [])) { dupePhoneSet.add(p.replace(/\D/g,'')) }
+        if (c.phone) dupePhoneSet.add(c.phone.replace(/\D/g, ''))
       }
     }
     let dupeCount = 0

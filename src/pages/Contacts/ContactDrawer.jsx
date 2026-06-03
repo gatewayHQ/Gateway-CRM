@@ -156,9 +156,14 @@ export default function ContactDrawer({
       }),
     }
 
+    // Use maybeSingle() rather than single(): if a write commits but the returning
+    // SELECT yields 0 rows (an RLS/returning quirk), single() raises PostgREST
+    // PGRST116 — "Cannot coerce the result to a single JSON object" — surfacing a
+    // scary error for a save that actually succeeded. maybeSingle() returns
+    // { data: null, error: null } in that case, and we recover via the parent reload.
     const doSave = (p) => contact?.id
-      ? supabase.from('contacts').update(p).eq('id', contact.id).select().single()
-      : supabase.from('contacts').insert([p]).select().single()
+      ? supabase.from('contacts').update(p).eq('id', contact.id).select().maybeSingle()
+      : supabase.from('contacts').insert([p]).select().maybeSingle()
 
     // Retry transient transport failures ("Failed to fetch") with short backoff before
     // giving up — a dropped/blocked request usually succeeds on a second attempt.
@@ -190,10 +195,15 @@ export default function ContactDrawer({
 
     if (error) {
       setSaving(false)
+      // Log the full structured error so any future failure (code/details/hint) is
+      // diagnosable from the console rather than just the toast message.
+      console.error('[ContactDrawer] save failed', {
+        code: error.code, message: error.message, details: error.details, hint: error.hint, status,
+      })
       pushToast(
         isTransportError(error, status)
           ? "Couldn't reach the server — check your connection and try again. If you use an ad or privacy blocker, allow this site."
-          : error.message,
+          : (error.message || 'Could not save contact — please try again.'),
         'error'
       )
       return
