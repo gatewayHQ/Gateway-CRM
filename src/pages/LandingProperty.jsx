@@ -75,7 +75,11 @@ export default function LandingProperty({ mailingId }) {
   const ctaText = cfg.cta_text || 'Get more info'
   const features = (Array.isArray(cfg.features) ? cfg.features : []).filter(Boolean)
   const images = (Array.isArray(cfg.images) ? cfg.images : [])
-    .map(v => (typeof v === 'string' ? { url: v, caption: '', price: '' } : v))
+    .map(v => (typeof v === 'string'
+      ? { url: v, caption: '', price: '' }
+      // Existing mailings store a `units` field used as a caption fallback —
+      // preserve that so already-created campaigns render unchanged.
+      : { url: v.url, caption: v.caption || v.units || '', price: v.price || '' }))
     .filter(v => v?.url)
   const heroImage = images[0]?.url
   const galleryImages = images.slice(1)
