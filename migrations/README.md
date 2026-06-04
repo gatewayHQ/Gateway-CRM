@@ -34,51 +34,54 @@ file is safe.
 Today every table uses `allow_all using(true)`, and data isolation happens only
 in client code (`App.jsx` filters by `assigned_agent_id`). Any authenticated
 user can read every row by issuing an unfiltered query. 0002 moves that scoping
-into the database for the genuinely-private tables: **contacts, deals, tasks,
-commissions, activities**.
+into the database.
+
+**This cut enforces scoping on `contacts`, `activities`, `tasks`** — the tables
+where a codebase audit confirmed enforcement is correct and non-breaking.
+`deals` and `commissions` are **deferred** (policies are written but left
+inactive in the file) because they are entangled with the brokerage-wide
+Commission page — see the decision note below.
 
 It is split into phases so it can land with zero downtime:
 
 ### Phase A — safe to run immediately
-Creates helper functions (`app_current_agent_id`, `app_is_admin`,
-`app_visible_agent_ids`) and the scoped policies. Because the existing
+Creates the helper functions and the scoped policies. Because the existing
 `allow_all` policy is OR-combined with these, **the tables stay fully open** —
-applying Phase A changes nothing a user can observe. This is the whole file as
-shipped (everything above the commented Phase B block).
+applying Phase A changes nothing a user can observe.
 
 ### Verify (ideally in a staging project) before Phase B
 Sign in as a **normal (non-admin) agent** and confirm:
-- Contacts, Pipeline, Tasks, and Commission pages show the **same rows as before**.
-- Creating a contact / deal / task assigned to yourself succeeds.
-- In the SQL Editor, impersonating that agent, `select * from contacts` returns
-  **only** your + sharing-peers' rows (previously it returned everyone's).
-
-Sign in as an **admin** and confirm Pipeline still shows **all** deals.
+- Contacts and Tasks pages show the **same rows as before**.
+- Creating a contact/task assigned to yourself succeeds.
+- `select * from contacts` returns **only** your + sharing-peers' rows.
+- Cold Calls import still works (dedup now checks your contacts only).
+- The Campaigns recipient picker now lists your contacts only (intended).
+- A contact's Activity tab still shows its history.
 
 `/api/*` endpoints use the service key and bypass RLS, so Twilio, DocuSign,
-cron (sequence-run), and campaign tracking are unaffected — no need to retest
-those for RLS.
+cron (sequence-run), and campaign tracking are unaffected.
 
 ### Phase B — activates enforcement
-Uncomment and run the `PHASE B` block (drops `allow_all` on the five tables).
-After this, the database itself enforces scoping.
+Uncomment and run the `PHASE B` block (drops `allow_all` on
+contacts/activities/tasks). After this, the database enforces scoping.
 
 ### Rollback
-If anything misbehaves, run the `PHASE B-ROLLBACK` block — it recreates
-`allow_all` instantly and reopens the tables.
+Run the `PHASE B-ROLLBACK` block — it recreates `allow_all` and reopens the
+tables instantly.
 
 ### Edge cases to know
-- Tasks must carry `agent_id` = the creating agent (the app always sets this).
-  A task inserted with a null `agent_id` would be rejected once Phase B is live.
-- **Commission page is brokerage-wide.** `src/pages/Commission.jsx` deliberately
-  fetches *all* deals and commissions to show org totals, a per-agent
-  leaderboard, and cap tracking — so today every agent sees the whole
-  brokerage's numbers. After Phase B, a **non-admin** will see only their own
-  (+ sharing-peer) data there; **admins are unaffected**. Decide before Phase B
-  whether brokerage-wide commission visibility is meant for everyone (keep those
-  tables permissive, or gate the page to admins) or for admins only (then this
-  is the intended hardening). The "same rows as before" check above will visibly
-  flag this for non-admins.
+- A task inserted with a null `agent_id` would be rejected once Phase B is live
+  (the app always sets it, so this does not happen in normal use).
+
+### Decision needed before hardening `deals` / `commissions`
+`src/pages/Commission.jsx` is a **brokerage-wide report** (org totals, per-agent
+leaderboard, cap tracking) — today every agent sees the whole firm's numbers.
+The deferred deals/commissions policies (written, inactive, in 0002) would make
+a **non-admin** see only their own data there; **admins are unaffected**.
+Decide: is firm-wide earnings visibility meant for everyone (keep those tables
+permissive, or admin-gate the page) or for admins only (then the deferred
+policies are the intended hardening)? Also scope the unscoped client reads
+(App.jsx:329, Commission.jsx:554-555) at that time.
 
 ---
 
