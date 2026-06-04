@@ -184,17 +184,21 @@ create table if not exists envelopes (
 -- ─────────────────────────────────────────────────────────────────────────────
 -- COMMISSIONS
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Canonical model: one commission row per deal (keyed by deal_id), storing the
+-- percentage split the app edits in Commission.jsx. Dollar amounts are derived
+-- in the app from these percentages × the deal value — they are not stored.
 create table if not exists commissions (
-  id          uuid primary key default uuid_generate_v4(),
-  deal_id     uuid references deals(id) on delete cascade,
-  agent_id    uuid references agents(id) on delete set null,
-  gross       numeric,
-  split_pct   numeric default 100,
-  net         numeric,
-  paid        boolean default false,
-  paid_at     timestamptz,
-  notes       text,
-  created_at  timestamptz default now()
+  id              uuid primary key default uuid_generate_v4(),
+  deal_id         uuid references deals(id) on delete cascade unique not null,
+  gross_pct       numeric not null default 3.0,    -- gross commission % of deal value
+  broker_pct      numeric not null default 30.0,   -- brokerage share of the split
+  agent_pct       numeric not null default 70.0,   -- agent share of the split
+  referral_pct    numeric not null default 0,      -- referral fee off the top
+  co_agent_pct    numeric not null default 0,      -- co-agent share of agent gross
+  transaction_fee numeric not null default 0,      -- flat fee off agent gross
+  notes           text,
+  created_at      timestamptz default now(),
+  updated_at      timestamptz default now()
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -475,9 +479,9 @@ create index if not exists idx_activities_contact on activities(contact_id, crea
 create index if not exists idx_activities_agent   on activities(agent_id);
 
 -- commissions
-create index if not exists idx_commissions_agent   on commissions(agent_id);
+-- commissions are keyed uniquely by deal_id (the unique constraint already
+-- provides the lookup index); no agent_id/paid columns in the canonical model.
 create index if not exists idx_commissions_deal    on commissions(deal_id);
-create index if not exists idx_commissions_paid    on commissions(paid, paid_at desc);
 
 -- agent_notifications — real-time inbox queries
 create index if not exists idx_notif_agent_unread on agent_notifications(agent_id, read) where read = false;
@@ -565,13 +569,11 @@ select
   count(distinct d.id) filter (where d.stage not in ('closed','lost')) as open_deals,
   count(distinct d.id) filter (where d.stage = 'closed') as closed_deals,
   coalesce(sum(d.value) filter (where d.stage = 'closed'), 0) as closed_volume,
-  coalesce(sum(comm.net) filter (where comm.paid = true), 0) as total_commission_paid,
   count(distinct t.id) filter (where t.completed = false and t.due_date < now()) as overdue_tasks
 from agents a
 left join contacts    c    on c.assigned_agent_id = a.id
 left join properties  p    on p.assigned_agent_id = a.id
 left join deals       d    on d.agent_id = a.id
-left join commissions comm on comm.agent_id = a.id
 left join tasks       t    on t.agent_id = a.id
 group by a.id;
 
