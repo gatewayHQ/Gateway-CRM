@@ -24,14 +24,19 @@ const toNum = (v) => {
 }
 const asPct = (v) => { const s = String(v).trim(); return s.endsWith('%') ? s : `${s}%` }
 
-export default function LandingProperty({ mailingId }) {
-  const [mailing, setMailing] = useState(null)
-  const [agent, setAgent] = useState(null)
-  const [loading, setLoading] = useState(true)
+export default function LandingProperty({ mailingId, preview = null }) {
+  // Preview mode: render the production page from injected sample data with no
+  // database fetch (used by the /lp/demo route for design review).
+  const [mailing, setMailing] = useState(
+    preview ? { id: 'demo', name: preview.name, agent_id: null, landing_config: preview.config } : null
+  )
+  const [agent, setAgent] = useState(preview?.agent || null)
+  const [loading, setLoading] = useState(!preview)
   const [error, setError] = useState(null)
   const [lightbox, setLightbox] = useState(-1) // -1 = closed
 
   useEffect(() => {
+    if (preview) return // skip fetch in demo mode
     let active = true
     ;(async () => {
       try {
@@ -56,7 +61,7 @@ export default function LandingProperty({ mailingId }) {
       }
     })()
     return () => { active = false }
-  }, [mailingId])
+  }, [mailingId, preview])
 
   // ── Loading / error / empty states ────────────────────────────────────────
   if (loading) return <LandingSkeleton />
@@ -113,6 +118,7 @@ export default function LandingProperty({ mailingId }) {
   }))
 
   const submitLead = async (form) => {
+    if (preview) { await new Promise(r => setTimeout(r, 700)); return } // demo: simulate send
     const res = await fetch('/api/campaigns', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'capture_lead', mailing_id: mailingId, source_landing: 'property', ...form }),
