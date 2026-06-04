@@ -154,7 +154,7 @@ create policy activities_contact_scope on activities for all to authenticated
 -- VERIFICATION CHECKLIST (run between Phase A and Phase B, ideally in staging)
 -- ───────────────────────────────────────────────────────────────────────────
 -- As a normal (non-admin) agent's JWT:
---   ✓ Contacts/Pipeline/Tasks/Commission pages load the SAME rows as before.
+--   ✓ Contacts/Pipeline/Tasks pages load the SAME rows as before.
 --   ✓ Creating a contact/deal/task assigned to yourself succeeds.
 --   ✓ select * from contacts  returns ONLY your + sharing-peers' rows
 --     (previously returned everyone's).
@@ -163,6 +163,17 @@ create policy activities_contact_scope on activities for all to authenticated
 -- As the service role (api/* endpoints): unaffected (bypasses RLS).
 -- Edge: tasks must carry agent_id = the creating agent (the app always sets
 --   this); a task inserted with a null agent_id would be rejected.
+--
+-- ⚠ INTENTIONAL BEHAVIOR CHANGE — the Commission page:
+--   src/pages/Commission.jsx is a brokerage-wide report: it fetches ALL deals
+--   and ALL commissions to show org totals + a per-agent leaderboard + cap
+--   tracking. Today every agent sees the whole brokerage's numbers.
+--   After Phase B, a NON-ADMIN agent will see only their own (+ sharing-peer)
+--   deals there, so the totals/leaderboard collapse to their own data. ADMINS
+--   are unaffected (the deals/commissions policies have an admin bypass).
+--   Decide before Phase B: is brokerage-wide commission visibility meant for
+--   everyone (then keep commissions/deals permissive, or gate the page to
+--   admins) or for admins only (then this change is the desired hardening)?
 --
 -- FOLLOW-UPS (separate migrations):
 --   • properties: route PropertyLanding's anonymous read through a service-key

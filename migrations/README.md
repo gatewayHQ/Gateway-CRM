@@ -70,6 +70,15 @@ If anything misbehaves, run the `PHASE B-ROLLBACK` block — it recreates
 ### Edge cases to know
 - Tasks must carry `agent_id` = the creating agent (the app always sets this).
   A task inserted with a null `agent_id` would be rejected once Phase B is live.
+- **Commission page is brokerage-wide.** `src/pages/Commission.jsx` deliberately
+  fetches *all* deals and commissions to show org totals, a per-agent
+  leaderboard, and cap tracking — so today every agent sees the whole
+  brokerage's numbers. After Phase B, a **non-admin** will see only their own
+  (+ sharing-peer) data there; **admins are unaffected**. Decide before Phase B
+  whether brokerage-wide commission visibility is meant for everyone (keep those
+  tables permissive, or gate the page to admins) or for admins only (then this
+  is the intended hardening). The "same rows as before" check above will visibly
+  flag this for non-admins.
 
 ---
 
