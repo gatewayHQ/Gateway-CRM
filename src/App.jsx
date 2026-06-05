@@ -16,7 +16,6 @@ const SettingsPage     = React.lazy(() => import('./pages/Settings.jsx'))
 const LeadsPage        = React.lazy(() => import('./pages/Leads.jsx'))
 const OmPage             = React.lazy(() => import('./pages/Om.jsx'))
 const SocialPage         = React.lazy(() => import('./pages/Social.jsx'))
-const ToolkitPage        = React.lazy(() => import('./pages/Toolkit.jsx'))
 const DataManagementPage = React.lazy(() => import('./pages/DataManagement.jsx'))
 const ReportsPage      = React.lazy(() => import('./pages/Reports.jsx'))
 const SequencesPage    = React.lazy(() => import('./pages/Sequences.jsx'))
@@ -86,6 +85,7 @@ const NAV_ADMIN = [
 ]
 
 const TOOLS_IDS = NAV_TOOLS.map(n => n.id)
+const TOOLKIT_URL = 'https://gatewayhq.github.io/'
 
 const TITLES = {
   dashboard:  { title: 'Dashboard',        crumb: 'Overview' },
@@ -246,6 +246,15 @@ export default function App() {
   useEffect(() => {
     if (hiddenNav.includes(route)) setRoute('dashboard')
   }, [hiddenNav])
+
+  // Nav click handler — Toolkit opens in a new tab (uses its own login); everything else routes
+  const navTo = (id) => {
+    if (id === 'toolkit') {
+      window.open(TOOLKIT_URL, '_blank', 'noopener,noreferrer')
+      return
+    }
+    setRoute(id)
+  }
 
   // Flat list for mobile nav (filter leads + hidden items)
   const toolsBase = websiteEnabled ? NAV_TOOLS : NAV_TOOLS.filter(n => n.id !== 'leads')
@@ -527,10 +536,13 @@ export default function App() {
           )}
           {(toolsOpen || collapsed) && visibleTools.map(n => (
             <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}${!collapsed ? ' nav-item--indented' : ''}`}
-              onClick={() => setRoute(n.id)} title={n.label}
-              role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
+              onClick={() => navTo(n.id)} title={n.label}
+              role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && navTo(n.id)}>
               <Icon name={n.icon} size={16} />
               {!collapsed && <span>{n.label}</span>}
+              {n.id === 'toolkit' && !collapsed && (
+                <Icon name="eye" size={11} style={{ marginLeft: 'auto', flexShrink: 0, opacity: 0.5 }} />
+              )}
             </div>
           ))}
         </nav>
@@ -672,7 +684,6 @@ export default function App() {
           {route === 'form-library' && <FormLibraryPage isAdmin={isAdmin} />}
           {route === 'om'         && <OmPage />}
           {route === 'social'     && <SocialPage />}
-          {route === 'toolkit'    && <ToolkitPage activeAgent={activeAgent} />}
           {route === 'leads'      && <LeadsPage {...props} />}
           {route === 'integrations'      && <IntegrationsPage db={db} />}
           {route === 'data-management'   && <DataManagementPage />}
@@ -716,7 +727,7 @@ export default function App() {
             <div className="mobile-menu__label">Navigation</div>
             {NAV.filter(n => !['dashboard', 'contacts', 'pipeline', 'tasks'].includes(n.id)).map(n => (
               <div key={n.id} className={`mobile-menu__item${route === n.id ? ' active' : ''}`}
-                onClick={() => { setRoute(n.id); setMobileMore(false) }}>
+                onClick={() => { navTo(n.id); setMobileMore(false) }}>
                 <Icon name={n.icon} size={20} />
                 <span>{n.label}</span>
               </div>

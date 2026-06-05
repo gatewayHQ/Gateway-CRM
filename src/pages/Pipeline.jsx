@@ -272,7 +272,11 @@ function ChecklistTab({ deal }) {
         <div style={{ display: 'flex', gap: 6 }}>
           <select className="form-control" style={{ flex: 1, fontSize: 12 }}
             value={dealState}
-            onChange={e => { setDealState(e.target.value); saveMeta(e.target.value, txType) }}>
+            onChange={e => {
+              const v = e.target.value
+              setDealState(v); saveMeta(v, txType)
+              if (v && txType && steps.length === 0) loadTemplate(v, txType)
+            }}>
             <option value="">State…</option>
             <option value="IA">Iowa (IA)</option>
             <option value="SD">South Dakota (SD)</option>
@@ -281,10 +285,14 @@ function ChecklistTab({ deal }) {
           </select>
           <select className="form-control" style={{ flex: 1, fontSize: 12 }}
             value={txType}
-            onChange={e => { setTxType(e.target.value); saveMeta(dealState, e.target.value) }}>
+            onChange={e => {
+              const v = e.target.value
+              setTxType(v); saveMeta(dealState, v)
+              if (dealState && v && steps.length === 0) loadTemplate(dealState, v)
+            }}>
             <option value="">Type…</option>
-            <option value="seller">Seller</option>
-            <option value="buyer">Buyer</option>
+            <option value="seller">Seller (Listing)</option>
+            <option value="buyer">Buyer (Purchase)</option>
             <option value="commercial">Commercial</option>
             <option value="lease">Lease / Rental</option>
           </select>
@@ -295,9 +303,21 @@ function ChecklistTab({ deal }) {
             </button>
           )}
         </div>
+        {/* Active transaction-type banner — makes buyer vs seller unmistakable */}
+        {dealState && txType && (
+          <div style={{ fontSize: 11, marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontWeight: 600, padding: '2px 8px', borderRadius: 10, fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.04em',
+              background: txType === 'seller' ? '#fff7ed' : txType === 'buyer' ? '#eff6ff' : 'var(--gw-bone)',
+              color:      txType === 'seller' ? '#c2410c' : txType === 'buyer' ? '#1d4ed8' : 'var(--gw-mist)',
+              border: `1px solid ${txType === 'seller' ? '#fed7aa' : txType === 'buyer' ? '#bfdbfe' : 'var(--gw-border)'}` }}>
+              {txType === 'seller' ? 'Seller / Listing side' : txType === 'buyer' ? 'Buyer / Purchase side' : txType}
+            </span>
+            <span style={{ color: 'var(--gw-mist)' }}>{dealState !== 'other' ? dealState : 'Custom'} checklist</span>
+          </div>
+        )}
         {(!dealState || !txType) && (
           <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 5, lineHeight: 1.4 }}>
-            Select state &amp; transaction type to load the correct document checklist.
+            Select state &amp; transaction type — the correct <strong>buyer</strong> or <strong>seller</strong> document checklist loads automatically.
           </div>
         )}
       </div>
