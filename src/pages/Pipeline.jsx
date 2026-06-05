@@ -36,48 +36,200 @@ const DEFAULT_STEPS_COMMERCIAL = [
 
 const CHECKLIST_STAGES = ['under-contract','closed']
 
+// Per-state, per-transaction-type document checklists (BoldTrail-style)
+const STATE_DOC_TEMPLATES = {
+  'IA-seller': [
+    { title: 'All IA Agency & Listing Paperwork',          doc_action: 'sign'   },
+    { title: "Seller's Property Disclosure (SPD)",         doc_action: 'sign'   },
+    { title: 'MLS Change Form',                            doc_action: 'sign'   },
+    { title: 'Addendum to SPD',                            doc_action: 'manual' },
+    { title: 'Completed Purchase Agreement',               doc_action: 'forms'  },
+    { title: 'Earnest Money Deposit Receipt',              doc_action: 'upload' },
+    { title: 'Escrow Sheet',                               doc_action: 'forms'  },
+    { title: 'Closing Disclosure / Settlement Statement',  doc_action: 'upload', admin_only: true },
+    { title: 'Commission — Proof of Payment',              doc_action: 'upload', admin_only: true },
+    { title: 'Inspection Addendums Submitted',             doc_action: 'upload', if_applicable: true },
+    { title: 'Order Home Warranty',                        doc_action: 'forms',  if_applicable: true },
+    { title: 'Addendums to Contract',                      doc_action: 'forms',  if_applicable: true },
+    { title: 'MLS Listing Change Form',                    doc_action: 'sign',   if_applicable: true },
+  ],
+  'IA-buyer': [
+    { title: 'Buyer Agency Agreement',                     doc_action: 'sign'   },
+    { title: 'Agency Disclosure',                          doc_action: 'sign'   },
+    { title: 'Purchase Agreement',                         doc_action: 'sign'   },
+    { title: 'Earnest Money Deposit Receipt',              doc_action: 'upload' },
+    { title: 'Pre-Approval Letter',                        doc_action: 'upload' },
+    { title: 'Home Inspection Report',                     doc_action: 'upload' },
+    { title: 'Inspection Addendum / Response',             doc_action: 'forms',  if_applicable: true },
+    { title: 'Financing Commitment Letter',                doc_action: 'upload' },
+    { title: 'Appraisal Report',                           doc_action: 'upload', if_applicable: true },
+    { title: 'Final Walkthrough Completed',                doc_action: 'manual' },
+    { title: 'Closing Disclosure Reviewed',                doc_action: 'manual' },
+    { title: 'Commission — Proof of Payment',              doc_action: 'upload', admin_only: true },
+    { title: 'Addendums to Contract',                      doc_action: 'forms',  if_applicable: true },
+  ],
+  'SD-seller': [
+    { title: 'All SD Agency & Listing Paperwork',          doc_action: 'sign'   },
+    { title: "SD Seller's Property Condition Disclosure",  doc_action: 'sign'   },
+    { title: 'MLS Change Form',                            doc_action: 'sign'   },
+    { title: 'Lead-Based Paint Disclosure',                doc_action: 'sign',   if_applicable: true },
+    { title: 'Completed Purchase Agreement',               doc_action: 'forms'  },
+    { title: 'Earnest Money Deposit Receipt',              doc_action: 'upload' },
+    { title: 'Escrow / Settlement Sheet',                  doc_action: 'forms'  },
+    { title: 'Closing Disclosure / Settlement Statement',  doc_action: 'upload', admin_only: true },
+    { title: 'Commission — Proof of Payment',              doc_action: 'upload', admin_only: true },
+    { title: 'Inspection Addendums Submitted',             doc_action: 'upload', if_applicable: true },
+    { title: 'Home Warranty Order',                        doc_action: 'forms',  if_applicable: true },
+    { title: 'Addendums to Contract',                      doc_action: 'forms',  if_applicable: true },
+    { title: 'MLS Listing Change Form',                    doc_action: 'sign',   if_applicable: true },
+  ],
+  'SD-buyer': [
+    { title: 'Buyer Representation Agreement',             doc_action: 'sign'   },
+    { title: 'Agency Disclosure',                          doc_action: 'sign'   },
+    { title: 'Purchase Agreement',                         doc_action: 'sign'   },
+    { title: 'Lead-Based Paint Disclosure',                doc_action: 'sign',   if_applicable: true },
+    { title: 'Earnest Money Deposit Receipt',              doc_action: 'upload' },
+    { title: 'Pre-Approval Letter',                        doc_action: 'upload' },
+    { title: 'Home Inspection Report',                     doc_action: 'upload' },
+    { title: 'Inspection Addendum / Response',             doc_action: 'forms',  if_applicable: true },
+    { title: 'Financing Commitment Letter',                doc_action: 'upload' },
+    { title: 'Appraisal Report',                           doc_action: 'upload', if_applicable: true },
+    { title: 'Final Walkthrough Completed',                doc_action: 'manual' },
+    { title: 'Closing Disclosure Reviewed',                doc_action: 'manual' },
+    { title: 'Commission — Proof of Payment',              doc_action: 'upload', admin_only: true },
+    { title: 'Addendums to Contract',                      doc_action: 'forms',  if_applicable: true },
+  ],
+  'NE-seller': [
+    { title: 'All NE Agency & Listing Paperwork',          doc_action: 'sign'   },
+    { title: 'NE Seller Property Condition Disclosure',    doc_action: 'sign'   },
+    { title: 'MLS Change Form',                            doc_action: 'sign'   },
+    { title: 'Lead-Based Paint Disclosure',                doc_action: 'sign',   if_applicable: true },
+    { title: 'Completed Purchase Agreement',               doc_action: 'forms'  },
+    { title: 'Earnest Money Deposit Receipt',              doc_action: 'upload' },
+    { title: 'Title Insurance Ordered',                    doc_action: 'manual' },
+    { title: 'Escrow / Settlement Sheet',                  doc_action: 'forms'  },
+    { title: 'Closing Disclosure / Settlement Statement',  doc_action: 'upload', admin_only: true },
+    { title: 'Commission — Proof of Payment',              doc_action: 'upload', admin_only: true },
+    { title: 'Inspection Addendums Submitted',             doc_action: 'upload', if_applicable: true },
+    { title: 'Home Warranty Order',                        doc_action: 'forms',  if_applicable: true },
+    { title: 'Addendums to Contract',                      doc_action: 'forms',  if_applicable: true },
+    { title: 'MLS Listing Change Form',                    doc_action: 'sign',   if_applicable: true },
+  ],
+  'NE-buyer': [
+    { title: 'Buyer Representation Agreement',             doc_action: 'sign'   },
+    { title: 'Agency Disclosure',                          doc_action: 'sign'   },
+    { title: 'Purchase Agreement',                         doc_action: 'sign'   },
+    { title: 'Lead-Based Paint Disclosure',                doc_action: 'sign',   if_applicable: true },
+    { title: 'Earnest Money Deposit Receipt',              doc_action: 'upload' },
+    { title: 'Pre-Approval Letter',                        doc_action: 'upload' },
+    { title: 'Home Inspection Report',                     doc_action: 'upload' },
+    { title: 'Inspection Addendum / Response',             doc_action: 'forms',  if_applicable: true },
+    { title: 'Financing Commitment Letter',                doc_action: 'upload' },
+    { title: 'Title Commitment Received',                  doc_action: 'manual' },
+    { title: 'Appraisal Report',                           doc_action: 'upload', if_applicable: true },
+    { title: 'Final Walkthrough Completed',                doc_action: 'manual' },
+    { title: 'Closing Disclosure Reviewed',                doc_action: 'manual' },
+    { title: 'Commission — Proof of Payment',              doc_action: 'upload', admin_only: true },
+    { title: 'Addendums to Contract',                      doc_action: 'forms',  if_applicable: true },
+  ],
+  'any-commercial': [
+    { title: 'Listing / Buyer Agency Agreement',           doc_action: 'sign'   },
+    { title: 'Agency Disclosure',                          doc_action: 'sign'   },
+    { title: 'Letter of Intent (LOI)',                     doc_action: 'sign',   if_applicable: true },
+    { title: 'Purchase Agreement / PSA',                   doc_action: 'sign'   },
+    { title: 'Earnest Money Deposit Receipt',              doc_action: 'upload' },
+    { title: 'Environmental Due Diligence (Phase I)',       doc_action: 'upload', if_applicable: true },
+    { title: 'Property Inspection Report',                 doc_action: 'upload' },
+    { title: 'Survey Ordered',                             doc_action: 'manual' },
+    { title: 'Survey Received & Approved',                 doc_action: 'upload', if_applicable: true },
+    { title: 'Zoning & Entitlements Verified',             doc_action: 'manual' },
+    { title: 'Financing Commitment Received',              doc_action: 'upload' },
+    { title: 'Lease Review',                               doc_action: 'upload', if_applicable: true },
+    { title: 'Closing Disclosure / Settlement Statement',  doc_action: 'upload', admin_only: true },
+    { title: 'Commission — Proof of Payment',              doc_action: 'upload', admin_only: true },
+    { title: 'Addendums to Contract',                      doc_action: 'forms',  if_applicable: true },
+  ],
+}
+
 const DEFAULT_KEY_DATE_TYPES = ['Closing','Financing Contingency','Inspection','HUD Approval','Appraisal','Lease Start Date','Possession Date']
 
-function ChecklistTab({ deal }) {
-  const [steps, setSteps]       = useState([])
-  const [loading, setLoading]   = useState(true)
-  const [newTitle, setNewTitle] = useState('')
-  const [adding, setAdding]     = useState(false)
-  const [ready, setReady]       = useState(true)
+const STATUS_BADGE_MAP = {
+  complete: { label: 'complete',            bg: '#f0fdf4', color: '#16a34a', border: '#bbf7d0' },
+  approved: { label: 'complete (approved)', bg: '#dcfce7', color: '#15803d', border: '#86efac' },
+  na:       { label: 'N/A',                 bg: 'var(--gw-bone)', color: 'var(--gw-mist)', border: 'var(--gw-border)' },
+}
+const ACTION_BADGE_MAP = {
+  upload: { label: 'Upload',    bg: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe' },
+  forms:  { label: 'Use forms', bg: '#f5f3ff', color: '#6d28d9', border: '#ddd6fe' },
+  sign:   { label: 'Sign',      bg: '#fff7ed', color: '#c2410c', border: '#fed7aa' },
+}
 
-  const defaultSteps = deal?.prop_category === 'commercial' ? DEFAULT_STEPS_COMMERCIAL : DEFAULT_STEPS_RESIDENTIAL
+function ChecklistTab({ deal }) {
+  const [steps,      setSteps]      = useState([])
+  const [loading,    setLoading]    = useState(true)
+  const [newTitle,   setNewTitle]   = useState('')
+  const [adding,     setAdding]     = useState(false)
+  const [ready,      setReady]      = useState(true)
+  const [dealState,  setDealState]  = useState('')
+  const [txType,     setTxType]     = useState('')
 
   React.useEffect(() => {
     if (!deal?.id) return
+    supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+      .then(({ data }) => {
+        const cd = data?.comp_data || {}
+        setDealState(cd.state || '')
+        setTxType(cd.transaction_type || '')
+      })
     loadSteps()
   }, [deal?.id])
 
   const loadSteps = async () => {
     setLoading(true)
     const { data, error } = await supabase
-      .from('transaction_steps')
-      .select('*')
-      .eq('deal_id', deal.id)
-      .order('sort_order', { ascending: true })
+      .from('transaction_steps').select('*').eq('deal_id', deal.id).order('sort_order', { ascending: true })
     if (error) { setReady(false); setLoading(false); return }
-    if (data.length === 0 && CHECKLIST_STAGES.includes(deal.stage)) {
-      await autoCreate()
-    } else {
-      setSteps(data)
-    }
+    setSteps(data || [])
     setLoading(false)
   }
 
-  const autoCreate = async () => {
-    const rows = defaultSteps.map((title, i) => ({ deal_id: deal.id, title, completed: false, sort_order: i }))
-    const { data } = await supabase.from('transaction_steps').insert(rows).select()
-    setSteps(data || [])
-    pushToast(`${deal?.prop_category === 'commercial' ? 'Commercial' : 'Residential'} closing checklist created`, 'info')
+  const saveMeta = async (stateVal, typeVal) => {
+    const { data: cur } = await supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+    const cd = cur?.comp_data || {}
+    await supabase.from('deals').update({ comp_data: { ...cd, state: stateVal, transaction_type: typeVal } }).eq('id', deal.id)
   }
 
-  const toggle = async (step) => {
-    const now = new Date().toISOString()
-    const patch = { completed: !step.completed, completed_at: !step.completed ? now : null }
+  const getTemplate = (stateVal, typeVal) => {
+    if (typeVal === 'commercial') return STATE_DOC_TEMPLATES['any-commercial'] || []
+    const key = `${stateVal}-${typeVal}`
+    return STATE_DOC_TEMPLATES[key]
+      || (deal?.prop_category === 'commercial' ? DEFAULT_STEPS_COMMERCIAL : DEFAULT_STEPS_RESIDENTIAL)
+           .map(title => ({ title, doc_action: 'manual' }))
+  }
+
+  const loadTemplate = async (stateVal, typeVal) => {
+    if (!stateVal || !typeVal) return
+    const template = getTemplate(stateVal, typeVal)
+    await supabase.from('transaction_steps').delete().eq('deal_id', deal.id)
+    const rows = template.map((doc, i) => ({
+      deal_id: deal.id, title: doc.title, completed: false, sort_order: i,
+      doc_action: doc.doc_action || 'manual', doc_status: 'pending',
+      if_applicable: doc.if_applicable || false,
+    }))
+    const { data } = await supabase.from('transaction_steps').insert(rows).select()
+    setSteps(data || [])
+    pushToast(`${stateVal !== 'other' ? stateVal + ' ' : ''}${typeVal} checklist loaded`, 'success')
+  }
+
+  const cycleStatus = async (step) => {
+    const cur = step.doc_status || (step.completed ? 'complete' : 'pending')
+    const next = { pending: 'complete', complete: 'approved', approved: 'na', na: 'pending' }[cur] || 'pending'
+    const now  = new Date().toISOString()
+    const patch = {
+      doc_status:   next,
+      completed:    next === 'complete' || next === 'approved',
+      completed_at: (next === 'complete' || next === 'approved') ? now : null,
+    }
     await supabase.from('transaction_steps').update(patch).eq('id', step.id)
     setSteps(p => p.map(s => s.id === step.id ? { ...s, ...patch } : s))
   }
@@ -87,6 +239,7 @@ function ChecklistTab({ deal }) {
     setAdding(true)
     const { data, error } = await supabase.from('transaction_steps').insert([{
       deal_id: deal.id, title: newTitle.trim(), completed: false, sort_order: steps.length,
+      doc_action: 'manual', doc_status: 'pending', if_applicable: false,
     }]).select().single()
     setAdding(false)
     if (error) { pushToast(error.message, 'error'); return }
@@ -109,66 +262,131 @@ function ChecklistTab({ deal }) {
 
   if (loading) return <div style={{ padding: 24, color: 'var(--gw-mist)', fontSize: 13 }}>Loading checklist…</div>
 
-  const doneCount = steps.filter(s => s.completed).length
+  const doneCount = steps.filter(s => s.doc_status === 'complete' || s.doc_status === 'approved' || (!s.doc_status && s.completed)).length
   const pct       = steps.length > 0 ? Math.round(doneCount / steps.length * 100) : 0
 
   return (
-    <div style={{ padding: 16, overflowY: 'auto', flex: 1 }}>
-      {/* Progress bar */}
-      {steps.length > 0 && (
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
-            <span>{doneCount}/{steps.length} complete</span>
-            <span style={{ color: pct === 100 ? 'var(--gw-green)' : 'var(--gw-mist)' }}>{pct}%</span>
-          </div>
-          <div style={{ height: 6, background: 'var(--gw-border)', borderRadius: 3, overflow: 'hidden' }}>
-            <div style={{ width: `${pct}%`, height: '100%', background: pct === 100 ? 'var(--gw-green)' : 'var(--gw-azure)', borderRadius: 3, transition: 'width 300ms ease' }} />
-          </div>
-        </div>
-      )}
-
-      {/* Steps */}
-      {steps.length === 0 && !CHECKLIST_STAGES.includes(deal.stage) && (
-        <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--gw-mist)', fontSize: 13 }}>
-          Checklist auto-creates when this deal reaches <strong>Under Contract</strong>.<br />
-          {deal?.prop_category === 'commercial' ? 'Commercial closing steps will be loaded.' : 'Residential closing steps will be loaded.'}<br />
-          Or add steps manually below.
-        </div>
-      )}
-
-      {steps.map(step => (
-        <div key={step.id} onClick={() => toggle(step)}
-          style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 'var(--radius)', cursor: 'pointer', marginBottom: 3, transition: 'background 120ms' }}
-          onMouseEnter={e => e.currentTarget.style.background = 'var(--gw-bone)'}
-          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-          <div style={{ width: 20, height: 20, borderRadius: 4, border: `2px solid ${step.completed ? 'var(--gw-green)' : 'var(--gw-border)'}`, background: step.completed ? 'var(--gw-green)' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, transition: 'all 150ms' }}>
-            {step.completed && <Icon name="check" size={11} style={{ color: '#fff' }} />}
-          </div>
-          <span style={{ flex: 1, fontSize: 13, textDecoration: step.completed ? 'line-through' : 'none', color: step.completed ? 'var(--gw-mist)' : 'var(--gw-ink)' }}>
-            {step.title}
-          </span>
-          {step.completed && step.completed_at && (
-            <span style={{ fontSize: 10, color: 'var(--gw-mist)', whiteSpace: 'nowrap' }}>
-              {new Date(step.completed_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-            </span>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* ── State + type selector ── */}
+      <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--gw-border)', background: 'var(--gw-bone)', flexShrink: 0 }}>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <select className="form-control" style={{ flex: 1, fontSize: 12 }}
+            value={dealState}
+            onChange={e => { setDealState(e.target.value); saveMeta(e.target.value, txType) }}>
+            <option value="">State…</option>
+            <option value="IA">Iowa (IA)</option>
+            <option value="SD">South Dakota (SD)</option>
+            <option value="NE">Nebraska (NE)</option>
+            <option value="other">Other</option>
+          </select>
+          <select className="form-control" style={{ flex: 1, fontSize: 12 }}
+            value={txType}
+            onChange={e => { setTxType(e.target.value); saveMeta(dealState, e.target.value) }}>
+            <option value="">Type…</option>
+            <option value="seller">Seller</option>
+            <option value="buyer">Buyer</option>
+            <option value="commercial">Commercial</option>
+            <option value="lease">Lease / Rental</option>
+          </select>
+          {dealState && txType && (
+            <button className="btn btn--primary btn--sm" style={{ whiteSpace: 'nowrap', fontSize: 11 }}
+              onClick={() => loadTemplate(dealState, txType)}>
+              {steps.length > 0 ? 'Reload' : 'Load'}
+            </button>
           )}
-          <button className="btn btn--ghost btn--icon" style={{ padding: 2, opacity: 0.4 }}
-            onClick={e => { e.stopPropagation(); removeStep(step.id) }}>
-            <Icon name="x" size={11} />
-          </button>
         </div>
-      ))}
+        {(!dealState || !txType) && (
+          <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 5, lineHeight: 1.4 }}>
+            Select state &amp; transaction type to load the correct document checklist.
+          </div>
+        )}
+      </div>
 
-      {/* Add custom step */}
-      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-        <input className="form-control" style={{ flex: 1, fontSize: 13 }}
-          placeholder="Add a step…"
-          value={newTitle} onChange={e => setNewTitle(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && addStep()}
-          disabled={adding} />
-        <button className="btn btn--secondary btn--sm" onClick={addStep} disabled={adding || !newTitle.trim()}>
-          Add
-        </button>
+      <div style={{ padding: '12px 14px', overflowY: 'auto', flex: 1 }}>
+        {/* Progress */}
+        {steps.length > 0 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontWeight: 600, marginBottom: 5, color: 'var(--gw-mist)' }}>
+              <span>{doneCount} of {steps.length} complete</span>
+              <span style={{ color: pct === 100 ? 'var(--gw-green)' : 'var(--gw-mist)' }}>{pct}%</span>
+            </div>
+            <div style={{ height: 5, background: 'var(--gw-border)', borderRadius: 3, overflow: 'hidden' }}>
+              <div style={{ width: `${pct}%`, height: '100%', background: pct === 100 ? 'var(--gw-green)' : 'var(--gw-azure)', borderRadius: 3, transition: 'width 300ms' }} />
+            </div>
+          </div>
+        )}
+
+        {steps.length === 0 && (
+          <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--gw-mist)', fontSize: 13, lineHeight: 1.6 }}>
+            {dealState && txType
+              ? <>Click <strong>Load</strong> above to populate the {dealState !== 'other' ? dealState + ' ' : ''}{txType} checklist.</>
+              : <>Select state &amp; type above to load a checklist,<br />or add steps manually below.</>}
+          </div>
+        )}
+
+        {/* Document rows */}
+        {steps.map(step => {
+          const status = step.doc_status || (step.completed ? 'complete' : 'pending')
+          const action = step.doc_action  || 'manual'
+          const isDone = status === 'complete' || status === 'approved'
+          const statusBadge = STATUS_BADGE_MAP[status]
+          const actionBadge = !statusBadge && action !== 'manual' ? ACTION_BADGE_MAP[action] : null
+
+          return (
+            <div key={step.id}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--gw-border)' }}>
+              {/* Checkbox */}
+              <div onClick={() => cycleStatus(step)} style={{ width: 18, height: 18, borderRadius: 3, flexShrink: 0, cursor: 'pointer', transition: 'all 140ms',
+                border: `2px solid ${isDone ? 'var(--gw-green)' : 'var(--gw-border)'}`,
+                background: isDone ? 'var(--gw-green)' : '#fff',
+                display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                {isDone && <Icon name="check" size={10} style={{ color: '#fff' }} />}
+              </div>
+
+              {/* Title */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ fontSize: 12.5, color: isDone ? 'var(--gw-mist)' : 'var(--gw-ink)', textDecoration: isDone ? 'line-through' : 'none' }}>
+                  {step.title}
+                </span>
+                {step.if_applicable && (
+                  <span style={{ fontSize: 10, color: 'var(--gw-mist)', marginLeft: 5, fontStyle: 'italic' }}>
+                    if applicable
+                  </span>
+                )}
+              </div>
+
+              {/* Status badge or action badge */}
+              {statusBadge && (
+                <span onClick={() => cycleStatus(step)} style={{ fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 10, whiteSpace: 'nowrap', cursor: 'pointer', flexShrink: 0,
+                  background: statusBadge.bg, color: statusBadge.color, border: `1px solid ${statusBadge.border}` }}>
+                  {statusBadge.label}
+                </span>
+              )}
+              {actionBadge && (
+                <span onClick={() => cycleStatus(step)} style={{ fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 10, whiteSpace: 'nowrap', cursor: 'pointer', flexShrink: 0,
+                  background: actionBadge.bg, color: actionBadge.color, border: `1px solid ${actionBadge.border}` }}>
+                  {actionBadge.label}
+                </span>
+              )}
+
+              {/* Remove */}
+              <button className="btn btn--ghost btn--icon" style={{ padding: 2, opacity: 0.3, flexShrink: 0 }}
+                onClick={e => { e.stopPropagation(); removeStep(step.id) }}>
+                <Icon name="x" size={10} />
+              </button>
+            </div>
+          )
+        })}
+
+        {/* Add custom step */}
+        <div style={{ display: 'flex', gap: 6, marginTop: 14 }}>
+          <input className="form-control" style={{ flex: 1, fontSize: 12 }}
+            placeholder="Add a document or step…"
+            value={newTitle} onChange={e => setNewTitle(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && addStep()}
+            disabled={adding} />
+          <button className="btn btn--secondary btn--sm" onClick={addStep} disabled={adding || !newTitle.trim()}>Add</button>
+        </div>
       </div>
     </div>
   )
@@ -773,10 +991,20 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
   )
 }
 
-function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, onSent }) {
-  const contact     = contacts?.find(c => c.id === deal?.contact_id)
-  const defaultName = `${contact?.first_name || ''} ${contact?.last_name || ''}`.trim()
-  const defaultEmail= contact?.email || ''
+function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent, onClose, onSent }) {
+  // Primary signer: contact linked directly to the deal
+  const contact      = contacts?.find(c => c.id === deal?.contact_id)
+  const defaultName  = `${contact?.first_name || ''} ${contact?.last_name || ''}`.trim()
+  const defaultEmail = contact?.email || ''
+
+  // Secondary signer: property owner contact (if different from primary)
+  const linkedProperty   = properties?.find(p => p.id === deal?.property_id)
+  const ownerContact     = linkedProperty?.linked_contact_id
+    ? contacts?.find(c => c.id === linkedProperty.linked_contact_id)
+    : null
+  const ownerIsDifferent = ownerContact && ownerContact.id !== deal?.contact_id
+  const ownerName        = ownerIsDifferent ? `${ownerContact.first_name || ''} ${ownerContact.last_name || ''}`.trim() : ''
+  const ownerEmail       = ownerIsDifferent ? (ownerContact.email || '') : ''
 
   const [step,          setStep]        = React.useState(1)
   const [subject,       setSubject]     = React.useState(`Please sign: ${deal?.title || 'Document'}`)
@@ -795,10 +1023,12 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
   const [useAnchorTabs, setUseAnchorTabs] = React.useState(false)
   const fileRef = React.useRef()
 
-  // Each signer has name, email, tabs[]
-  const [signers, setSigners] = React.useState([
-    { id: 1, name: defaultName, email: defaultEmail, tabs: [] }
-  ])
+  // Each signer has name, email, tabs[] — pre-fill contact + property owner when available
+  const [signers, setSigners] = React.useState(() => {
+    const base = [{ id: 1, name: defaultName, email: defaultEmail, tabs: [] }]
+    if (ownerIsDifferent) base.push({ id: 2, name: ownerName, email: ownerEmail, tabs: [] })
+    return base
+  })
 
   const addSigner    = () => setSigners(p => [...p, { id: Date.now(), name:'', email:'', tabs:[] }])
   const removeSigner = (id) => setSigners(p => p.filter(s => s.id !== id))
@@ -1172,7 +1402,7 @@ function SendSignatureModal({ deal, contacts, dealFiles, activeAgent, onClose, o
   )
 }
 
-function SignaturesTab({ deal, contacts, activeAgent }) {
+function SignaturesTab({ deal, contacts, properties, activeAgent }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
@@ -1362,7 +1592,7 @@ create policy "agent_notifications_policy" on agent_notifications
 
       {sendOpen && (
         <SendSignatureModal
-          deal={deal} contacts={contacts} dealFiles={dealFiles} activeAgent={activeAgent}
+          deal={deal} contacts={contacts} properties={properties} dealFiles={dealFiles} activeAgent={activeAgent}
           onClose={() => setSendOpen(false)}
           onSent={() => { setSendOpen(false); loadEnvelopes() }}
         />
@@ -1700,7 +1930,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
 
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
-        <SignaturesTab deal={deal} contacts={contacts} activeAgent={activeAgent} />
+        <SignaturesTab deal={deal} contacts={contacts} properties={properties} activeAgent={activeAgent} />
       )}
 
       {/* Client Portal tab */}
