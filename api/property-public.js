@@ -1,3 +1,15 @@
+/**
+ * Gateway CRM — Public Property Endpoint
+ *
+ * GET  /api/property-public?id=<uuid>   — social-share HTML for a listing
+ *                                          (served at /share/:id via rewrite)
+ * POST /api/property-public             — landing-page lead capture (gate)
+ *
+ * Two public-facing property actions share one serverless function (Vercel
+ * Hobby caps total functions at 12). GET renders Open Graph / Twitter cards
+ * and redirects real users to the full listing; POST creates/links a contact.
+ */
+
 const TYPE_LABELS = {
   residential: 'Residential', rental: 'Rental', multifamily: 'Multifamily',
   office: 'Office', land: 'Land', retail: 'Retail',
@@ -8,7 +20,8 @@ function esc(str) {
   return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
 }
 
-export default async function handler(req, res) {
+// ── GET: social-share HTML (formerly /api/share) ─────────────────────────────
+async function handleShare(req, res) {
   const id = req.query.id || req.url?.split('/').pop()?.split('?')[0]
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).send('Invalid property ID')
 
@@ -44,7 +57,6 @@ export default async function handler(req, res) {
     : specs
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8')
-  // Cache 1 hour on CDN, serve stale up to 24h while revalidating
   res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=86400')
 
   return res.send(`<!DOCTYPE html>
@@ -82,4 +94,88 @@ export default async function handler(req, res) {
   <a href="${esc(listingUrl)}" style="color:#4a6fa5">View Listing →</a>
 </body>
 </html>`)
+}
+
+// ── POST: landing-page lead capture (formerly /api/property-gate) ────────────
+async function handleGate(req, res) {
+  const { propertyId, name, email, phone } = req.body || {}
+  if (!name?.trim() || !email?.trim()) {
+    return res.status(400).json({ error: 'name and email are required' })
+  }
+  if (!email.includes('@')) {
+    return res.status(400).json({ error: 'Invalid email address' })
+  }
+
+  const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL
+  const SERVICE_KEY  = process.env.SUPABASE_SERVICE_KEY
+  if (!SUPABASE_URL || !SERVICE_KEY) {
+    return res.status(500).json({ error: 'Server configuration error' })
+  }
+
+  const headers = {
+    'Content-Type': 'application/json',
+    apikey: SERVICE_KEY,
+    Authorization: `Bearer ${SERVICE_KEY}`,
+  }
+
+  const parts = name.trim().split(/\s+/)
+  const first = parts[0]
+  const last  = parts.slice(1).join(' ') || '—'
+
+  const checkRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/contacts?email=eq.${encodeURIComponent(email.trim().toLowerCase())}&select=id&limit=1`,
+    { headers }
+  )
+  const existing = checkRes.ok ? await checkRes.json() : []
+
+  let contactId
+
+  if (existing.length > 0) {
+    contactId = existing[0].id
+  } else {
+    const createRes = await fetch(`${SUPABASE_URL}/rest/v1/contacts`, {
+      method: 'POST',
+      headers: { ...headers, Prefer: 'return=representation' },
+      body: JSON.stringify({
+        first_name: first,
+        last_name:  last,
+        email:      email.trim().toLowerCase(),
+        phone:      phone?.trim() || null,
+        source:     'website',
+        type:       'buyer',
+        status:     'active',
+      }),
+    })
+    if (!createRes.ok) {
+      const d = await createRes.json().catch(() => ({}))
+      return res.status(500).json({ error: d.message || 'Failed to create contact' })
+    }
+    const [created] = await createRes.json()
+    contactId = created?.id
+  }
+
+  if (contactId && propertyId) {
+    await fetch(`${SUPABASE_URL}/rest/v1/activities`, {
+      method: 'POST',
+      headers: { ...headers, Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        contact_id: contactId,
+        type:       'note',
+        body:       `Landing page inquiry submitted for property ID: ${propertyId}`,
+      }),
+    }).catch(() => {})
+  }
+
+  return res.json({ ok: true, contactId })
+}
+
+export default async function handler(req, res) {
+  // CORS for the lead-capture POST (landing pages may be embedded externally)
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  if (req.method === 'OPTIONS') return res.status(200).end()
+
+  if (req.method === 'POST') return handleGate(req, res)
+  return handleShare(req, res)
 }

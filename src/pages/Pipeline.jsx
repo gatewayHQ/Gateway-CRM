@@ -492,7 +492,7 @@ function KeyDatesTab({ deal }) {
   const sendTestReminder = async () => {
     setTestSending(true)
     try {
-      const resp = await fetch('/api/reminders?secret=' + encodeURIComponent(window.__gwCronSecret || ''))
+      const resp = await fetch('/api/cron?task=reminders&secret=' + encodeURIComponent(window.__gwCronSecret || ''))
       const data = await resp.json()
       pushToast(`Test run: ${data.sent || 0} sent, ${data.skipped || 0} skipped`)
       // Refresh sent status
