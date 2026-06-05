@@ -15,12 +15,20 @@ const BLANK = {
   assigned_agent_id: '', notes: '', tags: [],
   owner_address: '', owner_city: '', owner_state: '', owner_zip: '',
   birthday: '', anniversary_date: '',
+  spouse_name: '', spouse_phone: '', spouse_notes: '',
   submarket: '', submarkets: [], asset_types: [],
   size_min: '', size_max: '', size_unit: 'sqft',
 }
 const BLANK_PROP = { address: '', list_price: '', type: 'residential', subtype: '', beds: '', baths: '', sqft: '', garage: '', details: {} }
 
 const COMM_SUBTYPES = ['multifamily', 'office', 'land', 'retail', 'industrial', 'mixed-use']
+
+// A transport-level failure (status 0 / "Failed to fetch") means the request never
+// reached the server — transient network, offline, or a blocking browser extension.
+// These are worth retrying; PostgREST/validation errors (4xx/5xx) are not.
+const isTransportError = (error, status) =>
+  status === 0 ||
+  /failed to fetch|fetcherror|networkerror|network request failed|load failed/i.test(error?.message || '')
 
 export default function ContactDrawer({
   open, onClose, contact, agents,
@@ -38,6 +46,7 @@ export default function ContactDrawer({
   const [propForm, setPropForm] = useState(BLANK_PROP)
   const [dirty, setDirty] = useState(false)
   const [duplicateWarn, setDuplicateWarn] = useState(null)
+  const [showSpouse, setShowSpouse] = useState(false)
 
   // Reset on contact change
   useEffect(() => {
@@ -53,8 +62,11 @@ export default function ContactDrawer({
         tags:        Array.isArray(contact.tags)        ? contact.tags        : [],
         asset_types: Array.isArray(contact.asset_types) ? contact.asset_types : [],
       })
+      // Expand the spouse/partner section automatically when there's data to show
+      setShowSpouse(Boolean(contact.spouse_name || contact.spouse_phone || contact.spouse_notes))
     } else {
       setForm(BLANK)
+      setShowSpouse(false)
     }
     setErrors({})
     setTab('details')
@@ -127,6 +139,10 @@ export default function ContactDrawer({
       assigned_agent_id: form.assigned_agent_id || null,
       email:             form.email?.trim() || null,
       phone:             normalizedPhone,
+      // Spouse / significant other — phone normalized when parseable, raw otherwise
+      spouse_name:       form.spouse_name?.trim() || null,
+      spouse_phone:      form.spouse_phone ? (normalizePhone(form.spouse_phone) || form.spouse_phone.trim()) : null,
+      spouse_notes:      form.spouse_notes?.trim() || null,
       tags:              Array.isArray(form.tags) ? form.tags : [],
       ...(hasCriteria && {
         // Keep legacy single-value submarket synced for backward compatibility
@@ -140,23 +156,56 @@ export default function ContactDrawer({
       }),
     }
 
+    // Use maybeSingle() rather than single(): if a write commits but the returning
+    // SELECT yields 0 rows (an RLS/returning quirk), single() raises PostgREST
+    // PGRST116 — "Cannot coerce the result to a single JSON object" — surfacing a
+    // scary error for a save that actually succeeded. maybeSingle() returns
+    // { data: null, error: null } in that case, and we recover via the parent reload.
     const doSave = (p) => contact?.id
-      ? supabase.from('contacts').update(p).eq('id', contact.id).select().single()
-      : supabase.from('contacts').insert([p]).select().single()
+      ? supabase.from('contacts').update(p).eq('id', contact.id).select().maybeSingle()
+      : supabase.from('contacts').insert([p]).select().maybeSingle()
 
-    let { data: saved, error } = await doSave(payload)
+    // Retry transient transport failures ("Failed to fetch") with short backoff before
+    // giving up — a dropped/blocked request usually succeeds on a second attempt.
+    const saveWithRetry = async (p, attempts = 3) => {
+      let res
+      for (let i = 0; i < attempts; i++) {
+        res = await doSave(p)
+        if (!res.error || !isTransportError(res.error, res.status)) return res
+        if (i < attempts - 1) await new Promise(r => setTimeout(r, 400 * 2 ** i))
+      }
+      return res
+    }
 
-    // Migration-pending fallback
+    let { data: saved, error, status } = await saveWithRetry(payload)
+
+    // Migration-pending fallback: drop columns an older DB may not have yet, then retry.
     let criteriaDropped = false
-    if (error?.message?.includes('schema cache') && isBuyer) {
-      const { submarket: _s, submarkets: _ss, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u, ...payloadNoCriteria } = payload
-      ;({ data: saved, error } = await doSave(payloadNoCriteria))
-      if (!error) criteriaDropped = true
+    if (error?.message?.includes('schema cache')) {
+      // Spouse columns are newest — strip them regardless of contact type.
+      const { spouse_name: _sn, spouse_phone: _sp, spouse_notes: _snt, ...retryPayload } = payload
+      let next = retryPayload
+      if (isBuyer) {
+        const { submarket: _s, submarkets: _ss, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u, ...payloadNoCriteria } = next
+        next = payloadNoCriteria
+      }
+      ;({ data: saved, error, status } = await saveWithRetry(next))
+      if (!error && isBuyer) criteriaDropped = true
     }
 
     if (error) {
       setSaving(false)
-      pushToast(error.message, 'error')
+      // Log the full structured error so any future failure (code/details/hint) is
+      // diagnosable from the console rather than just the toast message.
+      console.error('[ContactDrawer] save failed', {
+        code: error.code, message: error.message, details: error.details, hint: error.hint, status,
+      })
+      pushToast(
+        isTransportError(error, status)
+          ? "Couldn't reach the server — check your connection and try again. If you use an ad or privacy blocker, allow this site."
+          : (error.message || 'Could not save contact — please try again.'),
+        'error'
+      )
       return
     }
 
@@ -316,7 +365,7 @@ export default function ContactDrawer({
               <div className="form-group">
                 <label className="form-label">Status</label>
                 <select className="form-control" value={form.status} onChange={(e) => set('status', e.target.value)}>
-                  {['active','cold','closed'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+                  {['lead','opportunity','active','pending','cold','closed'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
                 </select>
               </div>
             </div>
@@ -325,7 +374,7 @@ export default function ContactDrawer({
               <div className="form-group">
                 <label className="form-label">Source</label>
                 <select className="form-control" value={form.source || 'other'} onChange={(e) => set('source', e.target.value)}>
-                  {['referral','website','open house','social','cold call','other'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+                  {['referral','website','open house','social','cold call','team','paid service','other'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
                 </select>
               </div>
               <div className="form-group">
@@ -378,6 +427,61 @@ export default function ContactDrawer({
                 <input className="form-control" type="date" value={form.anniversary_date || ''} onChange={(e) => set('anniversary_date', e.target.value)} />
               </div>
             </div>
+
+            {/* ── Spouse / Significant Other ──────────────────────────────────
+                Collapsed by default so it never clutters the form; expands
+                inline on demand (and auto-expands when data already exists). */}
+            {!showSpouse ? (
+              <button
+                type="button"
+                onClick={() => setShowSpouse(true)}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  background: 'none', border: 'none', padding: '4px 0',
+                  color: 'var(--gw-azure)', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }}
+              >
+                + Add spouse / partner
+              </button>
+            ) : (
+              <div style={{ borderTop: '1px solid var(--gw-border)', marginTop: 4, paddingTop: 14 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gw-mist)' }}>
+                    Spouse / Partner
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { setShowSpouse(false); set('spouse_name', ''); set('spouse_phone', ''); set('spouse_notes', '') }}
+                    style={{ background: 'none', border: 'none', padding: 0, color: 'var(--gw-mist)', fontSize: 11, cursor: 'pointer' }}
+                  >
+                    Remove
+                  </button>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">Name</label>
+                    <input className="form-control" value={form.spouse_name || ''} onChange={(e) => set('spouse_name', e.target.value)} placeholder="Partner's name" />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Phone</label>
+                    <input className="form-control" value={form.spouse_phone || ''} onChange={(e) => set('spouse_phone', e.target.value)} placeholder="(555) 000-0000" />
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">
+                    Notes
+                    <span style={{ fontWeight: 400, color: 'var(--gw-mist)', fontSize: 11 }}> — optional</span>
+                  </label>
+                  <textarea
+                    className="form-control form-control--textarea"
+                    value={form.spouse_notes || ''}
+                    onChange={(e) => set('spouse_notes', e.target.value)}
+                    placeholder="Anniversary, kids' names, preferences…"
+                    style={{ minHeight: 60 }}
+                  />
+                </div>
+              </div>
+            )}
 
             <div className="form-group">
               <label className="form-label">Notes</label>

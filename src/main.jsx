@@ -6,6 +6,8 @@ import PropertyLandingPage from './pages/PropertyLanding.jsx'
 import LandingProperty from './pages/LandingProperty.jsx'
 import LandingValuation from './pages/LandingValuation.jsx'
 import LandingMultifamily from './pages/LandingMultifamily.jsx'
+import { DEMO_LISTING } from './pages/landingDemoData.js'
+import ClientPortal from './pages/ClientPortal.jsx'
 import { initWebVitals } from './lib/perf.js'
 import './styles/app.css'
 
@@ -44,12 +46,17 @@ const listingMatch   = pathname.match(/^\/listing\/([0-9a-f-]{36})/i)
 const lpPropMatch    = pathname.match(/^\/lp\/property\/([0-9a-f-]{36})/i)
 const lpValMatch     = pathname.match(/^\/lp\/valuation\/([0-9a-f-]{36})/i)
 const lpMultiMatch   = pathname.match(/^\/lp\/multifamily\/([0-9a-f-]{36})/i)
+const portalMatch    = pathname.match(/^\/portal\/([0-9a-f-]{36})/i)
+
+const isDemoPage     = pathname === '/lp/demo'
 
 let publicView = null
-if (listingMatch)        publicView = <PropertyLandingPage propertyId={listingMatch[1]} />
+if (isDemoPage)          publicView = <LandingProperty preview={DEMO_LISTING} />
+else if (listingMatch)   publicView = <PropertyLandingPage propertyId={listingMatch[1]} />
 else if (lpPropMatch)    publicView = <LandingProperty   mailingId={lpPropMatch[1]} />
 else if (lpValMatch)     publicView = <LandingValuation  mailingId={lpValMatch[1]} />
 else if (lpMultiMatch)   publicView = <LandingMultifamily mailingId={lpMultiMatch[1]} />
+else if (portalMatch)    publicView = <ClientPortal       token={portalMatch[1]} />
 else if (isLeadPage)     publicView = <LeadCapturePage />
 
 ReactDOM.createRoot(document.getElementById('root')).render(

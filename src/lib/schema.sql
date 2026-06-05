@@ -17,6 +17,9 @@ create table if not exists agents (
   color      text default '#2d3561',
   team_id    uuid,                         -- future: multi-team support
   specialty  text check (specialty in ('residential', 'commercial')),
+  phone      text,                         -- shown on landing-page advisor card
+  photo_url  text,                         -- headshot (public URL)
+  bio        text,                         -- short advisor bio for landing pages
   created_at timestamptz default now()
 );
 
@@ -30,8 +33,8 @@ create table if not exists contacts (
   email             text,
   phone             text,
   type              text check (type in ('buyer','seller','landlord','tenant','investor')) default 'buyer',
-  status            text check (status in ('active','cold','closed')) default 'active',
-  source            text check (source in ('referral','website','open house','social','cold call','other')) default 'other',
+  status            text check (status in ('active','cold','closed','lead','opportunity','pending')) default 'active',
+  source            text check (source in ('referral','website','open house','social','cold call','team','paid service','other')) default 'other',
   assigned_agent_id uuid references agents(id) on delete set null,
   notes             text,
   tags              text[],
@@ -44,6 +47,10 @@ create table if not exists contacts (
   -- Annual reminders
   birthday          date,
   anniversary_date  date,
+  -- Spouse / significant other (household relationship)
+  spouse_name       text,
+  spouse_phone      text,
+  spouse_notes      text,
   -- Buyer / investor search criteria (for matching)
   submarket         text,          -- target area / county
   asset_types       text[],        -- e.g. ['multifamily','office']
@@ -100,9 +107,13 @@ create table if not exists deals (
   probability         integer default 0,
   expected_close_date date,
   notes               text,
+  portal_token        uuid,                 -- client portal share token (unguessable)
+  portal_enabled      boolean default false,
   created_at          timestamptz default now(),
   updated_at          timestamptz default now()
 );
+create unique index if not exists deals_portal_token_idx
+  on deals(portal_token) where portal_token is not null;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- TASKS
@@ -162,35 +173,23 @@ create table if not exists documents (
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- ENVELOPES  (DocuSign signature tracking)
--- ─────────────────────────────────────────────────────────────────────────────
-create table if not exists envelopes (
-  id          uuid primary key default uuid_generate_v4(),
-  deal_id     uuid references deals(id) on delete cascade,
-  document_id uuid references documents(id) on delete set null,
-  agent_id    uuid references agents(id) on delete set null,
-  envelope_id text not null,       -- DocuSign envelope ID
-  status      text default 'sent', -- sent | delivered | completed | declined | voided
-  subject     text,
-  signers     jsonb default '[]',  -- [{name, email, routingOrder, status}]
-  sent_at     timestamptz default now(),
-  completed_at timestamptz
-);
-
--- ─────────────────────────────────────────────────────────────────────────────
 -- COMMISSIONS
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Canonical model: one commission row per deal (keyed by deal_id), storing the
+-- percentage split the app edits in Commission.jsx. Dollar amounts are derived
+-- in the app from these percentages × the deal value — they are not stored.
 create table if not exists commissions (
-  id          uuid primary key default uuid_generate_v4(),
-  deal_id     uuid references deals(id) on delete cascade,
-  agent_id    uuid references agents(id) on delete set null,
-  gross       numeric,
-  split_pct   numeric default 100,
-  net         numeric,
-  paid        boolean default false,
-  paid_at     timestamptz,
-  notes       text,
-  created_at  timestamptz default now()
+  id              uuid primary key default uuid_generate_v4(),
+  deal_id         uuid references deals(id) on delete cascade unique not null,
+  gross_pct       numeric not null default 3.0,    -- gross commission % of deal value
+  broker_pct      numeric not null default 30.0,   -- brokerage share of the split
+  agent_pct       numeric not null default 70.0,   -- agent share of the split
+  referral_pct    numeric not null default 0,      -- referral fee off the top
+  co_agent_pct    numeric not null default 0,      -- co-agent share of agent gross
+  transaction_fee numeric not null default 0,      -- flat fee off agent gross
+  notes           text,
+  created_at      timestamptz default now(),
+  updated_at      timestamptz default now()
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -330,7 +329,8 @@ create table if not exists docusign_envelopes (
   document_name text,
   signers       jsonb default '[]',
   sent_at       timestamptz default now(),
-  completed_at  timestamptz
+  completed_at  timestamptz,
+  created_at    timestamptz default now()
 );
 
 alter table docusign_envelopes enable row level security;
@@ -357,111 +357,6 @@ alter table transaction_steps enable row level security;
 do $$ begin
   if not exists (select 1 from pg_policies where tablename='transaction_steps' and policyname='allow_all') then
     create policy "allow_all" on transaction_steps for all using (true) with check (true);
-  end if;
-end $$;
-
--- ─────────────────────────────────────────────────────────────────────────────
--- MAIL CAMPAIGNS  (outreach campaigns — mail flyers, cold call, email blasts)
--- ─────────────────────────────────────────────────────────────────────────────
-create table if not exists mail_campaigns (
-  id                  uuid primary key default uuid_generate_v4(),
-  name                text not null,
-  description         text,
-  property_types      text[] default '{}',   -- target property types (multifamily, office…)
-  status              text check (status in ('draft','active','paused','completed')) default 'draft',
-  agent_id            uuid references agents(id) on delete set null,
-  property_id         uuid references properties(id) on delete set null, -- linked property for QR/landing page
-  flyer_url           text,                  -- link to flyer asset (Canva, PDF URL, etc.)
-  flyer_photo_caption text,                  -- caption shown under the hero photo on the flyer
-  tracking_url        text,                  -- Bitly short URL for QR tracking
-  qr_code_url         text,                  -- Bitly QR code image URL
-  bitly_id            text,                  -- Bitly link ID for analytics
-  qr_target           text check (qr_target in ('crm_landing','custom_url')) default 'crm_landing',
-  frequency_cap       integer default 0,     -- 0 = no cap; >0 = max sends per contact
-  frequency_days      integer default 30,    -- rolling window for frequency cap
-  total_sends         integer default 0,     -- denormalised counter (updated by trigger/app)
-  total_responses     integer default 0,
-  created_at          timestamptz default now()
-);
-
--- Migration: add new columns if they don't exist yet
-do $$ begin
-  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='flyer_photo_caption') then
-    alter table mail_campaigns add column flyer_photo_caption text;
-  end if;
-  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='property_id') then
-    alter table mail_campaigns add column property_id uuid references properties(id) on delete set null;
-  end if;
-  if not exists (select 1 from information_schema.columns where table_name='mail_campaigns' and column_name='qr_target') then
-    alter table mail_campaigns add column qr_target text default 'crm_landing';
-  end if;
-end $$;
-
-alter table mail_campaigns enable row level security;
-do $$ begin
-  if not exists (select 1 from pg_policies where tablename='mail_campaigns' and policyname='allow_all') then
-    create policy "allow_all" on mail_campaigns for all using (true) with check (true);
-  end if;
-end $$;
-
--- ─────────────────────────────────────────────────────────────────────────────
--- MAIL SENDS  (every individual send / contact event — mail, call, or email)
--- ─────────────────────────────────────────────────────────────────────────────
-create table if not exists mail_sends (
-  id                uuid primary key default uuid_generate_v4(),
-  campaign_id       uuid references mail_campaigns(id) on delete cascade,
-  -- Recipient link (at least one must be set, or use raw fields below)
-  contact_id        uuid references contacts(id) on delete set null,
-  cold_lead_id      uuid references cold_call_leads(id) on delete set null,
-  -- Raw recipient details (used when no contact record exists yet)
-  recipient_name    text,
-  recipient_address text,
-  recipient_city    text,
-  recipient_state   text,
-  recipient_zip     text,
-  -- Event metadata
-  channel           text check (channel in ('mail','cold-call','email')) default 'mail',
-  sent_at           timestamptz default now(),
-  agent_id          uuid references agents(id) on delete set null,
-  -- Response tracking
-  response          text check (response in ('no-response','callback','interested','dnc','converted')) default 'no-response',
-  responded_at      timestamptz,
-  deal_id           uuid references deals(id) on delete set null,  -- deal attributed to this send
-  notes             text,
-  created_at        timestamptz default now()
-);
-
-create index if not exists mail_sends_campaign_id_idx on mail_sends(campaign_id);
-create index if not exists mail_sends_contact_id_idx  on mail_sends(contact_id);
-create index if not exists mail_sends_cold_lead_idx   on mail_sends(cold_lead_id);
-
-alter table mail_sends enable row level security;
-do $$ begin
-  if not exists (select 1 from pg_policies where tablename='mail_sends' and policyname='allow_all') then
-    create policy "allow_all" on mail_sends for all using (true) with check (true);
-  end if;
-end $$;
-
--- ─────────────────────────────────────────────────────────────────────────────
--- MAIL SUPPRESSIONS  (global DNC / opt-out list across all campaigns)
--- ─────────────────────────────────────────────────────────────────────────────
-create table if not exists mail_suppressions (
-  id         uuid primary key default uuid_generate_v4(),
-  address    text,
-  email      text,
-  phone      text,
-  full_name  text,
-  reason     text check (reason in ('dnc','opted-out','deceased','returned-mail','other')) default 'dnc',
-  contact_id uuid references contacts(id) on delete set null,
-  agent_id   uuid references agents(id) on delete set null,
-  notes      text,
-  created_at timestamptz default now()
-);
-
-alter table mail_suppressions enable row level security;
-do $$ begin
-  if not exists (select 1 from pg_policies where tablename='mail_suppressions' and policyname='allow_all') then
-    create policy "allow_all" on mail_suppressions for all using (true) with check (true);
   end if;
 end $$;
 
@@ -496,6 +391,9 @@ end $$;
 -- alter table contacts    add column if not exists owner_zip        text;
 -- alter table contacts    add column if not exists birthday         date;
 -- alter table contacts    add column if not exists anniversary_date date;
+-- alter table contacts    add column if not exists spouse_name      text;
+-- alter table contacts    add column if not exists spouse_phone     text;
+-- alter table contacts    add column if not exists spouse_notes     text;
 -- alter table properties  add column if not exists county  text;
 -- alter table properties  add column if not exists garage  integer default 0;
 -- alter table properties  add column if not exists details jsonb   default '{}';
@@ -573,18 +471,13 @@ create index if not exists idx_activities_contact on activities(contact_id, crea
 create index if not exists idx_activities_agent   on activities(agent_id);
 
 -- commissions
-create index if not exists idx_commissions_agent   on commissions(agent_id);
+-- commissions are keyed uniquely by deal_id (the unique constraint already
+-- provides the lookup index); no agent_id/paid columns in the canonical model.
 create index if not exists idx_commissions_deal    on commissions(deal_id);
-create index if not exists idx_commissions_paid    on commissions(paid, paid_at desc);
 
 -- agent_notifications — real-time inbox queries
 create index if not exists idx_notif_agent_unread on agent_notifications(agent_id, read) where read = false;
 create index if not exists idx_notif_created      on agent_notifications(created_at desc);
-
--- mail_sends — campaign reporting (already has some indexes, adding agent lookup)
-create index if not exists idx_mail_sends_agent    on mail_sends(agent_id);
-create index if not exists idx_mail_sends_sent_at  on mail_sends(sent_at desc);
-create index if not exists idx_mail_sends_response on mail_sends(response) where response != 'no-response';
 
 -- docusign_envelopes — deal document queries
 create index if not exists idx_ds_envelopes_deal   on docusign_envelopes(deal_id);
@@ -668,13 +561,11 @@ select
   count(distinct d.id) filter (where d.stage not in ('closed','lost')) as open_deals,
   count(distinct d.id) filter (where d.stage = 'closed') as closed_deals,
   coalesce(sum(d.value) filter (where d.stage = 'closed'), 0) as closed_volume,
-  coalesce(sum(comm.net) filter (where comm.paid = true), 0) as total_commission_paid,
   count(distinct t.id) filter (where t.completed = false and t.due_date < now()) as overdue_tasks
 from agents a
 left join contacts    c    on c.assigned_agent_id = a.id
 left join properties  p    on p.assigned_agent_id = a.id
 left join deals       d    on d.agent_id = a.id
-left join commissions comm on comm.agent_id = a.id
 left join tasks       t    on t.agent_id = a.id
 group by a.id;
 
@@ -684,11 +575,11 @@ grant execute on function search_contacts(text, uuid[], int) to authenticated;
 grant execute on function search_properties(text, uuid[], int) to authenticated;
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- MAILINGS (v2) — clean rebuild of campaigns/sends with QR-first tracking.
+-- MAILINGS (v2) — QR-first mailing campaigns & tracking.
 --
--- Deprecation path:
---   • old mail_campaigns / mail_sends / mail_suppressions kept for now
---   • once frontend fully migrates, drop them in a follow-up migration
+-- This is the canonical mailing system. The legacy v1 tables
+-- (mail_campaigns / mail_sends / mail_suppressions) have been removed — see
+-- migrations/0001_drop_mailing_v1.sql to drop them from an existing database.
 -- ═════════════════════════════════════════════════════════════════════════════
 
 create table if not exists mailings (
@@ -875,3 +766,269 @@ do $$ begin
       using (bucket_id = 'campaign-images');
   end if;
 end $$;
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- CONSOLIDATED TABLES (formerly defined ad-hoc in component SQL_SETUP strings)
+--
+-- These were previously created from "run this SQL" panels inside ColdCalls,
+-- Sequences, Integrations, Settings, and Properties. They now live here as the
+-- single source of truth. See migrations/0003_consolidate_ghost_tables.sql for
+-- applying them to an existing database. All use `if not exists` and are safe
+-- to re-run.
+-- ═════════════════════════════════════════════════════════════════════════════
+
+-- ─── Cold calling ────────────────────────────────────────────────────────────
+create table if not exists cold_call_lists (
+  id         uuid primary key default uuid_generate_v4(),
+  name       text not null,
+  agent_id   uuid references agents(id) on delete set null,
+  created_at timestamptz default now()
+);
+
+create table if not exists cold_call_leads (
+  id               uuid primary key default uuid_generate_v4(),
+  list_id          uuid references cold_call_lists(id) on delete cascade,
+  property_address text, town text, state text,
+  prop_type        text, unit_count int,
+  owner_name       text, owner_address text,
+  owner_city       text, owner_state text, owner_zip text,
+  contact_name     text, age int,
+  phones           jsonb default '[]',
+  emails           jsonb default '[]',
+  remarks          text,
+  status           text default 'new',
+  call_notes       text, called_at timestamptz, callback_date date,
+  call_count       int default 0,
+  contact_id       uuid references contacts(id) on delete set null,
+  agent_id         uuid references agents(id) on delete set null,
+  created_at       timestamptz default now()
+);
+create index if not exists idx_cold_leads_list   on cold_call_leads(list_id);
+create index if not exists idx_cold_leads_status  on cold_call_leads(status);
+create index if not exists idx_cold_leads_agent   on cold_call_leads(agent_id);
+create index if not exists idx_cold_lists_agent   on cold_call_lists(agent_id);
+
+-- ─── Drip sequences ──────────────────────────────────────────────────────────
+create table if not exists sequences (
+  id          uuid primary key default uuid_generate_v4(),
+  name        text not null,
+  description text default '',
+  created_at  timestamptz default now()
+);
+
+create table if not exists sequence_steps (
+  id          uuid primary key default uuid_generate_v4(),
+  sequence_id uuid references sequences(id) on delete cascade not null,
+  subject     text not null default '',
+  body        text not null default '',
+  delay_days  int default 0,
+  sort_order  int default 0
+);
+create index if not exists idx_seq_steps_seq on sequence_steps(sequence_id, sort_order);
+
+create table if not exists contact_sequences (
+  id           uuid primary key default uuid_generate_v4(),
+  contact_id   uuid references contacts(id) on delete cascade not null,
+  sequence_id  uuid references sequences(id) on delete cascade not null,
+  agent_id     uuid references agents(id) on delete set null,
+  started_at   timestamptz default now(),
+  current_step int default 0,
+  status       text default 'active',
+  created_at   timestamptz default now()
+);
+create index if not exists idx_contact_seq_contact on contact_sequences(contact_id);
+create index if not exists idx_contact_seq_status   on contact_sequences(status);
+
+-- ─── Twilio SMS ──────────────────────────────────────────────────────────────
+alter table agents add column if not exists twilio_number text;
+alter table agents add column if not exists twilio_sid    text;
+
+create table if not exists conversations (
+  id                uuid primary key default uuid_generate_v4(),
+  contact_id        uuid references contacts(id) on delete set null,
+  agent_id          uuid references agents(id)   on delete set null,
+  twilio_number     text not null,
+  contact_number    text not null,
+  contact_name      text,
+  last_message_body text,
+  last_message_at   timestamptz default now(),
+  unread_count      integer default 0,
+  created_at        timestamptz default now(),
+  unique (twilio_number, contact_number)
+);
+create index if not exists idx_conversations_agent on conversations(agent_id);
+
+create table if not exists messages (
+  id              uuid primary key default uuid_generate_v4(),
+  conversation_id uuid references conversations(id) on delete cascade not null,
+  direction       text check (direction in ('inbound','outbound')) not null,
+  body            text not null,
+  status          text default 'sent',
+  twilio_sid      text,
+  agent_id        uuid references agents(id) on delete set null,
+  error_message   text,
+  created_at      timestamptz default now()
+);
+create index if not exists idx_messages_conversation on messages(conversation_id, created_at);
+
+-- ─── Website tracking ────────────────────────────────────────────────────────
+create table if not exists visitor_events (
+  id               uuid primary key default uuid_generate_v4(),
+  session_key      text not null,
+  agent_id         uuid references agents(id) on delete set null,
+  property_address text,
+  property_url     text,
+  created_at       timestamptz default now()
+);
+create index if not exists idx_visitor_events_session on visitor_events(session_key);
+
+create table if not exists lead_captures (
+  id                   uuid primary key default uuid_generate_v4(),
+  session_key          text,
+  agent_id             uuid references agents(id) on delete set null,
+  first_name           text not null,
+  last_name            text not null,
+  email                text not null,
+  phone                text,
+  property_address     text,
+  message              text,
+  converted_contact_id uuid references contacts(id) on delete set null,
+  created_at           timestamptz default now()
+);
+create index if not exists idx_lead_captures_agent on lead_captures(agent_id);
+
+-- ─── Property add-ons ────────────────────────────────────────────────────────
+create table if not exists property_showings (
+  id               uuid primary key default uuid_generate_v4(),
+  property_id      uuid references properties(id) on delete cascade,
+  agent_id         uuid references agents(id) on delete set null,
+  showing_date     timestamptz not null,
+  buyer_agent_name text,
+  feedback         text,
+  rating           int check (rating between 1 and 5),
+  created_at       timestamptz default now()
+);
+create index if not exists idx_showings_property on property_showings(property_id);
+
+create table if not exists listing_checklist_steps (
+  id           uuid primary key default uuid_generate_v4(),
+  property_id  uuid references properties(id) on delete cascade,
+  title        text not null,
+  completed    boolean default false,
+  completed_at timestamptz,
+  sort_order   int default 0,
+  created_at   timestamptz default now()
+);
+create index if not exists idx_listing_checklist_property on listing_checklist_steps(property_id, sort_order);
+
+-- ─── Integrations & automation (reverse-engineered from usage) ───────────────
+-- Columns inferred from how the app reads/writes these; verify vs the live DB.
+create table if not exists integrations (
+  id         uuid primary key default uuid_generate_v4(),
+  type       text not null unique,
+  config     jsonb default '{}',
+  active     boolean default false,
+  updated_at timestamptz default now(),
+  created_at timestamptz default now()
+);
+
+create table if not exists webhook_configs (
+  id         uuid primary key default uuid_generate_v4(),
+  name       text not null,
+  url        text not null,
+  events     text[] default '{}',
+  active     boolean default false,
+  created_at timestamptz default now()
+);
+
+create table if not exists email_log (
+  id               uuid primary key default uuid_generate_v4(),
+  enrollment_id    uuid references contact_sequences(id) on delete set null,
+  sequence_id      uuid references sequences(id) on delete set null,
+  sequence_step_id uuid references sequence_steps(id) on delete set null,
+  contact_id       uuid references contacts(id) on delete set null,
+  agent_id         uuid references agents(id) on delete set null,
+  to_email         text,
+  subject          text,
+  status           text check (status in ('sent','failed')),
+  provider_id      text,
+  error            text,
+  created_at       timestamptz default now()
+);
+create index if not exists idx_email_log_contact  on email_log(contact_id);
+create index if not exists idx_email_log_sequence on email_log(sequence_id);
+
+create table if not exists option_values (
+  id         uuid primary key default uuid_generate_v4(),
+  field_key  text not null,
+  value      text not null,
+  created_at timestamptz default now(),
+  unique (field_key, value)
+);
+create index if not exists idx_option_values_field on option_values(field_key);
+
+-- TODO: `option_value_counts` is queried as a VIEW by DataManagement.jsx but its
+-- cross-table counting logic is field-specific and not knowable from the client
+-- code. The app degrades to zeros when it is absent. Define it once the counting
+-- rules are confirmed. (See migrations/0003_consolidate_ghost_tables.sql.)
+
+-- ─── RLS for consolidated tables ─────────────────────────────────────────────
+do $$
+declare t text;
+begin
+  foreach t in array array[
+    'cold_call_lists','cold_call_leads','sequences','sequence_steps',
+    'contact_sequences','conversations','messages','property_showings',
+    'listing_checklist_steps','integrations','webhook_configs','email_log',
+    'option_values'
+  ] loop
+    execute format('alter table %I enable row level security', t);
+    execute format('drop policy if exists allow_all on %I', t);
+    execute format('create policy allow_all on %I for all to authenticated using (true) with check (true)', t);
+  end loop;
+end $$;
+
+-- visitor_events & lead_captures accept anonymous inserts (landing pages),
+-- authenticated read only.
+alter table visitor_events enable row level security;
+drop policy if exists public_insert on visitor_events;
+drop policy if exists auth_read     on visitor_events;
+create policy public_insert on visitor_events for insert to anon, authenticated with check (true);
+create policy auth_read     on visitor_events for select to authenticated using (true);
+
+alter table lead_captures enable row level security;
+drop policy if exists public_insert on lead_captures;
+drop policy if exists auth_read     on lead_captures;
+create policy public_insert on lead_captures for insert to anon, authenticated with check (true);
+create policy auth_read     on lead_captures for select to authenticated using (true);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- FORM PACKETS (BoldTrail-style document library)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists form_packets (
+  id               uuid primary key default uuid_generate_v4(),
+  state            text not null,
+  transaction_type text not null check (transaction_type in ('buyer','seller','lease','general')),
+  name             text not null,
+  description      text,
+  storage_path     text,
+  created_at       timestamptz default now()
+);
+alter table form_packets enable row level security;
+create policy "form_packets_all" on form_packets
+  for all to authenticated using (true) with check (true);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DEADLINE REMINDERS (cron-sent, dedup log)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists deadline_reminders (
+  id         uuid primary key default uuid_generate_v4(),
+  deal_id    uuid references deals(id) on delete cascade not null,
+  date_type  text not null,   -- matches comp_data.key_dates[].type, e.g. 'Closing'
+  threshold  text not null,   -- '72h' | '24h' | 'today'
+  sent_at    timestamptz default now(),
+  unique (deal_id, date_type, threshold)
+);
+alter table deadline_reminders enable row level security;
+create policy "deadline_reminders_all" on deadline_reminders
+  for all to authenticated using (true) with check (true);
