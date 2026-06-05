@@ -134,14 +134,6 @@ export default function LandingProperty({ mailingId, preview = null }) {
     cfg.year_built != null && { label: 'Year Built', value: String(cfg.year_built) },
   ]).filter(Boolean).filter(d => d.value !== null && d.value !== '' && d.value !== 'NaN')
 
-  // Compact, non-animated stat strip for the hero
-  const heroStats = details.slice(0, 4).map(d => ({
-    label: d.label,
-    value: typeof d.value === 'number'
-      ? `${d.prefix || ''}${d.value.toLocaleString()}${d.suffix || ''}`
-      : d.value,
-  }))
-
   const submitLead = async (form) => {
     if (preview) { await new Promise(r => setTimeout(r, 700)); return } // demo: simulate send
     const res = await fetch('/api/campaigns', {
@@ -161,7 +153,8 @@ export default function LandingProperty({ mailingId, preview = null }) {
         </Button>
       )}
     >
-      <Hero image={heroImage} eyebrow="Property For Sale" title={headline} stats={heroStats} />
+      {/* Stats intentionally omitted here — they appear in the details card below. */}
+      <Hero image={heroImage} eyebrow="Property For Sale" title={headline} />
 
       <div className="lx-container" style={{ padding: '28px 0 72px' }}>
         <div className="lx-grid-2">
