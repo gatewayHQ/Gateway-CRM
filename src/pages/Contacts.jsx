@@ -388,7 +388,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
         </select>
         <select className="filter-select" value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
           <option value="">All Statuses</option>
-          {['active','cold','closed'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+          {['lead','opportunity','active','pending','cold','closed'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
         </select>
         <select className="filter-select" value={filters.agent} onChange={(e) => setFilters({ ...filters, agent: e.target.value })}>
           <option value="">All Agents</option>

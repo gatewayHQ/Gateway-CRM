@@ -53,11 +53,35 @@ alter table lead_captures enable row level security;
 create policy "Public insert" on lead_captures for insert with check (true);
 create policy "Auth read" on lead_captures for select using (auth.role() = 'authenticated');`
 
-export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnabled }) {
+export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnabled, activeAgentId, hideableNav }) {
   const [companyName, setCompanyName] = useState('Gateway Real Estate Advisors')
   const [clearing, setClearing] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const [copied, setCopied] = useState(null)
+
+  // ── Sidebar customization ──────────────────────────────────────────────────
+  const activeAgent = (db.agents || []).find(a => a.id === activeAgentId)
+  const [hiddenNav, setHiddenNav] = useState(() => activeAgent?.nav_hidden || [])
+  const [navSaving, setNavSaving] = useState(false)
+
+  // Keep local state in sync if agent data loads after mount
+  useEffect(() => {
+    if (activeAgent?.nav_hidden) setHiddenNav(activeAgent.nav_hidden)
+  }, [activeAgent?.id])
+
+  const toggleNavItem = (id) => {
+    setHiddenNav(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+  }
+
+  const saveNavPrefs = async () => {
+    if (!activeAgentId) return
+    setNavSaving(true)
+    const { error } = await supabase.from('agents').update({ nav_hidden: hiddenNav }).eq('id', activeAgentId)
+    setNavSaving(false)
+    if (error) { pushToast(error.message, 'error'); return }
+    setDb(p => ({ ...p, agents: (p.agents || []).map(a => a.id === activeAgentId ? { ...a, nav_hidden: hiddenNav } : a) }))
+    pushToast('Sidebar preferences saved')
+  }
 
   // AI key — loaded from Supabase auth metadata (persists across devices)
   const [aiKey, setAiKey]         = useState('')
@@ -164,6 +188,53 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
           <input className="form-control" value={companyName} onChange={e=>setCompanyName(e.target.value)} />
         </div>
         <button className="btn btn--primary btn--sm" onClick={() => pushToast('Settings saved')}>Save Changes</button>
+      </div>
+
+      {/* ── Sidebar Customization ── */}
+      <div className="settings-section">
+        <div className="settings-section__title">Customize My Sidebar</div>
+        <div className="settings-section__sub">
+          Hide sections you don't need — keeping your workspace focused and clutter-free.
+          Dashboard, Pipeline, and Settings are always visible.
+        </div>
+        {!activeAgentId ? (
+          <div style={{ fontSize: 13, color: 'var(--gw-mist)' }}>No agent profile detected.</div>
+        ) : (hideableNav || []).length === 0 ? (
+          <div style={{ fontSize: 13, color: 'var(--gw-mist)' }}>Nav config not loaded.</div>
+        ) : (
+          <>
+            {['Core', 'Office', 'Tools'].map(group => (
+              <div key={group} style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gw-mist)', marginBottom: 8 }}>{group}</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {(hideableNav || []).filter(n => n.group === group).map(n => {
+                    const isHidden = hiddenNav.includes(n.id)
+                    return (
+                      <button key={n.id} onClick={() => toggleNavItem(n.id)}
+                        style={{ padding: '5px 12px', borderRadius: 20, fontSize: 12, fontWeight: 500, cursor: 'pointer', border: '1px solid', transition: 'all 150ms',
+                          background: isHidden ? 'var(--gw-bone)' : 'var(--gw-slate)',
+                          color:      isHidden ? 'var(--gw-mist)' : '#fff',
+                          borderColor: isHidden ? 'var(--gw-border)' : 'var(--gw-slate)',
+                          textDecoration: isHidden ? 'line-through' : 'none',
+                          opacity: isHidden ? 0.6 : 1,
+                        }}>
+                        {n.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            ))}
+            <button className="btn btn--primary btn--sm" onClick={saveNavPrefs} disabled={navSaving}>
+              {navSaving ? 'Saving…' : 'Save Sidebar Preferences'}
+            </button>
+            {hiddenNav.length > 0 && (
+              <button className="btn btn--ghost btn--sm" style={{ marginLeft: 8 }} onClick={() => setHiddenNav([])}>
+                Show all
+              </button>
+            )}
+          </>
+        )}
       </div>
 
       <div className="settings-section">

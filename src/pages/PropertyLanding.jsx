@@ -264,7 +264,7 @@ function GateForm({ propertyId, isCommercial, agentName }) {
     setError('')
     setSubmitting(true)
     try {
-      const res = await fetch('/api/property-gate', {
+      const res = await fetch('/api/property-public', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ propertyId, ...form }),

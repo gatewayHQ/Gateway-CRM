@@ -14,14 +14,13 @@ const TemplatesPage    = React.lazy(() => import('./pages/Templates.jsx'))
 const TeamPage         = React.lazy(() => import('./pages/Team/index.jsx'))
 const SettingsPage     = React.lazy(() => import('./pages/Settings.jsx'))
 const LeadsPage        = React.lazy(() => import('./pages/Leads.jsx'))
-const OmPage             = React.lazy(() => import('./pages/Om.jsx'))
-const SocialPage         = React.lazy(() => import('./pages/Social.jsx'))
 const DataManagementPage = React.lazy(() => import('./pages/DataManagement.jsx'))
 const ReportsPage      = React.lazy(() => import('./pages/Reports.jsx'))
 const SequencesPage    = React.lazy(() => import('./pages/Sequences.jsx'))
 const ColdCallsPage    = React.lazy(() => import('./pages/ColdCalls.jsx'))
 const IntegrationsPage = React.lazy(() => import('./pages/Integrations.jsx'))
 const CampaignsPage    = React.lazy(() => import('./pages/Campaigns.jsx'))
+const FormLibraryPage  = React.lazy(() => import('./pages/FormLibrary.jsx'))
 import LoginPage from './pages/Login.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
 import { Analytics } from '@vercel/analytics/react'
@@ -51,11 +50,29 @@ const NAV_OFFICE = [
 
 // Marketing & Tools: power features, collapsed for new users
 const NAV_TOOLS = [
-  { id: 'templates',  label: 'Email Templates', icon: 'mail' },
-  { id: 'sequences',  label: 'Drip Sequences',  icon: 'sequences' },
-  { id: 'om',         label: 'OM Generator',    icon: 'om' },
-  { id: 'social',     label: 'Social Media',    icon: 'social' },
-  { id: 'leads',      label: 'Website Leads',   icon: 'leads' },
+  { id: 'templates',    label: 'Email Templates', icon: 'mail'      },
+  { id: 'sequences',    label: 'Drip Sequences',  icon: 'sequences' },
+  { id: 'form-library', label: 'Form Library',    icon: 'document'  },
+  { id: 'toolkit',      label: 'Toolkit',         icon: 'sparkles'  },
+  { id: 'leads',        label: 'Website Leads',   icon: 'leads'     },
+]
+
+// Nav items agents are allowed to hide (dashboard + settings always stay)
+const HIDEABLE_NAV = [
+  { id: 'contacts',     label: 'Contacts',        group: 'Core'   },
+  { id: 'properties',   label: 'Properties',      group: 'Core'   },
+  { id: 'tasks',        label: 'Tasks',            group: 'Core'   },
+  { id: 'messages',     label: 'Messages',         group: 'Core'   },
+  { id: 'commission',   label: 'Commission',       group: 'Office' },
+  { id: 'coldcalls',    label: 'Cold Calls',       group: 'Office' },
+  { id: 'campaigns',    label: 'Campaigns',        group: 'Office' },
+  { id: 'reports',      label: 'Reports',          group: 'Office' },
+  { id: 'team',         label: 'Team',             group: 'Office' },
+  { id: 'templates',    label: 'Email Templates',  group: 'Tools'  },
+  { id: 'sequences',    label: 'Drip Sequences',   group: 'Tools'  },
+  { id: 'form-library', label: 'Form Library',     group: 'Tools'  },
+  { id: 'toolkit',      label: 'Toolkit',          group: 'Tools'  },
+  { id: 'leads',        label: 'Website Leads',    group: 'Tools'  },
 ]
 
 // Always visible at the bottom — never buried
@@ -66,6 +83,7 @@ const NAV_ADMIN = [
 ]
 
 const TOOLS_IDS = NAV_TOOLS.map(n => n.id)
+const TOOLKIT_URL = 'https://gatewayhq.github.io/'
 
 const TITLES = {
   dashboard:  { title: 'Dashboard',        crumb: 'Overview' },
@@ -81,8 +99,8 @@ const TITLES = {
   templates:  { title: 'Email Templates',  crumb: 'Communications · Library' },
   sequences:  { title: 'Drip Sequences',   crumb: 'Marketing · Automation' },
   reports:    { title: 'Reports',          crumb: 'Analytics · ROI' },
-  om:         { title: 'OM Generator',     crumb: 'Tools · Documents' },
-  social:     { title: 'Social Media',     crumb: 'Tools · Content' },
+  'form-library': { title: 'Form Library',  crumb: 'Documents · State Forms' },
+  toolkit:    { title: 'Toolkit',          crumb: 'Tools · Gateway Suite' },
   leads:      { title: 'Website Leads',    crumb: 'Marketing · Captures' },
   integrations: { title: 'Integrations',    crumb: 'Tools · Connections' },
   'data-management': { title: 'Data Management', crumb: 'Admin · Controlled Vocabulary' },
@@ -214,15 +232,36 @@ export default function App() {
     }
   }, [route])
 
-  // Flat list for mobile nav (filter leads if website is disabled)
+  // Per-agent hidden nav — loaded from agents table (nav_hidden column)
+  const hiddenNav = React.useMemo(() => {
+    const agent = db.agents?.find(a => a.id === activeAgentId)
+    return agent?.nav_hidden || []
+  }, [db.agents, activeAgentId])
+
+  // If the current route is now hidden, redirect to dashboard
+  useEffect(() => {
+    if (hiddenNav.includes(route)) setRoute('dashboard')
+  }, [hiddenNav])
+
+  // Nav click handler — Toolkit opens in a new tab (uses its own login); everything else routes
+  const navTo = (id) => {
+    if (id === 'toolkit') {
+      window.open(TOOLKIT_URL, '_blank', 'noopener,noreferrer')
+      return
+    }
+    setRoute(id)
+  }
+
+  // Flat list for mobile nav (filter leads + hidden items)
+  const toolsBase = websiteEnabled ? NAV_TOOLS : NAV_TOOLS.filter(n => n.id !== 'leads')
   const NAV = [
-    ...NAV_CORE,
-    ...NAV_OFFICE,
-    ...(websiteEnabled ? NAV_TOOLS : NAV_TOOLS.filter(n => n.id !== 'leads')),
+    ...NAV_CORE.filter(n => !hiddenNav.includes(n.id)),
+    ...NAV_OFFICE.filter(n => !hiddenNav.includes(n.id)),
+    ...toolsBase.filter(n => !hiddenNav.includes(n.id)),
     ...NAV_ADMIN,
   ]
-  // Tools items visible in sidebar (leads gated by websiteEnabled)
-  const visibleTools = websiteEnabled ? NAV_TOOLS : NAV_TOOLS.filter(n => n.id !== 'leads')
+  // Tools items visible in sidebar
+  const visibleTools = toolsBase.filter(n => !hiddenNav.includes(n.id))
 
   useEffect(() => {
     supabase.auth.getSession()
@@ -452,7 +491,7 @@ export default function App() {
 
         <nav className="sidebar__nav" aria-label="Main navigation">
           {/* ── Core ── */}
-          {NAV_CORE.filter(n => !(isAdmin && n.id === 'contacts')).map(n => (
+          {NAV_CORE.filter(n => !(isAdmin && n.id === 'contacts') && !hiddenNav.includes(n.id)).map(n => (
             <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}`}
               onClick={() => setRoute(n.id)} title={n.label}
               role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
@@ -467,7 +506,7 @@ export default function App() {
           {/* ── Office ── */}
           {!collapsed && <div className="nav-section-label" style={{ marginTop: 8 }}>Office</div>}
           {collapsed && <div className="nav-section-divider" />}
-          {NAV_OFFICE.map(n => (
+          {NAV_OFFICE.filter(n => !hiddenNav.includes(n.id)).map(n => (
             <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}`}
               onClick={() => setRoute(n.id)} title={n.label}
               role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
@@ -493,10 +532,13 @@ export default function App() {
           )}
           {(toolsOpen || collapsed) && visibleTools.map(n => (
             <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}${!collapsed ? ' nav-item--indented' : ''}`}
-              onClick={() => setRoute(n.id)} title={n.label}
-              role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
+              onClick={() => navTo(n.id)} title={n.label}
+              role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && navTo(n.id)}>
               <Icon name={n.icon} size={16} />
               {!collapsed && <span>{n.label}</span>}
+              {n.id === 'toolkit' && !collapsed && (
+                <Icon name="eye" size={11} style={{ marginLeft: 'auto', flexShrink: 0, opacity: 0.5 }} />
+              )}
             </div>
           ))}
         </nav>
@@ -635,12 +677,11 @@ export default function App() {
           {route === 'templates'  && <TemplatesPage {...props} />}
           {route === 'sequences'  && <SequencesPage {...props} />}
           {route === 'reports'    && <ReportsPage {...props} />}
-          {route === 'om'         && <OmPage />}
-          {route === 'social'     && <SocialPage />}
+          {route === 'form-library' && <FormLibraryPage isAdmin={isAdmin} />}
           {route === 'leads'      && <LeadsPage {...props} />}
           {route === 'integrations'      && <IntegrationsPage db={db} />}
           {route === 'data-management'   && <DataManagementPage />}
-          {route === 'settings'          && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} />}
+          {route === 'settings'          && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} activeAgentId={activeAgentId} hideableNav={HIDEABLE_NAV} />}
         </ErrorBoundary>
         </React.Suspense>
       </div>
@@ -680,7 +721,7 @@ export default function App() {
             <div className="mobile-menu__label">Navigation</div>
             {NAV.filter(n => !['dashboard', 'contacts', 'pipeline', 'tasks'].includes(n.id)).map(n => (
               <div key={n.id} className={`mobile-menu__item${route === n.id ? ' active' : ''}`}
-                onClick={() => { setRoute(n.id); setMobileMore(false) }}>
+                onClick={() => { navTo(n.id); setMobileMore(false) }}>
                 <Icon name={n.icon} size={20} />
                 <span>{n.label}</span>
               </div>

@@ -365,7 +365,7 @@ export default function ContactDrawer({
               <div className="form-group">
                 <label className="form-label">Status</label>
                 <select className="form-control" value={form.status} onChange={(e) => set('status', e.target.value)}>
-                  {['active','cold','closed'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+                  {['lead','opportunity','active','pending','cold','closed'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
                 </select>
               </div>
             </div>
@@ -374,7 +374,7 @@ export default function ContactDrawer({
               <div className="form-group">
                 <label className="form-label">Source</label>
                 <select className="form-control" value={form.source || 'other'} onChange={(e) => set('source', e.target.value)}>
-                  {['referral','website','open house','social','cold call','other'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+                  {['referral','website','open house','social','cold call','team','paid service','other'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
                 </select>
               </div>
               <div className="form-group">

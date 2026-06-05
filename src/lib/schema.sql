@@ -33,8 +33,8 @@ create table if not exists contacts (
   email             text,
   phone             text,
   type              text check (type in ('buyer','seller','landlord','tenant','investor')) default 'buyer',
-  status            text check (status in ('active','cold','closed')) default 'active',
-  source            text check (source in ('referral','website','open house','social','cold call','other')) default 'other',
+  status            text check (status in ('active','cold','closed','lead','opportunity','pending')) default 'active',
+  source            text check (source in ('referral','website','open house','social','cold call','team','paid service','other')) default 'other',
   assigned_agent_id uuid references agents(id) on delete set null,
   notes             text,
   tags              text[],
@@ -107,9 +107,13 @@ create table if not exists deals (
   probability         integer default 0,
   expected_close_date date,
   notes               text,
+  portal_token        uuid,                 -- client portal share token (unguessable)
+  portal_enabled      boolean default false,
   created_at          timestamptz default now(),
   updated_at          timestamptz default now()
 );
+create unique index if not exists deals_portal_token_idx
+  on deals(portal_token) where portal_token is not null;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- TASKS
@@ -997,3 +1001,34 @@ drop policy if exists public_insert on lead_captures;
 drop policy if exists auth_read     on lead_captures;
 create policy public_insert on lead_captures for insert to anon, authenticated with check (true);
 create policy auth_read     on lead_captures for select to authenticated using (true);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- FORM PACKETS (BoldTrail-style document library)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists form_packets (
+  id               uuid primary key default uuid_generate_v4(),
+  state            text not null,
+  transaction_type text not null check (transaction_type in ('buyer','seller','lease','general')),
+  name             text not null,
+  description      text,
+  storage_path     text,
+  created_at       timestamptz default now()
+);
+alter table form_packets enable row level security;
+create policy "form_packets_all" on form_packets
+  for all to authenticated using (true) with check (true);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DEADLINE REMINDERS (cron-sent, dedup log)
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists deadline_reminders (
+  id         uuid primary key default uuid_generate_v4(),
+  deal_id    uuid references deals(id) on delete cascade not null,
+  date_type  text not null,   -- matches comp_data.key_dates[].type, e.g. 'Closing'
+  threshold  text not null,   -- '72h' | '24h' | 'today'
+  sent_at    timestamptz default now(),
+  unique (deal_id, date_type, threshold)
+);
+alter table deadline_reminders enable row level security;
+create policy "deadline_reminders_all" on deadline_reminders
+  for all to authenticated using (true) with check (true);
