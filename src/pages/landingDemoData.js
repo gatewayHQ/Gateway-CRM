@@ -6,14 +6,34 @@
 const img = (id, q = 80, w = 1600) =>
   `https://images.unsplash.com/${id}?auto=format&fit=crop&w=${w}&q=${q}`
 
+const portrait = (id) => `https://images.unsplash.com/${id}?auto=format&fit=crop&w=480&h=480&q=80`
+
 export const DEMO_LISTING = {
   name: 'Demo — 14 Cliffside Terrace',
-  agent: {
-    name: 'Daniel Hart',
-    role: 'Principal Broker',
-    phone: '+15125550147',
-    color: '#1e2642',
-  },
+  // The first agent is the "creator" of the mailing; the second is a co-agent.
+  agents: [
+    {
+      id: 'demo-a1',
+      name: 'Daniel Hart',
+      role: 'Principal Broker',
+      phone: '+15125550147',
+      email: 'daniel@gatewayrealestate.com',
+      photo_url: portrait('photo-1560250097-0b93528c311a'),
+      color: '#1e2642',
+      bio: 'Daniel has guided more than $400M in luxury and waterfront transactions across the region. Known for discreet, data-driven advising, he pairs architectural fluency with a relentless negotiating edge — and a client roster built almost entirely on referrals.',
+    },
+    {
+      id: 'demo-a2',
+      name: 'Sophia Bennett',
+      role: "Buyer's Advisor",
+      phone: '+15125550162',
+      email: 'sophia@gatewayrealestate.com',
+      photo_url: portrait('photo-1573496359142-b8d87734a5a2'),
+      color: '#7c3aed',
+      bio: 'Sophia specializes in matching discerning buyers with one-of-a-kind homes. With a background in interior design, she sees what a property can become — and shepherds every detail from first showing to closing day.',
+    },
+  ],
+  get agent() { return this.agents[0] },
   config: {
     accent: '#1e2642',
     headline: '14 Cliffside Terrace — A Modern Waterfront Estate',

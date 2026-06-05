@@ -15,7 +15,7 @@ import { supabase } from '../lib/supabase.js'
 import '../components/landing/landing.css'
 import {
   LandingShell, Hero, Section, DetailGrid, Gallery, Lightbox,
-  LeadForm, AgentCard, Button, Reveal, Skeleton, StatePanel,
+  LeadForm, AgentCard, AgentTeam, Button, Reveal, Skeleton, StatePanel,
 } from '../components/landing'
 
 const toNum = (v) => {
@@ -30,7 +30,11 @@ export default function LandingProperty({ mailingId, preview = null }) {
   const [mailing, setMailing] = useState(
     preview ? { id: 'demo', name: preview.name, agent_id: null, landing_config: preview.config } : null
   )
-  const [agent, setAgent] = useState(preview?.agent || null)
+  // `agents` holds 1–2 advisors (primary first); `agent` is the primary, used
+  // for the header CTA + sidebar card.
+  const previewAgents = preview ? (preview.agents || (preview.agent ? [preview.agent] : [])) : []
+  const [agents, setAgents] = useState(previewAgents)
+  const [agent, setAgent] = useState(previewAgents[0] || null)
   const [loading, setLoading] = useState(!preview)
   const [error, setError] = useState(null)
   const [lightbox, setLightbox] = useState(-1) // -1 = closed
@@ -48,11 +52,25 @@ export default function LandingProperty({ mailingId, preview = null }) {
         if (mErr) throw mErr
         if (!m) { setError('notfound'); setLoading(false); return }
         setMailing(m)
-        if (m.agent_id) {
-          const { data: a } = await supabase.from('agents')
+
+        // Build the advisor list: the mailing's primary agent first, then any
+        // co-agents named in landing_config.agent_ids. Per-mailing overrides in
+        // landing_config.agent_overrides (bio/photo/role/name) win over the
+        // agent's stored profile — that's how the builder customizes a mailing.
+        const cfg = m.landing_config || {}
+        const ids = [...new Set(
+          [m.agent_id, ...(Array.isArray(cfg.agent_ids) ? cfg.agent_ids : [])].filter(Boolean)
+        )]
+        if (ids.length) {
+          const { data: rows } = await supabase.from('agents')
             .select('id, name, phone, email, photo_url, color, role')
-            .eq('id', m.agent_id).maybeSingle()
-          if (active) setAgent(a || null)
+            .in('id', ids)
+          const overrides = cfg.agent_overrides || {}
+          const ordered = ids
+            .map(id => (rows || []).find(r => r.id === id))
+            .filter(Boolean)
+            .map(r => ({ ...r, ...(overrides[r.id] || {}) }))
+          if (active) { setAgents(ordered); setAgent(ordered[0] || null) }
         }
       } catch {
         if (active) setError('network')
@@ -184,6 +202,11 @@ export default function LandingProperty({ mailingId, preview = null }) {
             <LeadForm title={ctaText} cta={ctaText} onSubmit={submitLead} agentName={agent?.name} />
             <AgentCard agent={agent} accent={accent} />
           </aside>
+        </div>
+
+        {/* Meet your advisor(s) — full width, below the listing details */}
+        <div style={{ marginTop: 'clamp(36px, 7vw, 72px)' }}>
+          <AgentTeam agents={agents} accent={accent} />
         </div>
       </div>
 

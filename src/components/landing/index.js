@@ -9,7 +9,7 @@
  *   import '../components/landing/landing.css'
  */
 export { Reveal, ScrollProgress, Button, Field, Skeleton, StatePanel } from './primitives.jsx'
-export { LandingShell, Hero, Section, DetailGrid, Gallery, Lightbox, LeadForm, AgentCard } from './sections.jsx'
+export { LandingShell, Hero, Section, DetailGrid, Gallery, Lightbox, LeadForm, AgentCard, AgentTeam } from './sections.jsx'
 export {
   usePrefersReducedMotion, useReveal, useCountUp, useParallax,
   useScrollProgress, useStuck, useLockBodyScroll,

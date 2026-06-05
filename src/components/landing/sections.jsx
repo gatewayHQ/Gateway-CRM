@@ -268,7 +268,51 @@ export function LeadForm({ title = 'Get more info', cta = 'Get more info', subte
   )
 }
 
-/* ── AgentCard ──────────────────────────────────────────────────────────────── */
+/* ── AgentTeam ("Meet your advisor(s)") ───────────────────────────────────────
+   Full bio section that reveals below the gallery. Accepts 1–2 agents, each
+   { id?, name, role, bio, photo_url, color, phone, email }. Renders a single
+   centered advisor or a two-up grid; stacks on mobile. */
+export function AgentTeam({ agents = [], accent, heading }) {
+  const list = agents.filter(a => a && a.name).slice(0, 2)
+  if (!list.length) return null
+  const title = heading || (list.length > 1 ? 'Meet your advisors' : 'Meet your advisor')
+  return (
+    <Section title={title} aria-label="About your real estate advisors" delay={60}>
+      <div className="lx-team__grid" data-count={list.length}>
+        {list.map((a, i) => <Advisor key={a.id || i} agent={a} accent={accent} />)}
+      </div>
+    </Section>
+  )
+}
+
+function Advisor({ agent, accent }) {
+  const { name, role, bio, photo_url, phone, email } = agent
+  return (
+    <article className="lx-advisor">
+      {photo_url ? (
+        <img className="lx-advisor__photo" src={photo_url} alt={`${name}, real estate advisor`}
+             loading="lazy" decoding="async" />
+      ) : (
+        <div className="lx-advisor__photo lx-advisor__photo--ph"
+             style={{ background: agent.color || accent || 'var(--lx-accent)' }} aria-hidden="true">
+          {initials(name)}
+        </div>
+      )}
+      <div style={{ minWidth: 0 }}>
+        <h3 className="lx-serif lx-advisor__name">{name}</h3>
+        <p className="lx-advisor__role">{role || 'Real Estate Advisor'} · Gateway Real Estate</p>
+        <hr className="lx-advisor__rule" aria-hidden="true" />
+        {bio && <p className="lx-advisor__bio">{bio}</p>}
+        <div className="lx-advisor__cta">
+          {phone && <Button href={`tel:${phone}`} style={{ padding: '9px 16px', fontSize: 13 }}>Call</Button>}
+          {phone && <Button href={`sms:${phone}`} variant="ghost" style={{ padding: '9px 16px', fontSize: 13 }}>Text</Button>}
+          {email && <Button href={`mailto:${email}`} variant="ghost" style={{ padding: '9px 16px', fontSize: 13 }}>Email</Button>}
+        </div>
+      </div>
+    </article>
+  )
+}
+
 export function AgentCard({ agent, accent }) {
   if (!agent) return null
   return (
