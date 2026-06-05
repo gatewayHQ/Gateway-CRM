@@ -1,36 +1,103 @@
 /**
- * Property Showcase Landing — public-facing, served at /lp/property/:mailingId
+ * Signature Property Dossier — /lp/property/:mailingId
  *
- * Renders entirely from mailings.landing_config — no private CRM notes ever shown.
- * landing_config shape:
- *   { headline, subheadline, price, beds, baths, sqft, lot_size, year_built,
- *     description, features[], images[{url,caption,price}], cta_text, accent }
+ * Gateway Real Estate Advisors · Private Landing Page
+ *
+ * landing_config: { headline, subheadline, price, beds, baths, sqft,
+ *   lot_size, year_built, description, features[], images[], cta_text, accent }
+ *
+ * Key stats are displayed ONCE — in the key-facts bar between hero and body.
+ * Never in the hero and again in a card.
  */
-
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 
+// ── Brand tokens ─────────────────────────────────────────────────────────────
+const B = {
+  dark:     '#282828',
+  deep:     '#1E2F39',
+  bluegray: '#A2B6C0',
+  cream:    '#E4E3DF',
+  offwhite: '#F8F7F4',
+  gold:     '#C5A46E',
+  white:    '#FFFFFF',
+}
+
+// ── Scroll-reveal hook ────────────────────────────────────────────────────────
+function useReveal(threshold = 0.1) {
+  const ref = useRef(null)
+  const [vis, setVis] = useState(false)
+  useEffect(() => {
+    const el = ref.current; if (!el) return
+    const ob = new IntersectionObserver(
+      ([e]) => { if (e.isIntersecting) { setVis(true); ob.disconnect() } }, { threshold }
+    )
+    ob.observe(el)
+    return () => ob.disconnect()
+  }, [])
+  return [ref, vis]
+}
+
+// ── Mosaic gallery layout ─────────────────────────────────────────────────────
 function useMosaicLayout(n) {
   return useMemo(() => {
     const L = {
-      1: { cols:1, rows:1, areas:[['a']] },
-      2: { cols:2, rows:1, areas:[['a','b']] },
-      3: { cols:3, rows:2, areas:[['a','a','b'],['a','a','c']] },
-      4: { cols:4, rows:2, areas:[['a','a','b','c'],['a','a','d','b']] },
-      5: { cols:4, rows:2, areas:[['a','a','b','c'],['a','a','d','e']] },
+      1: { cols:1, areas:[['a']] },
+      2: { cols:2, areas:[['a','b']] },
+      3: { cols:3, areas:[['a','a','b'],['a','a','c']] },
+      4: { cols:4, areas:[['a','a','b','c'],['a','a','d','b']] },
+      5: { cols:4, areas:[['a','a','b','c'],['a','a','d','e']] },
     }[Math.min(n, 5)]
     if (!L) return { gridStyle:{}, cells:[] }
     const unique = [...new Set(L.areas.flat())]
     return {
-      gridStyle: {
-        gridTemplateColumns:`repeat(${L.cols}, 1fr)`,
-        gridTemplateAreas: L.areas.map(r => `"${r.join(' ')}"`).join(' '),
-      },
-      cells: unique.map(letter => ({ gridArea:letter, minHeight: n===1 ? 320 : n<=2 ? 240 : 160 })),
+      gridStyle: { gridTemplateColumns:`repeat(${L.cols}, 1fr)`, gridTemplateAreas: L.areas.map(r=>`"${r.join(' ')}"`).join(' ') },
+      cells: unique.map(ltr => ({ gridArea:ltr, minHeight: n===1?360:n<=2?260:180 })),
     }
   }, [n])
 }
 
+// ── Sub-components ────────────────────────────────────────────────────────────
+function LuxeInput({ label, value, onChange, type='text', placeholder, required, accent }) {
+  return (
+    <label style={{ display:'flex', flexDirection:'column', gap:6 }}>
+      <span style={{ fontSize:10, letterSpacing:'0.12em', textTransform:'uppercase', color:B.bluegray, fontWeight:600 }}>
+        {label}{required && <span style={{ color:accent, marginLeft:3 }}>*</span>}
+      </span>
+      <input required={required} type={type} value={value} placeholder={placeholder||''} onChange={onChange}
+        style={{ width:'100%', padding:'12px 14px', background:B.offwhite, border:`1px solid ${B.cream}`, borderRadius:3,
+                 fontSize:14, fontFamily:'inherit', outline:'none', color:B.dark, transition:'border-color 200ms, box-shadow 200ms' }} />
+    </label>
+  )
+}
+
+function SuccessView({ agent, accent }) {
+  return (
+    <div style={{ textAlign:'center', padding:'28px 8px' }}>
+      <div style={{ width:56, height:56, borderRadius:'50%', background:B.deep, color:accent, display:'flex', alignItems:'center', justifyContent:'center', margin:'0 auto 20px', fontSize:22 }}>✓</div>
+      <h2 style={{ fontFamily:`'Cormorant Garamond', Georgia, serif`, fontSize:24, margin:'0 0 12px', color:B.deep, letterSpacing:'-0.02em', fontWeight:600 }}>
+        Message received.
+      </h2>
+      <p style={{ color:B.bluegray, fontSize:14, lineHeight:1.75, margin:0 }}>
+        {agent ? `${agent.name} will reach out to you personally within the business day.` : "We'll be in touch shortly."}
+        <br /><br />
+        <em style={{ fontSize:12 }}>Your details are held in the strictest confidence.</em>
+      </p>
+    </div>
+  )
+}
+
+function Loader() {
+  return (
+    <div style={{ minHeight:'100vh', display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column', gap:14, background:B.offwhite }}>
+      <div style={{ fontFamily:`'Cormorant Garamond', Georgia, serif`, fontSize:22, color:B.deep, letterSpacing:'-0.02em' }}>Gateway</div>
+      <div style={{ width:22, height:22, border:`2px solid ${B.cream}`, borderTopColor:B.deep, borderRadius:'50%', animation:'gwspin 0.85s linear infinite' }} />
+      <style>{`@keyframes gwspin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  )
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
 export default function LandingProperty({ mailingId }) {
   const [mailing,    setMailing]    = useState(null)
   const [agent,      setAgent]      = useState(null)
@@ -42,16 +109,11 @@ export default function LandingProperty({ mailingId }) {
 
   useEffect(() => {
     ;(async () => {
-      const { data: m } = await supabase
-        .from('mailings')
-        .select('id, name, agent_id, landing_config')
-        .eq('id', mailingId).single()
+      const { data: m } = await supabase.from('mailings').select('id, name, agent_id, landing_config').eq('id', mailingId).single()
       if (!m) { setError('Mailing not found'); setLoading(false); return }
       setMailing(m)
       if (m.agent_id) {
-        const { data: a } = await supabase.from('agents')
-          .select('id, name, phone, email, photo_url, color, role')
-          .eq('id', m.agent_id).single()
+        const { data: a } = await supabase.from('agents').select('id, name, phone, email, photo_url, color, role').eq('id', m.agent_id).single()
         setAgent(a || null)
       }
       setLoading(false)
@@ -59,29 +121,29 @@ export default function LandingProperty({ mailingId }) {
   }, [mailingId])
 
   const cfg         = mailing?.landing_config || {}
-  const accent      = cfg.accent      || '#1e2642'
-  const headline    = cfg.headline    || mailing?.name || 'Property For Sale'
+  const accent      = cfg.accent      || B.gold
+  const headline    = cfg.headline    || mailing?.name || 'A Private Opportunity'
   const subhead     = cfg.subheadline || ''
-  const ctaText     = cfg.cta_text    || 'Get more info'
+  const ctaText     = cfg.cta_text    || 'Request a Private Viewing'
   const description = cfg.description || ''
   const features    = Array.isArray(cfg.features) ? cfg.features.filter(Boolean) : []
   const images      = (Array.isArray(cfg.images) ? cfg.images : [])
-    .map(v => typeof v === 'string' ? { url:v, caption:'', price:'' } : v)
-    .filter(v => v?.url)
-
+    .map(v => typeof v==='string' ? { url:v, caption:'', price:'' } : v).filter(v => v?.url)
+  const heroImg       = images[0]?.url
   const galleryImages = images.slice(1)
-  const mosaic = useMosaicLayout(Math.min(galleryImages.length, 5))
+  const mosaic        = useMosaicLayout(Math.min(galleryImages.length, 5))
 
   const fmtNum   = v => { const n = Number(String(v).replace(/[^0-9.]/g,'')); return isNaN(n) ? String(v) : n.toLocaleString() }
-  const fmtPrice = v => { if (!v) return null; const n = Number(String(v).replace(/[^0-9.]/g,'')); return isNaN(n) ? String(v) : '$' + n.toLocaleString() }
+  const fmtPrice = v => { if (!v) return null; const n = Number(String(v).replace(/[^0-9.]/g,'')); return isNaN(n) ? String(v) : '$'+n.toLocaleString() }
 
+  // Stats defined ONCE — rendered in the key-facts bar only, never the hero
   const details = [
-    cfg.price      && { label:'Price',       value: fmtPrice(cfg.price) },
-    cfg.beds       && { label:'Bedrooms',     value: cfg.beds },
-    cfg.baths      && { label:'Bathrooms',    value: cfg.baths },
-    cfg.sqft       && { label:'Sq Ft',        value: fmtNum(cfg.sqft) },
-    cfg.lot_size   && { label:'Lot',          value: fmtNum(cfg.lot_size) + ' sqft' },
-    cfg.year_built && { label:'Year Built',   value: cfg.year_built },
+    cfg.price      && { label:'Offered at',  value: fmtPrice(cfg.price) },
+    cfg.beds       && { label:'Bedrooms',    value: cfg.beds },
+    cfg.baths      && { label:'Bathrooms',   value: cfg.baths },
+    cfg.sqft       && { label:'Sq Ft',       value: fmtNum(cfg.sqft) },
+    cfg.lot_size   && { label:'Lot',         value: fmtNum(cfg.lot_size)+' sqft' },
+    cfg.year_built && { label:'Year Built',  value: cfg.year_built },
   ].filter(Boolean)
 
   const submit = async (e) => {
@@ -90,149 +152,177 @@ export default function LandingProperty({ mailingId }) {
     if (!form.phone.trim()) { setError('Please enter a phone number'); return }
     setError(null); setSubmitting(true)
     const res = await fetch('/api/campaigns', {
-      method:'POST', headers:{ 'Content-Type':'application/json' },
+      method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ action:'capture_lead', mailing_id:mailingId, source_landing:'property', ...form }),
     })
     const data = await res.json()
     setSubmitting(false)
-    if (!res.ok || data.error) { setError(data.error || 'Could not submit — please try again'); return }
+    if (!res.ok || data.error) { setError(data.error||'Could not submit — please try again'); return }
     setSubmitted(true)
   }
 
-  if (loading) return <div style={loadingSt}>Loading…</div>
-  if (error && !mailing) return <div style={{ ...loadingSt, color:'#c0392b' }}>{error}</div>
+  const [storyRef, storyVis]   = useReveal()
+  const [featRef,  featVis]    = useReveal()
+  const [gallRef,  gallVis]    = useReveal()
+
+  const agentInitials = (agent?.name||'?').split(/\s+/).map(w=>w[0]).slice(0,2).join('').toUpperCase()
+
+  if (loading) return <Loader />
+  if (error && !mailing) return (
+    <div style={{ minHeight:'100vh', display:'flex', alignItems:'center', justifyContent:'center', background:B.offwhite, fontFamily:'sans-serif', flexDirection:'column', gap:12 }}>
+      <div style={{ fontFamily:`'Cormorant Garamond', Georgia, serif`, fontSize:20, color:B.deep }}>Gateway Real Estate Advisors</div>
+      <div style={{ color:'#c0392b', fontSize:14 }}>{error}</div>
+    </div>
+  )
 
   return (
-    <div style={{ minHeight:'100vh', fontFamily:'DM Sans, system-ui, sans-serif', background:'#fafaf7', color:'#1e2642' }}>
+    <div style={{ minHeight:'100vh', fontFamily:`'DM Sans', system-ui, sans-serif`, background:B.offwhite, color:B.dark }}>
 
-      {/* Top bar */}
-      <header style={{ background:'#fff', borderBottom:'1px solid #eaecf0', padding:'14px 24px',
-                       display:'flex', alignItems:'center', justifyContent:'space-between' }}>
-        <div style={{ fontFamily:'Cormorant Garamond, serif', fontSize:20, color:accent, fontWeight:600 }}>
-          Gateway Real Estate Advisors
+      {/* ── Fonts + Global CSS ───────────────────────────────────────────── */}
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400;1,600&family=DM+Sans:wght@300;400;500;600&display=swap');
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        .gwp-grid { display: grid; grid-template-columns: minmax(0,1.4fr) minmax(0,1fr); gap: 56px; }
+        .gwp-sticky { position: sticky; top: 88px; align-self: start; }
+        @media (max-width: 860px) {
+          .gwp-grid  { grid-template-columns: 1fr !important; gap: 40px !important; }
+          .gwp-sticky { position: static !important; }
+        }
+        .gwp-hero-bg { animation: gwp-kb 16s ease-in-out infinite alternate; }
+        @keyframes gwp-kb { 0% { transform: scale(1); } 100% { transform: scale(1.06); } }
+        @media (prefers-reduced-motion: reduce) { .gwp-hero-bg { animation: none !important; } }
+        .gwp-reveal { opacity: 0; transform: translateY(22px); transition: opacity 0.75s ease, transform 0.75s ease; }
+        .gwp-reveal.on { opacity: 1; transform: none; }
+        .gwp-gimg > div { transition: transform 0.85s cubic-bezier(0.25,0.46,0.45,0.94); }
+        .gwp-gimg:hover > div { transform: scale(1.04); }
+        .gwp-cta-btn { transition: background 0.3s ease, transform 0.3s ease, box-shadow 0.3s ease; cursor: pointer; }
+        .gwp-cta-btn:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(30,47,57,0.22); }
+        .gwp-sub-btn { transition: background 0.25s ease; cursor: pointer; }
+        .gwp-sub-btn:hover { background: #152530 !important; }
+        input:focus, textarea:focus { outline: none !important; border-color: ${accent} !important; box-shadow: 0 0 0 3px ${accent}1a !important; }
+        @keyframes gwspin { to { transform: rotate(360deg); } }
+      `}</style>
+
+      {/* ── Header ──────────────────────────────────────────────────────── */}
+      <header style={{ background:B.white, borderBottom:`1px solid ${B.cream}`, padding:'16px 36px', display:'flex', alignItems:'center', justifyContent:'space-between', position:'sticky', top:0, zIndex:200 }}>
+        <div>
+          <div style={{ fontFamily:`'Cormorant Garamond', Georgia, serif`, fontSize:18, fontWeight:600, color:B.deep, letterSpacing:'-0.02em' }}>Gateway</div>
+          <div style={{ fontSize:8.5, letterSpacing:'0.2em', textTransform:'uppercase', color:B.bluegray, fontWeight:500, marginTop:1 }}>Real Estate Advisors</div>
         </div>
-        {agent?.phone && (
-          <a href={`tel:${agent.phone}`}
-             style={{ fontSize:13, color:'#1e2642', textDecoration:'none', fontWeight:600,
-                      padding:'7px 16px', border:`1.5px solid ${accent}`, borderRadius:99 }}>
-            Call {agent.name?.split(' ')[0] || 'Us'}
-          </a>
-        )}
+        <div style={{ display:'flex', alignItems:'center', gap:18 }}>
+          {agent?.phone && (
+            <a href={`tel:${agent.phone}`} style={{ fontSize:13, color:B.deep, textDecoration:'none', fontWeight:500 }}>
+              {agent.phone}
+            </a>
+          )}
+          <div style={{ fontSize:8.5, letterSpacing:'0.22em', textTransform:'uppercase', color:B.white, background:B.deep, padding:'4px 12px', borderRadius:99, fontWeight:600 }}>
+            Private
+          </div>
+        </div>
       </header>
 
-      {/* Hero */}
-      <div style={{
-        background: images.length > 0
-          ? `linear-gradient(rgba(10,12,20,0.40) 0%, rgba(10,12,20,0.68) 100%), url(${images[0].url}) center/cover no-repeat`
-          : `linear-gradient(135deg, ${accent} 0%, #2c3a5e 100%)`,
-        padding:'72px 24px 56px', color:'#fff',
-      }}>
-        <div style={{ maxWidth:980, margin:'0 auto' }}>
-          <div style={{ display:'inline-block', fontSize:11, letterSpacing:1.8, textTransform:'uppercase',
-                        padding:'3px 10px', border:'1px solid rgba(255,255,255,0.4)', borderRadius:99, marginBottom:14 }}>
-            Property For Sale
+      {/* ── Hero — stats NOT shown here ──────────────────────────────────── */}
+      <div style={{ position:'relative', height:'72vh', minHeight:500, maxHeight:760, overflow:'hidden' }}>
+        {heroImg ? (
+          <>
+            <div className="gwp-hero-bg" style={{ position:'absolute', inset:'-8%', backgroundImage:`url(${heroImg})`, backgroundSize:'cover', backgroundPosition:'center' }} />
+            <div style={{ position:'absolute', inset:0, background:'linear-gradient(to bottom, rgba(30,47,57,0.08) 0%, rgba(30,47,57,0.52) 52%, rgba(30,47,57,0.93) 100%)' }} />
+          </>
+        ) : (
+          <div style={{ position:'absolute', inset:0, background:`linear-gradient(135deg, ${B.deep} 0%, #0d1d26 100%)` }} />
+        )}
+        <div style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', justifyContent:'flex-end', padding:'52px 40px', maxWidth:1100, left:'50%', transform:'translateX(-50%)' }}>
+          <div style={{ position:'absolute', top:28, left:40 }}>
+            <div style={{ display:'inline-flex', alignItems:'center', gap:8, border:'1px solid rgba(228,227,223,0.3)', borderRadius:99, padding:'5px 14px' }}>
+              <div style={{ width:5, height:5, borderRadius:'50%', background:accent }} />
+              <span style={{ fontSize:9, letterSpacing:'0.22em', textTransform:'uppercase', color:'rgba(228,227,223,0.8)', fontWeight:600 }}>
+                Private Listing · Gateway Advisors
+              </span>
+            </div>
           </div>
-          <h1 style={{ fontFamily:'Cormorant Garamond, serif', fontSize:'clamp(30px,4.8vw,56px)',
-                       fontWeight:600, lineHeight:1.08, margin:'0 0 16px' }}>
+          <h1 style={{ fontFamily:`'Cormorant Garamond', Georgia, serif`, fontSize:'clamp(30px,4.8vw,60px)', fontWeight:600, lineHeight:1.06, marginBottom:16, color:'#fff', letterSpacing:'-0.03em', maxWidth:680 }}>
             {headline}
           </h1>
-          {details.length > 0 && (
-            <div style={{ display:'flex', gap:24, flexWrap:'wrap', fontSize:15, fontWeight:500 }}>
-              {details.map((d, i) => (
-                <span key={i} style={{ opacity:0.95 }}>
-                  <strong style={{ fontWeight:700 }}>{d.value}</strong>{' '}{d.label}
-                </span>
-              ))}
-            </div>
+          {subhead && (
+            <p style={{ fontSize:'clamp(14px,1.5vw,17px)', color:B.cream, opacity:0.9, marginBottom:26, maxWidth:500, lineHeight:1.58, fontWeight:300 }}>
+              {subhead}
+            </p>
           )}
+          <button onClick={() => document.getElementById('gwp-form')?.scrollIntoView({ behavior:'smooth' })}
+            className="gwp-cta-btn"
+            style={{ display:'inline-flex', alignItems:'center', gap:10, background:accent, color:B.dark, padding:'14px 26px', border:'none', borderRadius:3, fontSize:12, fontWeight:600, letterSpacing:'0.08em', textTransform:'uppercase', width:'fit-content' }}>
+            {ctaText} &nbsp;→
+          </button>
         </div>
       </div>
 
-      {/* Body */}
-      <div style={{ maxWidth:980, margin:'0 auto', padding:'28px 24px 80px' }}>
-        <div style={{ display:'grid', gridTemplateColumns:'minmax(0,1.35fr) minmax(0,1fr)', gap:32 }}
-             className="prop-grid">
-
-          {/* Left */}
-          <div style={{ display:'flex', flexDirection:'column', gap:24 }}>
-
-            {/* Details card */}
-            {details.length > 0 && (
-              <div style={card}>
-                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(120px,1fr))', gap:18 }}>
-                  {details.map((d, i) => (
-                    <div key={i}>
-                      <div style={{ fontSize:10, textTransform:'uppercase', letterSpacing:0.9, color:'#9aa3b2', fontWeight:700, marginBottom:3 }}>
-                        {d.label}
-                      </div>
-                      <div style={{ fontSize:22, fontWeight:800, color:accent, fontFamily:'Cormorant Garamond, serif' }}>
-                        {d.value}
-                      </div>
-                    </div>
-                  ))}
+      {/* ── Key Facts Bar — the ONE and ONLY place stats appear ─────────── */}
+      {details.length > 0 && (
+        <div style={{ background:B.deep }}>
+          <div style={{ maxWidth:1100, margin:'0 auto', padding:'0 40px', display:'flex', flexWrap:'wrap', alignItems:'stretch' }}>
+            {details.map((d, i) => (
+              <React.Fragment key={i}>
+                <div style={{ padding:'24px 36px 24px 0', display:'flex', flexDirection:'column', gap:4 }}>
+                  <span style={{ fontSize:9, letterSpacing:'0.18em', textTransform:'uppercase', color:B.bluegray, fontWeight:600 }}>{d.label}</span>
+                  <span style={{ fontFamily:`'Cormorant Garamond', Georgia, serif`, fontSize:24, fontWeight:600, color:B.cream, letterSpacing:'-0.02em', lineHeight:1 }}>{d.value}</span>
                 </div>
-              </div>
-            )}
-
-            {/* Subheadline + description */}
-            {(subhead || description) && (
-              <div style={card}>
-                {subhead && (
-                  <p style={{ fontFamily:'Cormorant Garamond, serif', fontSize:18, lineHeight:1.6,
-                               color:'#1e2642', fontWeight:500, margin:'0 0 10px' }}>
-                    {subhead}
-                  </p>
+                {i < details.length - 1 && (
+                  <div style={{ width:1, background:'rgba(162,182,192,0.18)', margin:'18px 36px 18px 0', alignSelf:'stretch' }} />
                 )}
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Body ─────────────────────────────────────────────────────────── */}
+      <div style={{ maxWidth:1100, margin:'0 auto', padding:'60px 40px 100px' }}>
+        <div className="gwp-grid">
+
+          {/* Left — story, features, gallery */}
+          <div style={{ display:'flex', flexDirection:'column', gap:52 }}>
+
+            {(description || subhead) && (
+              <div ref={storyRef} className={`gwp-reveal${storyVis?' on':''}`}>
+                <div style={{ display:'flex', alignItems:'center', gap:14, marginBottom:22 }}>
+                  <div style={{ width:28, height:1, background:accent }} />
+                  <span style={{ fontSize:9, letterSpacing:'0.2em', textTransform:'uppercase', color:B.bluegray, fontWeight:600 }}>The Property</span>
+                </div>
                 {description && (
-                  <p style={{ lineHeight:1.75, color:'#4a5263', margin:0, fontSize:14 }}>{description}</p>
+                  <p style={{ fontSize:16, lineHeight:1.85, color:'#4a5060', fontWeight:300 }}>{description}</p>
                 )}
               </div>
             )}
 
-            {/* Features */}
             {features.length > 0 && (
-              <div style={card}>
-                <h3 style={{ fontFamily:'Cormorant Garamond, serif', fontSize:20, fontWeight:600,
-                             margin:'0 0 14px', color:'#1e2642' }}>
+              <div ref={featRef} className={`gwp-reveal${featVis?' on':''}`}>
+                <h3 style={{ fontFamily:`'Cormorant Garamond', Georgia, serif`, fontSize:22, fontWeight:600, marginBottom:22, color:B.deep, letterSpacing:'-0.02em' }}>
                   Property Highlights
                 </h3>
-                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
+                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'14px 36px' }}>
                   {features.map((f, i) => (
-                    <div key={i} style={{ display:'flex', gap:9, alignItems:'flex-start', fontSize:13 }}>
-                      <span style={{ color:accent, fontWeight:700, flexShrink:0, marginTop:1 }}>✓</span>
-                      <span style={{ color:'#4a5263', lineHeight:1.5 }}>{f}</span>
+                    <div key={i} style={{ display:'flex', gap:12, alignItems:'flex-start', fontSize:14 }}>
+                      <div style={{ width:4, height:4, borderRadius:'50%', background:accent, flexShrink:0, marginTop:8 }} />
+                      <span style={{ color:'#4a5060', lineHeight:1.65, fontWeight:300 }}>{f}</span>
                     </div>
                   ))}
                 </div>
               </div>
             )}
 
-            {/* Gallery */}
             {galleryImages.length > 0 && (
-              <div>
-                <h3 style={{ fontFamily:'Cormorant Garamond, serif', fontSize:20, fontWeight:600,
-                             margin:'0 0 14px', color:'#1e2642' }}>
+              <div ref={gallRef} className={`gwp-reveal${gallVis?' on':''}`}>
+                <h3 style={{ fontFamily:`'Cormorant Garamond', Georgia, serif`, fontSize:22, fontWeight:600, marginBottom:22, color:B.deep, letterSpacing:'-0.02em' }}>
                   Gallery
                 </h3>
-                <div style={{ display:'grid', gap:8, ...mosaic.gridStyle }}>
-                  {galleryImages.slice(0, 5).map((img, i) => (
-                    <div key={i} style={{
-                      ...(mosaic.cells[i] || {}),
-                      backgroundImage:`url(${img.url})`, backgroundSize:'cover', backgroundPosition:'center',
-                      borderRadius:8, overflow:'hidden', position:'relative',
-                    }}>
-                      {(img.caption || img.units || img.price) && (
-                        <div style={{ position:'absolute', bottom:0, left:0, right:0,
-                                      background:'linear-gradient(transparent, rgba(10,12,20,0.6))',
-                                      padding:'18px 10px 8px', color:'#fff' }}>
-                          {(img.caption || img.units) && (
-                            <div style={{ fontSize:11, fontWeight:600 }}>{img.caption || img.units}</div>
-                          )}
-                          {img.price && (
-                            <div style={{ fontSize:13, fontWeight:700, color: accent === '#1e2642' ? '#c9a961' : accent }}>
-                              {img.price}
-                            </div>
-                          )}
+                <div style={{ display:'grid', gap:6, ...mosaic.gridStyle }}>
+                  {galleryImages.slice(0,5).map((img, i) => (
+                    <div key={i} className="gwp-gimg" style={{ ...(mosaic.cells[i]||{}), borderRadius:4, overflow:'hidden', position:'relative' }}>
+                      <div style={{ width:'100%', height:'100%', minHeight:mosaic.cells[i]?.minHeight, backgroundImage:`url(${img.url})`, backgroundSize:'cover', backgroundPosition:'center' }} />
+                      {(img.caption || img.price) && (
+                        <div style={{ position:'absolute', bottom:0, left:0, right:0, background:'linear-gradient(transparent,rgba(30,47,57,0.72))', padding:'22px 12px 10px' }}>
+                          {img.caption && <div style={{ fontSize:11, color:B.cream, fontWeight:500 }}>{img.caption}</div>}
+                          {img.price && <div style={{ fontSize:13, fontWeight:700, color:accent }}>{img.price}</div>}
                         </div>
                       )}
                     </div>
@@ -240,77 +330,66 @@ export default function LandingProperty({ mailingId }) {
                 </div>
               </div>
             )}
+
+            {/* Gateway Perspective */}
+            <div style={{ borderTop:`1px solid ${B.cream}`, paddingTop:36 }}>
+              <div style={{ fontSize:9, letterSpacing:'0.2em', textTransform:'uppercase', color:B.bluegray, fontWeight:600, marginBottom:16 }}>The Gateway Perspective</div>
+              <blockquote style={{ fontFamily:`'Cormorant Garamond', Georgia, serif`, fontSize:17, lineHeight:1.78, color:'#4a5060', fontStyle:'italic', borderLeft:`2px solid ${accent}`, paddingLeft:20, margin:0 }}>
+                "Gateway Real Estate Advisors offers the highest level of service in every aspect of real estate. This property was selected for our private clientele because it represents exceptional quality and lasting value in the Siouxland region."
+              </blockquote>
+              {agent && (
+                <div style={{ marginTop:14, fontSize:13, color:B.bluegray, fontWeight:500, paddingLeft:22 }}>
+                  — {agent.name}, {agent.role || 'Listing Advisor'}
+                </div>
+              )}
+            </div>
           </div>
 
-          {/* Right — sticky lead form */}
-          <div style={{ alignSelf:'start', position:'sticky', top:20 }}>
-            <div style={{ ...card, padding:28, boxShadow:'0 8px 40px rgba(30,38,66,0.13)' }}>
+          {/* Right — sticky form + agent */}
+          <div className="gwp-sticky">
+            <div id="gwp-form" style={{ background:B.white, borderRadius:2, padding:32, boxShadow:'0 2px 4px rgba(30,47,57,0.05), 0 14px 44px rgba(30,47,57,0.1)', border:`1px solid ${B.cream}` }}>
               {submitted ? (
-                <div style={{ textAlign:'center', padding:'16px 0' }}>
-                  <div style={{ width:56, height:56, borderRadius:'50%', background:`${accent}18`, color:accent,
-                                display:'flex', alignItems:'center', justifyContent:'center',
-                                margin:'0 auto', fontSize:28 }}>✓</div>
-                  <h2 style={{ fontFamily:'Cormorant Garamond, serif', fontSize:26, margin:'14px 0 8px' }}>
-                    We'll be in touch!
-                  </h2>
-                  <p style={{ color:'#9aa3b2', fontSize:14, lineHeight:1.6, margin:0 }}>
-                    {agent ? `${agent.name} will reach out shortly.` : "We'll reach out shortly."}
-                  </p>
-                </div>
+                <SuccessView accent={accent} agent={agent} />
               ) : (
                 <>
-                  <h2 style={{ fontFamily:'Cormorant Garamond, serif', fontSize:22, fontWeight:600,
-                               margin:'0 0 4px', color:'#1e2642' }}>
-                    {ctaText}
+                  <div style={{ width:24, height:1, background:accent, marginBottom:22 }} />
+                  <h2 style={{ fontFamily:`'Cormorant Garamond', Georgia, serif`, fontSize:22, fontWeight:600, marginBottom:6, color:B.deep, letterSpacing:'-0.02em' }}>
+                    {agent ? `A private note for ${agent.name.split(' ')[0]}` : ctaText}
                   </h2>
-                  <p style={{ fontSize:12, color:'#9aa3b2', margin:'0 0 16px', lineHeight:1.5 }}>
-                    Leave your info — we'll get back to you fast. No spam, ever.
+                  <p style={{ fontSize:13, color:B.bluegray, marginBottom:24, lineHeight:1.65 }}>
+                    Leave your details — we'll respond confidentially within the business day.
                   </p>
-                  <form onSubmit={submit} style={{ display:'flex', flexDirection:'column', gap:10 }}>
-                    <input required value={form.name} placeholder="Your name *"
-                           onChange={e => setForm(f => ({...f, name:e.target.value}))} style={inputSt(accent)} />
-                    <input required type="tel" value={form.phone} placeholder="Phone number *"
-                           onChange={e => setForm(f => ({...f, phone:e.target.value}))} style={inputSt(accent)} />
-                    <input type="email" value={form.email} placeholder="Email (optional)"
-                           onChange={e => setForm(f => ({...f, email:e.target.value}))} style={inputSt(accent)} />
-                    <textarea rows={3} value={form.message} placeholder="Questions or notes (optional)"
-                              onChange={e => setForm(f => ({...f, message:e.target.value}))}
-                              style={{ ...inputSt(accent), resize:'vertical', fontFamily:'inherit' }} />
-                    {error && <div style={{ color:'#c0392b', fontSize:12, lineHeight:1.4 }}>{error}</div>}
-                    <button type="submit" disabled={submitting}
-                            style={{ background:accent, color:'#fff', padding:'13px', border:'none',
-                                     borderRadius:8, fontSize:15, fontWeight:700, cursor:'pointer',
-                                     opacity: submitting ? 0.7 : 1, marginTop:4, letterSpacing:0.2 }}>
-                      {submitting ? 'Sending…' : ctaText + ' →'}
+                  <form onSubmit={submit} style={{ display:'flex', flexDirection:'column', gap:14 }}>
+                    <LuxeInput label="Your name" required value={form.name} accent={accent} onChange={e=>setForm(f=>({...f,name:e.target.value}))} />
+                    <LuxeInput label="Phone number" type="tel" required value={form.phone} accent={accent} placeholder="(555) 000-0000" onChange={e=>setForm(f=>({...f,phone:e.target.value}))} />
+                    <LuxeInput label="Email address" type="email" value={form.email} accent={accent} onChange={e=>setForm(f=>({...f,email:e.target.value}))} />
+                    <label style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                      <span style={{ fontSize:10, letterSpacing:'0.12em', textTransform:'uppercase', color:B.bluegray, fontWeight:600 }}>Your message (optional)</span>
+                      <textarea rows={3} value={form.message} placeholder="Questions, timeline, or how you'd like to connect…" onChange={e=>setForm(f=>({...f,message:e.target.value}))}
+                        style={{ width:'100%', padding:'12px 14px', background:B.offwhite, border:`1px solid ${B.cream}`, borderRadius:3, fontSize:14, fontFamily:'inherit', outline:'none', color:B.dark, resize:'vertical', lineHeight:1.6, transition:'border-color 200ms' }} />
+                    </label>
+                    {error && <div style={{ color:'#c0392b', fontSize:12, lineHeight:1.5 }}>{error}</div>}
+                    <button type="submit" disabled={submitting} className="gwp-sub-btn"
+                      style={{ background:B.deep, color:B.cream, padding:'15px 24px', border:'none', borderRadius:3, fontSize:12, fontWeight:600, letterSpacing:'0.1em', textTransform:'uppercase', opacity:submitting?0.65:1, marginTop:4 }}>
+                      {submitting ? 'Sending…' : `${ctaText} →`}
                     </button>
-                    <p style={{ fontSize:11, color:'#9aa3b2', textAlign:'center', margin:'4px 0 0' }}>
-                      Your information stays private.
-                    </p>
+                    <p style={{ fontSize:11, color:B.bluegray, textAlign:'center', letterSpacing:'0.02em' }}>Your information is strictly private.</p>
                   </form>
                 </>
               )}
             </div>
 
             {agent && (
-              <div style={{ marginTop:14, ...card, padding:'14px 18px',
-                            display:'flex', alignItems:'center', gap:14 }}>
-                <div style={{ width:44, height:44, borderRadius:'50%', background: agent.color || accent,
-                              display:'flex', alignItems:'center', justifyContent:'center',
-                              fontWeight:700, color:'#fff', fontSize:16, flexShrink:0 }}>
-                  {(agent.name || '?').split(/\s+/).map(w => w[0]).slice(0,2).join('').toUpperCase()}
+              <div style={{ marginTop:16, padding:'18px 22px', background:B.deep, borderRadius:2, display:'flex', alignItems:'center', gap:16 }}>
+                <div style={{ width:46, height:46, borderRadius:'50%', background:agent.color||accent, color:'#fff', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:700, fontSize:15, flexShrink:0 }}>
+                  {agentInitials}
                 </div>
                 <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontWeight:700, fontSize:14 }}>{agent.name}</div>
-                  <div style={{ fontSize:11.5, color:'#9aa3b2' }}>
-                    {agent.role || 'Listing Agent'} · Gateway Real Estate
-                  </div>
+                  <div style={{ fontWeight:600, fontSize:14, color:B.cream }}>{agent.name}</div>
+                  <div style={{ fontSize:11, color:B.bluegray, marginTop:2 }}>{agent.role||'Listing Advisor'} · Gateway Advisors</div>
                 </div>
                 {agent.phone && (
-                  <a href={`tel:${agent.phone}`}
-                     style={{ color:accent, fontSize:12, textDecoration:'none',
-                              padding:'6px 10px', border:`1px solid ${accent}55`, borderRadius:99, whiteSpace:'nowrap' }}>
-                    Call
-                  </a>
+                  <a href={`tel:${agent.phone}`} style={{ color:accent, fontSize:11, textDecoration:'none', fontWeight:600, padding:'7px 14px', border:`1px solid ${accent}55`, borderRadius:99, whiteSpace:'nowrap' }}>Call</a>
                 )}
               </div>
             )}
@@ -318,30 +397,15 @@ export default function LandingProperty({ mailingId }) {
         </div>
       </div>
 
-      <footer style={{ textAlign:'center', padding:'20px 16px 48px', fontSize:12, color:'#9aa3b2',
-                       borderTop:'1px solid #eaecf0' }}>
-        Gateway Real Estate Advisors · Licensed Brokerage · Information believed accurate but not guaranteed.
+      {/* ── Footer ──────────────────────────────────────────────────────── */}
+      <footer style={{ borderTop:`1px solid ${B.cream}`, padding:'28px 40px 52px', textAlign:'center', background:B.white }}>
+        <div style={{ fontFamily:`'Cormorant Garamond', Georgia, serif`, fontSize:16, color:B.deep, marginBottom:10, letterSpacing:'-0.01em' }}>Gateway Real Estate Advisors</div>
+        <div style={{ fontSize:11, color:B.bluegray, letterSpacing:'0.05em', lineHeight:1.9 }}>
+          Licensed in Iowa · South Dakota · Nebraska<br />
+          <em>This page is confidential and intended for recipients of our private correspondence.</em>
+        </div>
       </footer>
 
-      <style>{`
-        @media (max-width: 820px) { .prop-grid { grid-template-columns: 1fr !important; } }
-        input:focus, textarea:focus { outline:none; border-color: ${accent} !important; box-shadow: 0 0 0 3px ${accent}18; }
-      `}</style>
     </div>
   )
-}
-
-const card = {
-  background:'#fff', borderRadius:12, padding:22,
-  boxShadow:'0 2px 12px rgba(30,38,66,0.07)', border:'1px solid #eaecf0',
-}
-const inputSt = (accent) => ({
-  padding:'10px 12px', border:'1px solid #d6d9e0', borderRadius:7, fontSize:14,
-  fontFamily:'inherit', outline:'none', width:'100%', boxSizing:'border-box',
-  transition:'border-color 150ms, box-shadow 150ms',
-})
-const loadingSt = {
-  padding:60, textAlign:'center', fontFamily:'DM Sans, system-ui, sans-serif',
-  color:'#9aa3b2', fontSize:14, minHeight:'100vh', display:'flex',
-  alignItems:'center', justifyContent:'center',
 }
