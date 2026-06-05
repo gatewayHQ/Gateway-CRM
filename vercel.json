@@ -4,7 +4,7 @@
   "installCommand": "npm ci --no-audit --no-fund",
   "framework": "vite",
   "crons": [
-    { "path": "/api/sequence-run", "schedule": "5 * * * *" },
+    { "path": "/api/sequence-run", "schedule": "0 9 * * *" },
     { "path": "/api/reminders",    "schedule": "0 8 * * *" }
   ],
   "rewrites": [

@@ -2,7 +2,7 @@
  * Gateway CRM — Sequence Runner
  *
  * GET /api/sequence-run
- *   (intended to be called by Vercel Cron every ~5 minutes)
+ *   (called by Vercel Cron once daily — step delays are measured in days)
  *
  * Responsibilities:
  *   1. Find all active contact_sequences
@@ -17,7 +17,7 @@
  * Vercel cron config (in vercel.json):
  *   {
  *     "crons": [
- *       { "path": "/api/sequence-run", "schedule": "  5 * * * *" }
+ *       { "path": "/api/sequence-run", "schedule": "0 9 * * *" }
  *     ]
  *   }
  *
