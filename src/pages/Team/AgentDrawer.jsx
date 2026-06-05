@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { Icon, Drawer, pushToast } from '../../components/UI.jsx'
 
 const COLORS = ['#2d3561','#4a6fa5','#2e7d5e','#c9a84c','#6b4fa5','#c0392b','#d4820a','#1a1a2e']
-const BLANK  = { name: '', initials: '', role: '', email: '', color: '#2d3561' }
+const BLANK  = { name: '', initials: '', role: '', email: '', phone: '', color: '#2d3561', photo_url: '', bio: '' }
+const BIO_MAX = 600
 
 const autoInitials = (name) =>
   name.trim().split(/\s+/).map(w => w[0] || '').join('').toUpperCase().slice(0, 2)
@@ -12,13 +13,34 @@ export default function AgentDrawer({ open, onClose, agent, onSave }) {
   const [form,   setForm]   = useState(BLANK)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const fileRef = useRef(null)
 
   useEffect(() => {
-    setForm(agent ? { ...agent } : BLANK)
+    setForm(agent ? { ...BLANK, ...agent } : BLANK)
     setErrors({})
   }, [agent, open])
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }))
+
+  const uploadHeadshot = async (file) => {
+    if (!file) return
+    if (!file.type.startsWith('image/')) { pushToast('Please choose an image file', 'error'); return }
+    setUploading(true)
+    try {
+      const ext  = (file.name.split('.').pop() || 'jpg').toLowerCase()
+      const path = `agents/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
+      const { error } = await supabase.storage
+        .from('campaign-images').upload(path, file, { contentType: file.type, upsert: false })
+      if (error) throw error
+      const { data: { publicUrl } } = supabase.storage.from('campaign-images').getPublicUrl(path)
+      set('photo_url', publicUrl)
+    } catch (e) {
+      pushToast(e.message || 'Upload failed — try again', 'error')
+    } finally {
+      setUploading(false)
+    }
+  }
 
   const save = async () => {
     const e = {}
@@ -29,24 +51,61 @@ export default function AgentDrawer({ open, onClose, agent, onSave }) {
 
     setSaving(true)
     const payload = { ...form, initials: form.initials || autoInitials(form.name) }
-    const { error } = agent?.id
-      ? await supabase.from('agents').update(payload).eq('id', agent.id)
-      : await supabase.from('agents').insert([payload])
+    const doSave = (p) => agent?.id
+      ? supabase.from('agents').update(p).eq('id', agent.id)
+      : supabase.from('agents').insert([p])
+
+    let { error } = await doSave(payload)
+
+    // Graceful fallback if migration 0004 (bio/photo_url/phone) hasn't run yet:
+    // strip the new fields and save the rest so the agent isn't blocked.
+    let droppedNew = false
+    if (error?.message?.includes('schema cache')) {
+      const { phone, photo_url, bio, ...base } = payload
+      ;({ error } = await doSave(base))
+      if (!error) droppedNew = true
+    }
     setSaving(false)
 
     if (error) { pushToast(error.message, 'error'); return }
-    pushToast(agent?.id ? 'Agent updated' : 'Agent added')
+    pushToast(droppedNew
+      ? 'Saved — run DB migration 0004 to store bio, photo & phone'
+      : (agent?.id ? 'Agent updated' : 'Agent added'))
     onSave()
     onClose()
   }
 
+  const previewInitials = form.initials || autoInitials(form.name) || '?'
+
   return (
     <Drawer open={open} onClose={onClose} title={agent?.id ? 'Edit Agent' : 'Add Agent'} width={400}>
       <div className="drawer__body">
-        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 20 }}>
-          <div style={{ width: 64, height: 64, borderRadius: 12, background: form.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24, fontWeight: 700, color: '#fff' }}>
-            {form.initials || autoInitials(form.name) || '?'}
+        {/* Headshot — what shows on QR landing pages */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, marginBottom: 20 }}>
+          {form.photo_url ? (
+            <img src={form.photo_url} alt="Headshot preview"
+                 style={{ width: 84, height: 84, borderRadius: 16, objectFit: 'cover' }} />
+          ) : (
+            <div style={{ width: 84, height: 84, borderRadius: 16, background: form.color,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          fontSize: 30, fontWeight: 700, color: '#fff' }}>
+              {previewInitials}
+            </div>
+          )}
+          <input ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
+                 onChange={e => uploadHeadshot(e.target.files?.[0])} />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button type="button" className="btn btn--secondary btn--sm" disabled={uploading}
+                    onClick={() => fileRef.current?.click()}>
+              <Icon name="upload" size={12} /> {uploading ? 'Uploading…' : form.photo_url ? 'Replace headshot' : 'Upload headshot'}
+            </button>
+            {form.photo_url && (
+              <button type="button" className="btn btn--ghost btn--sm" onClick={() => set('photo_url', '')}>
+                Remove
+              </button>
+            )}
           </div>
+          <div className="form-hint" style={{ textAlign: 'center' }}>Shown on your QR landing pages</div>
         </div>
 
         <div className="form-group">
@@ -59,17 +118,32 @@ export default function AgentDrawer({ open, onClose, agent, onSave }) {
           <input className="form-control" value={form.initials}
             onChange={e => set('initials', e.target.value.toUpperCase().slice(0, 2))}
             placeholder="Auto-generated" maxLength={2} />
-          <div className="form-hint">Leave blank to auto-generate from name</div>
+          <div className="form-hint">Used when no headshot is set. Leave blank to auto-generate.</div>
         </div>
         <div className="form-group">
-          <label className="form-label">Role</label>
+          <label className="form-label">Role / Title</label>
           <input className="form-control" value={form.role}
-            onChange={e => set('role', e.target.value)} placeholder="Lead Agent, Agent, Admin…" />
+            onChange={e => set('role', e.target.value)} placeholder="Lead Agent, Buyer's Advisor…" />
         </div>
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label required">Email</label>
+            <input className={`form-control${errors.email ? ' error' : ''}`} type="email" value={form.email}
+              onChange={e => set('email', e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Phone</label>
+            <input className="form-control" type="tel" value={form.phone || ''}
+              onChange={e => set('phone', e.target.value)} placeholder="(555) 000-0000" />
+          </div>
+        </div>
+
         <div className="form-group">
-          <label className="form-label required">Email</label>
-          <input className={`form-control${errors.email ? ' error' : ''}`} type="email" value={form.email}
-            onChange={e => set('email', e.target.value)} />
+          <label className="form-label">Bio</label>
+          <textarea className="form-control form-control--textarea" rows={4} maxLength={BIO_MAX}
+            value={form.bio || ''} onChange={e => set('bio', e.target.value)}
+            placeholder="A few sentences clients will see on your landing pages — your focus, experience, and what makes working with you great." />
+          <div className="form-hint">{(form.bio || '').length}/{BIO_MAX} · Appears in the “Meet your advisor” section.</div>
         </div>
 
         <div className="form-group">
@@ -83,12 +157,13 @@ export default function AgentDrawer({ open, onClose, agent, onSave }) {
               }} />
             ))}
           </div>
+          <div className="form-hint">Used for the initials badge when there’s no headshot.</div>
         </div>
       </div>
 
       <div className="drawer__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-        <button className="btn btn--primary" onClick={save} disabled={saving}>
+        <button className="btn btn--primary" onClick={save} disabled={saving || uploading}>
           {saving ? 'Saving…' : 'Save Agent'}
         </button>
       </div>

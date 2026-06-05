@@ -62,9 +62,16 @@ export default function LandingProperty({ mailingId, preview = null }) {
           [m.agent_id, ...(Array.isArray(cfg.agent_ids) ? cfg.agent_ids : [])].filter(Boolean)
         )]
         if (ids.length) {
-          const { data: rows } = await supabase.from('agents')
-            .select('id, name, phone, email, photo_url, color, role')
+          // Include bio; fall back to the pre-0004 column set if that migration
+          // hasn't run yet (selecting a missing column would otherwise error).
+          let { data: rows, error: agErr } = await supabase.from('agents')
+            .select('id, name, phone, email, photo_url, color, role, bio')
             .in('id', ids)
+          if (agErr) {
+            ;({ data: rows } = await supabase.from('agents')
+              .select('id, name, phone, email, photo_url, color, role')
+              .in('id', ids))
+          }
           const overrides = cfg.agent_overrides || {}
           const ordered = ids
             .map(id => (rows || []).find(r => r.id === id))

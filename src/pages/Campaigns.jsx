@@ -240,13 +240,112 @@ async function api(action, payload = {}, method = 'POST') {
   return r.json()
 }
 
+// ─── Advisors panel — who appears in "Meet your advisor(s)" on the landing ────
+// Primary agent comes from the mailing's agent_id; an optional co-agent is
+// stored in landing_config.agent_ids. Per-mailing bio/photo tweaks (without
+// touching the agent's profile) live in landing_config.agent_overrides[id].
+
+function AdvisorsField({ agents, primaryId, form, setCfg }) {
+  const cfg       = form.landing_config || {}
+  const secondId  = (Array.isArray(cfg.agent_ids) ? cfg.agent_ids : [])[0] || ''
+  const overrides = cfg.agent_overrides || {}
+  const byId      = (id) => agents.find(a => a.id === id)
+  const ids       = [primaryId, secondId].filter(Boolean)
+
+  const setSecond   = (id) => setCfg('agent_ids', id ? [id] : [])
+  const setOverride = (id, patch) => setCfg('agent_overrides', { ...overrides, [id]: { ...(overrides[id] || {}), ...patch } })
+  const clearOverride = (id) => { const next = { ...overrides }; delete next[id]; setCfg('agent_overrides', next) }
+
+  return (
+    <div style={{ border:'1px solid var(--gw-border)', borderRadius:10, padding:14 }}>
+      <div style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Agents on this landing page</div>
+      <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'2px 0 12px', lineHeight:1.5 }}>
+        Each agent’s headshot &amp; bio come from their profile (Team → edit agent). Add a co-agent for shared
+        listings, and optionally tailor what shows on this mailing.
+      </div>
+
+      <label style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)' }}>Co-agent (optional)</label>
+      <select className="input" value={secondId} onChange={e => setSecond(e.target.value)} disabled={!primaryId}>
+        <option value="">— None —</option>
+        {agents.filter(a => a.id !== primaryId).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+      </select>
+      {!primaryId && <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>Choose a primary agent above first.</div>}
+
+      <div style={{ display:'flex', flexDirection:'column', gap:8, marginTop:12 }}>
+        {ids.map((id, i) => (
+          <AdvisorCustomize key={id} agent={byId(id)} role={i === 0 ? 'Primary' : 'Co-agent'}
+            ov={overrides[id] || {}} onPatch={(patch) => setOverride(id, patch)} onClear={() => clearOverride(id)} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function AdvisorCustomize({ agent, role, ov, onPatch, onClear }) {
+  const [open, setOpen] = useState(false)
+  const [uploading, setUploading] = useState({})
+  if (!agent) return null
+  const photo       = ov.photo_url || agent.photo_url
+  const profileBio  = (agent.bio || '').trim()
+  const hasOverride = Boolean((ov.bio && ov.bio.trim()) || ov.photo_url)
+  const inits       = (agent.name || '?').split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase()
+
+  return (
+    <div style={{ border:'1px solid var(--gw-border)', borderRadius:8, padding:10, background:'#fff' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+        {photo
+          ? <img src={photo} alt="" style={{ width:38, height:38, borderRadius:8, objectFit:'cover' }} />
+          : <div style={{ width:38, height:38, borderRadius:8, background:agent.color || '#2d3561', color:'#fff',
+                          display:'flex', alignItems:'center', justifyContent:'center', fontWeight:700, fontSize:13 }}>{inits}</div>}
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:13, fontWeight:700 }}>
+            {agent.name} <span style={{ fontSize:10, color:'var(--gw-mist)', fontWeight:600 }}>· {role}</span>
+          </div>
+          <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
+            {hasOverride ? 'Customized for this mailing' : profileBio ? 'Using their profile bio' : 'No bio on file — add one in their profile'}
+          </div>
+        </div>
+        <button type="button" className="btn btn--ghost btn--sm" style={{ fontSize:11 }} onClick={() => setOpen(o => !o)}>
+          {open ? 'Done' : 'Customize'}
+        </button>
+      </div>
+
+      {open && (
+        <div style={{ marginTop:10, display:'flex', flexDirection:'column', gap:8 }}>
+          <textarea className="input" rows={3} maxLength={600} value={ov.bio ?? ''}
+            placeholder={profileBio || 'Bio shown on this mailing…'}
+            onChange={e => onPatch({ bio: e.target.value })} />
+          <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Leave blank to use their profile bio.</div>
+          <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+            <label className="btn btn--secondary btn--sm" style={{ cursor:'pointer', fontSize:11 }}>
+              {uploading.photo ? 'Uploading…' : 'Upload photo'}
+              <input type="file" accept="image/*" style={{ display:'none' }}
+                onChange={async e => {
+                  const f = e.target.files?.[0]; if (!f) return
+                  try { const url = await uploadImageToStorage(f, setUploading, 'photo'); onPatch({ photo_url: url }) }
+                  catch (err) { pushToast(err.message || 'Upload failed', 'error') }
+                }} />
+            </label>
+            {hasOverride && (
+              <button type="button" className="btn btn--ghost btn--sm" style={{ fontSize:11 }} onClick={onClear}>
+                Reset to profile
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── New / Edit Mailing form ──────────────────────────────────────────────────
 
-function MailingForm({ initial, agents, properties, onSave, onCancel, saving, initialTemplate }) {
+function MailingForm({ initial, agents, properties, activeAgent, onSave, onCancel, saving, initialTemplate }) {
   const [form, setForm] = useState(() => ({
     name:               initial?.name               || initialTemplate?.fields?.name               || '',
     description:        initial?.description        || initialTemplate?.fields?.description        || '',
-    agent_id:           initial?.agent_id           || '',
+    // New mailings default to the agent creating them; existing keep their agent.
+    agent_id:           initial?.agent_id           || activeAgent?.id                             || '',
     property_id:        initial?.property_id        || '',
     mailing_type:       initial?.mailing_type       || initialTemplate?.fields?.mailing_type       || 'postcard',
     landing_type:       initial?.landing_type       || initialTemplate?.fields?.landing_type       || 'property',
@@ -315,12 +414,17 @@ function MailingForm({ initial, agents, properties, onSave, onCancel, saving, in
       </div>
 
       <div>
-        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Assigned Agent</label>
+        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Primary agent</label>
         <select className="input" value={form.agent_id} onChange={e => set('agent_id', e.target.value)}>
           <option value="">Unassigned</option>
           {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
+        <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>
+          Defaults to you. Their headshot &amp; bio appear on the landing page.
+        </div>
       </div>
+
+      <AdvisorsField agents={agents} primaryId={form.agent_id} form={form} setCfg={setCfg} />
 
       <div>
         <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)', display:'block', marginBottom:8 }}>
@@ -1304,7 +1408,7 @@ function RecipientImporter({ mailingId, contacts, onDone, onCancel }) {
 
 // ─── Mailing detail drawer ────────────────────────────────────────────────────
 
-function MailingDetail({ mailing, agents, properties, contacts, onClose, onUpdate, onDelete }) {
+function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onClose, onUpdate, onDelete }) {
   const [tab, setTab] = useState('overview') // overview | recipients | scans | leads | edit
   const [recipients, setRecipients] = useState([])
   const [scans, setScans] = useState([])
@@ -1638,7 +1742,7 @@ function MailingDetail({ mailing, agents, properties, contacts, onClose, onUpdat
         )}
 
         {tab === 'edit' && (
-          <MailingForm initial={mailing} agents={agents} properties={properties}
+          <MailingForm initial={mailing} agents={agents} properties={properties} activeAgent={activeAgent}
                        saving={saving} onSave={saveEdit} onCancel={() => setTab('overview')} />
         )}
       </div>
@@ -1682,7 +1786,7 @@ function MailingDetail({ mailing, agents, properties, contacts, onClose, onUpdat
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
-export default function CampaignsPage({ db, isAdmin }) {
+export default function CampaignsPage({ db, isAdmin, activeAgent }) {
   const agents     = db?.agents     || []
   const properties = db?.properties || []
 
@@ -1975,6 +2079,7 @@ export default function CampaignsPage({ db, isAdmin }) {
               initialTemplate={templateSel}
               agents={agents}
               properties={properties}
+              activeAgent={activeAgent}
               saving={saving}
               onSave={createMailing}
               onCancel={() => { setCreating(false); setTemplateSel(null) }}
@@ -1989,6 +2094,7 @@ export default function CampaignsPage({ db, isAdmin }) {
           agents={agents}
           properties={properties}
           contacts={contacts}
+          activeAgent={activeAgent}
           onClose={() => setSelected(null)}
           onUpdate={updateMailing}
           onDelete={handleDelete}

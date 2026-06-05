@@ -17,6 +17,9 @@ create table if not exists agents (
   color      text default '#2d3561',
   team_id    uuid,                         -- future: multi-team support
   specialty  text check (specialty in ('residential', 'commercial')),
+  phone      text,                         -- shown on landing-page advisor card
+  photo_url  text,                         -- headshot (public URL)
+  bio        text,                         -- short advisor bio for landing pages
   created_at timestamptz default now()
 );
 
