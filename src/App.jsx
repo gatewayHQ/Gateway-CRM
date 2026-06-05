@@ -14,8 +14,6 @@ const TemplatesPage    = React.lazy(() => import('./pages/Templates.jsx'))
 const TeamPage         = React.lazy(() => import('./pages/Team/index.jsx'))
 const SettingsPage     = React.lazy(() => import('./pages/Settings.jsx'))
 const LeadsPage        = React.lazy(() => import('./pages/Leads.jsx'))
-const OmPage             = React.lazy(() => import('./pages/Om.jsx'))
-const SocialPage         = React.lazy(() => import('./pages/Social.jsx'))
 const DataManagementPage = React.lazy(() => import('./pages/DataManagement.jsx'))
 const ReportsPage      = React.lazy(() => import('./pages/Reports.jsx'))
 const SequencesPage    = React.lazy(() => import('./pages/Sequences.jsx'))
@@ -102,8 +100,6 @@ const TITLES = {
   sequences:  { title: 'Drip Sequences',   crumb: 'Marketing · Automation' },
   reports:    { title: 'Reports',          crumb: 'Analytics · ROI' },
   'form-library': { title: 'Form Library',  crumb: 'Documents · State Forms' },
-  om:         { title: 'OM Generator',     crumb: 'Tools · Documents' },
-  social:     { title: 'Social Media',     crumb: 'Tools · Content' },
   toolkit:    { title: 'Toolkit',          crumb: 'Tools · Gateway Suite' },
   leads:      { title: 'Website Leads',    crumb: 'Marketing · Captures' },
   integrations: { title: 'Integrations',    crumb: 'Tools · Connections' },
@@ -682,8 +678,6 @@ export default function App() {
           {route === 'sequences'  && <SequencesPage {...props} />}
           {route === 'reports'    && <ReportsPage {...props} />}
           {route === 'form-library' && <FormLibraryPage isAdmin={isAdmin} />}
-          {route === 'om'         && <OmPage />}
-          {route === 'social'     && <SocialPage />}
           {route === 'leads'      && <LeadsPage {...props} />}
           {route === 'integrations'      && <IntegrationsPage db={db} />}
           {route === 'data-management'   && <DataManagementPage />}

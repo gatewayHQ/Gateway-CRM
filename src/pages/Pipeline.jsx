@@ -1083,8 +1083,18 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
 
   // Each signer has name, email, tabs[] — pre-fill contact + property owner when available
   const [signers, setSigners] = React.useState(() => {
-    const base = [{ id: 1, name: defaultName, email: defaultEmail, tabs: [] }]
-    if (ownerIsDifferent) base.push({ id: 2, name: ownerName, email: ownerEmail, tabs: [] })
+    // Signer 1: deal contact. If they have no email, fall back to property owner.
+    let s1Name  = defaultName
+    let s1Email = defaultEmail
+    if (!s1Email && ownerContact?.email) {
+      s1Name  = ownerName
+      s1Email = ownerContact.email
+    }
+    const base = [{ id: 1, name: s1Name, email: s1Email, tabs: [] }]
+    // Signer 2: property owner when they differ from signer 1 and have an email
+    if (ownerIsDifferent && ownerEmail && ownerEmail !== s1Email) {
+      base.push({ id: 2, name: ownerName, email: ownerEmail, tabs: [] })
+    }
     return base
   })
 
