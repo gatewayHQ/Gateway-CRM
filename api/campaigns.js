@@ -72,6 +72,47 @@ function baseUrl(req) {
   return `${proto}://${req.headers.host}`
 }
 
+// Link-preview / social crawlers don't run the SPA's JS, so they need server
+// rendered Open Graph tags. Matches the major ones (Facebook, iMessage, X,
+// LinkedIn, Slack, WhatsApp, Telegram, Discord, Pinterest, Reddit, Google…).
+const SOCIAL_CRAWLERS = /facebookexternalhit|facebot|twitterbot|linkedinbot|slackbot|slack-imgproxy|whatsapp|telegrambot|discordbot|pinterest|redditbot|embedly|quora link preview|skypeuripreview|nuzzel|vkshare|w3c_validator|bitlybot|applebot|googlebot|bingbot|developers\.google\.com\/\+\/web\/snippet|iframely/i
+function isCrawler(req) {
+  return SOCIAL_CRAWLERS.test(req.headers['user-agent'] || '')
+}
+
+function escHtml(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+// Minimal HTML page carrying Open Graph + Twitter tags, then redirecting real
+// browsers to the actual landing page (in case a human's UA is misdetected).
+function ogHtml({ url, title, description, image, siteName = 'Gateway Real Estate' }) {
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escHtml(title)}</title>
+<meta name="description" content="${escHtml(description)}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="${escHtml(url)}">
+<meta property="og:title" content="${escHtml(title)}">
+<meta property="og:description" content="${escHtml(description)}">
+<meta property="og:site_name" content="${escHtml(siteName)}">
+${image ? `<meta property="og:image" content="${escHtml(image)}">
+<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="${escHtml(title)}">` : ''}
+<meta name="twitter:card" content="${image ? 'summary_large_image' : 'summary'}">
+<meta name="twitter:title" content="${escHtml(title)}">
+<meta name="twitter:description" content="${escHtml(description)}">
+${image ? `<meta name="twitter:image" content="${escHtml(image)}">` : ''}
+<meta http-equiv="refresh" content="0;url=${escHtml(url)}">
+<script>window.location.replace(${JSON.stringify(url)})</script>
+</head><body style="font-family:system-ui,sans-serif;padding:48px;text-align:center;color:#1e2642">
+<div style="font-size:24px;font-weight:600;margin-bottom:8px">${escHtml(siteName)}</div>
+<div style="font-size:16px;margin-bottom:24px">${escHtml(title)}</div>
+<a href="${escHtml(url)}" style="color:#4a6fa5">View listing →</a>
+</body></html>`
+}
+
 const CORS = {
   'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
@@ -100,14 +141,50 @@ export default async function handler(req, res) {
 
       const { data: m } = await db()
         .from('mailings')
-        .select('id, landing_type, landing_custom_url, landing_config, property_id, status, scan_count')
+        .select('id, name, landing_type, landing_custom_url, landing_config, property_id, status, scan_count')
         .eq('qr_token', token)
         .single()
       if (!m) return res.status(404).send('Mailing not found')
 
-      // Log the scan + bump counter. Fire-and-forget — never block the redirect.
-      // (Race condition on counter is acceptable at our scale; periodic resync
-      // could be added later via a cron-style aggregation if needed.)
+      // Compute redirect destination
+      let dest
+      if (m.landing_type === 'custom' && m.landing_custom_url) {
+        dest = m.landing_custom_url
+      } else if (m.landing_type === 'valuation') {
+        dest = `/lp/valuation/${m.id}`
+      } else if (m.landing_type === 'multifamily') {
+        dest = `/lp/multifamily/${m.id}`
+      } else {
+        dest = `/lp/property/${m.id}`
+      }
+
+      // Social/link-preview crawlers: serve Open Graph tags built from the
+      // mailing so Facebook/iMessage/etc. show the property (not "Gateway CRM").
+      // These hits are NOT counted as scans, and external custom URLs are left
+      // to redirect so the destination provides its own preview.
+      const isExternalCustom = m.landing_type === 'custom' && m.landing_custom_url
+      if (isCrawler(req) && !isExternalCustom) {
+        const cfg = m.landing_config || {}
+        const num = v => { const n = Number(String(v ?? '').replace(/[^0-9.]/g, '')); return v && isFinite(n) ? n.toLocaleString() : '' }
+        const price = num(cfg.price) ? `$${num(cfg.price)}` : ''
+        const specs = [
+          price,
+          cfg.beds  ? `${cfg.beds} bd`  : '',
+          cfg.baths ? `${cfg.baths} ba` : '',
+          cfg.sqft  ? `${num(cfg.sqft)} sqft` : '',
+          cfg.units ? `${cfg.units} units` : '',
+        ].filter(Boolean).join(' · ')
+        const imgs  = Array.isArray(cfg.images) ? cfg.images : []
+        const image = imgs.map(v => (typeof v === 'string' ? v : v?.url)).find(Boolean) || ''
+        const title = cfg.headline || m.name || 'Property For Sale'
+        const description = String(cfg.subheadline || specs || 'View this listing from Gateway Real Estate.').slice(0, 280)
+        res.setHeader('Content-Type', 'text/html; charset=utf-8')
+        res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=86400')
+        return res.status(200).send(ogHtml({ url: `${baseUrl(req)}${dest}`, title, description, image }))
+      }
+
+      // Real visitor — log the scan + bump counter. Fire-and-forget; never block
+      // the redirect. (Counter race is acceptable at our scale.)
       const ip = clientIp(req)
       db().from('mailing_scans').insert({
         mailing_id:  m.id,
@@ -121,18 +198,6 @@ export default async function handler(req, res) {
         .update({ scan_count: (m.scan_count || 0) + 1 })
         .eq('id', m.id)
         .then(() => {})
-
-      // Compute redirect destination
-      let dest
-      if (m.landing_type === 'custom' && m.landing_custom_url) {
-        dest = m.landing_custom_url
-      } else if (m.landing_type === 'valuation') {
-        dest = `/lp/valuation/${m.id}`
-      } else if (m.landing_type === 'multifamily') {
-        dest = `/lp/multifamily/${m.id}`
-      } else {
-        dest = `/lp/property/${m.id}`
-      }
 
       res.setHeader('Cache-Control', 'no-store')
       res.setHeader('Location', dest)
