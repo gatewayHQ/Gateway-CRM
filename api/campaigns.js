@@ -239,14 +239,34 @@ export default async function handler(req, res) {
       return json(res, 200, { ok: true, ts: new Date().toISOString() })
     }
 
-    // ── List all mailings ───────────────────────────────────────────────────
+    // ── List mailings (scoped) ──────────────────────────────────────────────
+    // Each agent sees ONLY their own campaigns, plus any they collaborate on
+    // (their id is the primary agent_id OR appears in landing_config.agent_ids).
+    // Admins pass all=1 to see every campaign. The client supplies agent_id/all;
+    // this endpoint runs on the service key, so DB-level RLS (migration 0002,
+    // deferred) is the eventual hard guarantee — this filter is the product rule.
     if (action === 'list') {
+      const agentId = req.query.agent_id || null
+      const all = req.query.all === '1' || req.query.all === 'true'
+
       const { data, error } = await db()
         .from('mailings')
         .select('*')
         .order('created_at', { ascending: false })
       if (error) throw error
-      return json(res, 200, { mailings: data })
+
+      let mailings = data || []
+      if (!all) {
+        // Non-admin with no resolved identity yet → return nothing rather than
+        // leaking the whole list during the first-paint window.
+        if (!agentId) return json(res, 200, { mailings: [] })
+        mailings = mailings.filter(m => {
+          if (m.agent_id === agentId) return true
+          const ids = m.landing_config?.agent_ids
+          return Array.isArray(ids) && ids.includes(agentId)
+        })
+      }
+      return json(res, 200, { mailings })
     }
 
     // ── Get one mailing ─────────────────────────────────────────────────────

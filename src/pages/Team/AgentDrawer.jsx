@@ -3,7 +3,8 @@ import { supabase } from '../../lib/supabase.js'
 import { Icon, Drawer, pushToast } from '../../components/UI.jsx'
 
 const COLORS = ['#2d3561','#4a6fa5','#2e7d5e','#c9a84c','#6b4fa5','#c0392b','#d4820a','#1a1a2e']
-const BLANK  = { name: '', initials: '', role: '', email: '', phone: '', color: '#2d3561', photo_url: '', bio: '' }
+const BLANK  = { name: '', initials: '', role: '', email: '', phone: '', color: '#2d3561', photo_url: '', bio: '',
+                 default_split_pct: 70, no_brokerage_split: false, is_admin: false }
 const BIO_MAX = 600
 
 const autoInitials = (name) =>
@@ -50,18 +51,24 @@ export default function AgentDrawer({ open, onClose, agent, onSave }) {
     if (Object.keys(e).length) return
 
     setSaving(true)
-    const payload = { ...form, initials: form.initials || autoInitials(form.name) }
+    const payload = {
+      ...form,
+      initials: form.initials || autoInitials(form.name),
+      default_split_pct: Number(form.default_split_pct) || 0,
+      no_brokerage_split: !!form.no_brokerage_split,
+      is_admin: !!form.is_admin,
+    }
     const doSave = (p) => agent?.id
       ? supabase.from('agents').update(p).eq('id', agent.id)
       : supabase.from('agents').insert([p])
 
     let { error } = await doSave(payload)
 
-    // Graceful fallback if migration 0004 (bio/photo_url/phone) hasn't run yet:
-    // strip the new fields and save the rest so the agent isn't blocked.
+    // Graceful fallback if migration 0004/0005 columns haven't run yet: strip
+    // the newer fields and save the rest so the agent isn't blocked.
     let droppedNew = false
-    if (error?.message?.includes('schema cache')) {
-      const { phone, photo_url, bio, ...base } = payload
+    if (error?.message?.includes('schema cache') || /column|default_split_pct|no_brokerage_split|is_admin/i.test(error?.message || '')) {
+      const { phone, photo_url, bio, default_split_pct, no_brokerage_split, is_admin, ...base } = payload
       ;({ error } = await doSave(base))
       if (!error) droppedNew = true
     }
@@ -144,6 +151,32 @@ export default function AgentDrawer({ open, onClose, agent, onSave }) {
             value={form.bio || ''} onChange={e => set('bio', e.target.value)}
             placeholder="A few sentences clients will see on your landing pages — your focus, experience, and what makes working with you great." />
           <div className="form-hint">{(form.bio || '').length}/{BIO_MAX} · Appears in the “Meet your advisor” section.</div>
+        </div>
+
+        {/* ── Commission & access ─────────────────────────────────────────── */}
+        <div style={{ borderTop: '1px solid var(--gw-border)', margin: '4px 0 16px', paddingTop: 16 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--gw-ink)', marginBottom: 12 }}>Commission & Access</div>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, marginBottom: 12, cursor: 'pointer' }}>
+            <input type="checkbox" checked={!!form.no_brokerage_split}
+              onChange={e => set('no_brokerage_split', e.target.checked)} />
+            <span>Keeps <strong>100%</strong> — no brokerage split (capped / special arrangement)</span>
+          </label>
+
+          {!form.no_brokerage_split && (
+            <div className="form-group">
+              <label className="form-label">Default commission split (%)</label>
+              <input className="form-control" type="number" min="0" max="100" step="1"
+                value={form.default_split_pct} onChange={e => set('default_split_pct', e.target.value)} />
+              <div className="form-hint">This agent's share; the brokerage keeps the rest. Pre-fills the commission editor.</div>
+            </div>
+          )}
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, marginTop: 4, cursor: 'pointer' }}>
+            <input type="checkbox" checked={!!form.is_admin}
+              onChange={e => set('is_admin', e.target.checked)} />
+            <span><strong>Office admin</strong> — can view every agent's deals, documents, signatures & commissions</span>
+          </label>
         </div>
 
         <div className="form-group">

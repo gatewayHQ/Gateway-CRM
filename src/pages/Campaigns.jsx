@@ -1817,8 +1817,11 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
 
   const loadAll = async () => {
     setLoading(true)
+    // Scope the list: admins see every campaign; agents see only their own +
+    // any they collaborate on (passed to the API, enforced there).
+    const listParams = isAdmin ? { all: '1' } : { agent_id: activeAgent?.id || '' }
     const [mRes, dRes, cRes] = await Promise.all([
-      api('list', {}, 'GET'),
+      api('list', listParams, 'GET'),
       api('dashboard', {}, 'GET'),
       supabase.from('contacts').select('id, first_name, last_name, email, phone, owner_address, owner_city, owner_state, owner_zip').order('last_name'),
     ])
@@ -1834,7 +1837,8 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
     setLoading(false)
   }
 
-  useEffect(() => { loadAll() }, [])
+  // Re-scope when identity resolves (activeAgent may be null on first paint).
+  useEffect(() => { loadAll() }, [isAdmin, activeAgent?.id])
 
   const createMailing = async (form) => {
     setSaving(true)
