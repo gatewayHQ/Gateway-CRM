@@ -69,6 +69,11 @@ function AdvisorCard({ agent, accent }) {
           {phone && <ContactBtn href={`tel:${phone}`}  accent={accent} filled>Call</ContactBtn>}
           {phone && <ContactBtn href={`sms:${phone}`}  accent={accent}>Text</ContactBtn>}
           {email && <ContactBtn href={`mailto:${email}`} accent={accent}>Email</ContactBtn>}
+          {agent.id && (
+            <ContactBtn href={`/advisor/${agent.id}`} accent={accent}>
+              About {(name || '').split(/\s+/)[0]} →
+            </ContactBtn>
+          )}
         </div>
       </div>
     </article>

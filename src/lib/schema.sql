@@ -20,6 +20,8 @@ create table if not exists agents (
   phone      text,                         -- shown on landing-page advisor card
   photo_url  text,                         -- headshot (public URL)
   bio        text,                         -- short advisor bio for landing pages
+  tagline    text,                          -- one-line positioning for the advisor profile page
+  stats      jsonb not null default '[]',   -- [{label,value}] public vanity stats curated by the agent
   default_split_pct  numeric default 70,   -- agent's default % share of a commission allocation
   no_brokerage_split boolean default false,-- true = keeps 100% (capped / no split)
   is_admin   boolean default false,        -- office admin: sees all deals/docs/commissions
