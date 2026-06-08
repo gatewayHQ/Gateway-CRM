@@ -10,6 +10,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
+import AdvisorDark from '../components/landing/AdvisorDark.jsx'
 
 const PROPERTY_TYPES = [
   { value:'single-family',  label:'Single-Family Home'       },
@@ -51,6 +52,7 @@ function useMosaicLayout(n) {
 export default function LandingValuation({ mailingId }) {
   const [mailing,    setMailing]    = useState(null)
   const [agent,      setAgent]      = useState(null)
+  const [agents,     setAgents]     = useState([])
   const [loading,    setLoading]    = useState(true)
   const [submitted,  setSubmitted]  = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -64,14 +66,32 @@ export default function LandingValuation({ mailingId }) {
       const { data: m } = await supabase
         .from('mailings')
         .select('id, name, agent_id, landing_config')
-        .eq('id', mailingId).single()
+        .eq('id', mailingId).maybeSingle()
       if (!m) { setError('Mailing not found'); setLoading(false); return }
       setMailing(m)
-      if (m.agent_id) {
-        const { data: a } = await supabase.from('agents')
-          .select('id, name, phone, email, photo_url, color, role')
-          .eq('id', m.agent_id).single()
-        setAgent(a || null)
+
+      // Advisor list: primary agent first, then co-agents from
+      // landing_config.agent_ids; per-mailing agent_overrides win over profile.
+      const cfg = m.landing_config || {}
+      const ids = [...new Set(
+        [m.agent_id, ...(Array.isArray(cfg.agent_ids) ? cfg.agent_ids : [])].filter(Boolean)
+      )]
+      if (ids.length) {
+        let { data: rows, error: agErr } = await supabase.from('agents')
+          .select('id, name, phone, email, photo_url, color, role, bio')
+          .in('id', ids)
+        if (agErr) {
+          ;({ data: rows } = await supabase.from('agents')
+            .select('id, name, phone, email, photo_url, color, role')
+            .in('id', ids))
+        }
+        const overrides = cfg.agent_overrides || {}
+        const ordered = ids
+          .map(id => (rows || []).find(r => r.id === id))
+          .filter(Boolean)
+          .map(r => ({ ...r, ...(overrides[r.id] || {}) }))
+        setAgents(ordered)
+        setAgent(ordered[0] || null)
       }
       setLoading(false)
     })()
@@ -121,7 +141,7 @@ export default function LandingValuation({ mailingId }) {
   )
 
   return (
-    <div style={pageSt}>
+    <div className="val-page" style={pageSt}>
       {/* Header */}
       <header style={{ padding:'18px 24px', maxWidth:1180, margin:'0 auto',
                        display:'flex', justifyContent:'space-between', alignItems:'center' }}>
@@ -179,17 +199,18 @@ export default function LandingValuation({ mailingId }) {
               </div>
             )}
 
-            {/* Highlights */}
-            <div style={{ marginTop:36, display:'grid', gridTemplateColumns:`repeat(${highlights.length},1fr)`,
+            {/* Highlights — minmax(0,1fr) prevents overflow; 2-up on phones. */}
+            <div className="val-highlights"
+                 style={{ marginTop:36, display:'grid', gridTemplateColumns:`repeat(${highlights.length}, minmax(0, 1fr))`,
                           gap:24, padding:'24px 0',
                           borderTop:'1px solid #2a2a2a', borderBottom:'1px solid #2a2a2a' }}>
               {highlights.map((h, i) => (
-                <div key={i}>
-                  <div style={{ fontFamily:'Cormorant Garamond, serif', fontSize:30, fontWeight:600,
-                                color:'#f3f0e6', lineHeight:1 }}>
+                <div key={i} style={{ minWidth:0 }}>
+                  <div style={{ fontFamily:'Cormorant Garamond, serif', fontSize:'clamp(22px, 4vw, 30px)', fontWeight:600,
+                                color:'#f3f0e6', lineHeight:1.05 }}>
                     {h.value}
                   </div>
-                  <div style={{ fontSize:11, textTransform:'uppercase', letterSpacing:1.2, color:'#8c8c84', marginTop:6 }}>
+                  <div style={{ fontSize:11, textTransform:'uppercase', letterSpacing:1.2, color:'#8c8c84', marginTop:6, lineHeight:1.3 }}>
                     {h.label}
                   </div>
                 </div>
@@ -333,13 +354,22 @@ export default function LandingValuation({ mailingId }) {
         </div>
       </section>
 
+      {/* Meet your advisor(s) — below the form so visitors read, request a
+          valuation, then scroll to learn who they'll be working with. */}
+      <AdvisorDark agents={agents} accent={accent} />
+
       <footer style={{ borderTop:'1px solid #1f1f1f', padding:'20px 24px 40px',
                        textAlign:'center', fontSize:12, color:'#6c6c66' }}>
         Gateway Real Estate Advisors · Licensed Brokerage · This valuation is an opinion of value, not an appraisal.
       </footer>
 
       <style>{`
+        /* Kill horizontal overflow + the cream body bleed behind the dark page. */
+        html, body { margin: 0; background: #0a0a0a; }
+        #root { overflow-x: hidden; }
+        .val-page, .val-page * { box-sizing: border-box; }
         @media (max-width: 880px) { .val-hero-grid { grid-template-columns: 1fr !important; gap: 28px !important; } }
+        @media (max-width: 560px) { .val-highlights { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 18px !important; } }
         input::placeholder, textarea::placeholder { color: #6c6c66; }
         input:focus, textarea:focus, select:focus { outline:none; border-color: ${accent} !important; }
       `}</style>
@@ -360,6 +390,8 @@ function Field({ label, children, accent }) {
 
 const pageSt = {
   minHeight:'100vh',
+  width:'100%',
+  overflowX:'hidden',
   background:'radial-gradient(1200px 600px at 20% -10%, #1a1f2e 0%, #0f0f0f 55%, #0a0a0a 100%)',
   color:'#f3f0e6',
   fontFamily:'DM Sans, system-ui, sans-serif',
