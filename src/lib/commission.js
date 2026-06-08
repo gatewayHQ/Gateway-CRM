@@ -24,6 +24,12 @@
  * share of that net and applies their own split (or none) to it. The house total
  * is whatever the agents don't keep.
  *
+ *   3. TRANSACTION FEE — a flat per-deal fee the brokerage charges on every
+ *      closing (default $100), split evenly across the agents on the deal ($50
+ *      each for two agents). It is charged ON TOP and does NOT count toward an
+ *      agent's annual cap — the cap measures only the brokerage SPLIT. A
+ *      per-agent `fee` > 0 overrides that agent's share of the flat fee.
+ *
  * ── Backward compatibility ───────────────────────────────────────────────────
  * Existing rows use the old flat shape (gross_pct / referral_pct / broker_pct /
  * agent_pct / co_agent_pct / transaction_fee). `normalizeCommission` upgrades
@@ -32,8 +38,9 @@
  */
 
 export const DEFAULTS = {
-  GROSS_PCT: 3.0,   // typical one-side rate
-  SPLIT_PCT: 70.0,  // agent's share of their allocation (house keeps the rest)
+  GROSS_PCT: 3.0,        // typical one-side rate
+  SPLIT_PCT: 70.0,       // agent's share of their allocation (house keeps the rest)
+  TRANSACTION_FEE: 100,  // flat per-deal brokerage transaction fee, split across agents
 }
 
 const num = (v, fallback = 0) => {
@@ -59,7 +66,7 @@ export function makeParticipant({ agent = null, role = 'primary', allocation_pct
     allocation_pct,                    // share of NET commission this agent is allocated
     split_pct: noSplit ? 100 : num(agent?.default_split_pct, DEFAULTS.SPLIT_PCT),
     no_split: noSplit,                 // true = keeps 100%, no brokerage cut
-    fee: 0,                            // flat transaction fee off this agent's take (to house)
+    fee: 0,                            // per-agent override of the flat fee share (0 = use the deal-level split)
   }
 }
 
@@ -84,6 +91,7 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
       sale_price,
       sides: commission.sides.map(s => ({ ...makeSide(s.key, s.rate_pct), ...s })),
       participants: commission.participants.map(p => ({ ...makeParticipant(), ...p })),
+      transaction_fee: num(commission.transaction_fee, 0),
     }
   }
 
@@ -100,7 +108,6 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
   const primary = makeParticipant({ agent: primaryAgent, role: 'primary', allocation_pct: 100 })
   primary.split_pct = agent_pct
   primary.no_split = false
-  primary.fee = fee
 
   const participants = [primary]
 
@@ -113,7 +120,9 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
     participants.push(co)
   }
 
-  return { sale_price, sides, participants, _legacy: true }
+  // The legacy flat `transaction_fee` was a single deal-level fee — carry it
+  // straight through as the deal-level fee (no longer pinned to the primary).
+  return { sale_price, sides, participants, transaction_fee: fee, _legacy: true }
 }
 
 /**
@@ -159,30 +168,42 @@ export function computeCommission(input) {
     legacyCo._fixed_take = round2(coTake)
   }
 
+  // Flat per-deal transaction fee, split evenly across the agents who pay it
+  // (legacy fixed-take co-agents don't). A per-agent `fee` > 0 overrides the
+  // even share. This fee is charged ON TOP and is excluded from cap tracking.
+  const transaction_fee = num(input?.transaction_fee, 0)
+  const feePayers = rawParts.filter(p => p._fixed_take == null && p._legacy_co_pct == null)
+  const feeShare = feePayers.length ? transaction_fee / feePayers.length : 0
+
   const participants = rawParts.map(p => {
     const allocation = net_total * num(p.allocation_pct, 0) / 100
-    const fee = num(p.fee, 0)
+    const ownFee = num(p.fee, 0)
+    const txnFee = p._fixed_take != null ? 0 : (ownFee > 0 ? ownFee : feeShare)
 
     if (p._fixed_take != null) {
       // Legacy co-agent: fixed dollar take, comes out of the agent pool.
-      return { ...p, allocation: round2(p._fixed_take), agent_take: round2(p._fixed_take), house_from: 0, fee: 0 }
+      return { ...p, allocation: round2(p._fixed_take), agent_take: round2(p._fixed_take), house_split: 0, house_fee: 0, house_from: 0, fee: 0 }
     }
 
     if (p.no_split) {
-      // Keeps 100% of their allocation (capped / no brokerage split). Only a flat
-      // fee (if any) goes to the house.
-      const take = allocation - fee
-      return { ...p, allocation: round2(allocation), agent_take: round2(take), house_from: round2(fee), fee }
+      // Keeps 100% of their allocation (capped / no brokerage split). Only the
+      // flat transaction fee goes to the house.
+      const take = allocation - txnFee
+      return { ...p, allocation: round2(allocation), agent_take: round2(take), house_split: 0, house_fee: round2(txnFee), house_from: round2(txnFee), fee: round2(txnFee) }
     }
 
     const split = num(p.split_pct, DEFAULTS.SPLIT_PCT)
-    const take = allocation * split / 100 - fee
+    const splitTake = allocation * split / 100
+    const houseSplit = allocation - splitTake   // the brokerage split — counts toward cap
+    const take = splitTake - txnFee
     return {
       ...p,
       allocation: round2(allocation),
       agent_take: round2(take),
-      house_from: round2(allocation - take),
-      fee,
+      house_split: round2(houseSplit),
+      house_fee: round2(txnFee),                // transaction fee — charged on top, not capped
+      house_from: round2(houseSplit + txnFee),
+      fee: round2(txnFee),
     }
   })
 
@@ -198,6 +219,8 @@ export function computeCommission(input) {
 
   const allocatedAgentTake = participants.reduce((s, p) => s + p.agent_take, 0)
   const allocatedHouse     = participants.reduce((s, p) => s + p.house_from, 0)
+  const transaction_fee_total = round2(participants.reduce((s, p) => s + (p.house_fee || 0), 0))
+  const house_split_total     = round2(participants.reduce((s, p) => s + (p.house_split || 0), 0))
   const allocatedTotal     = participants.reduce((s, p) => s + (p._fixed_take != null ? 0 : p.allocation), 0)
   // Anything not allocated to a participant falls to the house.
   const unallocated = Math.max(0, net_total - allocatedTotal)
@@ -220,6 +243,9 @@ export function computeCommission(input) {
     participants,
     agent_total,
     house_total,
+    transaction_fee: round2(transaction_fee),
+    transaction_fee_total,   // total flat fees charged on this deal (on top of cap)
+    house_split_total,       // brokerage split only — the cap-counting portion
     primary,
     // Effective blended rate (for the dashboard's "GC %" column).
     effective_rate_pct: sale_price > 0 ? round2(gross_total / sale_price * 100) : 0,

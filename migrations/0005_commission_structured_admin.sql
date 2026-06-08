@@ -22,7 +22,7 @@ alter table commissions add column if not exists participants jsonb not null def
 comment on column commissions.sides is
   'Array of { key, label, rate_pct, referral_pct, referral_flat }. One entry for a single-side deal, two when the brokerage represents both buyer and seller. Empty = use legacy flat columns.';
 comment on column commissions.participants is
-  'Array of { id, agent_id, name, role, allocation_pct, split_pct, no_split, fee }. Each agent on the deal with their own brokerage split. Empty = use legacy flat columns.';
+  'Array of { id, agent_id, name, role, allocation_pct, split_pct, no_split, fee }. Each agent on the deal with their own brokerage split. fee = per-agent override of the flat transaction-fee share (0 = use the even split of commissions.transaction_fee). Empty = use legacy flat columns.';
 
 -- 2. Per-agent commission defaults -------------------------------------------
 alter table agents add column if not exists default_split_pct  numeric default 70;

@@ -447,7 +447,9 @@ export default function App() {
   if (!session) return <LoginPage />
 
   const activeAgent = db.agents.find(a => a.id === activeAgentId) || null
-  const isAdmin     = activeAgent?.role?.toLowerCase().includes('admin') ?? false
+  // Office admin: honor the explicit is_admin flag (migration 0005) first, then
+  // fall back to the free-text role for profiles created before the column.
+  const isAdmin     = activeAgent?.is_admin === true || (activeAgent?.role?.toLowerCase().includes('admin') ?? false)
   const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin, visibleAgentIds, dealAgentIds }
 
   if (loading) return (

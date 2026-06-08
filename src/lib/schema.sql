@@ -193,9 +193,9 @@ create table if not exists commissions (
   agent_pct       numeric not null default 70.0,   -- legacy: agent share of the split
   referral_pct    numeric not null default 0,      -- legacy: referral fee off the top
   co_agent_pct    numeric not null default 0,      -- legacy: co-agent share of agent gross
-  transaction_fee numeric not null default 0,      -- legacy: flat fee off agent gross
+  transaction_fee numeric not null default 0,      -- flat per-deal brokerage fee, split across agents, charged on top of cap
   sides           jsonb not null default '[]',     -- [{ key,label,rate_pct,referral_pct,referral_flat }]
-  participants    jsonb not null default '[]',     -- [{ id,agent_id,name,role,allocation_pct,split_pct,no_split,fee }]
+  participants    jsonb not null default '[]',     -- [{ id,agent_id,name,role,allocation_pct,split_pct,no_split,fee }] (fee = per-agent override of the flat-fee share)
   notes           text,
   created_at      timestamptz default now(),
   updated_at      timestamptz default now()

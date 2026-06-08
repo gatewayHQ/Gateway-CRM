@@ -66,6 +66,9 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
         .filter(p => p._legacy_co_pct == null) // legacy co marker not editable directly
         .map(p => ({ ...p })),
       twoSided,
+      // Flat brokerage transaction fee for the whole deal. New deals default to
+      // $100; existing rows keep whatever was saved.
+      transaction_fee: commission?.id != null ? Number(norm.transaction_fee || 0) : DEFAULTS.TRANSACTION_FEE,
       notes: commission?.notes ?? '',
     }
   }
@@ -82,6 +85,7 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
     sale_price: sp,
     sides: form.sides,
     participants: form.participants,
+    transaction_fee: form.transaction_fee,
   })
 
   // ── Side editing ────────────────────────────────────────────────────────
@@ -159,7 +163,7 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
       agent_pct:       primary ? Number(primary.split_pct) : D_AGENT,
       broker_pct:      primary ? Math.round((100 - Number(primary.split_pct)) * 10) / 10 : D_BROKER,
       co_agent_pct:    0,
-      transaction_fee: primary ? Number(primary.fee || 0) : 0,
+      transaction_fee: Number(form.transaction_fee || 0),
       notes: form.notes.trim(),
       updated_at: new Date().toISOString(),
     }
@@ -245,6 +249,20 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
             </button>
           </div>
 
+          {/* Deal-level transaction fee — flat brokerage fee, split across agents. */}
+          <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:8, display:'flex', alignItems:'center', gap:10 }}>
+            <div style={{ flex:1 }}>
+              <label style={fieldLabel}>Transaction fee ($)</label>
+              <input className="form-control" type="number" min="0" step="25" value={form.transaction_fee}
+                onChange={e=>setForm(p=>({ ...p, transaction_fee:e.target.value }))} placeholder="100" />
+            </div>
+            <div style={{ flex:1, fontSize:11, color:'var(--gw-mist)', alignSelf:'flex-end', paddingBottom:8 }}>
+              Flat brokerage fee, charged on top of the split. Split evenly:
+              <strong> {formatCurrency((Number(form.transaction_fee)||0) / Math.max(1, form.participants.length))} </strong>
+              per agent.
+            </div>
+          </div>
+
           {form.participants.map((p, i) => {
             const rp = result.participants.find(x => x.id === p.id) || {}
             return (
@@ -268,9 +286,10 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
                       onChange={e=>setPart(p.id,{ allocation_pct:e.target.value })} />
                   </div>
                   <div style={{ flex:1 }}>
-                    <label style={fieldLabel}>Fee to house ($)</label>
-                    <input className="form-control" type="number" min="0" step="25" value={p.fee}
-                      onChange={e=>setPart(p.id,{ fee:e.target.value })} placeholder="0" />
+                    <label style={fieldLabel}>Fee override ($)</label>
+                    <input className="form-control" type="number" min="0" step="25" value={p.fee || ''}
+                      onChange={e=>setPart(p.id,{ fee:e.target.value })}
+                      placeholder={String(Math.round((Number(form.transaction_fee)||0) / Math.max(1, form.participants.length)))} />
                   </div>
                 </div>
 
@@ -318,6 +337,7 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
                 val: p.agent_take, color:'var(--gw-green)',
               })),
               { label:'Brokerage / House', val: result.house_total, color:'var(--gw-azure)', bold:true },
+              result.transaction_fee_total > 0 && { label:'  incl. transaction fee', val: result.transaction_fee_total, color:'var(--gw-mist)' },
             ].filter(Boolean).map((row, i) => (
               <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'3px 0', borderTop: row.bold || row.rule ? '1px solid var(--gw-border)' : 'none', marginTop: row.bold||row.rule ? 6 : 0, paddingTop: row.bold||row.rule ? 8 : 3, fontWeight: row.bold ? 700 : 400 }}>
                 <span style={{ color:'var(--gw-mist)', whiteSpace:'pre' }}>{row.label}</span>
@@ -705,10 +725,17 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
     const r = breakdownForDeal(deal, getComm(deal.id), agents)
     const mine = r.participants.filter(p => p.agent_id === agentId)
     if (mine.length) {
-      return { agent: mine.reduce((s,p)=>s+p.agent_take,0), house: mine.reduce((s,p)=>s+p.house_from,0) }
+      return {
+        agent: mine.reduce((s,p)=>s+p.agent_take,0),
+        house: mine.reduce((s,p)=>s+p.house_from,0),
+        // Cap counts the brokerage SPLIT only — the flat transaction fee is on top.
+        cap:   mine.reduce((s,p)=>s+(p.house_split||0),0),
+      }
     }
     // No structured participant matched — fall back to deal.agent_id ownership.
-    return deal.agent_id === agentId ? { agent: r.agent_total, house: r.house_total } : { agent: 0, house: 0 }
+    return deal.agent_id === agentId
+      ? { agent: r.agent_total, house: r.house_total, cap: r.house_split_total }
+      : { agent: 0, house: 0, cap: 0 }
   }
 
   const reload = async () => {
@@ -755,7 +782,7 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
     const r = breakdownForDeal(d, getComm(d.id), agents)
     return d.agent_id === activeAgent?.id || r.participants.some(p => p.agent_id === activeAgent?.id)
   })
-  const ytdBrokerFees  = activeAgentClosedDeals.reduce((s, d) => s + agentSlice(d, activeAgent?.id).house, 0)
+  const ytdBrokerFees  = activeAgentClosedDeals.reduce((s, d) => s + agentSlice(d, activeAgent?.id).cap, 0)
   const ytdAgentEarned = activeAgentClosedDeals.reduce((s, d) => s + agentSlice(d, activeAgent?.id).agent, 0)
   const capPct = capAmt > 0 ? Math.min(100, Math.round(ytdBrokerFees / capAmt * 100)) : 0
   const capHit = capAmt > 0 && ytdBrokerFees >= capAmt

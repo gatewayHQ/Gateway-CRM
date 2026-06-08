@@ -39,12 +39,23 @@ A transaction is two stacked concepts:
   referred co-agent who owes the house nothing); others split with the house.
   Participants are independent — a co-agent never carves down the primary's take.
 
+- **Transaction fee** — a flat per-deal brokerage fee (default $100), split
+  evenly across the agents on the deal ($50 each for two). It is charged **on
+  top** of the split and is **excluded from the annual cap** — the cap measures
+  only the brokerage split. A per-agent `fee > 0` overrides that agent's share.
+
 ```
 net = Σ(side.gross − side.referral)
+fee_share = transaction_fee / (number of paying agents)
 for each participant:
-  allocation = net × allocation_pct
-  take       = no_split ? allocation − fee : allocation × split_pct − fee
-  house     += allocation − take          (+ any unallocated net)
+  allocation  = net × allocation_pct
+  txn_fee     = participant.fee > 0 ? participant.fee : fee_share
+  split_take  = no_split ? allocation : allocation × split_pct
+  take        = split_take − txn_fee
+  house_split = allocation − split_take      ← counts toward the agent's cap
+  house      += house_split + txn_fee        (+ any unallocated net)
+
+cap progress = Σ house_split   (transaction fees never count toward cap)
 ```
 
 Stored as two `jsonb` columns on `commissions` (`sides`, `participants`). The
