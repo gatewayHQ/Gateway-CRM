@@ -96,10 +96,25 @@ async function handleShare(req, res) {
 </html>`)
 }
 
-// ── POST: landing-page lead capture (formerly /api/property-gate) ────────────
+// ── POST: landing-page / website lead capture (formerly /api/property-gate) ──
+// Accepts the full lead shape (first_name/last_name OR name, agent_id,
+// session_key, property_address, property_type, message). Assigns an agent
+// (explicit link, else round-robin by specialty), de-dupes the contact by
+// email, and logs an activity + a lead_captures record.
 async function handleGate(req, res) {
-  const { propertyId, name, email, phone } = req.body || {}
-  if (!name?.trim() || !email?.trim()) {
+  const {
+    propertyId,
+    name, first_name, last_name,
+    email, phone,
+    agent_id,            // set when the lead comes from a specific agent's page/listing
+    session_key, message, property_address,
+    property_type,       // 'residential' | 'commercial' — drives round-robin pool
+  } = req.body || {}
+
+  const resolvedFirst = first_name?.trim() || name?.trim().split(/\s+/)[0] || ''
+  const resolvedLast  = last_name?.trim()  || name?.trim().split(/\s+/).slice(1).join(' ') || '—'
+
+  if (!resolvedFirst || !email?.trim()) {
     return res.status(400).json({ error: 'name and email are required' })
   }
   if (!email.includes('@')) {
@@ -118,32 +133,41 @@ async function handleGate(req, res) {
     Authorization: `Bearer ${SERVICE_KEY}`,
   }
 
-  const parts = name.trim().split(/\s+/)
-  const first = parts[0]
-  const last  = parts.slice(1).join(' ') || '—'
+  // Lead assignment: explicit agent link first, else round-robin by specialty.
+  const assignedAgentId = agent_id || await pickRoundRobinAgent(SUPABASE_URL, headers, property_type)
 
+  // De-duplicate the contact by email.
+  const normalEmail = email.trim().toLowerCase()
   const checkRes = await fetch(
-    `${SUPABASE_URL}/rest/v1/contacts?email=eq.${encodeURIComponent(email.trim().toLowerCase())}&select=id&limit=1`,
+    `${SUPABASE_URL}/rest/v1/contacts?email=eq.${encodeURIComponent(normalEmail)}&select=id&limit=1`,
     { headers }
   )
   const existing = checkRes.ok ? await checkRes.json() : []
 
   let contactId
+  let isNew = false
 
   if (existing.length > 0) {
     contactId = existing[0].id
   } else {
+    const noteParts = [
+      property_address ? `Interested in: ${property_address}` : '',
+      message          ? `Message: ${message}`                 : '',
+    ].filter(Boolean)
+
     const createRes = await fetch(`${SUPABASE_URL}/rest/v1/contacts`, {
       method: 'POST',
       headers: { ...headers, Prefer: 'return=representation' },
       body: JSON.stringify({
-        first_name: first,
-        last_name:  last,
-        email:      email.trim().toLowerCase(),
-        phone:      phone?.trim() || null,
-        source:     'website',
-        type:       'buyer',
-        status:     'active',
+        first_name:        resolvedFirst,
+        last_name:         resolvedLast,
+        email:             normalEmail,
+        phone:             phone?.trim() || null,
+        source:            'website',
+        type:              'buyer',
+        status:            'active',
+        assigned_agent_id: assignedAgentId,
+        notes:             noteParts.join('\n') || null,
       }),
     })
     if (!createRes.ok) {
@@ -152,21 +176,87 @@ async function handleGate(req, res) {
     }
     const [created] = await createRes.json()
     contactId = created?.id
+    isNew = true
   }
 
-  if (contactId && propertyId) {
+  // Activity note on the contact timeline.
+  if (contactId) {
+    const activityBody = property_address
+      ? `Website lead form submitted — interested in: ${property_address}${message ? `\nMessage: ${message}` : ''}`
+      : propertyId
+        ? `Landing page inquiry submitted for property ID: ${propertyId}`
+        : `Website lead form submitted${message ? `\nMessage: ${message}` : ''}`
+
     await fetch(`${SUPABASE_URL}/rest/v1/activities`, {
       method: 'POST',
       headers: { ...headers, Prefer: 'return=minimal' },
       body: JSON.stringify({
         contact_id: contactId,
+        agent_id:   assignedAgentId,
         type:       'note',
-        body:       `Landing page inquiry submitted for property ID: ${propertyId}`,
+        body:       activityBody,
       }),
     }).catch(() => {})
   }
 
-  return res.json({ ok: true, contactId })
+  // Lead-capture record (already linked to the created/matched contact).
+  if (session_key && contactId) {
+    await fetch(`${SUPABASE_URL}/rest/v1/lead_captures`, {
+      method: 'POST',
+      headers: { ...headers, Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        session_key,
+        agent_id:             assignedAgentId,
+        first_name:           resolvedFirst,
+        last_name:            resolvedLast,
+        email:                normalEmail,
+        phone:                phone?.trim() || null,
+        property_address:     property_address || null,
+        message:              message || null,
+        converted_contact_id: contactId,
+      }),
+    }).catch(() => {})
+  }
+
+  return res.json({ ok: true, contactId, isNew, assignedAgentId })
+}
+
+// Round-robin: pull agents by specialty, find the most recently assigned agent
+// in that pool, and return the next one in alphabetical rotation. Falls back to
+// the other specialty, then any agent, then null if none are configured.
+async function pickRoundRobinAgent(supabaseUrl, headers, propertyType) {
+  const specialty = propertyType === 'commercial' ? 'commercial' : 'residential'
+  const pools = [
+    `specialty=eq.${specialty}`,
+    `specialty=eq.${specialty === 'residential' ? 'commercial' : 'residential'}`,
+    '',  // all agents
+  ]
+
+  for (const filter of pools) {
+    const qs = filter ? `${filter}&` : ''
+    const agentsRes = await fetch(
+      `${supabaseUrl}/rest/v1/agents?${qs}select=id,name&order=name.asc`,
+      { headers }
+    )
+    if (!agentsRes.ok) continue
+    const agents = await agentsRes.json()
+    if (!agents.length) continue
+    if (agents.length === 1) return agents[0].id
+
+    const idList = agents.map(a => a.id).join(',')
+    const lastRes = await fetch(
+      `${supabaseUrl}/rest/v1/lead_captures?agent_id=in.(${idList})&select=agent_id&order=created_at.desc&limit=1`,
+      { headers }
+    )
+    const last = lastRes.ok ? await lastRes.json() : []
+    if (!last.length) return agents[0].id
+
+    const lastIdx = agents.findIndex(a => a.id === last[0].agent_id)
+    const nextIdx = (lastIdx === -1 ? 0 : lastIdx + 1) % agents.length
+    return agents[nextIdx].id
+  }
+
+  return null  // no agents configured at all
 }
 
 export default async function handler(req, res) {

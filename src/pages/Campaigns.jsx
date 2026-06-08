@@ -383,7 +383,15 @@ function MailingForm({ initial, agents, properties, activeAgent, onSave, onCance
     }
     if (Array.isArray(cfg.highlights)) cfg.highlights = cfg.highlights.filter(h => (h.label || '').trim() && (h.value || '').trim()).slice(0, 4)
     if (Array.isArray(cfg.features))   cfg.features   = cfg.features.map(f => (f || '').trim()).filter(Boolean)
-    onSave({ ...form, landing_config: cfg })
+    // Empty <select>/<input> values must become null for uuid/date columns —
+    // Postgres rejects "" for uuid ("invalid input syntax for type uuid").
+    onSave({
+      ...form,
+      agent_id:    form.agent_id    || null,
+      property_id: form.property_id || null,
+      send_date:   form.send_date   || null,
+      landing_config: cfg,
+    })
   }
 
   return (
