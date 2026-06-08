@@ -10,6 +10,15 @@
   "rewrites": [
     { "source": "/m/:token",  "destination": "/api/campaigns?action=scan&token=:token" },
     { "source": "/share/:id", "destination": "/api/property-public?id=:id" },
+    { "source": "/lp/property/:id",
+      "has": [{ "type": "header", "key": "user-agent", "value": "(?i).*(facebookexternalhit|facebot|twitterbot|linkedinbot|slackbot|slack-imgproxy|whatsapp|telegrambot|discordbot|pinterest|redditbot|embedly|skypeuripreview|applebot|googlebot|bingbot|iframely|vkshare).*" }],
+      "destination": "/api/campaigns?action=og&id=:id&lt=property" },
+    { "source": "/lp/valuation/:id",
+      "has": [{ "type": "header", "key": "user-agent", "value": "(?i).*(facebookexternalhit|facebot|twitterbot|linkedinbot|slackbot|slack-imgproxy|whatsapp|telegrambot|discordbot|pinterest|redditbot|embedly|skypeuripreview|applebot|googlebot|bingbot|iframely|vkshare).*" }],
+      "destination": "/api/campaigns?action=og&id=:id&lt=valuation" },
+    { "source": "/lp/multifamily/:id",
+      "has": [{ "type": "header", "key": "user-agent", "value": "(?i).*(facebookexternalhit|facebot|twitterbot|linkedinbot|slackbot|slack-imgproxy|whatsapp|telegrambot|discordbot|pinterest|redditbot|embedly|skypeuripreview|applebot|googlebot|bingbot|iframely|vkshare).*" }],
+      "destination": "/api/campaigns?action=og&id=:id&lt=multifamily" },
     { "source": "/((?!api/)(?!share/)(?!m/).*)", "destination": "/index.html" }
   ],
   "headers": [

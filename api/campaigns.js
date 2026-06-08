@@ -113,6 +113,26 @@ ${image ? `<meta name="twitter:image" content="${escHtml(image)}">` : ''}
 </body></html>`
 }
 
+// Build Open Graph fields (title/description/image) from a mailing's
+// landing_config. Shared by the /m crawler branch and the og action.
+function mailingOgFields(m) {
+  const cfg = m.landing_config || {}
+  const num = v => { const n = Number(String(v ?? '').replace(/[^0-9.]/g, '')); return v && isFinite(n) ? n.toLocaleString() : '' }
+  const price = num(cfg.price) ? `$${num(cfg.price)}` : ''
+  const specs = [
+    price,
+    cfg.beds  ? `${cfg.beds} bd`  : '',
+    cfg.baths ? `${cfg.baths} ba` : '',
+    cfg.sqft  ? `${num(cfg.sqft)} sqft` : '',
+    cfg.units ? `${cfg.units} units` : '',
+  ].filter(Boolean).join(' · ')
+  const imgs  = Array.isArray(cfg.images) ? cfg.images : []
+  const image = imgs.map(v => (typeof v === 'string' ? v : v?.url)).find(Boolean) || ''
+  const title = cfg.headline || m.name || 'Property For Sale'
+  const description = String(cfg.subheadline || specs || 'View this listing from Gateway Real Estate.').slice(0, 280)
+  return { title, description, image }
+}
+
 const CORS = {
   'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
@@ -164,20 +184,7 @@ export default async function handler(req, res) {
       // to redirect so the destination provides its own preview.
       const isExternalCustom = m.landing_type === 'custom' && m.landing_custom_url
       if (isCrawler(req) && !isExternalCustom) {
-        const cfg = m.landing_config || {}
-        const num = v => { const n = Number(String(v ?? '').replace(/[^0-9.]/g, '')); return v && isFinite(n) ? n.toLocaleString() : '' }
-        const price = num(cfg.price) ? `$${num(cfg.price)}` : ''
-        const specs = [
-          price,
-          cfg.beds  ? `${cfg.beds} bd`  : '',
-          cfg.baths ? `${cfg.baths} ba` : '',
-          cfg.sqft  ? `${num(cfg.sqft)} sqft` : '',
-          cfg.units ? `${cfg.units} units` : '',
-        ].filter(Boolean).join(' · ')
-        const imgs  = Array.isArray(cfg.images) ? cfg.images : []
-        const image = imgs.map(v => (typeof v === 'string' ? v : v?.url)).find(Boolean) || ''
-        const title = cfg.headline || m.name || 'Property For Sale'
-        const description = String(cfg.subheadline || specs || 'View this listing from Gateway Real Estate.').slice(0, 280)
+        const { title, description, image } = mailingOgFields(m)
         res.setHeader('Content-Type', 'text/html; charset=utf-8')
         res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=86400')
         return res.status(200).send(ogHtml({ url: `${baseUrl(req)}${dest}`, title, description, image }))
@@ -202,6 +209,29 @@ export default async function handler(req, res) {
       res.setHeader('Cache-Control', 'no-store')
       res.setHeader('Location', dest)
       return res.status(302).end()
+    }
+
+    // ── Public: Open Graph for landing URLs pasted directly ──────────────────
+    // When a social crawler fetches /lp/{type}/{id} (the long landing link, not
+    // the /m QR link), vercel.json rewrites it here by user-agent. Returns OG
+    // tags built from the mailing so the share preview shows the property.
+    if (action === 'og') {
+      const { id, lt } = req.query
+      if (!id) return res.status(400).send('Missing id')
+
+      const { data: m } = await db()
+        .from('mailings')
+        .select('id, name, landing_type, landing_config')
+        .eq('id', id)
+        .single()
+      if (!m) return res.status(404).send('Mailing not found')
+
+      const type = lt === 'valuation' ? 'valuation' : lt === 'multifamily' ? 'multifamily' : 'property'
+      const dest = `/lp/${type}/${m.id}`
+      const { title, description, image } = mailingOgFields(m)
+      res.setHeader('Content-Type', 'text/html; charset=utf-8')
+      res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=86400')
+      return res.status(200).send(ogHtml({ url: `${baseUrl(req)}${dest}`, title, description, image }))
     }
 
     // ── Health check ────────────────────────────────────────────────────────
