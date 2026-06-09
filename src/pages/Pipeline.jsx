@@ -1155,7 +1155,9 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       const lib = await loadPdfjs()
       const pdf = await lib.getDocument({ data: arrayBuffer.slice(0) }).promise
       const objs = await pdf.getFieldObjects()
-      return objs ? Object.keys(objs) : []
+      if (!objs) return []
+      // Pass each field's widget type so the mapper can infer sig/checkbox/text.
+      return Object.entries(objs).map(([name, arr]) => ({ name, type: arr?.[0]?.type || 'text' }))
     } catch { return [] }
   }
 
@@ -1286,13 +1288,13 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       }
       const names = await readPdfFieldNames(ab)
       if (!names.length) {
-        pushToast('No fillable fields found in this PDF. Add named fields (gw_…) in Acrobat, or use anchor/manual placement.', 'error')
+        pushToast('No fillable fields found in this PDF. Add form fields in Acrobat, or use anchor/manual placement.', 'error')
         setSending(false); return
       }
       const prefill = buildPrefillFromDeal({ deal, contact, property: linkedProperty, agent: activeAgent })
       const { tabsByRole, recognized } = buildFormTabs(names, prefill)
       if (!recognized) {
-        pushToast('Form fields found, but none use the gw_role_type__key naming. See the DocuSign fillable-forms guide.', 'error')
+        pushToast('Found form fields, but none could be mapped to a signer. See the DocuSign fillable-forms guide.', 'error')
         setSending(false); return
       }
       const roleFor = (s, i) => s.id === 'agent' ? 'agent' : i === 0 ? 'client' : i === 1 ? 'client2' : null

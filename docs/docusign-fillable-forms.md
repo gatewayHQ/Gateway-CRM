@@ -22,7 +22,25 @@ tells it *who* fills each field and *which* deal value to pre-fill.
 5. Each recipient sees only their own fields; data fields arrive pre-filled and
    editable.
 
-## The field-naming convention
+## Easy mode (least typing)
+You usually don't need the full `gw_…` name. The app reads the PDF field's own
+**type** and infers the rest, so:
+
+- **Signatures / initials / dates:** drop in Acrobat's native **Signature field**
+  — no name needed. It becomes the primary client's signature automatically.
+- **Checkboxes:** drop a **Check Box** — becomes a client checkbox.
+- **Data boxes:** add a **Text Field** and name it after the value, e.g.
+  `buyer_name`, `property_address`, `list_price`, `closing_date`. It's assigned
+  to the client and pre-filled from the deal.
+- **Give it to the agent instead:** prefix the name with `agent_`
+  (e.g. `agent_list_price`, or name a signature field `agent_signature`).
+- **Second signer (co-buyer/co-seller):** prefix with `client2_` or `co_`.
+
+That's it — most forms need only natural names plus an `agent_`/`client2_` prefix
+where the owner isn't the primary client. Use the full convention below only when
+you want to be explicit or override the inference.
+
+## The field-naming convention (explicit / advanced)
 Name every fillable field like this:
 
 ```

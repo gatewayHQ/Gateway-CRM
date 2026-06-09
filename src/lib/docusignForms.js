@@ -47,6 +47,32 @@ export function parseFieldName(name = '') {
   return { role, type, key: m[3].toLowerCase() }
 }
 
+/**
+ * "Easy mode": infer { role, type, key } from a plain field name + the PDF's own
+ * widget type, so the admin doesn't have to type the full gw_ convention.
+ *   - type comes from the actual PDF field (a signature widget → sign-here, a
+ *     checkbox → checkbox, everything else → text) — so a signature field needs
+ *     no special name at all.
+ *   - role comes from a leading token (`agent_…`, `client2_…`/`co_…`); otherwise
+ *     it defaults to the primary client.
+ *   - key is the cleaned remainder, which still drives text auto-fill.
+ * Push buttons return null (nothing to sign/fill).
+ */
+export function inferField(name = '', widgetType = 'text') {
+  if (widgetType === 'button') return null
+  const lc = String(name).trim().toLowerCase()
+  let role = 'client', rest = lc
+  const rm = /^(agent|client2|co)[ _-]+(.*)$/.exec(lc)
+  if (rm) { role = rm[1] === 'agent' ? 'agent' : 'client2'; rest = rm[2] }
+
+  let type = 'text'
+  if (widgetType === 'signature') type = 'signature'
+  else if (widgetType === 'checkbox' || widgetType === 'radiobutton') type = 'checkbox'
+
+  const key = rest.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+  return { role, type, key }
+}
+
 const money = (n) => (n != null && n !== '' && !Number.isNaN(Number(n)))
   ? `$${Number(n).toLocaleString()}` : ''
 
@@ -86,28 +112,33 @@ export function buildPrefillFromDeal({ deal = {}, contact = null, property = nul
 }
 
 /**
- * Map a list of PDF form-field names → DocuSign tabs grouped by role, applying
- * CRM prefill to text fields. Returns { tabsByRole, unmatched, recognized }.
+ * Map a PDF's form fields → DocuSign tabs grouped by role, applying CRM prefill
+ * to text fields. Accepts either plain name strings or { name, type } objects
+ * (the latter unlocks "easy mode" type inference from the PDF widget).
+ * Returns { tabsByRole, recognized, skipped }.
  *   tabsByRole : { client:[], client2:[], agent:[] } of { type, tabLabel, value? }
- *   unmatched  : field names that didn't follow the convention (left for DocuSign
- *                to convert as plain, unassigned fields)
+ *   skipped    : field names we couldn't turn into a tab (e.g. push buttons)
  */
-export function buildFormTabs(fieldNames = [], prefill = {}) {
+export function buildFormTabs(fields = [], prefill = {}) {
   const tabsByRole = { client: [], client2: [], agent: [] }
-  const unmatched = []
+  const skipped = []
   let recognized = 0
 
-  for (const name of fieldNames) {
-    const f = parseFieldName(name)
-    if (!f) { unmatched.push(name); continue }
+  for (const raw of fields) {
+    const name = typeof raw === 'string' ? raw : raw?.name
+    const widgetType = typeof raw === 'string' ? 'text' : (raw?.type || 'text')
+    if (!name) continue
+    // Explicit gw_ convention wins; otherwise infer from the widget + name.
+    const f = parseFieldName(name) || inferField(name, widgetType)
+    if (!f) { skipped.push(name); continue }
     recognized++
     const tab = { type: f.type, tabLabel: name }
-    if (f.type === 'text') {
+    if (f.type === 'text' && f.key) {
       const v = prefill[f.key]
       if (v != null && v !== '') tab.value = String(v)
     }
     if (!tabsByRole[f.role]) tabsByRole[f.role] = []
     tabsByRole[f.role].push(tab)
   }
-  return { tabsByRole, unmatched, recognized }
+  return { tabsByRole, recognized, skipped, unmatched: skipped }
 }
