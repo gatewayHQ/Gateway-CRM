@@ -2267,7 +2267,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
             <div className="page-title">Pipeline{isAdmin ? ' — Admin View' : ''}</div>
             {/* Tab toggle */}
             <div style={{ display:'flex', background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:3, gap:2 }}>
-              {[['deals','Deals'],['listings','Listings']].map(([id, label]) => (
+              {[['deals','Transactions'],['listings','Listings']].map(([id, label]) => (
                 <button key={id} onClick={() => setPipelineTab(id)} style={{
                   padding:'5px 14px', border:'none', borderRadius:'var(--radius)', cursor:'pointer',
                   fontFamily:'var(--font-body)', fontSize:12, fontWeight:600,
@@ -2279,8 +2279,8 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
             </div>
           </div>
           {pipelineTab === 'deals'
-            ? <div className="page-sub">{visibleDeals.length} deal{visibleDeals.length !== 1 ? 's' : ''} · {formatCurrency(totalValue)} total value</div>
-            : <div className="page-sub">{visibleListings.length} listing{visibleListings.length !== 1 ? 's' : ''} · {formatCurrency(totalListingValue)} total listed</div>
+            ? <div className="page-sub">Active buyer &amp; seller transactions · {visibleDeals.length} open · {formatCurrency(totalValue)} total value</div>
+            : <div className="page-sub">Your property inventory by status · {visibleListings.length} listing{visibleListings.length !== 1 ? 's' : ''} · {formatCurrency(totalListingValue)} listed</div>
           }
         </div>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
