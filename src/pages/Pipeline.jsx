@@ -2017,16 +2017,16 @@ const AUTO_TASKS = {
   closed:           { title: d => `Request referral — ${d.title}`,            type: 'follow-up', priority: 'low',    daysOut: 7 },
 }
 
-const LISTING_STATUS_ORDER  = ['active','pending','off-market','sold','leased']
-const LISTING_STATUS_LABELS = { active:'Active', pending:'Pending', 'off-market':'Off Market', sold:'Sold', leased:'Leased' }
-const LISTING_STATUS_COLORS = { active:'#10b981', pending:'#f59e0b', 'off-market':'#9ca3af', sold:'#3b82f6', leased:'#8b5cf6' }
+const LISTING_STATUS_ORDER  = ['active','pending','off-market','sold','leased','cancelled']
+const LISTING_STATUS_LABELS = { active:'Active', pending:'Pending', 'off-market':'Off Market', sold:'Sold', leased:'Leased', cancelled:'Cancelled' }
+const LISTING_STATUS_COLORS = { active:'#10b981', pending:'#f59e0b', 'off-market':'#9ca3af', sold:'#3b82f6', leased:'#8b5cf6', cancelled:'#dc2626' }
 
 function daysOnMarket(dateStr) {
   if (!dateStr) return null
   return Math.max(0, Math.floor((Date.now() - new Date(dateStr)) / 86_400_000))
 }
 
-function ListingCard({ property, agent, deals = [], onClick }) {
+function ListingCard({ property, agent, deals = [], onClick, onDelete, draggable, onDragStart, onDragEnd, dragging }) {
   const dom         = daysOnMarket(property.created_at)
   const isRes       = ['residential','rental'].includes(property.type)
   const statusColor = LISTING_STATUS_COLORS[property.status] || '#9ca3af'
@@ -2050,7 +2050,8 @@ function ListingCard({ property, agent, deals = [], onClick }) {
   const lastReduction = priceHistory.length > 0 ? priceHistory[priceHistory.length - 1] : null
 
   return (
-    <div className="deal-card" style={{ cursor: onClick ? 'pointer' : 'default' }} onClick={onClick}>
+    <div className={`deal-card${dragging ? ' dragging' : ''}`} style={{ cursor: onClick ? 'pointer' : 'default' }}
+         onClick={onClick} draggable={draggable} onDragStart={onDragStart} onDragEnd={onDragEnd}>
       {expiryAlert && (
         <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:5, fontSize:10, fontWeight:700, color: daysToExpiry === 0 ? '#dc2626' : '#d97706' }}>
           <span>⚠</span>
@@ -2093,7 +2094,15 @@ function ListingCard({ property, agent, deals = [], onClick }) {
           {dom !== null ? `${dom}d on market` : ''}
           {domAlert ? ' ⚠' : ''}
         </div>
-        {agent && <Avatar agent={agent} size={20} />}
+        <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+          {agent && <Avatar agent={agent} size={20} />}
+          {onDelete && (
+            <button className="btn btn--ghost btn--icon" style={{ padding:2 }} title="Remove listing"
+              onClick={e => { e.stopPropagation(); onDelete() }}>
+              <Icon name="trash" size={11} />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -2105,8 +2114,11 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const [defaultStage, setDefaultStage] = useState('lead')
   const [pipelineTab, setPipelineTab] = useState('deals')
   const [confirm, setConfirm] = useState(null)
+  const [confirmProp, setConfirmProp] = useState(null)
   const [dragging, setDragging] = useState(null)
   const [dragOver, setDragOver] = useState(null)
+  const [dragListing, setDragListing] = useState(null)
+  const [dragOverStatus, setDragOverStatus] = useState(null)
   const [agentFilter, setAgentFilter] = useState('all')
 
   const deals      = db.deals      || []
@@ -2181,6 +2193,43 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     setConfirm(null); reload()
   }, [reload])
 
+  // ── Listings: drag between statuses, delete, and open the linked deal ──────
+  // Listings are `properties`; documents/signatures live on the deal that links
+  // to a property (deal.property_id), so opening a listing routes to that deal.
+  const moveListingStatus = useCallback(async (propertyId, newStatus) => {
+    const { error } = await supabase.from('properties').update({ status: newStatus }).eq('id', propertyId)
+    if (error) { pushToast(error.message, 'error'); return }
+    setDb(p => ({ ...p, properties: (p.properties || []).map(pr => pr.id === propertyId ? { ...pr, status: newStatus } : pr) }))
+    pushToast(`Listing moved to ${LISTING_STATUS_LABELS[newStatus]}`)
+  }, [setDb])
+
+  const delProperty = useCallback(async (id) => {
+    // deals.property_id is ON DELETE SET NULL — linked deals are kept, just unlinked.
+    const { error } = await supabase.from('properties').delete().eq('id', id)
+    if (error) { pushToast(error.message, 'error'); setConfirmProp(null); return }
+    setDb(p => ({ ...p, properties: (p.properties || []).filter(pr => pr.id !== id) }))
+    pushToast('Listing removed', 'info'); setConfirmProp(null)
+  }, [setDb])
+
+  const openListing = useCallback((property) => {
+    const linked = deals.filter(d => d.property_id === property.id)
+    if (linked.length) {
+      // Prefer an in-progress deal; otherwise the most recent one.
+      setEditing(linked.find(d => d.stage === 'under-contract') || linked[0])
+    } else {
+      // No deal yet — open a new one prefilled from the property. Saving it
+      // unlocks the Documents & Signatures tabs (those need an existing deal).
+      setEditing({
+        stage: 'lead',
+        property_id: property.id,
+        title: property.address || 'New Listing Deal',
+        agent_id: property.assigned_agent_id || activeAgent?.id || '',
+        prop_category: ['residential','rental'].includes(property.type) ? 'residential' : 'commercial',
+      })
+    }
+    setDrawer(true)
+  }, [deals, activeAgent])
+
   // updated_at omitted — handled by DB trigger
   const moveStage = useCallback(async (dealId, newStage) => {
     await supabase.from('deals').update({ stage: newStage }).eq('id', dealId)
@@ -2218,7 +2267,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
             <div className="page-title">Pipeline{isAdmin ? ' — Admin View' : ''}</div>
             {/* Tab toggle */}
             <div style={{ display:'flex', background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:3, gap:2 }}>
-              {[['deals','Deals'],['listings','Listings']].map(([id, label]) => (
+              {[['deals','Transactions'],['listings','Listings']].map(([id, label]) => (
                 <button key={id} onClick={() => setPipelineTab(id)} style={{
                   padding:'5px 14px', border:'none', borderRadius:'var(--radius)', cursor:'pointer',
                   fontFamily:'var(--font-body)', fontSize:12, fontWeight:600,
@@ -2230,8 +2279,8 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
             </div>
           </div>
           {pipelineTab === 'deals'
-            ? <div className="page-sub">{visibleDeals.length} deal{visibleDeals.length !== 1 ? 's' : ''} · {formatCurrency(totalValue)} total value</div>
-            : <div className="page-sub">{visibleListings.length} listing{visibleListings.length !== 1 ? 's' : ''} · {formatCurrency(totalListingValue)} total listed</div>
+            ? <div className="page-sub">Active buyer &amp; seller transactions · {visibleDeals.length} open · {formatCurrency(totalValue)} total value</div>
+            : <div className="page-sub">Your property inventory by status · {visibleListings.length} listing{visibleListings.length !== 1 ? 's' : ''} · {formatCurrency(totalListingValue)} listed</div>
           }
         </div>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
@@ -2323,7 +2372,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                                 </div>
                               ))}
                             </div>
-                            {!isAdmin && <button className="btn btn--ghost btn--icon" style={{ padding:2 }} onClick={e=>{e.stopPropagation(); setConfirm(deal.id)}}><Icon name="trash" size={11} /></button>}
+                            <button className="btn btn--ghost btn--icon" style={{ padding:2 }} title="Delete deal" onClick={e=>{e.stopPropagation(); setConfirm(deal.id)}}><Icon name="trash" size={11} /></button>
                           </div>
                         </div>
                       </div>
@@ -2361,9 +2410,14 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                   </div>
                   <span className="kanban-col__count">{listingGroups[status].length}</span>
                 </div>
-                <div className="kanban-col__body">
+                <div
+                  className={`kanban-col__body${dragOverStatus === status ? ' drag-over' : ''}`}
+                  onDragOver={e => { e.preventDefault(); setDragOverStatus(status) }}
+                  onDragLeave={() => setDragOverStatus(null)}
+                  onDrop={e => { e.preventDefault(); if (dragListing) moveListingStatus(dragListing, status); setDragOverStatus(null); setDragListing(null) }}
+                >
                   {listingGroups[status].length === 0 ? (
-                    <div style={{ fontSize:12, color:'var(--gw-border)', textAlign:'center', padding:'20px 0', fontStyle:'italic' }}>No listings</div>
+                    <div style={{ fontSize:12, color:'var(--gw-border)', textAlign:'center', padding:'20px 0', fontStyle:'italic' }}>Drop a listing here</div>
                   ) : (
                     listingGroups[status].map(property => (
                       <ListingCard
@@ -2371,6 +2425,12 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                         property={property}
                         agent={agentMap[property.assigned_agent_id]}
                         deals={deals}
+                        onClick={() => openListing(property)}
+                        onDelete={() => setConfirmProp(property.id)}
+                        draggable
+                        dragging={dragListing === property.id}
+                        onDragStart={() => setDragListing(property.id)}
+                        onDragEnd={() => { setDragListing(null); setDragOverStatus(null) }}
                       />
                     ))
                   )}
@@ -2383,6 +2443,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
       <DealDrawer open={drawer} onClose={() => setDrawer(false)} deal={editing ? editing : { stage: defaultStage }} agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} onSave={reload} />
       {confirm && <ConfirmDialog message="This will permanently delete this deal." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
+      {confirmProp && <ConfirmDialog message="Remove this listing from the pipeline? Any linked deals are kept but will be unlinked from the property." onConfirm={() => delProperty(confirmProp)} onCancel={() => setConfirmProp(null)} />}
     </div>
   )
 }

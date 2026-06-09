@@ -324,7 +324,9 @@ export default function App() {
       }
 
       setActiveAgentId(matched.id)
-      const isAdminAgent = matched.role?.toLowerCase().includes('admin') ?? false
+      // Office admin: prefer the explicit is_admin flag (migration 0005); fall
+      // back to the free-text role for agents created before the column existed.
+      const isAdminAgent = matched.is_admin === true || (matched.role?.toLowerCase().includes('admin') ?? false)
 
       // ── Compute scoped agent ID lists ──────────────────────────────────────
       // Each team member row carries explicit share_* flags (default true).
@@ -343,32 +345,26 @@ export default function App() {
       setDealAgentIds(myDealVisible)
 
       // ── Phase 2: scoped data fetches ─────────────────────────────────────
-      // Admin sees only pipeline deals (all agents); all other tables return
-      // empty so no contacts/properties/tasks bleed through.
+      // Office admin sees EVERYTHING firm-wide (deals, contacts, properties,
+      // commissions, activities, documents-by-deal) so they can oversee the whole
+      // office. Tasks stay personal even for admins — a to-do list isn't oversight
+      // data and the admin's own tasks are all that's useful to them.
       // Regular agents receive only rows scoped to their computed lists above.
       const [contacts, properties, deals, tasks, templates, commissionsRes, activitiesRes] = await Promise.all([
         isAdminAgent
-          ? { data: [] }
+          ? supabase.from('contacts').select('*').order('created_at', { ascending: false })
           : supabase.from('contacts').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
         isAdminAgent
-          ? { data: [] }
+          ? supabase.from('properties').select('*').order('created_at', { ascending: false })
           : supabase.from('properties').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
         isAdminAgent
           ? supabase.from('deals').select('*').order('created_at', { ascending: false })
           : supabase.from('deals').select('*').in('agent_id', myDealVisible).order('created_at', { ascending: false }),
-        // Tasks are personal — never shared, even within a team
-        isAdminAgent
-          ? { data: [] }
-          : supabase.from('tasks').select('*').eq('agent_id', matched.id).order('due_date', { ascending: true }),
-        isAdminAgent
-          ? { data: [] }
-          : supabase.from('templates').select('*').order('created_at', { ascending: false }),
-        isAdminAgent
-          ? { data: [], error: null }
-          : supabase.from('commissions').select('*'),
-        isAdminAgent
-          ? { data: [], error: null }
-          : supabase.from('activities').select('*').order('created_at', { ascending: false }),
+        // Tasks are personal — never shared, even for an admin
+        supabase.from('tasks').select('*').eq('agent_id', matched.id).order('due_date', { ascending: true }),
+        supabase.from('templates').select('*').order('created_at', { ascending: false }),
+        supabase.from('commissions').select('*'),
+        supabase.from('activities').select('*').order('created_at', { ascending: false }),
       ])
 
       const dbPayload = {
@@ -451,7 +447,9 @@ export default function App() {
   if (!session) return <LoginPage />
 
   const activeAgent = db.agents.find(a => a.id === activeAgentId) || null
-  const isAdmin     = activeAgent?.role?.toLowerCase().includes('admin') ?? false
+  // Office admin: honor the explicit is_admin flag (migration 0005) first, then
+  // fall back to the free-text role for profiles created before the column.
+  const isAdmin     = activeAgent?.is_admin === true || (activeAgent?.role?.toLowerCase().includes('admin') ?? false)
   const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin, visibleAgentIds, dealAgentIds }
 
   if (loading) return (

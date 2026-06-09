@@ -20,6 +20,11 @@ create table if not exists agents (
   phone      text,                         -- shown on landing-page advisor card
   photo_url  text,                         -- headshot (public URL)
   bio        text,                         -- short advisor bio for landing pages
+  tagline    text,                          -- one-line positioning for the advisor profile page
+  stats      jsonb not null default '[]',   -- [{label,value}] public vanity stats curated by the agent
+  default_split_pct  numeric default 70,   -- agent's default % share of a commission allocation
+  no_brokerage_split boolean default false,-- true = keeps 100% (capped / no split)
+  is_admin   boolean default false,        -- office admin: sees all deals/docs/commissions
   created_at timestamptz default now()
 );
 
@@ -175,18 +180,24 @@ create table if not exists documents (
 -- ─────────────────────────────────────────────────────────────────────────────
 -- COMMISSIONS
 -- ─────────────────────────────────────────────────────────────────────────────
--- Canonical model: one commission row per deal (keyed by deal_id), storing the
--- percentage split the app edits in Commission.jsx. Dollar amounts are derived
--- in the app from these percentages × the deal value — they are not stored.
+-- Canonical model: one commission row per deal (keyed by deal_id). Two layers:
+--   • Legacy flat columns (gross_pct … transaction_fee) — kept for backward
+--     compatibility; the app upgrades them on the fly via src/lib/commission.js.
+--   • Structured columns (sides, participants) — the complex model: two-sided
+--     deals, per-side referrals, and per-agent brokerage arrangements. When
+--     these are non-empty they are authoritative. Dollar amounts are always
+--     derived in the app from the deal value — never stored.
 create table if not exists commissions (
   id              uuid primary key default uuid_generate_v4(),
   deal_id         uuid references deals(id) on delete cascade unique not null,
-  gross_pct       numeric not null default 3.0,    -- gross commission % of deal value
-  broker_pct      numeric not null default 30.0,   -- brokerage share of the split
-  agent_pct       numeric not null default 70.0,   -- agent share of the split
-  referral_pct    numeric not null default 0,      -- referral fee off the top
-  co_agent_pct    numeric not null default 0,      -- co-agent share of agent gross
-  transaction_fee numeric not null default 0,      -- flat fee off agent gross
+  gross_pct       numeric not null default 3.0,    -- legacy: gross commission % of deal value
+  broker_pct      numeric not null default 30.0,   -- legacy: brokerage share of the split
+  agent_pct       numeric not null default 70.0,   -- legacy: agent share of the split
+  referral_pct    numeric not null default 0,      -- legacy: referral fee off the top
+  co_agent_pct    numeric not null default 0,      -- legacy: co-agent share of agent gross
+  transaction_fee numeric not null default 0,      -- flat per-deal brokerage fee, split across agents, charged on top of cap
+  sides           jsonb not null default '[]',     -- [{ key,label,rate_pct,referral_pct,referral_flat }]
+  participants    jsonb not null default '[]',     -- [{ id,agent_id,name,role,allocation_pct,split_pct,no_split,fee }] (fee = per-agent override of the flat-fee share)
   notes           text,
   created_at      timestamptz default now(),
   updated_at      timestamptz default now()

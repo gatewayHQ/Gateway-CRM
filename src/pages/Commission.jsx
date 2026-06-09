@@ -2,10 +2,14 @@ import React, { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Avatar, Badge, Drawer, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatCurrency } from '../lib/helpers.js'
+import {
+  computeCommission, normalizeCommission, breakdownForDeal,
+  makeSide, makeParticipant, DEFAULTS,
+} from '../lib/commission.js'
 
-const D_GROSS = 3.0
+const D_GROSS = DEFAULTS.GROSS_PCT
 const D_BROKER = 30.0
-const D_AGENT = 70.0
+const D_AGENT = DEFAULTS.SPLIT_PCT
 
 const COMMISSION_SQL = `create table if not exists commissions (
   id uuid primary key default gen_random_uuid(),
@@ -46,130 +50,297 @@ function CapCelebration({ agentName, onClose }) {
   )
 }
 
-// ── Commission Drawer ──────────────────────────────────────────────────────────
-function CommissionDrawer({ open, onClose, deal, commission, onSave }) {
-  const init = {
-    gross_pct:       commission?.gross_pct       ?? D_GROSS,
-    broker_pct:      commission?.broker_pct      ?? D_BROKER,
-    agent_pct:       commission?.agent_pct       ?? D_AGENT,
-    referral_pct:    commission?.referral_pct    ?? 0,
-    co_agent_pct:    commission?.co_agent_pct    ?? 0,
-    transaction_fee: commission?.transaction_fee ?? 0,
-    notes: commission?.notes ?? '',
+// ── Commission Drawer (structured editor) ───────────────────────────────────
+// Handles the simple case (one side, one agent at their default split) and the
+// complex one (both sides represented, a referral on only one side, multiple
+// agents each with their own brokerage arrangement) from the same form. The
+// agent never has to do mental math — the live breakdown shows every dollar.
+function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave }) {
+  // Seed the form from the stored row (legacy or structured), normalized.
+  const buildInitial = () => {
+    const norm = normalizeCommission(commission, { deal, agents })
+    const twoSided = norm.sides.length > 1
+    return {
+      sides: norm.sides.map(s => ({ ...s })),
+      participants: norm.participants
+        .filter(p => p._legacy_co_pct == null) // legacy co marker not editable directly
+        .map(p => ({ ...p })),
+      twoSided,
+      // Flat brokerage transaction fee for the whole deal. New deals default to
+      // $100; existing rows keep whatever was saved.
+      transaction_fee: commission?.id != null ? Number(norm.transaction_fee || 0) : DEFAULTS.TRANSACTION_FEE,
+      notes: commission?.notes ?? '',
+    }
   }
-  const [form, setForm] = useState(init)
+
+  const [form, setForm] = useState(buildInitial)
   const [saving, setSaving] = useState(false)
 
-  React.useEffect(() => {
-    setForm({
-      gross_pct:       commission?.gross_pct       ?? D_GROSS,
-      broker_pct:      commission?.broker_pct      ?? D_BROKER,
-      agent_pct:       commission?.agent_pct       ?? D_AGENT,
-      referral_pct:    commission?.referral_pct    ?? 0,
-      co_agent_pct:    commission?.co_agent_pct    ?? 0,
-      transaction_fee: commission?.transaction_fee ?? 0,
-      notes: commission?.notes ?? '',
+  React.useEffect(() => { setForm(buildInitial()) /* eslint-disable-next-line */ }, [commission, open, deal?.id])
+
+  const sp = deal?.value || 0
+
+  // Live breakdown straight from the engine — identical math to the reports.
+  const result = computeCommission({
+    sale_price: sp,
+    sides: form.sides,
+    participants: form.participants,
+    transaction_fee: form.transaction_fee,
+  })
+
+  // ── Side editing ────────────────────────────────────────────────────────
+  const setSide = (id, patch) =>
+    setForm(p => ({ ...p, sides: p.sides.map(s => s.id === id ? { ...s, ...patch } : s) }))
+
+  const toggleTwoSided = (on) => {
+    setForm(p => {
+      if (on) {
+        // Convert the single side into a Listing side and add a Buyer side.
+        const first = p.sides[0] || makeSide()
+        return {
+          ...p, twoSided: true,
+          sides: [
+            { ...first, key: 'listing', label: 'Listing side' },
+            makeSide('buyer', 0),
+          ],
+        }
+      }
+      // Collapse back to one Sale side, keeping the first side's numbers.
+      const keep = p.sides[0] || makeSide()
+      return { ...p, twoSided: false, sides: [{ ...keep, key: 'sale', label: 'Sale' }] }
     })
-  }, [commission, open])
+  }
 
-  const setBroker = (v) => { const b = Math.min(100,Math.max(0,Number(v)||0)); setForm(p=>({...p,broker_pct:b,agent_pct:Math.round((100-b)*10)/10})) }
-  const setAgent  = (v) => { const a = Math.min(100,Math.max(0,Number(v)||0)); setForm(p=>({...p,agent_pct:a,broker_pct:Math.round((100-a)*10)/10})) }
+  // ── Participant editing ─────────────────────────────────────────────────
+  const setPart = (id, patch) =>
+    setForm(p => ({ ...p, participants: p.participants.map(x => x.id === id ? { ...x, ...patch } : x) }))
 
-  const sp          = deal?.value || 0
-  const gross       = sp * (Number(form.gross_pct) || 0) / 100
-  const referralAmt = gross * (Number(form.referral_pct) || 0) / 100
-  const netGross    = gross - referralAmt
-  const brokerAmt   = netGross * (Number(form.broker_pct) || 0) / 100
-  const agentGross  = netGross * (Number(form.agent_pct) || 0) / 100
-  const txFee       = Number(form.transaction_fee) || 0
-  const coAgentAmt  = (agentGross - txFee) * (Number(form.co_agent_pct) || 0) / 100
-  const agentNet    = agentGross - txFee - coAgentAmt
-  const splitWarning = Math.abs(Number(form.broker_pct)+Number(form.agent_pct)-100) > 0.5
+  const pickAgent = (id, agentId) => {
+    const a = agents.find(x => x.id === agentId)
+    setPart(id, {
+      agent_id: agentId,
+      name: a?.name || '',
+      // Pull this agent's stored default arrangement so the common case is zero-typing.
+      no_split: a?.no_brokerage_split === true,
+      split_pct: a?.no_brokerage_split ? 100 : Number(a?.default_split_pct ?? D_AGENT),
+    })
+  }
+
+  const addParticipant = () => {
+    setForm(p => {
+      const used = p.participants.length
+      // Re-balance allocations: split evenly across all participants by default.
+      const evenly = Math.round((100 / (used + 1)) * 10) / 10
+      const next = makeParticipant({ role: 'co', allocation_pct: evenly })
+      const rebalanced = p.participants.map(x => ({ ...x, allocation_pct: evenly }))
+      return { ...p, participants: [...rebalanced, next] }
+    })
+  }
+
+  const removeParticipant = (id) =>
+    setForm(p => {
+      const rest = p.participants.filter(x => x.id !== id)
+      // Give the removed share back to the first participant.
+      if (rest.length) {
+        const total = rest.reduce((s, x) => s + Number(x.allocation_pct || 0), 0)
+        if (Math.abs(total - 100) > 0.1) rest[0] = { ...rest[0], allocation_pct: Math.round((Number(rest[0].allocation_pct || 0) + (100 - total)) * 10) / 10 }
+      }
+      return { ...p, participants: rest.length ? rest : [makeParticipant({ allocation_pct: 100 })] }
+    })
 
   const save = async () => {
     setSaving(true)
+    // Write BOTH the structured shape (authoritative) and best-effort legacy
+    // scalar columns, so any older report path still renders something sane.
+    const primary = result.primary
     const payload = {
       deal_id: deal.id,
-      gross_pct:       Number(form.gross_pct),
-      broker_pct:      Number(form.broker_pct),
-      agent_pct:       Number(form.agent_pct),
-      referral_pct:    Number(form.referral_pct),
-      co_agent_pct:    Number(form.co_agent_pct),
-      transaction_fee: Number(form.transaction_fee),
+      sides: form.sides,
+      participants: form.participants,
+      // Legacy mirror (single-side blended view):
+      gross_pct:       result.effective_rate_pct,
+      referral_pct:    result.gross_total > 0 ? Math.round(result.referral_total / result.gross_total * 1000) / 10 : 0,
+      agent_pct:       primary ? Number(primary.split_pct) : D_AGENT,
+      broker_pct:      primary ? Math.round((100 - Number(primary.split_pct)) * 10) / 10 : D_BROKER,
+      co_agent_pct:    0,
+      transaction_fee: Number(form.transaction_fee || 0),
       notes: form.notes.trim(),
       updated_at: new Date().toISOString(),
     }
     let error
-    if (commission?.id) { ;({error}=await supabase.from('commissions').update(payload).eq('id',commission.id)) }
-    else               { ;({error}=await supabase.from('commissions').insert([payload])) }
+    if (commission?.id) { ;({ error } = await supabase.from('commissions').update(payload).eq('id', commission.id)) }
+    else                { ;({ error } = await supabase.from('commissions').insert([payload])) }
     setSaving(false)
-    if (error) { pushToast(error.message,'error'); return }
+    if (error) {
+      // If the structured columns don't exist yet (migration 0005 not run), retry
+      // with just the legacy columns so the agent isn't blocked.
+      if (/sides|participants|column/i.test(error.message)) {
+        const { sides, participants, ...legacy } = payload
+        const retry = commission?.id
+          ? await supabase.from('commissions').update(legacy).eq('id', commission.id)
+          : await supabase.from('commissions').insert([legacy])
+        if (retry.error) { pushToast(retry.error.message, 'error'); return }
+        pushToast('Saved (run migration 0005 to enable two-sided deals)')
+        onSave(); onClose(); return
+      }
+      pushToast(error.message, 'error'); return
+    }
     pushToast('Commission updated'); onSave(); onClose()
   }
 
+  const fieldLabel = { display:'block', fontSize:11, fontWeight:600, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:'0.05em', marginBottom:4 }
+  const sectionTitle = { fontSize:12, fontWeight:700, color:'var(--gw-ink)', marginBottom:10, display:'flex', alignItems:'center', justifyContent:'space-between' }
+
   return (
-    <Drawer open={open} onClose={onClose} title="Edit Commission Split" width={420}>
+    <Drawer open={open} onClose={onClose} title="Edit Commission Split" width={460}>
       <div className="drawer__body">
-        <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'12px 14px', marginBottom:20 }}>
+        <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'12px 14px', marginBottom:18 }}>
           <div style={{ fontSize:11, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:'0.06em', marginBottom:2 }}>Deal</div>
           <div style={{ fontWeight:600 }}>{deal?.title}</div>
           {sp>0 && <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:2 }}>Sale Price: {formatCurrency(sp)}</div>}
         </div>
-        <div className="form-group">
-          <label className="form-label">Gross Commission Rate (%)</label>
-          <input className="form-control" type="number" min="0" max="100" step="0.1" value={form.gross_pct} onChange={e=>setForm(p=>({...p,gross_pct:e.target.value}))} />
-          <div className="form-hint">Gross commission: {formatCurrency(gross)}</div>
+
+        {/* ── SIDES ─────────────────────────────────────────────────────── */}
+        <div style={{ marginBottom:18 }}>
+          <div style={sectionTitle}>
+            <span>Commission Sides</span>
+          </div>
+          <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, marginBottom:12, cursor:'pointer' }}>
+            <input type="checkbox" checked={form.twoSided} onChange={e=>toggleTwoSided(e.target.checked)} />
+            <span>We represented <strong>both sides</strong> (listing + buyer)</span>
+          </label>
+
+          {form.sides.map((s, i) => {
+            const rs = result.sides[i] || {}
+            return (
+              <div key={s.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:8 }}>
+                {form.twoSided && <div style={{ fontSize:12, fontWeight:700, marginBottom:8 }}>{s.label}</div>}
+                <div className="form-row" style={{ display:'flex', gap:10 }}>
+                  <div style={{ flex:1 }}>
+                    <label style={fieldLabel}>Rate (%)</label>
+                    <input className="form-control" type="number" min="0" max="100" step="0.1" value={s.rate_pct}
+                      onChange={e=>setSide(s.id,{ rate_pct:e.target.value })} />
+                  </div>
+                  <div style={{ flex:1 }}>
+                    <label style={fieldLabel}>Referral (% of this side)</label>
+                    <input className="form-control" type="number" min="0" max="100" step="1" value={s.referral_pct}
+                      onChange={e=>setSide(s.id,{ referral_pct:e.target.value })} placeholder="0" />
+                  </div>
+                </div>
+                <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
+                  Gross {formatCurrency(rs.gross || 0)}
+                  {rs.referral > 0 && <> · referral ({formatCurrency(rs.referral)}) → net {formatCurrency(rs.net || 0)}</>}
+                </div>
+              </div>
+            )
+          })}
+          <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, fontWeight:700, padding:'4px 2px' }}>
+            <span style={{ color:'var(--gw-mist)' }}>Net commission to split</span>
+            <span>{formatCurrency(result.net_total)}</span>
+          </div>
         </div>
 
-        <div className="form-group">
-          <label className="form-label">Referral Fee (%)</label>
-          <input className="form-control" type="number" min="0" max="100" step="1" value={form.referral_pct} onChange={e=>setForm(p=>({...p,referral_pct:e.target.value}))} />
-          <div className="form-hint">Paid off gross before split — {formatCurrency(referralAmt)}{referralAmt>0?` → net to split: ${formatCurrency(netGross)}`:''}</div>
+        {/* ── PARTICIPANTS ──────────────────────────────────────────────── */}
+        <div style={{ marginBottom:18 }}>
+          <div style={sectionTitle}>
+            <span>Who splits it</span>
+            <button className="btn btn--ghost btn--sm" onClick={addParticipant} style={{ fontSize:12 }}>
+              <Icon name="plus" size={12} /> Add agent
+            </button>
+          </div>
+
+          {/* Deal-level transaction fee — flat brokerage fee, split across agents. */}
+          <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:8, display:'flex', alignItems:'center', gap:10 }}>
+            <div style={{ flex:1 }}>
+              <label style={fieldLabel}>Transaction fee ($)</label>
+              <input className="form-control" type="number" min="0" step="25" value={form.transaction_fee}
+                onChange={e=>setForm(p=>({ ...p, transaction_fee:e.target.value }))} placeholder="100" />
+            </div>
+            <div style={{ flex:1, fontSize:11, color:'var(--gw-mist)', alignSelf:'flex-end', paddingBottom:8 }}>
+              Flat brokerage fee, charged on top of the split. Split evenly:
+              <strong> {formatCurrency((Number(form.transaction_fee)||0) / Math.max(1, form.participants.length))} </strong>
+              per agent.
+            </div>
+          </div>
+
+          {form.participants.map((p, i) => {
+            const rp = result.participants.find(x => x.id === p.id) || {}
+            return (
+              <div key={p.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:8 }}>
+                <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:8 }}>
+                  <select className="form-control" value={p.agent_id} onChange={e=>pickAgent(p.id, e.target.value)} style={{ flex:1 }}>
+                    <option value="">Select agent…</option>
+                    {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                  {form.participants.length > 1 && (
+                    <button className="btn btn--ghost btn--icon btn--sm" onClick={()=>removeParticipant(p.id)} title="Remove">
+                      <Icon name="trash" size={13} />
+                    </button>
+                  )}
+                </div>
+
+                <div className="form-row" style={{ display:'flex', gap:10 }}>
+                  <div style={{ flex:1 }}>
+                    <label style={fieldLabel}>Allocation (% of net)</label>
+                    <input className="form-control" type="number" min="0" max="100" step="1" value={p.allocation_pct}
+                      onChange={e=>setPart(p.id,{ allocation_pct:e.target.value })} />
+                  </div>
+                  <div style={{ flex:1 }}>
+                    <label style={fieldLabel}>Fee override ($)</label>
+                    <input className="form-control" type="number" min="0" step="25" value={p.fee || ''}
+                      onChange={e=>setPart(p.id,{ fee:e.target.value })}
+                      placeholder={String(Math.round((Number(form.transaction_fee)||0) / Math.max(1, form.participants.length)))} />
+                  </div>
+                </div>
+
+                <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, margin:'10px 0 6px', cursor:'pointer' }}>
+                  <input type="checkbox" checked={!!p.no_split} onChange={e=>setPart(p.id,{ no_split:e.target.checked })} />
+                  <span>Keeps 100% — no brokerage split (capped / referred co-agent)</span>
+                </label>
+
+                {!p.no_split && (
+                  <div>
+                    <label style={fieldLabel}>Agent's split (%) — house keeps the rest</label>
+                    <input className="form-control" type="number" min="0" max="100" step="1" value={p.split_pct}
+                      onChange={e=>setPart(p.id,{ split_pct:e.target.value })} />
+                  </div>
+                )}
+
+                <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, marginTop:8, paddingTop:8, borderTop:'1px dashed var(--gw-border)' }}>
+                  <span style={{ color:'var(--gw-mist)' }}>
+                    {p.role === 'primary' ? 'Take-home' : 'Co-agent take-home'}
+                  </span>
+                  <span style={{ fontWeight:700, color:'var(--gw-green)' }}>{formatCurrency(rp.agent_take || 0)}</span>
+                </div>
+              </div>
+            )
+          })}
+
+          {result.warnings.map((w, i) => (
+            <div key={i} style={{ background:'#fff3cd', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:'8px 12px', fontSize:12, color:'#856404', marginBottom:8 }}>{w}</div>
+          ))}
         </div>
 
-        <div className="form-row">
-          <div className="form-group">
-            <label className="form-label">Brokerage Split (%)</label>
-            <input className="form-control" type="number" min="0" max="100" step="1" value={form.broker_pct} onChange={e=>setBroker(e.target.value)} />
-            <div className="form-hint">House gets {formatCurrency(brokerAmt)}</div>
-          </div>
-          <div className="form-group">
-            <label className="form-label">Agent Split (%)</label>
-            <input className="form-control" type="number" min="0" max="100" step="1" value={form.agent_pct} onChange={e=>setAgent(e.target.value)} />
-            <div className="form-hint">Agent gross {formatCurrency(agentGross)}</div>
-          </div>
-        </div>
-        {splitWarning && <div style={{ background:'#fff3cd', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:'8px 12px', fontSize:12, color:'#856404', marginBottom:12 }}>Brokerage + agent splits should add up to 100%</div>}
-
-        <div className="form-row">
-          <div className="form-group">
-            <label className="form-label">Transaction Fee ($)</label>
-            <input className="form-control" type="number" min="0" step="50" value={form.transaction_fee} onChange={e=>setForm(p=>({...p,transaction_fee:e.target.value}))} placeholder="0" />
-            <div className="form-hint">Flat fee off agent gross</div>
-          </div>
-          <div className="form-group">
-            <label className="form-label">Co-Agent Split (%)</label>
-            <input className="form-control" type="number" min="0" max="100" step="1" value={form.co_agent_pct} onChange={e=>setForm(p=>({...p,co_agent_pct:e.target.value}))} placeholder="0" />
-            <div className="form-hint">Co-agent gets {formatCurrency(coAgentAmt)}</div>
-          </div>
-        </div>
-
-        {/* Step-by-step breakdown */}
+        {/* ── BREAKDOWN ─────────────────────────────────────────────────── */}
         {sp > 0 && (
           <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'12px 14px', marginBottom:16, fontSize:12 }}>
             <div style={{ fontWeight:700, marginBottom:8, fontSize:11, textTransform:'uppercase', letterSpacing:'0.06em', color:'var(--gw-mist)' }}>Commission Breakdown</div>
             {[
-              { label:'Sale Price',          val: sp,          color:'var(--gw-ink)' },
-              { label:`Gross Commission (${form.gross_pct}%)`, val: gross,       color:'var(--gw-ink)' },
-              referralAmt > 0 && { label:`Referral Fee (${form.referral_pct}%)`, val: -referralAmt, color:'var(--gw-red)' },
-              referralAmt > 0 && { label:'Net to Split',        val: netGross,    color:'var(--gw-ink)' },
-              { label:`Brokerage (${form.broker_pct}%)`,        val: -brokerAmt,  color:'var(--gw-red)' },
-              txFee > 0 && { label:'Transaction Fee',           val: -txFee,      color:'var(--gw-red)' },
-              coAgentAmt > 0 && { label:`Co-Agent (${form.co_agent_pct}%)`,      val: -coAgentAmt, color:'var(--gw-red)' },
-              { label:'Your Net',            val: agentNet,    color:'var(--gw-green)', bold:true },
+              { label:'Sale Price', val: sp, color:'var(--gw-ink)' },
+              ...result.sides.flatMap(s => [
+                { label:`${form.twoSided ? s.label + ' — ' : ''}Gross (${s.rate_pct}%)`, val: s.gross, color:'var(--gw-ink)' },
+                s.referral > 0 && { label:`  Referral (${s.referral_pct}%)`, val:-s.referral, color:'var(--gw-red)' },
+              ]),
+              { label:'Net to Split', val: result.net_total, color:'var(--gw-ink)', rule:true },
+              ...result.participants.map(p => ({
+                label:`${p.name || 'Agent'}${p.no_split ? ' (100%)' : ` (${p.split_pct}%)`}`,
+                val: p.agent_take, color:'var(--gw-green)',
+              })),
+              { label:'Brokerage / House', val: result.house_total, color:'var(--gw-azure)', bold:true },
+              result.transaction_fee_total > 0 && { label:'  incl. transaction fee', val: result.transaction_fee_total, color:'var(--gw-mist)' },
             ].filter(Boolean).map((row, i) => (
-              <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'3px 0', borderTop: row.bold ? '1px solid var(--gw-border)' : 'none', marginTop: row.bold ? 6 : 0, paddingTop: row.bold ? 8 : 3, fontWeight: row.bold ? 700 : 400 }}>
-                <span style={{ color:'var(--gw-mist)' }}>{row.label}</span>
+              <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'3px 0', borderTop: row.bold || row.rule ? '1px solid var(--gw-border)' : 'none', marginTop: row.bold||row.rule ? 6 : 0, paddingTop: row.bold||row.rule ? 8 : 3, fontWeight: row.bold ? 700 : 400 }}>
+                <span style={{ color:'var(--gw-mist)', whiteSpace:'pre' }}>{row.label}</span>
                 <span style={{ color: row.color, fontWeight: row.bold ? 700 : 500 }}>{row.val < 0 ? `(${formatCurrency(Math.abs(row.val))})` : formatCurrency(row.val)}</span>
               </div>
             ))}
@@ -530,23 +701,41 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
 
   const getComm = (dealId) => commissions.find(c => c.deal_id === dealId)
 
+  // Single source of truth — the engine resolves legacy AND structured rows.
+  // Returns the firm-wide view of a deal: total agent dollars (all participants)
+  // and total house dollars, plus the legacy-shaped keys the charts consume.
   const calc = (deal) => {
-    const c            = getComm(deal.id)
-    const gross_pct    = c?.gross_pct    ?? D_GROSS
-    const broker_pct   = c?.broker_pct   ?? D_BROKER
-    const agent_pct    = c?.agent_pct    ?? D_AGENT
-    const referral_pct = c?.referral_pct ?? 0
-    const co_agent_pct = c?.co_agent_pct ?? 0
-    const tx_fee       = c?.transaction_fee ?? 0
-    const sp           = deal.value || 0
-    const gross        = sp * gross_pct / 100
-    const referralAmt  = gross * referral_pct / 100
-    const netGross     = gross - referralAmt
-    const brokerAmt    = netGross * broker_pct / 100
-    const agentGross   = netGross * agent_pct  / 100
-    const coAgentAmt   = (agentGross - tx_fee) * co_agent_pct / 100
-    const agentAmt     = agentGross - tx_fee - coAgentAmt
-    return { gross_pct, broker_pct, agent_pct, sp, gross, agentAmt, brokerAmt }
+    const r = breakdownForDeal(deal, getComm(deal.id), agents)
+    return {
+      ...r,
+      sp: r.sale_price,
+      gross_pct: r.effective_rate_pct,
+      agent_pct: r.primary ? Number(r.primary.split_pct) : D_AGENT,
+      broker_pct: r.primary ? Math.round((100 - Number(r.primary.split_pct)) * 10) / 10 : D_BROKER,
+      gross: r.gross_total,
+      agentAmt: r.agent_total,   // sum across ALL participants on the deal
+      brokerAmt: r.house_total,
+    }
+  }
+
+  // One agent's slice of a deal (their take + the house fees they generated),
+  // summing every participant row that belongs to them. Used for per-agent
+  // rollups and the cap tracker so co-agents are attributed correctly.
+  const agentSlice = (deal, agentId) => {
+    const r = breakdownForDeal(deal, getComm(deal.id), agents)
+    const mine = r.participants.filter(p => p.agent_id === agentId)
+    if (mine.length) {
+      return {
+        agent: mine.reduce((s,p)=>s+p.agent_take,0),
+        house: mine.reduce((s,p)=>s+p.house_from,0),
+        // Cap counts the brokerage SPLIT only — the flat transaction fee is on top.
+        cap:   mine.reduce((s,p)=>s+(p.house_split||0),0),
+      }
+    }
+    // No structured participant matched — fall back to deal.agent_id ownership.
+    return deal.agent_id === agentId
+      ? { agent: r.agent_total, house: r.house_total, cap: r.house_split_total }
+      : { agent: 0, house: 0, cap: 0 }
   }
 
   const reload = async () => {
@@ -569,12 +758,16 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
     acc.gross += gross; acc.broker += brokerAmt; acc.agent += agentAmt; return acc
   }, { gross:0, broker:0, agent:0 })
 
-  // Per-agent breakdown (closed deals only)
+  // Per-agent breakdown (closed deals only) — attributes each participant's take
+  // to their agent, so a co-agent on someone else's deal still gets credited.
   const agentBreakdown = agents.map(a => {
-    const aDeals = closedDeals.filter(d => d.agent_id === a.id)
+    const aDeals = closedDeals.filter(d => {
+      const r = breakdownForDeal(d, getComm(d.id), agents)
+      return d.agent_id === a.id || r.participants.some(p => p.agent_id === a.id)
+    })
     const totals = aDeals.reduce((acc, d) => {
-      const { agentAmt, brokerAmt, gross } = calc(d)
-      acc.agent += agentAmt; acc.broker += brokerAmt; acc.gross += gross; acc.deals++; return acc
+      const slice = agentSlice(d, a.id)
+      acc.agent += slice.agent; acc.broker += slice.house; acc.deals++; return acc
     }, { agent:0, broker:0, gross:0, deals:0 })
     return { ...a, ...totals }
   }).filter(a => a.deals > 0).sort((a,b) => b.agent - a.agent)
@@ -584,9 +777,13 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
 
   // Cap tracking — for the active agent's closed deals this year
   const thisYear = new Date().getFullYear()
-  const activeAgentClosedDeals = closedDeals.filter(d => d.agent_id === activeAgent?.id && new Date(d.updated_at || d.created_at).getFullYear() === thisYear)
-  const ytdBrokerFees = activeAgentClosedDeals.reduce((s, d) => s + calc(d).brokerAmt, 0)
-  const ytdAgentEarned = activeAgentClosedDeals.reduce((s, d) => s + calc(d).agentAmt, 0)
+  const activeAgentClosedDeals = closedDeals.filter(d => {
+    if (new Date(d.updated_at || d.created_at).getFullYear() !== thisYear) return false
+    const r = breakdownForDeal(d, getComm(d.id), agents)
+    return d.agent_id === activeAgent?.id || r.participants.some(p => p.agent_id === activeAgent?.id)
+  })
+  const ytdBrokerFees  = activeAgentClosedDeals.reduce((s, d) => s + agentSlice(d, activeAgent?.id).cap, 0)
+  const ytdAgentEarned = activeAgentClosedDeals.reduce((s, d) => s + agentSlice(d, activeAgent?.id).agent, 0)
   const capPct = capAmt > 0 ? Math.min(100, Math.round(ytdBrokerFees / capAmt * 100)) : 0
   const capHit = capAmt > 0 && ytdBrokerFees >= capAmt
 
@@ -862,7 +1059,7 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
       )}
 
       {drawer && selectedDeal && (
-        <CommissionDrawer open={drawer} onClose={()=>setDrawer(false)} deal={selectedDeal} commission={getComm(selectedDeal.id)} onSave={reload} />
+        <CommissionDrawer open={drawer} onClose={()=>setDrawer(false)} deal={selectedDeal} commission={getComm(selectedDeal.id)} agents={agents} onSave={reload} />
       )}
 
       {celebration && (

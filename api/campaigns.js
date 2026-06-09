@@ -190,8 +190,10 @@ export default async function handler(req, res) {
         return res.status(200).send(ogHtml({ url: `${baseUrl(req)}${dest}`, title, description, image }))
       }
 
-      // Real visitor — log the scan + bump counter. Fire-and-forget; never block
-      // the redirect. (Counter race is acceptable at our scale.)
+      // Real visitor — log the scan, then bump the cached counter ONLY if the
+      // event row actually landed, so the counter and the mailing_scans table
+      // stay in lockstep (the list now derives its counts from this table).
+      // Fire-and-forget; never block the redirect.
       const ip = clientIp(req)
       db().from('mailing_scans').insert({
         mailing_id:  m.id,
@@ -199,12 +201,13 @@ export default async function handler(req, res) {
         user_agent:  (req.headers['user-agent'] || '').slice(0, 500),
         referrer:    (req.headers.referer || req.headers.referrer || '').slice(0, 500),
         country:     req.headers['x-vercel-ip-country'] || null,
-      }).then(() => {})
-
-      db().from('mailings')
-        .update({ scan_count: (m.scan_count || 0) + 1 })
-        .eq('id', m.id)
-        .then(() => {})
+      }).then(({ error }) => {
+        if (error) { console.error('[campaigns] scan insert failed:', error.message); return }
+        db().from('mailings')
+          .update({ scan_count: (m.scan_count || 0) + 1 })
+          .eq('id', m.id)
+          .then(() => {})
+      })
 
       res.setHeader('Cache-Control', 'no-store')
       res.setHeader('Location', dest)
@@ -239,14 +242,52 @@ export default async function handler(req, res) {
       return json(res, 200, { ok: true, ts: new Date().toISOString() })
     }
 
-    // ── List all mailings ───────────────────────────────────────────────────
+    // ── List mailings (scoped) ──────────────────────────────────────────────
+    // Each agent sees ONLY their own campaigns, plus any they collaborate on
+    // (their id is the primary agent_id OR appears in landing_config.agent_ids).
+    // Admins pass all=1 to see every campaign. The client supplies agent_id/all;
+    // this endpoint runs on the service key, so DB-level RLS (migration 0002,
+    // deferred) is the eventual hard guarantee — this filter is the product rule.
     if (action === 'list') {
+      const agentId = req.query.agent_id || null
+      const all = req.query.all === '1' || req.query.all === 'true'
+
       const { data, error } = await db()
         .from('mailings')
         .select('*')
         .order('created_at', { ascending: false })
       if (error) throw error
-      return json(res, 200, { mailings: data })
+
+      let mailings = data || []
+      if (!all) {
+        // Non-admin with no resolved identity yet → return nothing rather than
+        // leaking the whole list during the first-paint window.
+        if (!agentId) return json(res, 200, { mailings: [] })
+        mailings = mailings.filter(m => {
+          if (m.agent_id === agentId) return true
+          const ids = m.landing_config?.agent_ids
+          return Array.isArray(ids) && ids.includes(agentId)
+        })
+      }
+
+      // Accurate counts: derive scan/lead totals from the event tables so each
+      // list card matches that campaign's detail view. The denormalized
+      // scan_count / lead_count columns are best-effort caches that can drift
+      // (e.g. a scan-row insert failed but the counter still bumped), which is
+      // why the card and the drilldown could disagree.
+      const ids = mailings.map(m => m.id)
+      if (ids.length) {
+        const [scanRes, leadRes] = await Promise.all([
+          db().from('mailing_scans').select('mailing_id').in('mailing_id', ids),
+          db().from('mailing_leads').select('mailing_id').in('mailing_id', ids),
+        ])
+        const tally = rows => (rows || []).reduce((acc, r) => { acc[r.mailing_id] = (acc[r.mailing_id] || 0) + 1; return acc }, {})
+        const scanBy = tally(scanRes.data)
+        const leadBy = tally(leadRes.data)
+        mailings = mailings.map(m => ({ ...m, scan_count: scanBy[m.id] || 0, lead_count: leadBy[m.id] || 0 }))
+      }
+
+      return json(res, 200, { mailings })
     }
 
     // ── Get one mailing ─────────────────────────────────────────────────────

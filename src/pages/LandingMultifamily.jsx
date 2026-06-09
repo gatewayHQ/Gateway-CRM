@@ -20,6 +20,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
+import AdvisorDark from '../components/landing/AdvisorDark.jsx'
 
 const UNIT_RANGES = [
   { value: '2-4',     label: '2–4 units' },
@@ -39,6 +40,7 @@ const DEFAULT_HIGHLIGHTS = [
 export default function LandingMultifamily({ mailingId }) {
   const [mailing,    setMailing]    = useState(null)
   const [agent,      setAgent]      = useState(null)
+  const [agents,     setAgents]     = useState([])
   const [loading,    setLoading]    = useState(true)
   const [submitted,  setSubmitted]  = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -61,11 +63,33 @@ export default function LandingMultifamily({ mailingId }) {
         .eq('id', mailingId).single()
       if (!m) { setError('Mailing not found'); setLoading(false); return }
       setMailing(m)
-      if (m.agent_id) {
-        const { data: a } = await supabase.from('agents')
-          .select('id, name, phone, email, photo_url, color, role')
-          .eq('id', m.agent_id).single()
-        setAgent(a || null)
+
+      // Advisor list: the mailing's primary agent first, then any co-agents
+      // named in landing_config.agent_ids. Per-mailing overrides in
+      // landing_config.agent_overrides (bio/photo/role/name) win over the
+      // stored profile — same model the LandingProperty page uses.
+      const cfg = m.landing_config || {}
+      const ids = [...new Set(
+        [m.agent_id, ...(Array.isArray(cfg.agent_ids) ? cfg.agent_ids : [])].filter(Boolean)
+      )]
+      if (ids.length) {
+        // Include bio; fall back to the pre-0004 column set if that migration
+        // hasn't run yet (selecting a missing column would otherwise error).
+        let { data: rows, error: agErr } = await supabase.from('agents')
+          .select('id, name, phone, email, photo_url, color, role, bio')
+          .in('id', ids)
+        if (agErr) {
+          ;({ data: rows } = await supabase.from('agents')
+            .select('id, name, phone, email, photo_url, color, role')
+            .in('id', ids))
+        }
+        const overrides = cfg.agent_overrides || {}
+        const ordered = ids
+          .map(id => (rows || []).find(r => r.id === id))
+          .filter(Boolean)
+          .map(r => ({ ...r, ...(overrides[r.id] || {}) }))
+        setAgents(ordered)
+        setAgent(ordered[0] || null)
       }
       setLoading(false)
     })()
@@ -130,7 +154,7 @@ export default function LandingMultifamily({ mailingId }) {
   )
 
   return (
-    <div style={pageStyle}>
+    <div className="mf-page" style={pageStyle}>
       {/* Top bar */}
       <header style={{ padding:'18px 24px', maxWidth:1180, margin:'0 auto', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
         <div style={{ fontFamily:'Cormorant Garamond, serif', fontSize:20, color:'#f3f0e6' }}>
@@ -184,15 +208,17 @@ export default function LandingMultifamily({ mailingId }) {
               </div>
             )}
 
-            {/* Highlights strip */}
-            <div style={{ marginTop:36, display:'grid', gridTemplateColumns:`repeat(${highlights.length}, 1fr)`, gap:24,
+            {/* Highlights strip — minmax(0,1fr) lets columns shrink (no overflow);
+                collapses to 2-up on phones via the media query below. */}
+            <div className="mf-highlights"
+                 style={{ marginTop:36, display:'grid', gridTemplateColumns:`repeat(${highlights.length}, minmax(0, 1fr))`, gap:24,
                           padding:'24px 0', borderTop:'1px solid #2a2a2a', borderBottom:'1px solid #2a2a2a' }}>
               {highlights.map((h, i) => (
-                <div key={i}>
-                  <div style={{ fontFamily:'Cormorant Garamond, serif', fontSize:30, fontWeight:600, color:'#f3f0e6', lineHeight:1 }}>
+                <div key={i} style={{ minWidth:0 }}>
+                  <div style={{ fontFamily:'Cormorant Garamond, serif', fontSize:'clamp(22px, 4vw, 30px)', fontWeight:600, color:'#f3f0e6', lineHeight:1.05 }}>
                     {h.value || '—'}
                   </div>
-                  <div style={{ fontSize:11, textTransform:'uppercase', letterSpacing:1.2, color:'#8c8c84', marginTop:6 }}>
+                  <div style={{ fontSize:11, textTransform:'uppercase', letterSpacing:1.2, color:'#8c8c84', marginTop:6, lineHeight:1.3 }}>
                     {h.label}
                   </div>
                 </div>
@@ -330,13 +356,24 @@ export default function LandingMultifamily({ mailingId }) {
         </div>
       </section>
 
+      {/* Meet your advisor(s) — full width, below the form so visitors read
+          the page, request a valuation, then scroll to learn who they'll work with. */}
+      <AdvisorDark agents={agents} accent={accent} />
+
       <footer style={{ borderTop:'1px solid #1f1f1f', padding:'20px 24px 40px', textAlign:'center', fontSize:12, color:'#6c6c66' }}>
         Gateway Real Estate Advisors · Licensed Brokerage · This valuation is an opinion of value, not an appraisal.
       </footer>
 
       <style>{`
+        /* Kill horizontal overflow + the cream body bleed behind the dark page. */
+        html, body { margin: 0; background: #0a0a0a; }
+        #root { overflow-x: hidden; }
+        .mf-page, .mf-page * { box-sizing: border-box; }
         @media (max-width: 880px) {
           .mf-hero-grid { grid-template-columns: 1fr !important; gap: 28px !important; }
+        }
+        @media (max-width: 560px) {
+          .mf-highlights { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 18px !important; }
         }
         input::placeholder, textarea::placeholder { color: #6c6c66; }
         input:focus, textarea:focus, select:focus { outline: none; border-color: ${accent} !important; }
@@ -390,6 +427,8 @@ function useMosaicLayout(n) {
 
 const pageStyle = {
   minHeight: '100vh',
+  width: '100%',
+  overflowX: 'hidden',
   background: 'radial-gradient(1200px 600px at 20% -10%, #1a1f2e 0%, #0f0f0f 55%, #0a0a0a 100%)',
   color: '#f3f0e6',
   fontFamily: 'DM Sans, system-ui, sans-serif',
