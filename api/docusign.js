@@ -76,7 +76,11 @@ function buildTabs(tabs, recipientId) {
         checkboxTabs = [], textTabs = []
 
   for (const t of (tabs || [])) {
-    const isAnchor = Boolean(t.anchorString)
+    const isAnchor    = Boolean(t.anchorString)
+    // Form-field tab: no anchor and no coordinates, just a tabLabel. With
+    // transformPdfFields enabled on the document, DocuSign places this tab onto
+    // the PDF form field whose name === tabLabel and assigns it to this recipient.
+    const isFormField = !isAnchor && Boolean(t.tabLabel) && t.page == null && t.xPosition == null
     let base
 
     if (isAnchor) {
@@ -92,6 +96,8 @@ function buildTabs(tabs, recipientId) {
         scaleValue:     t.scaleValue             || '0.8',
       }
       if (t.optional) base.optional = true
+    } else if (isFormField) {
+      base = { documentId: '1', recipientId }
     } else {
       base = {
         documentId:  '1',
@@ -438,7 +444,7 @@ export default async function handler(req, res) {
     const headers = { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' }
 
     if (action === 'send') {
-      const { signers, documentBase64, documentName, emailSubject, useAnchorTabs } = req.body
+      const { signers, documentBase64, documentName, emailSubject, useAnchorTabs, transformPdfFields } = req.body
       const ext = (documentName || 'document.pdf').split('.').pop().toLowerCase()
 
       const recipients = (signers || []).map((s, i) => {
@@ -465,7 +471,12 @@ export default async function handler(req, res) {
 
       const envelope = {
         emailSubject: emailSubject || 'Please sign this document',
-        documents: [{ documentBase64, name: documentName || 'Document', fileExtension: ext, documentId: '1' }],
+        documents: [{
+          documentBase64, name: documentName || 'Document', fileExtension: ext, documentId: '1',
+          // Convert the PDF's named form fields into DocuSign tabs so admin-drawn
+          // fillable spots become real (assignable, prefillable) fields.
+          ...(transformPdfFields ? { transformPdfFields: 'true' } : {}),
+        }],
         recipients: { signers: recipients },
         status: 'sent',
       }

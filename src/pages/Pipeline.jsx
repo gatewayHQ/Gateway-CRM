@@ -2,6 +2,7 @@ import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import { buildFormTabs, buildPrefillFromDeal } from '../lib/docusignForms.js'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
   'Title Search Ordered',
@@ -1079,6 +1080,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const [autoDetecting, setAutoDetecting] = React.useState(false)
   const [autoResult,    setAutoResult]  = React.useState(null)   // { docType, label, signerTabs }
   const [useAnchorTabs, setUseAnchorTabs] = React.useState(false)
+  const [formFieldMode, setFormFieldMode] = React.useState(false)
   const fileRef = React.useRef()
 
   // Each signer has name, email, tabs[] — pre-fill contact + property owner when available
@@ -1135,6 +1137,27 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const toBase64 = f => new Promise((res, rej) => {
     const r = new FileReader(); r.onload = e => res(e.target.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(f)
   })
+
+  // Read the named AcroForm fields out of a fillable PDF (for transformPdfFields).
+  const loadPdfjs = async () => {
+    if (window.pdfjsLib) return window.pdfjsLib
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script')
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
+      s.onload = resolve; s.onerror = reject; document.head.appendChild(s)
+    })
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+    return window.pdfjsLib
+  }
+  const readPdfFieldNames = async (arrayBuffer) => {
+    try {
+      const lib = await loadPdfjs()
+      const pdf = await lib.getDocument({ data: arrayBuffer.slice(0) }).promise
+      const objs = await pdf.getFieldObjects()
+      return objs ? Object.keys(objs) : []
+    } catch { return [] }
+  }
 
   const docName = file ? file.name : (pickedFile ? pickedFile.replace(/^\d+-/, '') : '')
 
@@ -1235,11 +1258,11 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   }
 
   const send = async () => {
-    if (!useAnchorTabs && allFields.length === 0) { pushToast('Place at least one field on the PDF', 'error'); return }
+    if (!useAnchorTabs && !formFieldMode && allFields.length === 0) { pushToast('Place at least one field on the PDF', 'error'); return }
     setSending(true)
 
-    // When anchor tabs bypass step 2, the signed URL may not have been fetched yet.
-    // Resolve it now before trying to read the file.
+    // When anchor/form-field tabs bypass step 2, the signed URL may not have been
+    // fetched yet. Resolve it now before trying to read the file.
     let resolvedFileUrl = fileUrl
     if (!file && pickedFile && !resolvedFileUrl) {
       const { data: urlData, error: urlErr } = await supabase.storage
@@ -1248,6 +1271,55 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       if (urlErr) { pushToast('Could not load document', 'error'); setSending(false); return }
       resolvedFileUrl = urlData.signedUrl
       setFileUrl(resolvedFileUrl)
+    }
+
+    // ── Fillable-form mode: map the PDF's named fields to signers + prefill ────
+    if (formFieldMode) {
+      const invalid = signers.find(s => !s.name.trim() || !s.email.trim())
+      if (invalid) { pushToast('All signers need a name and email', 'error'); setSending(false); return }
+
+      let ab, b64, name
+      if (file) { ab = await file.arrayBuffer(); b64 = await toBase64(file); name = file.name }
+      else {
+        const blob = await fetch(resolvedFileUrl).then(r => r.blob())
+        ab = await blob.arrayBuffer(); b64 = await toBase64(blob); name = pickedFile.replace(/^\d+-/, '')
+      }
+      const names = await readPdfFieldNames(ab)
+      if (!names.length) {
+        pushToast('No fillable fields found in this PDF. Add named fields (gw_…) in Acrobat, or use anchor/manual placement.', 'error')
+        setSending(false); return
+      }
+      const prefill = buildPrefillFromDeal({ deal, contact, property: linkedProperty, agent: activeAgent })
+      const { tabsByRole, recognized } = buildFormTabs(names, prefill)
+      if (!recognized) {
+        pushToast('Form fields found, but none use the gw_role_type__key naming. See the DocuSign fillable-forms guide.', 'error')
+        setSending(false); return
+      }
+      const roleFor = (s, i) => s.id === 'agent' ? 'agent' : i === 0 ? 'client' : i === 1 ? 'client2' : null
+      const signerPayload = allSigners.map((s, i) => ({
+        name: s.name, email: s.email, routingOrder: s.routingOrder,
+        tabs: tabsByRole[roleFor(s, i)] || [],
+      }))
+      const resp = await fetch('/api/docusign', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'send', emailSubject: subject,
+          documentBase64: b64, documentName: name,
+          signers: signerPayload, transformPdfFields: true,
+        }),
+      })
+      const data = await resp.json()
+      setSending(false)
+      if (data.error) { pushToast(data.error, 'error'); return }
+      await supabase.from('docusign_envelopes').insert([{
+        deal_id: deal.id, envelope_id: data.envelopeId,
+        signer_name:  allSigners.map(s => s.name).join(', '),
+        signer_email: allSigners.map(s => s.email).join(', '),
+        document_name: name, subject, status: data.status || 'sent',
+      }])
+      pushToast(`Sent to ${allSigners.length} signer${allSigners.length > 1 ? 's' : ''} — ${recognized} fields mapped`)
+      onSent()
+      return
     }
 
     let base64, finalDocName
@@ -1373,8 +1445,17 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
             </div>
           </div>
 
-          {/* ── Auto-detect signature fields ─────────────────────────────── */}
+          {/* ── Fillable-form mode ───────────────────────────────────────── */}
           {(file || pickedFile) && (
+            <label style={{ display:'flex', alignItems:'flex-start', gap:8, fontSize:12, margin:'10px 0 4px', cursor:'pointer', lineHeight:1.4 }}>
+              <input type="checkbox" checked={formFieldMode} style={{ marginTop:2 }}
+                onChange={e => { setFormFieldMode(e.target.checked); if (e.target.checked) { setUseAnchorTabs(false); setAutoResult(null) } }} />
+              <span>This is a <strong>fillable form</strong> — auto-map its named fields to each signer and pre-fill data from this deal (no manual placement).</span>
+            </label>
+          )}
+
+          {/* ── Auto-detect signature fields ─────────────────────────────── */}
+          {!formFieldMode && (file || pickedFile) && (
             <div style={{ marginTop:4 }}>
               {!autoResult && (
                 <button className="btn btn--secondary btn--sm" style={{ width:'100%', justifyContent:'center' }}
@@ -1452,9 +1533,11 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       <div className="modal__foot">
         {step===1 && <>
           <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-          {useAnchorTabs
+          {(useAnchorTabs || formFieldMode)
             ? <button className="btn btn--primary" onClick={send} disabled={sending}>
-                {sending ? 'Sending…' : `Send for Signature (${autoResult?.totalTabs || 0} auto-fields)`}
+                {sending ? 'Sending…' : useAnchorTabs
+                  ? `Send for Signature (${autoResult?.totalTabs || 0} auto-fields)`
+                  : 'Send for Signature (mapped form fields)'}
               </button>
             : <button className="btn btn--primary" onClick={goToStep2}>Next: Place Fields</button>
           }
