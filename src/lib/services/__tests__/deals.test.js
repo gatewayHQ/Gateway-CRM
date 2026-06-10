@@ -25,15 +25,31 @@ function mockClient(handler) {
 const deal = (id, agent_id, created_at) => ({ id, agent_id, created_at })
 
 describe('fetchCoListedDealIds', () => {
-  it('returns de-duplicated deal ids from participant containment', async () => {
-    const client = mockClient(() => ({
-      data: [{ deal_id: 'd1' }, { deal_id: 'd1' }, { deal_id: 'd2' }, { deal_id: null }],
-      error: null,
-    }))
+  it('merges de-duplicated ids from participants and the legacy co_agent_ids column', async () => {
+    const client = mockClient((call) =>
+      call.table === 'commissions'
+        ? { data: [{ deal_id: 'd1' }, { deal_id: 'd1' }, { deal_id: 'd2' }, { deal_id: null }], error: null }
+        : { data: [{ id: 'd2' }, { id: 'd3' }], error: null })
     const { data } = await fetchCoListedDealIds(client, 'agent-1')
-    expect(data).toEqual(['d1', 'd2'])
-    expect(client.calls[0].table).toBe('commissions')
-    expect(client.calls[0].filters[0][0]).toBe('contains')
+    expect([...data].sort()).toEqual(['d1', 'd2', 'd3'])
+    expect(client.calls.map(c => c.table).sort()).toEqual(['commissions', 'deals'])
+  })
+
+  it('tolerates the legacy column being absent (fresh installs)', async () => {
+    const client = mockClient((call) =>
+      call.table === 'commissions'
+        ? { data: [{ deal_id: 'd1' }], error: null }
+        : { data: null, error: { message: 'column co_agent_ids does not exist' } })
+    const { data, error } = await fetchCoListedDealIds(client, 'agent-1')
+    expect(data).toEqual(['d1'])
+    expect(error).toBeNull()
+  })
+
+  it('errors only when both sources fail', async () => {
+    const client = mockClient(() => ({ data: null, error: { message: 'boom' } }))
+    const { data, error } = await fetchCoListedDealIds(client, 'agent-1')
+    expect(data).toEqual([])
+    expect(error).toBeTruthy()
   })
 
   it('returns empty without querying when there is no agent', async () => {
@@ -56,6 +72,7 @@ describe('fetchVisibleDeals', () => {
   it('non-admin: merges own/team deals with co-listed deals, deduped and sorted', async () => {
     const client = mockClient((call) => {
       if (call.table === 'commissions') return { data: [{ deal_id: 'own1' }, { deal_id: 'co1' }], error: null }
+      if (call.filters.some(f => f[0] === 'contains')) return { data: [], error: null } // legacy co_agent_ids lookup
       const inFilter = call.filters.find(f => f[0] === 'in')
       if (inFilter?.[1] === 'agent_id') {
         return { data: [deal('own1', 'a1', '2026-06-01'), deal('own2', 'peer', '2026-06-03')], error: null }

@@ -32,16 +32,25 @@ async function selectInChunks(client, table, column, ids, order) {
   return { data: out, error: null }
 }
 
-// IDs of deals where the agent is a paid participant on the commission
-// (jsonb containment: participants @> [{"agent_id": "..."}]).
+// IDs of deals the agent is co-listed on, from both sources:
+//   1. structured commission participants (jsonb containment:
+//      participants @> [{"agent_id": "..."}]) — the canonical model, and
+//   2. the legacy deals.co_agent_ids uuid[] that exists only in the original
+//      production database (its query errors harmlessly where the column
+//      doesn't exist, e.g. fresh installs).
+// Returns an error only when BOTH sources fail.
 export async function fetchCoListedDealIds(client, agentId) {
   if (!agentId) return { data: [], error: null }
-  const { data, error } = await client
-    .from('commissions')
-    .select('deal_id')
-    .contains('participants', JSON.stringify([{ agent_id: agentId }]))
-  if (error) return { data: [], error }
-  return { data: [...new Set((data || []).map(r => r.deal_id).filter(Boolean))], error: null }
+  const [viaParticipants, viaLegacy] = await Promise.all([
+    client.from('commissions').select('deal_id')
+      .contains('participants', JSON.stringify([{ agent_id: agentId }])),
+    client.from('deals').select('id').contains('co_agent_ids', [agentId]),
+  ])
+  const ids = new Set()
+  if (!viaParticipants.error) for (const r of viaParticipants.data || []) { if (r.deal_id) ids.add(r.deal_id) }
+  if (!viaLegacy.error) for (const r of viaLegacy.data || []) { if (r.id) ids.add(r.id) }
+  const error = viaParticipants.error && viaLegacy.error ? viaParticipants.error : null
+  return { data: [...ids], error }
 }
 
 // Every deal the agent may see, newest first. Admins get the firm; everyone
