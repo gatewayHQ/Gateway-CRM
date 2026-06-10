@@ -3,8 +3,8 @@ import { supabase } from '../../lib/supabase.js'
 import { Drawer, Tabs, pushToast } from '../../components/UI.jsx'
 import { normalizePhone } from '../../lib/phone.js'
 import { validateEmail, validateRequired, validateForm } from '../../lib/validation.js'
-import { friendlyDbError } from '../../lib/dbErrors.js'
-import { CONTACT_TYPES, CONTACT_STATUSES, CONTACT_SOURCES, titleCase } from '../../lib/enums.js'
+import { CONTACT_TYPES, CONTACT_STATUSES, CONTACT_SOURCES, COMMERCIAL_PROPERTY_TYPES, titleCase } from '../../lib/enums.js'
+import { withRetry, mutationErrorMessage } from '../../lib/services/db.js'
 import OptionMultiSelect from '../../components/OptionMultiSelect.jsx'
 import ChipToggleGroup from '../../components/ChipToggleGroup.jsx'
 import ActivityTab from './ActivityTab.jsx'
@@ -23,14 +23,7 @@ const BLANK = {
 }
 const BLANK_PROP = { address: '', list_price: '', type: 'residential', subtype: '', beds: '', baths: '', sqft: '', garage: '', details: {} }
 
-const COMM_SUBTYPES = ['multifamily', 'office', 'land', 'retail', 'industrial', 'mixed-use']
-
-// A transport-level failure (status 0 / "Failed to fetch") means the request never
-// reached the server — transient network, offline, or a blocking browser extension.
-// These are worth retrying; PostgREST/validation errors (4xx/5xx) are not.
-const isTransportError = (error, status) =>
-  status === 0 ||
-  /failed to fetch|fetcherror|networkerror|network request failed|load failed/i.test(error?.message || '')
+const COMM_SUBTYPES = COMMERCIAL_PROPERTY_TYPES
 
 export default function ContactDrawer({
   open, onClose, contact, agents,
@@ -169,15 +162,7 @@ export default function ContactDrawer({
 
     // Retry transient transport failures ("Failed to fetch") with short backoff before
     // giving up — a dropped/blocked request usually succeeds on a second attempt.
-    const saveWithRetry = async (p, attempts = 3) => {
-      let res
-      for (let i = 0; i < attempts; i++) {
-        res = await doSave(p)
-        if (!res.error || !isTransportError(res.error, res.status)) return res
-        if (i < attempts - 1) await new Promise(r => setTimeout(r, 400 * 2 ** i))
-      }
-      return res
-    }
+    const saveWithRetry = (p) => withRetry(() => doSave(p))
 
     let { data: saved, error, status } = await saveWithRetry(payload)
 
@@ -202,12 +187,7 @@ export default function ContactDrawer({
       console.error('[ContactDrawer] save failed', {
         code: error.code, message: error.message, details: error.details, hint: error.hint, status,
       })
-      pushToast(
-        isTransportError(error, status)
-          ? "Couldn't reach the server — check your connection and try again. If you use an ad or privacy blocker, allow this site."
-          : (friendlyDbError(error) || error.message || 'Could not save contact — please try again.'),
-        'error'
-      )
+      pushToast(mutationErrorMessage(error, status, 'Could not save contact — please try again.'), 'error')
       return
     }
 

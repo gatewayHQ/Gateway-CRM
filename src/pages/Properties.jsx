@@ -4,7 +4,7 @@ import { formatCurrency } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
 import { findMatchingBuyers } from '../lib/matching.js'
-import { friendlyDbError } from '../lib/dbErrors.js'
+import { mutationErrorMessage } from '../lib/services/db.js'
 import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
 import OptionSelect from '../components/OptionSelect.jsx'
 
@@ -883,14 +883,14 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
       price_history:        updatedHistory,
       comps:                form.comps || [],
     }
-    let error, data
+    let error, data, status
     if (property?.id) {
-      ({ error, data } = await supabase.from('properties').update(payload).eq('id', property.id).select().single())
+      ({ error, data, status } = await supabase.from('properties').update(payload).eq('id', property.id).select().single())
     } else {
-      ({ error, data } = await supabase.from('properties').insert([payload]).select().single())
+      ({ error, data, status } = await supabase.from('properties').insert([payload]).select().single())
     }
     setSaving(false)
-    if (error) { pushToast(friendlyDbError(error) || error.message, 'error'); return }
+    if (error) { pushToast(mutationErrorMessage(error, status, 'Could not save property — please try again.'), 'error'); return }
 
     // Geocode on save if address changed or not yet geocoded
     const savedId = data?.id || resolvedId
