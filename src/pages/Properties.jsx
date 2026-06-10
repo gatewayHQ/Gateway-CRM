@@ -4,6 +4,7 @@ import { formatCurrency } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
 import { findMatchingBuyers } from '../lib/matching.js'
+import { friendlyDbError } from '../lib/dbErrors.js'
 import OptionSelect from '../components/OptionSelect.jsx'
 
 // Types where commercial fields apply
@@ -888,7 +889,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
       ({ error, data } = await supabase.from('properties').insert([payload]).select().single())
     }
     setSaving(false)
-    if (error) { pushToast(error.message, 'error'); return }
+    if (error) { pushToast(friendlyDbError(error) || error.message, 'error'); return }
 
     // Geocode on save if address changed or not yet geocoded
     const savedId = data?.id || resolvedId

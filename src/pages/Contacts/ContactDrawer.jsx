@@ -3,6 +3,7 @@ import { supabase } from '../../lib/supabase.js'
 import { Drawer, Tabs, pushToast } from '../../components/UI.jsx'
 import { normalizePhone } from '../../lib/phone.js'
 import { validateEmail, validateRequired, validateForm } from '../../lib/validation.js'
+import { friendlyDbError } from '../../lib/dbErrors.js'
 import OptionMultiSelect from '../../components/OptionMultiSelect.jsx'
 import ChipToggleGroup from '../../components/ChipToggleGroup.jsx'
 import ActivityTab from './ActivityTab.jsx'
@@ -203,7 +204,7 @@ export default function ContactDrawer({
       pushToast(
         isTransportError(error, status)
           ? "Couldn't reach the server — check your connection and try again. If you use an ad or privacy blocker, allow this site."
-          : (error.message || 'Could not save contact — please try again.'),
+          : (friendlyDbError(error) || error.message || 'Could not save contact — please try again.'),
         'error'
       )
       return
