@@ -25,11 +25,16 @@ file is safe.
 | 0005 | `0005_commission_structured_admin.sql` | Adds `commissions.sides` / `commissions.participants` (complex two-sided deals), `agents.default_split_pct` / `agents.no_brokerage_split` (per-agent split defaults), and `agents.is_admin` (back-filled from role) | No (additive columns; legacy rows still computed on the fly) | Anytime |
 | 0006 | `0006_agent_profile_stats.sql` | Adds `agents.tagline` / `agents.stats` for the standalone advisor profile page (`/advisor/:id`) and the "Meet your advisor" sections | No (additive columns) | Anytime |
 | 0007 | `0007_properties_status_cancelled.sql` | Widens the `properties.status` CHECK to include `'cancelled'` so listings can be dragged to a Cancelled column in the pipeline | No (constraint swap) | Anytime |
-| 0002 | `0002_rls_agent_scoping.sql` | Real RLS: enforces the existing agent/team scoping in the database (two phases — see below) | **Phase A: no. Phase B: yes (activates enforcement)** | After 0003, with testing |
+| 0002 | `0002_rls_agent_scoping.sql` | Real RLS: enforces the existing agent/team scoping in the database (two phases — see below) | **Phase A: no. Phase B: superseded — use 0011's Phase B** | After 0003 |
+| 0008 | `0008_schema_drift_reconciliation.sql` | Adds the `deals` columns the app already uses (`prop_category`, `prop_subtype`, `comp_data`) to environments missing them; restates the 20260605 dated migration so the numbered chain is self-contained | No (additive, idempotent) | Anytime |
+| 0009 | `0009_deal_activities.sql` | `activities.deal_id` — activities can attach to a deal as well as a contact, giving deals a real timeline | No (additive) | After 0008 |
+| 0010 | `0010_deal_data_guards.sql` | Cleans and then CHECK-constrains `deals.value` (≥ 0) and `deals.probability` (0–100) so commission math can't be poisoned | Only for out-of-range rows (normally none — see the preview SELECTs in the file) | After 0008 |
+| 0011 | `0011_rls_deals_commissions.sql` | RLS for deals/commissions/documents/envelopes/steps per the decided visibility model (own + team-shared + co-listed; admin sees all). Its Phase B activates enforcement for 0002's tables too | **Phase A: no. Phase B: yes (activates ALL scoping)** | Last, with testing |
 
-> Note the numeric order vs. recommended run order: **0001 → 0003 → 0004 → 0005 → 0006 → 0007 → 0002**.
-> 0002 is applied last because its Phase B is the only step that changes what
-> data the database returns, so it should land after the schema is settled.
+> Note the numeric order vs. recommended run order: **0001 → 0003 → 0004 → 0005 → 0006 → 0007 → 0002 (Phase A) → 0008 → 0009 → 0010 → 0011 (Phase A, then Phase B after verification)**.
+> 0011's Phase B is the only step that changes what data the database returns,
+> so it lands last — after the schema is settled, the matching app build is
+> deployed, and the verification checklist in the file passes.
 
 ---
 
@@ -77,15 +82,16 @@ tables instantly.
 - A task inserted with a null `agent_id` would be rejected once Phase B is live
   (the app always sets it, so this does not happen in normal use).
 
-### Decision needed before hardening `deals` / `commissions`
-`src/pages/Commission.jsx` is a **brokerage-wide report** (org totals, per-agent
-leaderboard, cap tracking) — today every agent sees the whole firm's numbers.
-The deferred deals/commissions policies (written, inactive, in 0002) would make
-a **non-admin** see only their own data there; **admins are unaffected**.
-Decide: is firm-wide earnings visibility meant for everyone (keep those tables
-permissive, or admin-gate the page) or for admins only (then the deferred
-policies are the intended hardening)? Also scope the unscoped client reads
-(App.jsx:329, Commission.jsx:554-555) at that time.
+### Decision on `deals` / `commissions` visibility → RESOLVED (2026-06)
+Decided: **a regular agent sees only their own deals & earnings, plus deals
+they are co-listed on and will get paid on; firm-wide visibility is admin
+only.** Migration **0011** implements exactly this (deals, commissions, and the
+deal-children: documents, docusign_envelopes, transaction_steps,
+deadline_reminders, plus personal agent_notifications), and its Phase B is now
+the single switch that activates enforcement for 0002's tables as well. The
+previously-unscoped client reads were fixed alongside it: every deal/commission
+(re)load now goes through `src/lib/services/deals.js`, which also adds
+co-listed deals (commission participants) to what a non-admin fetches.
 
 ---
 

@@ -25,6 +25,7 @@ create table if not exists form_packets (
 );
 
 alter table form_packets enable row level security;
+drop policy if exists "form_packets_all" on form_packets;
 create policy "form_packets_all" on form_packets
   for all to authenticated using (true) with check (true);
 

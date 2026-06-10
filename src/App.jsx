@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase.js'
 import { primeCache, invalidate } from './lib/queryCache.js'
+import { fetchVisibleDeals, fetchVisibleCommissions } from './lib/services/deals.js'
 import { Icon, Avatar, Modal, Badge, ToastHost, Loading, ErrorBoundary, pushToast } from './components/UI.jsx'
 // All pages are lazy-loaded — only the current route's bundle downloads
 const Dashboard        = React.lazy(() => import('./pages/Dashboard.jsx'))
@@ -350,22 +351,25 @@ export default function App() {
       // office. Tasks stay personal even for admins — a to-do list isn't oversight
       // data and the admin's own tasks are all that's useful to them.
       // Regular agents receive only rows scoped to their computed lists above.
-      const [contacts, properties, deals, tasks, templates, commissionsRes, activitiesRes] = await Promise.all([
+      const [contacts, properties, deals, tasks, templates, activitiesRes] = await Promise.all([
         isAdminAgent
           ? supabase.from('contacts').select('*').order('created_at', { ascending: false })
           : supabase.from('contacts').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
         isAdminAgent
           ? supabase.from('properties').select('*').order('created_at', { ascending: false })
           : supabase.from('properties').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
-        isAdminAgent
-          ? supabase.from('deals').select('*').order('created_at', { ascending: false })
-          : supabase.from('deals').select('*').in('agent_id', myDealVisible).order('created_at', { ascending: false }),
+        // Own + team-shared + co-listed (commission participant) deals
+        fetchVisibleDeals(supabase, { isAdmin: isAdminAgent, agentId: matched.id, dealAgentIds: myDealVisible }),
         // Tasks are personal — never shared, even for an admin
         supabase.from('tasks').select('*').eq('agent_id', matched.id).order('due_date', { ascending: true }),
         supabase.from('templates').select('*').order('created_at', { ascending: false }),
-        supabase.from('commissions').select('*'),
         supabase.from('activities').select('*').order('created_at', { ascending: false }),
       ])
+      // Commissions follow the visible deals (firm-wide for admins only)
+      const commissionsRes = await fetchVisibleCommissions(supabase, {
+        isAdmin: isAdminAgent,
+        dealIds: (deals.data || []).map(d => d.id),
+      })
 
       const dbPayload = {
         contacts:         contacts.data     || [],

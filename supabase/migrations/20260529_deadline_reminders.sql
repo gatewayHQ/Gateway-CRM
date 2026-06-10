@@ -13,6 +13,7 @@ create table if not exists deadline_reminders (
 );
 
 alter table deadline_reminders enable row level security;
+drop policy if exists "deadline_reminders_all" on deadline_reminders;
 create policy "deadline_reminders_all" on deadline_reminders
   for all to authenticated using (true) with check (true);
 
