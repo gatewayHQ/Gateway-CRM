@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check:enums": "node scripts/check-enums.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.91.1",

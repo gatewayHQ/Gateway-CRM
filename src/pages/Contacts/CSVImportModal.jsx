@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
 import { normalizePhone } from '../../lib/phone.js'
+import { CONTACT_TYPES, CONTACT_STATUSES, CONTACT_SOURCES } from '../../lib/enums.js'
 
 function parseCSV(text) {
   const rows = []
@@ -101,9 +102,9 @@ export default function CSVImportModal({ onClose, onImported, agents, activeAgen
 
   const doImport = async () => {
     setStep(4); setProgress(0); setErrors([])
-    const validTypes   = ['buyer','seller','landlord','tenant','investor']
-    const validSources = ['referral','website','open house','social','cold call','team','paid service','other']
-    const validStatus  = ['active','cold','closed','lead','opportunity','pending']
+    const validTypes   = CONTACT_TYPES
+    const validSources = CONTACT_SOURCES
+    const validStatus  = CONTACT_STATUSES
     const CHUNK = 50
     let done = 0
     const errs = []

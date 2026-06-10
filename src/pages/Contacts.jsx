@@ -27,6 +27,7 @@
 import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { calcHeatScore } from '../lib/helpers.js'
+import { CONTACT_TYPES, CONTACT_STATUSES, titleCase } from '../lib/enums.js'
 import { normalizePhone } from '../lib/phone.js'
 import { Icon, EmptyState, ConfirmDialog, pushToast } from '../components/UI.jsx'
 import { useDebounce } from '../hooks/useDebounce.js'
@@ -384,11 +385,11 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
         </div>
         <select className="filter-select" value={filters.type} onChange={(e) => setFilters({ ...filters, type: e.target.value })}>
           <option value="">All Types</option>
-          {['buyer','seller','landlord','tenant','investor'].map(t => <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>)}
+          {CONTACT_TYPES.map(t => <option key={t} value={t}>{titleCase(t)}</option>)}
         </select>
         <select className="filter-select" value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
           <option value="">All Statuses</option>
-          {['lead','opportunity','active','pending','cold','closed'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+          {CONTACT_STATUSES.map(s => <option key={s} value={s}>{titleCase(s)}</option>)}
         </select>
         <select className="filter-select" value={filters.agent} onChange={(e) => setFilters({ ...filters, agent: e.target.value })}>
           <option value="">All Agents</option>

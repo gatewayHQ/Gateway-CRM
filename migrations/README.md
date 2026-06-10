@@ -146,3 +146,34 @@ These are deliberately deferred and documented so they aren't lost:
 - Never modify or delete an already-applied migration — add a new one.
 - When a migration adds/changes a table, also update `src/lib/schema.sql` so a
   fresh install stays in sync.
+
+---
+
+## Enum values: single source of truth + drift guard
+
+Controlled-vocabulary fields (`contacts.type/status/source`,
+`properties.type/status`) are guarded by **three** layers that must agree:
+
+1. **The database CHECK constraint** — what the live Supabase DB actually enforces.
+2. **`src/lib/schema.sql`** — the re-runnable description of the current schema.
+3. **`src/lib/enums.js`** — the single source of truth the UI imports. Forms,
+   filters, CSV import, and cold-call intake all read these lists (no more
+   copy-pasted arrays).
+
+`npm run check:enums` (also a CI step in the `schema-lint` job) parses the CHECK
+constraints out of `schema.sql` and fails the build if `enums.js` ever offers a
+value the constraint would reject. This catches **code-vs-schema** drift before
+it ships.
+
+> ⚠️ The guard cannot see the **live database**. The original
+> `contacts_status_check` failure was a value (`opportunity`) that existed in
+> `enums.js` *and* `schema.sql` but whose migration had never been run in
+> Supabase. That **schema-vs-production** axis is closed only by actually
+> applying migrations (see "Apply order" above) — until then,
+> `friendlyDbError()` in `src/lib/dbErrors.js` turns the raw Postgres message
+> into an actionable one for the agent.
+>
+> **To add a new enum value:** (1) add it to the CHECK constraint via a new
+> migration, (2) mirror it into `schema.sql`, (3) add it to `enums.js`, and
+> (4) run the migration in Supabase. Steps 1–3 are enforced by CI; step 4 is the
+> manual deploy step.

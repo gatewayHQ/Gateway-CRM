@@ -4,6 +4,7 @@ import { Drawer, Tabs, pushToast } from '../../components/UI.jsx'
 import { normalizePhone } from '../../lib/phone.js'
 import { validateEmail, validateRequired, validateForm } from '../../lib/validation.js'
 import { friendlyDbError } from '../../lib/dbErrors.js'
+import { CONTACT_TYPES, CONTACT_STATUSES, CONTACT_SOURCES, titleCase } from '../../lib/enums.js'
 import OptionMultiSelect from '../../components/OptionMultiSelect.jsx'
 import ChipToggleGroup from '../../components/ChipToggleGroup.jsx'
 import ActivityTab from './ActivityTab.jsx'
@@ -360,13 +361,13 @@ export default function ContactDrawer({
               <div className="form-group">
                 <label className="form-label">Type</label>
                 <select className="form-control" value={form.type} onChange={(e) => { set('type', e.target.value) }}>
-                  {['buyer','seller','landlord','tenant','investor'].map(t => <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>)}
+                  {CONTACT_TYPES.map(t => <option key={t} value={t}>{titleCase(t)}</option>)}
                 </select>
               </div>
               <div className="form-group">
                 <label className="form-label">Status</label>
                 <select className="form-control" value={form.status} onChange={(e) => set('status', e.target.value)}>
-                  {['lead','opportunity','active','pending','cold','closed'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+                  {CONTACT_STATUSES.map(s => <option key={s} value={s}>{titleCase(s)}</option>)}
                 </select>
               </div>
             </div>
@@ -375,7 +376,7 @@ export default function ContactDrawer({
               <div className="form-group">
                 <label className="form-label">Source</label>
                 <select className="form-control" value={form.source || 'other'} onChange={(e) => set('source', e.target.value)}>
-                  {['referral','website','open house','social','cold call','team','paid service','other'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+                  {CONTACT_SOURCES.map(s => <option key={s} value={s}>{titleCase(s)}</option>)}
                 </select>
               </div>
               <div className="form-group">

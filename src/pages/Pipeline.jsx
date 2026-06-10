@@ -1,6 +1,7 @@
 import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
+import { isResidentialPropertyType } from '../lib/enums.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
@@ -2028,7 +2029,7 @@ function daysOnMarket(dateStr) {
 
 function ListingCard({ property, agent, deals = [], onClick, onDelete, draggable, onDragStart, onDragEnd, dragging }) {
   const dom         = daysOnMarket(property.created_at)
-  const isRes       = ['residential','rental'].includes(property.type)
+  const isRes       = isResidentialPropertyType(property.type)
   const statusColor = LISTING_STATUS_COLORS[property.status] || '#9ca3af'
   const domAlert    = dom !== null && dom > 30 && property.status === 'active'
 
@@ -2224,7 +2225,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
         property_id: property.id,
         title: property.address || 'New Listing Deal',
         agent_id: property.assigned_agent_id || activeAgent?.id || '',
-        prop_category: ['residential','rental'].includes(property.type) ? 'residential' : 'commercial',
+        prop_category: isResidentialPropertyType(property.type) ? 'residential' : 'commercial',
       })
     }
     setDrawer(true)

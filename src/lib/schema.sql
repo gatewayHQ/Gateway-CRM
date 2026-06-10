@@ -80,7 +80,7 @@ create table if not exists properties (
                       'office','land','retail','industrial','mixed-use','commercial'
                     )) default 'residential',
   status            text check (status in (
-                      'active','pending','sold','off-market','leased'
+                      'active','pending','sold','off-market','leased','cancelled'
                     )) default 'active',
   list_price        numeric,
   sqft              numeric,

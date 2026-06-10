@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react'
 import { formatCurrency } from '../lib/helpers.js'
+import { CONTACT_SOURCES as SOURCES } from '../lib/enums.js'
 
-const SOURCES      = ['referral','website','open house','social','cold call','other']
 const STAGE_LABELS = { lead:'Lead', qualified:'Qualified', showing:'Showing', offer:'Offer Made', 'under-contract':'Under Contract', closed:'Closed' }
 const STAGE_COLORS = { lead:'var(--gw-mist)', qualified:'var(--gw-azure)', showing:'#4a6fa5', offer:'var(--gw-amber)', 'under-contract':'var(--gw-purple)', closed:'var(--gw-green)' }
 
