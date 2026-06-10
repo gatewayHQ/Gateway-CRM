@@ -28,6 +28,9 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Unit tests
+        run: npm test
+
       - name: Verify Vercel function count (Hobby plan ≤ 12)
         run: |
           COUNT=$(find api -maxdepth 1 -type f \( -name '*.js' -o -name '*.ts' \) | wc -l)
@@ -67,6 +70,10 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       - name: Verify schema.sql exists
         run: test -f src/lib/schema.sql
       - name: Check for forbidden destructive statements in schema
@@ -75,3 +82,5 @@ jobs:
             echo "::error::Destructive statements not allowed in schema.sql"
             exit 1
           fi
+      - name: Check enum lists match schema.sql CHECK constraints
+        run: npm run check:enums

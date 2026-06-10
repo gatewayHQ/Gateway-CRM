@@ -3,6 +3,8 @@ import { supabase } from '../../lib/supabase.js'
 import { Drawer, Tabs, pushToast } from '../../components/UI.jsx'
 import { normalizePhone } from '../../lib/phone.js'
 import { validateEmail, validateRequired, validateForm } from '../../lib/validation.js'
+import { CONTACT_TYPES, CONTACT_STATUSES, CONTACT_SOURCES, COMMERCIAL_PROPERTY_TYPES, titleCase } from '../../lib/enums.js'
+import { withRetry, mutationErrorMessage } from '../../lib/services/db.js'
 import OptionMultiSelect from '../../components/OptionMultiSelect.jsx'
 import ChipToggleGroup from '../../components/ChipToggleGroup.jsx'
 import ActivityTab from './ActivityTab.jsx'
@@ -21,14 +23,7 @@ const BLANK = {
 }
 const BLANK_PROP = { address: '', list_price: '', type: 'residential', subtype: '', beds: '', baths: '', sqft: '', garage: '', details: {} }
 
-const COMM_SUBTYPES = ['multifamily', 'office', 'land', 'retail', 'industrial', 'mixed-use']
-
-// A transport-level failure (status 0 / "Failed to fetch") means the request never
-// reached the server — transient network, offline, or a blocking browser extension.
-// These are worth retrying; PostgREST/validation errors (4xx/5xx) are not.
-const isTransportError = (error, status) =>
-  status === 0 ||
-  /failed to fetch|fetcherror|networkerror|network request failed|load failed/i.test(error?.message || '')
+const COMM_SUBTYPES = COMMERCIAL_PROPERTY_TYPES
 
 export default function ContactDrawer({
   open, onClose, contact, agents,
@@ -167,15 +162,7 @@ export default function ContactDrawer({
 
     // Retry transient transport failures ("Failed to fetch") with short backoff before
     // giving up — a dropped/blocked request usually succeeds on a second attempt.
-    const saveWithRetry = async (p, attempts = 3) => {
-      let res
-      for (let i = 0; i < attempts; i++) {
-        res = await doSave(p)
-        if (!res.error || !isTransportError(res.error, res.status)) return res
-        if (i < attempts - 1) await new Promise(r => setTimeout(r, 400 * 2 ** i))
-      }
-      return res
-    }
+    const saveWithRetry = (p) => withRetry(() => doSave(p))
 
     let { data: saved, error, status } = await saveWithRetry(payload)
 
@@ -200,12 +187,7 @@ export default function ContactDrawer({
       console.error('[ContactDrawer] save failed', {
         code: error.code, message: error.message, details: error.details, hint: error.hint, status,
       })
-      pushToast(
-        isTransportError(error, status)
-          ? "Couldn't reach the server — check your connection and try again. If you use an ad or privacy blocker, allow this site."
-          : (error.message || 'Could not save contact — please try again.'),
-        'error'
-      )
+      pushToast(mutationErrorMessage(error, status, 'Could not save contact — please try again.'), 'error')
       return
     }
 
@@ -359,13 +341,13 @@ export default function ContactDrawer({
               <div className="form-group">
                 <label className="form-label">Type</label>
                 <select className="form-control" value={form.type} onChange={(e) => { set('type', e.target.value) }}>
-                  {['buyer','seller','landlord','tenant','investor'].map(t => <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>)}
+                  {CONTACT_TYPES.map(t => <option key={t} value={t}>{titleCase(t)}</option>)}
                 </select>
               </div>
               <div className="form-group">
                 <label className="form-label">Status</label>
                 <select className="form-control" value={form.status} onChange={(e) => set('status', e.target.value)}>
-                  {['lead','opportunity','active','pending','cold','closed'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+                  {CONTACT_STATUSES.map(s => <option key={s} value={s}>{titleCase(s)}</option>)}
                 </select>
               </div>
             </div>
@@ -374,7 +356,7 @@ export default function ContactDrawer({
               <div className="form-group">
                 <label className="form-label">Source</label>
                 <select className="form-control" value={form.source || 'other'} onChange={(e) => set('source', e.target.value)}>
-                  {['referral','website','open house','social','cold call','team','paid service','other'].map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+                  {CONTACT_SOURCES.map(s => <option key={s} value={s}>{titleCase(s)}</option>)}
                 </select>
               </div>
               <div className="form-group">

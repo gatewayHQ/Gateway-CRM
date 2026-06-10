@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Modal, pushToast } from '../components/UI.jsx'
+import { CONTACT_TYPES, PROPERTY_TYPES, titleCase } from '../lib/enums.js'
 
 // ── SQL shown when tables are missing ─────────────────────────────────────
 const SQL_SETUP = `create table if not exists cold_call_lists (
@@ -322,7 +323,7 @@ function ConvertModal({ lead, agents, activeAgent, setDb, onClose, onConverted }
 
     // Create linked property and sync into in-memory db
     if (lead?.property_address) {
-      const VALID_PROP_TYPES = ['residential','rental','multifamily','office','land','retail','industrial','mixed-use','commercial']
+      const VALID_PROP_TYPES = PROPERTY_TYPES
       const rawType = (lead.prop_type || '').toLowerCase().trim()
       const safeType = VALID_PROP_TYPES.includes(rawType) ? rawType : 'residential'
       const { data: propData } = await supabase.from('properties').insert([{
@@ -374,7 +375,7 @@ function ConvertModal({ lead, agents, activeAgent, setDb, onClose, onConverted }
         <div className="form-row">
           <div className="form-group"><label className="form-label">Type</label>
             <select className="form-control" value={form.type} onChange={e=>set('type',e.target.value)}>
-              {['buyer','seller','investor','landlord','tenant'].map(t=><option key={t} value={t}>{t.charAt(0).toUpperCase()+t.slice(1)}</option>)}
+              {CONTACT_TYPES.map(t=><option key={t} value={t}>{titleCase(t)}</option>)}
             </select></div>
           <div className="form-group"><label className="form-label">Agent</label>
             <select className="form-control" value={form.assigned_agent_id} onChange={e=>set('assigned_agent_id',e.target.value)}>

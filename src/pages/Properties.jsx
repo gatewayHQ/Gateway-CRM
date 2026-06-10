@@ -4,10 +4,12 @@ import { formatCurrency } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
 import { findMatchingBuyers } from '../lib/matching.js'
+import { mutationErrorMessage } from '../lib/services/db.js'
+import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
 import OptionSelect from '../components/OptionSelect.jsx'
 
 // Types where commercial fields apply
-const COMMERCIAL_TYPES = ['multifamily','office','land','retail','industrial','mixed-use']
+const COMMERCIAL_TYPES = COMMERCIAL_PROPERTY_TYPES
 const isCommercial = (t) => COMMERCIAL_TYPES.includes(t)
 
 const TYPE_LABELS = {
@@ -881,14 +883,14 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
       price_history:        updatedHistory,
       comps:                form.comps || [],
     }
-    let error, data
+    let error, data, status
     if (property?.id) {
-      ({ error, data } = await supabase.from('properties').update(payload).eq('id', property.id).select().single())
+      ({ error, data, status } = await supabase.from('properties').update(payload).eq('id', property.id).select().single())
     } else {
-      ({ error, data } = await supabase.from('properties').insert([payload]).select().single())
+      ({ error, data, status } = await supabase.from('properties').insert([payload]).select().single())
     }
     setSaving(false)
-    if (error) { pushToast(error.message, 'error'); return }
+    if (error) { pushToast(mutationErrorMessage(error, status, 'Could not save property — please try again.'), 'error'); return }
 
     // Geocode on save if address changed or not yet geocoded
     const savedId = data?.id || resolvedId
@@ -1001,23 +1003,17 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
             <label className="form-label">Property Type</label>
             <select className="form-control" value={form.type} onChange={e=>set('type',e.target.value)}>
               <optgroup label="Residential">
-                <option value="residential">Residential</option>
-                <option value="rental">Rental (Residential)</option>
+                {RESIDENTIAL_PROPERTY_TYPES.map(t=><option key={t} value={t}>{PROPERTY_TYPE_LABELS[t]}</option>)}
               </optgroup>
               <optgroup label="Commercial">
-                <option value="multifamily">Multifamily</option>
-                <option value="office">Office</option>
-                <option value="land">Land</option>
-                <option value="retail">Retail</option>
-                <option value="industrial">Industrial</option>
-                <option value="mixed-use">Mixed-Use</option>
+                {COMMERCIAL_PROPERTY_TYPES.map(t=><option key={t} value={t}>{PROPERTY_TYPE_LABELS[t]}</option>)}
               </optgroup>
             </select>
           </div>
           <div className="form-group">
             <label className="form-label">Status</label>
             <select className="form-control" value={form.status} onChange={e=>set('status',e.target.value)}>
-              {['active','pending','sold','off-market','leased'].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1).replace('-',' ')}</option>)}
+              {PROPERTY_STATUSES.map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1).replace('-',' ')}</option>)}
             </select>
           </div>
         </div>
@@ -1471,7 +1467,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
         </select>
         <select className="filter-select" value={filterStatus} onChange={e=>setFilterStatus(e.target.value)}>
           <option value="">All Statuses</option>
-          {['active','pending','sold','off-market','leased'].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1).replace('-',' ')}</option>)}
+          {PROPERTY_STATUSES.map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1).replace('-',' ')}</option>)}
         </select>
         {counties.length > 0 && (
           <select className="filter-select" value={filterCounty} onChange={e=>setFilterCounty(e.target.value)}>
