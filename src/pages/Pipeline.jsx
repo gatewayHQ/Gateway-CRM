@@ -2,7 +2,7 @@ import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { fetchVisibleDeals } from '../lib/services/deals.js'
 import { formatCurrency, formatDate, STAGE_LABELS, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
-import { TRACKS, TRACK_ORDER, trackForDeal, boardStageFor } from '../lib/stages.js'
+import { TRACKS, TRACK_ORDER, trackForDeal, boardStageFor, STAGE_AUTO_TASKS } from '../lib/stages.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
@@ -1759,18 +1759,18 @@ function PortalTab({ deal }) {
   )
 }
 
-function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave }) {
+export function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave, initialTab = 'details' }) {
   const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
-  const [tab, setTab]       = useState('details')
+  const [tab, setTab]       = useState(initialTab)
 
   React.useEffect(() => {
     setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {} } : blank)
     setErrors({})
-    setTab('details')
-  }, [deal, open])
+    setTab(deal?.id ? initialTab : 'details')
+  }, [deal, open, initialTab])
 
   const set  = (k, v) => setForm(p => ({...p, [k]: v}))
   const setCD = (k, v) => setForm(p => ({...p, comp_data: {...(p.comp_data||{}), [k]: v}}))
@@ -2046,24 +2046,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
   )
 }
 
-const AUTO_TASKS = {
-  // shared / residential buyer
-  qualified:        { title: d => `Schedule showing — ${d.title}`,            type: 'showing',   priority: 'high',   daysOut: 2 },
-  showing:          { title: d => `Send post-showing follow-up — ${d.title}`, type: 'follow-up', priority: 'medium', daysOut: 1 },
-  offer:            { title: d => `Prepare & submit offer — ${d.title}`,      type: 'document',  priority: 'high',   daysOut: 2 },
-  'under-contract': { title: d => `Order inspection — ${d.title}`,            type: 'follow-up', priority: 'high',   daysOut: 5 },
-  closed:           { title: d => `Request referral — ${d.title}`,            type: 'follow-up', priority: 'low',    daysOut: 7 },
-  // residential seller
-  'pre-list':       { title: d => `Prep listing: photos, comps, disclosures — ${d.title}`, type: 'document',  priority: 'high',   daysOut: 3 },
-  active:           { title: d => `Schedule open house / showings — ${d.title}`,           type: 'showing',   priority: 'medium', daysOut: 3 },
-  // commercial
-  'om-marketing':       { title: d => `Build OM & marketing package — ${d.title}`,         type: 'document',  priority: 'high',   daysOut: 3 },
-  'listing-agreement':  { title: d => `Collect signed listing agreement — ${d.title}`,     type: 'document',  priority: 'high',   daysOut: 2 },
-  'on-market':          { title: d => `Syndicate listing (Crexi/LoopNet) — ${d.title}`,    type: 'follow-up', priority: 'medium', daysOut: 2 },
-  loi:                  { title: d => `Review & respond to LOI — ${d.title}`,              type: 'document',  priority: 'high',   daysOut: 2 },
-  psa:                  { title: d => `Open escrow & order title — ${d.title}`,            type: 'document',  priority: 'high',   daysOut: 3 },
-  'due-diligence':      { title: d => `Track DD checklist & deadlines — ${d.title}`,       type: 'follow-up', priority: 'high',   daysOut: 2 },
-}
+const AUTO_TASKS = STAGE_AUTO_TASKS
 
 const LISTING_STATUS_ORDER  = ['active','pending','off-market','sold','leased','cancelled']
 const LISTING_STATUS_LABELS = { active:'Active', pending:'Pending', 'off-market':'Off Market', sold:'Sold', leased:'Leased', cancelled:'Cancelled' }
@@ -2156,7 +2139,7 @@ function ListingCard({ property, agent, deals = [], onClick, onDelete, draggable
   )
 }
 
-export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
+export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgentIds, go }) {
   const [drawer, setDrawer] = useState(false)
   const [editing, setEditing] = useState(null)
   const [defaultStage, setDefaultStage] = useState('lead')
@@ -2294,7 +2277,9 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     const linked = deals.filter(d => d.property_id === property.id)
     if (linked.length) {
       // Prefer an in-contract deal (either track's tokens); otherwise the most recent one.
-      setEditing(linked.find(d => ['under-contract','psa','due-diligence','loi'].includes(d.stage)) || linked[0])
+      const target = linked.find(d => ['under-contract','psa','due-diligence','loi'].includes(d.stage)) || linked[0]
+      go(`deal/${target.id}`)
+      return
     } else {
       // No deal yet — open a new one prefilled from the property. Saving it
       // unlocks the Documents & Signatures tabs (those need an existing deal).
@@ -2444,7 +2429,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                         draggable
                         onDragStart={() => setDragging(deal.id)}
                         onDragEnd={() => { setDragging(null); setDragOver(null) }}
-                        onClick={() => { setEditing(deal); setDrawer(true) }}
+                        onClick={() => go(`deal/${deal.id}`)}
                       >
                         {urgency && nearestKD && (
                           <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:5, fontSize:10, fontWeight:700, color: urgency === 'urgent' ? '#dc2626' : '#d97706' }}>

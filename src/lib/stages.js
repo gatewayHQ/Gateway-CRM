@@ -103,3 +103,24 @@ export function boardStageFor(deal, trackId) {
 // A deal is in-flight when it's neither won nor lost — shared by boards,
 // dashboards, and the "open deals" pickers.
 export const isOpenStage = (stage) => stage !== 'closed' && stage !== 'lost'
+
+// Auto-task fired when a deal ENTERS a stage (board drag or deal-page rail).
+// One rule per stage; daysOut sets the due date.
+export const STAGE_AUTO_TASKS = {
+  // shared / residential buyer
+  qualified:        { title: d => `Schedule showing — ${d.title}`,            type: 'showing',   priority: 'high',   daysOut: 2 },
+  showing:          { title: d => `Send post-showing follow-up — ${d.title}`, type: 'follow-up', priority: 'medium', daysOut: 1 },
+  offer:            { title: d => `Prepare & submit offer — ${d.title}`,      type: 'document',  priority: 'high',   daysOut: 2 },
+  'under-contract': { title: d => `Order inspection — ${d.title}`,            type: 'follow-up', priority: 'high',   daysOut: 5 },
+  closed:           { title: d => `Request referral — ${d.title}`,            type: 'follow-up', priority: 'low',    daysOut: 7 },
+  // residential seller
+  'pre-list':       { title: d => `Prep listing: photos, comps, disclosures — ${d.title}`, type: 'document',  priority: 'high',   daysOut: 3 },
+  active:           { title: d => `Schedule open house / showings — ${d.title}`,           type: 'showing',   priority: 'medium', daysOut: 3 },
+  // commercial
+  'om-marketing':       { title: d => `Build OM & marketing package — ${d.title}`,         type: 'document',  priority: 'high',   daysOut: 3 },
+  'listing-agreement':  { title: d => `Collect signed listing agreement — ${d.title}`,     type: 'document',  priority: 'high',   daysOut: 2 },
+  'on-market':          { title: d => `Syndicate listing (Crexi/LoopNet) — ${d.title}`,    type: 'follow-up', priority: 'medium', daysOut: 2 },
+  loi:                  { title: d => `Review & respond to LOI — ${d.title}`,              type: 'document',  priority: 'high',   daysOut: 2 },
+  psa:                  { title: d => `Open escrow & order title — ${d.title}`,            type: 'document',  priority: 'high',   daysOut: 3 },
+  'due-diligence':      { title: d => `Track DD checklist & deadlines — ${d.title}`,       type: 'follow-up', priority: 'high',   daysOut: 2 },
+}
