@@ -25,6 +25,7 @@ create table if not exists agents (
   default_split_pct  numeric default 70,   -- agent's default % share of a commission allocation
   no_brokerage_split boolean default false,-- true = keeps 100% (capped / no split)
   is_admin   boolean default false,        -- office admin: sees all deals/docs/commissions
+  nav_hidden text[] default '{}',          -- nav item IDs hidden from this agent's sidebar
   created_at timestamptz default now()
 );
 
@@ -108,10 +109,15 @@ create table if not exists deals (
                         'lead','qualified','showing','offer',
                         'under-contract','closed','lost'
                       )) default 'lead',
-  value               numeric,
-  probability         integer default 0,
+  value               numeric constraint deals_value_nonneg
+                        check (value is null or value >= 0),
+  probability         integer default 0 constraint deals_probability_range
+                        check (probability is null or (probability >= 0 and probability <= 100)),
   expected_close_date date,
   notes               text,
+  prop_category       text,                 -- 'residential' | 'commercial' (deal-level category)
+  prop_subtype        text,                 -- commercial subtype: multifamily, office, land, retail, industrial
+  comp_data           jsonb default '{}',   -- { key_dates:[{type,date}], portal_docs:[name], state, transaction_type }
   portal_token        uuid,                 -- client portal share token (unguessable)
   portal_enabled      boolean default false,
   created_at          timestamptz default now(),
@@ -152,11 +158,14 @@ create table if not exists templates (
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- ACTIVITIES  (contact timeline — calls, notes, emails, meetings, showings)
+-- ACTIVITIES  (timeline — calls, notes, emails, meetings, showings)
+-- An activity can attach to a contact, a deal, or both (e.g. a call about a
+-- specific deal logs to the contact's history AND the deal's timeline).
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists activities (
   id         uuid primary key default uuid_generate_v4(),
   contact_id uuid references contacts(id) on delete cascade,
+  deal_id    uuid references deals(id) on delete set null,
   agent_id   uuid references agents(id) on delete set null,
   type       text check (type in ('note','call','email','meeting','showing')) default 'note',
   body       text not null,
@@ -205,6 +214,16 @@ create table if not exists commissions (
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- ROW LEVEL SECURITY
+-- RLS is enabled here for the core tables. Policies come in two flavors:
+--   • SHARED tables (agents, properties, templates, …) keep a permissive
+--     allow_all policy — created just below.
+--   • SCOPED tables (contacts, deals, commissions, activities, tasks, and the
+--     deal-children: documents, docusign_envelopes, transaction_steps,
+--     deadline_reminders, agent_notifications) are governed by the agent/team/
+--     co-listing policies defined in the "SCOPED RLS POLICIES" section at the
+--     END of this file (they depend on tables created later). Fresh installs
+--     are scoped from day one; existing databases reach the same state via
+--     migrations 0002 + 0011.
 -- ─────────────────────────────────────────────────────────────────────────────
 alter table agents      enable row level security;
 alter table contacts    enable row level security;
@@ -214,50 +233,22 @@ alter table tasks       enable row level security;
 alter table templates   enable row level security;
 alter table activities  enable row level security;
 alter table documents   enable row level security;
-alter table envelopes   enable row level security;
 alter table commissions enable row level security;
 
--- Open access for all authenticated users (restrict per-agent later if needed)
+-- Open access for all authenticated users on intentionally-shared tables
 do $$ begin
-  -- agents
+  -- agents (roster is shared: pickers, avatars, landing pages)
   if not exists (select 1 from pg_policies where tablename='agents' and policyname='allow_all') then
     create policy "allow_all" on agents for all using (true) with check (true);
   end if;
-  -- contacts
-  if not exists (select 1 from pg_policies where tablename='contacts' and policyname='allow_all') then
-    create policy "allow_all" on contacts for all using (true) with check (true);
-  end if;
-  -- properties
+  -- properties (read anonymously by the public PropertyLanding page — scope
+  -- only after that read moves behind a service-key API; see migrations/README)
   if not exists (select 1 from pg_policies where tablename='properties' and policyname='allow_all') then
     create policy "allow_all" on properties for all using (true) with check (true);
   end if;
-  -- deals
-  if not exists (select 1 from pg_policies where tablename='deals' and policyname='allow_all') then
-    create policy "allow_all" on deals for all using (true) with check (true);
-  end if;
-  -- tasks
-  if not exists (select 1 from pg_policies where tablename='tasks' and policyname='allow_all') then
-    create policy "allow_all" on tasks for all using (true) with check (true);
-  end if;
-  -- templates
+  -- templates (shared across all agents by design)
   if not exists (select 1 from pg_policies where tablename='templates' and policyname='allow_all') then
     create policy "allow_all" on templates for all using (true) with check (true);
-  end if;
-  -- activities
-  if not exists (select 1 from pg_policies where tablename='activities' and policyname='allow_all') then
-    create policy "allow_all" on activities for all using (true) with check (true);
-  end if;
-  -- documents
-  if not exists (select 1 from pg_policies where tablename='documents' and policyname='allow_all') then
-    create policy "allow_all" on documents for all using (true) with check (true);
-  end if;
-  -- envelopes
-  if not exists (select 1 from pg_policies where tablename='envelopes' and policyname='allow_all') then
-    create policy "allow_all" on envelopes for all using (true) with check (true);
-  end if;
-  -- commissions
-  if not exists (select 1 from pg_policies where tablename='commissions' and policyname='allow_all') then
-    create policy "allow_all" on commissions for all using (true) with check (true);
   end if;
 end $$;
 
@@ -318,11 +309,7 @@ create table if not exists agent_notifications (
 );
 
 alter table agent_notifications enable row level security;
-do $$ begin
-  if not exists (select 1 from pg_policies where tablename='agent_notifications' and policyname='allow_all') then
-    create policy "allow_all" on agent_notifications for all using (true) with check (true);
-  end if;
-end $$;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- DOCUSIGN ENVELOPES  (named to match app code)
@@ -345,31 +332,26 @@ create table if not exists docusign_envelopes (
 );
 
 alter table docusign_envelopes enable row level security;
-do $$ begin
-  if not exists (select 1 from pg_policies where tablename='docusign_envelopes' and policyname='allow_all') then
-    create policy "allow_all" on docusign_envelopes for all using (true) with check (true);
-  end if;
-end $$;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- TRANSACTION STEPS  (closing checklists per deal)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists transaction_steps (
-  id           uuid primary key default uuid_generate_v4(),
-  deal_id      uuid references deals(id) on delete cascade,
-  title        text not null,
-  completed    boolean default false,
-  completed_at timestamptz,
-  sort_order   integer default 0,
-  created_at   timestamptz default now()
+  id            uuid primary key default uuid_generate_v4(),
+  deal_id       uuid references deals(id) on delete cascade,
+  title         text not null,
+  completed     boolean default false,
+  completed_at  timestamptz,
+  sort_order    integer default 0,
+  doc_action    text    default 'manual',  -- manual | upload | forms | sign | admin
+  doc_status    text    default 'pending', -- pending | complete | approved | na
+  if_applicable boolean default false,     -- conditional document ("if applicable")
+  created_at    timestamptz default now()
 );
 
 alter table transaction_steps enable row level security;
-do $$ begin
-  if not exists (select 1 from pg_policies where tablename='transaction_steps' and policyname='allow_all') then
-    create policy "allow_all" on transaction_steps for all using (true) with check (true);
-  end if;
-end $$;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- DOCUSIGN FIELD TEMPLATES  (pre-built anchor tab configs per document type)
@@ -477,8 +459,9 @@ create index if not exists idx_tasks_due            on tasks(due_date asc) where
 create index if not exists idx_tasks_contact        on tasks(contact_id);
 create index if not exists idx_tasks_deal           on tasks(deal_id);
 
--- activities — contact timeline queries
+-- activities — contact + deal timeline queries
 create index if not exists idx_activities_contact on activities(contact_id, created_at desc);
+create index if not exists idx_activities_deal    on activities(deal_id, created_at desc);
 create index if not exists idx_activities_agent   on activities(agent_id);
 
 -- commissions
@@ -633,6 +616,7 @@ create index if not exists mailings_status_idx       on mailings(status);
 create index if not exists mailings_property_id_idx  on mailings(property_id);
 create index if not exists mailings_qr_token_idx     on mailings(qr_token);
 
+drop trigger if exists mailings_updated_at on mailings;
 create trigger mailings_updated_at before update on mailings
   for each row execute function set_updated_at();
 
@@ -1026,6 +1010,7 @@ create table if not exists form_packets (
   created_at       timestamptz default now()
 );
 alter table form_packets enable row level security;
+drop policy if exists "form_packets_all" on form_packets;
 create policy "form_packets_all" on form_packets
   for all to authenticated using (true) with check (true);
 
@@ -1041,5 +1026,184 @@ create table if not exists deadline_reminders (
   unique (deal_id, date_type, threshold)
 );
 alter table deadline_reminders enable row level security;
-create policy "deadline_reminders_all" on deadline_reminders
-  for all to authenticated using (true) with check (true);
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- SCOPED RLS POLICIES  (single source of truth for data visibility)
+--
+-- Visibility model (decided 2026-06; see migrations/0011):
+--   • An agent sees their OWN records, records of TEAM PEERS who share that
+--     dimension (team_splits.share_*), and deals they are CO-LISTED on
+--     (a participant row in commissions.participants pays them on the deal).
+--   • Admins (agents.is_admin — the office admin / transaction coordinator)
+--     see everything firm-wide. Tasks stay personal even for admins.
+--   • /api/* serverless functions use the service key and bypass RLS.
+--
+-- Defined last because the helpers reference team_splits and commissions.
+-- Fresh installs get these as the ONLY policies on the scoped tables (secure
+-- by default). On an existing database the legacy allow_all policies OR-combine
+-- with these until migration 0011 Phase B drops them.
+-- ═════════════════════════════════════════════════════════════════════════════
+
+-- The agent row for the currently authenticated user.
+create or replace function app_current_agent_id()
+returns uuid
+language sql stable security definer set search_path = public as $$
+  select id from agents where auth_id = auth.uid() limit 1;
+$$;
+
+-- Office admin / transaction coordinator: explicit flag, with the legacy
+-- role-string fallback for agents created before the column existed.
+create or replace function app_is_admin()
+returns boolean
+language sql stable security definer set search_path = public as $$
+  select coalesce(bool_or(is_admin or role ilike '%admin%'), false)
+  from agents where auth_id = auth.uid();
+$$;
+
+-- The set of agent_ids whose data the current user may see for a given
+-- dimension: self + team peers who share that dimension. A null share flag is
+-- treated as "shared" to match the app's default.
+create or replace function app_visible_agent_ids(dimension text)
+returns setof uuid
+language sql stable security definer set search_path = public as $$
+  select app_current_agent_id()
+  union
+  select peer.agent_id
+  from team_splits me
+  join team_splits peer
+    on peer.team_id = me.team_id
+   and peer.agent_id <> me.agent_id
+  where me.agent_id = app_current_agent_id()
+    and case dimension
+          when 'contacts'   then peer.share_contacts
+          when 'properties' then peer.share_properties
+          when 'deals'      then peer.share_deals
+          else false
+        end is not false;
+$$;
+
+-- Every deal the current user may see: all (admin), own + team-shared, or
+-- co-listed (they appear as a participant on the deal's commission).
+create or replace function app_visible_deal_ids()
+returns setof uuid
+language sql stable security definer set search_path = public as $$
+  select d.id from deals d where app_is_admin()
+  union
+  select d.id from deals d
+  where d.agent_id in (select app_visible_agent_ids('deals'))
+  union
+  select c.deal_id
+  from commissions c
+  cross join lateral jsonb_array_elements(coalesce(c.participants, '[]'::jsonb)) p
+  where (p->>'agent_id') is not null
+    and (p->>'agent_id') ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    and (p->>'agent_id')::uuid = app_current_agent_id();
+$$;
+
+grant execute on function app_current_agent_id()      to authenticated;
+grant execute on function app_is_admin()              to authenticated;
+grant execute on function app_visible_agent_ids(text) to authenticated;
+grant execute on function app_visible_deal_ids()      to authenticated;
+
+-- CONTACTS — own + sharing team peers; admins see all.
+drop policy if exists contacts_agent_scope on contacts;
+create policy contacts_agent_scope on contacts for all to authenticated
+  using      (app_is_admin() or assigned_agent_id in (select app_visible_agent_ids('contacts')))
+  with check (app_is_admin() or assigned_agent_id in (select app_visible_agent_ids('contacts')));
+
+-- ACTIVITIES — visible through the parent contact OR the parent deal; the
+-- author always sees their own entries; admins see all.
+drop policy if exists activities_contact_scope on activities;
+drop policy if exists activities_scope on activities;
+create policy activities_scope on activities for all to authenticated
+  using (
+    app_is_admin()
+    or agent_id = app_current_agent_id()
+    or exists (
+      select 1 from contacts c
+      where c.id = activities.contact_id
+        and c.assigned_agent_id in (select app_visible_agent_ids('contacts'))
+    )
+    or activities.deal_id in (select app_visible_deal_ids())
+  )
+  with check (
+    app_is_admin()
+    or agent_id = app_current_agent_id()
+    or exists (
+      select 1 from contacts c
+      where c.id = activities.contact_id
+        and c.assigned_agent_id in (select app_visible_agent_ids('contacts'))
+    )
+    or activities.deal_id in (select app_visible_deal_ids())
+  );
+
+-- TASKS — strictly personal, even for admins (a to-do list isn't oversight data).
+drop policy if exists tasks_agent_scope on tasks;
+create policy tasks_agent_scope on tasks for all to authenticated
+  using      (agent_id = app_current_agent_id())
+  with check (agent_id = app_current_agent_id());
+
+-- DEALS — own + team-shared + co-listed; admins see all. The with check arm
+-- lets an agent create deals owned by themselves / a sharing peer, and lets a
+-- co-listed participant edit a deal they can already see.
+drop policy if exists deals_agent_scope on deals;
+create policy deals_agent_scope on deals for all to authenticated
+  using (id in (select app_visible_deal_ids()))
+  with check (
+    app_is_admin()
+    or agent_id in (select app_visible_agent_ids('deals'))
+    or id in (select app_visible_deal_ids())
+  );
+
+-- COMMISSIONS — follow the deal.
+drop policy if exists commissions_deal_scope on commissions;
+create policy commissions_deal_scope on commissions for all to authenticated
+  using      (deal_id in (select app_visible_deal_ids()))
+  with check (deal_id in (select app_visible_deal_ids()));
+
+-- DOCUMENTS — follow the deal; unattached uploads stay personal.
+drop policy if exists documents_deal_scope on documents;
+create policy documents_deal_scope on documents for all to authenticated
+  using (
+    app_is_admin()
+    or deal_id in (select app_visible_deal_ids())
+    or (deal_id is null and agent_id = app_current_agent_id())
+  )
+  with check (
+    app_is_admin()
+    or deal_id in (select app_visible_deal_ids())
+    or (deal_id is null and agent_id = app_current_agent_id())
+  );
+
+-- DOCUSIGN ENVELOPES — follow the deal; sender always sees their own.
+drop policy if exists docusign_envelopes_deal_scope on docusign_envelopes;
+create policy docusign_envelopes_deal_scope on docusign_envelopes for all to authenticated
+  using (
+    app_is_admin()
+    or deal_id in (select app_visible_deal_ids())
+    or agent_id = app_current_agent_id()
+  )
+  with check (
+    app_is_admin()
+    or deal_id in (select app_visible_deal_ids())
+    or agent_id = app_current_agent_id()
+  );
+
+-- TRANSACTION STEPS — follow the deal.
+drop policy if exists transaction_steps_deal_scope on transaction_steps;
+create policy transaction_steps_deal_scope on transaction_steps for all to authenticated
+  using      (deal_id in (select app_visible_deal_ids()))
+  with check (deal_id in (select app_visible_deal_ids()));
+
+-- DEADLINE REMINDERS — follow the deal (written by cron via service key).
+drop policy if exists deadline_reminders_deal_scope on deadline_reminders;
+create policy deadline_reminders_deal_scope on deadline_reminders for all to authenticated
+  using      (deal_id in (select app_visible_deal_ids()))
+  with check (deal_id in (select app_visible_deal_ids()));
+
+-- AGENT NOTIFICATIONS — strictly personal (written by APIs via service key).
+drop policy if exists agent_notifications_own on agent_notifications;
+create policy agent_notifications_own on agent_notifications for all to authenticated
+  using      (agent_id = app_current_agent_id())
+  with check (agent_id = app_current_agent_id());

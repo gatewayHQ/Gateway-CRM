@@ -1,5 +1,6 @@
 import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { fetchVisibleDeals } from '../lib/services/deals.js'
 import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2179,11 +2180,11 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   }, [visibleListings])
 
   const reload = useCallback(async () => {
-    let q = supabase.from('deals').select('*').order('created_at', { ascending: false })
-    if (!isAdmin && dealAgentIds?.length) q = q.in('agent_id', dealAgentIds)
-    const { data } = await q
+    const { data } = await fetchVisibleDeals(supabase, {
+      isAdmin, agentId: activeAgent?.id, dealAgentIds,
+    })
     setDb(p => ({ ...p, deals: data || [] }))
-  }, [setDb, isAdmin, dealAgentIds])
+  }, [setDb, isAdmin, dealAgentIds, activeAgent?.id])
 
   const del = useCallback(async (id) => {
     // Nullify deal_id on tasks before deletion to avoid FK constraint failures

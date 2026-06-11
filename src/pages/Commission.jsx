@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Avatar, Badge, Drawer, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatCurrency } from '../lib/helpers.js'
+import { fetchVisibleDeals, fetchVisibleCommissions } from '../lib/services/deals.js'
 import {
   computeCommission, normalizeCommission, breakdownForDeal,
   makeSide, makeParticipant, DEFAULTS,
@@ -677,7 +678,7 @@ function CategoryBreakdown({ closedDeals, calcFn }) {
 }
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
-export default function CommissionPage({ db, setDb, activeAgent }) {
+export default function CommissionPage({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
   const [drawer, setDrawer]           = useState(false)
   const [selectedDeal, setSelectedDeal] = useState(null)
   const [filterStage, setFilterStage] = useState('all')
@@ -738,11 +739,15 @@ export default function CommissionPage({ db, setDb, activeAgent }) {
       : { agent: 0, house: 0, cap: 0 }
   }
 
+  // Scoped exactly like the initial App.jsx load — a non-admin's refresh must
+  // not replace their scoped deals/commissions with firm-wide data.
   const reload = async () => {
-    const [dealsRes, commRes] = await Promise.all([
-      supabase.from('deals').select('*').order('created_at', { ascending: false }),
-      supabase.from('commissions').select('*'),
-    ])
+    const dealsRes = await fetchVisibleDeals(supabase, {
+      isAdmin, agentId: activeAgent?.id, dealAgentIds,
+    })
+    const commRes = await fetchVisibleCommissions(supabase, {
+      isAdmin, dealIds: (dealsRes.data || []).map(d => d.id),
+    })
     setDb(p => ({ ...p, deals: dealsRes.data||[], commissions: commRes.data||[], commissionsReady: !commRes.error }))
     pushToast('Refreshed')
   }
