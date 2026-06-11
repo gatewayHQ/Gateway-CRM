@@ -35,7 +35,7 @@ applied to production and the findings, so the repo's history matches reality.
 |------|------|--------|
 | 2026-06-10 | `2026-06-10_milestone0_phaseA.sql` | Built and validated against an exact replica (see `scripts/db-verify/production/`) — applied by Daniel via the SQL editor |
 | 2026-06-11 | (Phase B block from this README) | Applied by Daniel — per-agent enforcement is LIVE in production |
-| 2026-06-11 | `2026-06-11_milestone1_stage_tracks.sql` | **PENDING** — apply before/with the Milestone 1 app deploy (widens `deals.stage` for the new boards; `not valid`, so legacy rows are untouched) |
+| 2026-06-11 | `2026-06-11_milestone1_stage_tracks.sql` | Applied by Daniel — the track-aware stage tokens are accepted by production |
 
 The bundle: creates `documents` (secure from day one), adds the missing
 `docusign_envelopes` columns, adds `activities.deal_id`, adds the deal value /
