@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatCurrency, formatDate, formatPhone, STAGE_LABELS } from '../lib/helpers.js'
-import { TRACKS, trackForDeal, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
+import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
 import { DealDrawer } from './Pipeline.jsx'
 
@@ -109,7 +109,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   const contact  = deal?.contact_id ? contacts.find(c => c.id === deal.contact_id) : null
   const property = deal?.property_id ? properties.find(p => p.id === deal.property_id) : null
   const agent    = deal?.agent_id ? agents.find(a => a.id === deal.agent_id) : null
-  const track    = deal ? TRACKS[trackForDeal(deal)] : null
+  const track    = deal ? TRACKS[UNIFIED] : null
   const cd       = deal?.comp_data || {}
 
   const commission = (db.commissions || []).find(c => c.deal_id === dealId)
@@ -141,10 +141,12 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   // ── Actions ────────────────────────────────────────────────────────────────
   const setStage = async (newStage) => {
     if (!deal || newStage === deal.stage) return
-    const { error, status } = await withRetry(() => supabase.from('deals').update({ stage: newStage }).eq('id', deal.id))
+    // Stamp stage_since so days-in-stage / rotting stays accurate (no schema change)
+    const comp_data = { ...(deal.comp_data || {}), stage_since: new Date().toISOString() }
+    const { error, status } = await withRetry(() => supabase.from('deals').update({ stage: newStage, comp_data }).eq('id', deal.id))
     if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
-    setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, stage: newStage } : d) }))
-    setFetched(f => f && f.id === deal.id ? { ...f, stage: newStage } : f)
+    setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, stage: newStage, comp_data } : d) }))
+    setFetched(f => f && f.id === deal.id ? { ...f, stage: newStage, comp_data } : f)
     pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
     const auto = STAGE_AUTO_TASKS[newStage]
     if (!auto) return

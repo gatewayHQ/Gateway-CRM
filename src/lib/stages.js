@@ -32,6 +32,14 @@ export const STAGE_LABELS = {
 }
 
 export const TRACKS = {
+  // The single board every deal lives on (decided 2026-06-12: no res/comm
+  // split — one pipeline, with List/Focus views layered on top).
+  unified: {
+    id: 'unified',
+    label: 'Pipeline',
+    stages: ['lead', 'qualified', 'showing', 'offer', 'under-contract', 'closed', 'lost'],
+  },
+  // Retained for data mapping (deals stored with these tokens still resolve)
   commercial: {
     id: 'commercial',
     label: 'Commercial',
@@ -49,6 +57,7 @@ export const TRACKS = {
   },
 }
 
+export const UNIFIED = 'unified'
 export const TRACK_ORDER = ['commercial', 'residential-buyer', 'residential-seller']
 
 // Every storable stage token — drives the deals.stage CHECK constraint
@@ -72,6 +81,13 @@ export function trackForDeal(deal) {
 // Nearest-column maps for stage tokens foreign to a track. Used for display
 // grouping only — a deal's stored stage changes only when dragged.
 const FOREIGN_STAGE_MAP = {
+  // The unified board: every commercial/seller token lands in the nearest
+  // legacy column so no deal vanishes when viewed on the single pipeline.
+  unified: {
+    pursuit: 'lead', 'om-marketing': 'qualified', 'listing-agreement': 'qualified',
+    'pre-list': 'qualified', 'on-market': 'showing', active: 'showing',
+    loi: 'offer', psa: 'under-contract', 'due-diligence': 'under-contract',
+  },
   commercial: {
     lead: 'pursuit', qualified: 'pursuit', showing: 'om-marketing',
     'pre-list': 'listing-agreement', active: 'on-market', offer: 'loi',
