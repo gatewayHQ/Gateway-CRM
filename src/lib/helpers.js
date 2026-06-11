@@ -28,10 +28,11 @@ export const getInitials = (firstName, lastName) => {
 
 export const contactFullName = (c) => c ? `${c.first_name} ${c.last_name}` : '—'
 
-export const STAGE_LABELS = {
-  lead: 'Lead', qualified: 'Qualified', showing: 'Showing',
-  offer: 'Offer', 'under-contract': 'Under Contract', closed: 'Closed', lost: 'Lost'
-}
+// Stage definitions live in stages.js (track-aware since Milestone 1);
+// re-exported here so existing imports keep working. STAGE_ORDER remains the
+// legacy residential-buyer-shaped list used by older consumers (QuickAdd,
+// Dashboard funnel) until they go track-aware.
+export { STAGE_LABELS } from './stages.js'
 
 export const STAGE_ORDER = ['lead','qualified','showing','offer','under-contract','closed','lost']
 
@@ -67,8 +68,9 @@ export const calcHeatScore = (contact, activities, deals) => {
   else if (acts.some(a => new Date(a.created_at) > d30)) score += 1
   const activeDeal = contactDeals.find(d => !['closed','lost'].includes(d.stage))
   if (activeDeal) {
-    if      (['offer','under-contract'].includes(activeDeal.stage)) score += 4
-    else if (['showing','qualified'].includes(activeDeal.stage))    score += 2
+    // late-stage tokens from every track (res buyer/seller + commercial)
+    if      (['offer','under-contract','loi','psa','due-diligence'].includes(activeDeal.stage)) score += 4
+    else if (['showing','qualified','active','on-market','om-marketing'].includes(activeDeal.stage)) score += 2
     else                                                             score += 1
   }
   if (contact.last_contacted_at) {

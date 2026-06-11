@@ -8,6 +8,7 @@ const Dashboard        = React.lazy(() => import('./pages/Dashboard.jsx'))
 const ContactsPage     = React.lazy(() => import('./pages/Contacts.jsx'))
 const PropertiesPage   = React.lazy(() => import('./pages/Properties.jsx'))
 const PipelinePage     = React.lazy(() => import('./pages/Pipeline.jsx'))
+const DealPage         = React.lazy(() => import('./pages/DealPage.jsx'))
 const TasksPage        = React.lazy(() => import('./pages/Tasks.jsx'))
 const MessagesPage     = React.lazy(() => import('./pages/Messages.jsx'))
 const CommissionPage   = React.lazy(() => import('./pages/Commission.jsx'))
@@ -494,7 +495,7 @@ export default function App() {
         <nav className="sidebar__nav" aria-label="Main navigation">
           {/* ── Core ── */}
           {NAV_CORE.filter(n => !(isAdmin && n.id === 'contacts') && !hiddenNav.includes(n.id)).map(n => (
-            <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}`}
+            <div key={n.id} className={`nav-item${route === n.id || (n.id === 'pipeline' && route.startsWith('deal/')) ? ' active' : ''}`}
               onClick={() => setRoute(n.id)} title={n.label}
               role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
               <Icon name={n.icon} size={16} />
@@ -670,6 +671,7 @@ export default function App() {
           {route === 'contacts'   && <ContactsPage {...props} />}
           {route === 'properties' && <PropertiesPage {...props} />}
           {route === 'pipeline'   && <PipelinePage {...props} isAdmin={isAdmin} />}
+          {route.startsWith('deal/') && <DealPage {...props} dealId={route.slice(5)} />}
           {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
           {route === 'campaigns'  && <CampaignsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
           {route === 'commission' && <CommissionPage {...props} />}

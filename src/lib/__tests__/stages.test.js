@@ -1,0 +1,85 @@
+import { describe, it, expect } from 'vitest'
+import {
+  TRACKS, TRACK_ORDER, STAGE_LABELS, ALL_DEAL_STAGES,
+  trackForDeal, boardStageFor, isOpenStage,
+} from '../stages.js'
+
+describe('track definitions', () => {
+  it('every track stage has a label and is a storable token', () => {
+    for (const trackId of TRACK_ORDER) {
+      for (const s of TRACKS[trackId].stages) {
+        expect(STAGE_LABELS[s], `label for ${s}`).toBeTruthy()
+        expect(ALL_DEAL_STAGES, `${s} in ALL_DEAL_STAGES`).toContain(s)
+      }
+    }
+  })
+
+  it('every track ends with closed and lost', () => {
+    for (const trackId of TRACK_ORDER) {
+      const stages = TRACKS[trackId].stages
+      expect(stages.slice(-2)).toEqual(['closed', 'lost'])
+    }
+  })
+
+  it('commercial follows the decided order (OM before listing agreement)', () => {
+    const s = TRACKS.commercial.stages
+    expect(s.indexOf('om-marketing')).toBeLessThan(s.indexOf('listing-agreement'))
+    expect(s.indexOf('loi')).toBeLessThan(s.indexOf('psa'))
+    expect(s.indexOf('psa')).toBeLessThan(s.indexOf('due-diligence'))
+  })
+})
+
+describe('trackForDeal', () => {
+  it('commercial deals go to the commercial board regardless of side', () => {
+    expect(trackForDeal({ prop_category: 'commercial' })).toBe('commercial')
+    expect(trackForDeal({ prop_category: 'commercial', comp_data: { transaction_type: 'seller' } })).toBe('commercial')
+  })
+
+  it('residential deals split by the Forms-tab side field', () => {
+    expect(trackForDeal({ prop_category: 'residential', comp_data: { transaction_type: 'seller' } })).toBe('residential-seller')
+    expect(trackForDeal({ prop_category: 'residential', comp_data: { transaction_type: 'buyer' } })).toBe('residential-buyer')
+  })
+
+  it('legacy deals without category or side default to the buyer board (legacy stage shape)', () => {
+    expect(trackForDeal({ stage: 'showing' })).toBe('residential-buyer')
+    expect(trackForDeal({ prop_category: null, comp_data: null })).toBe('residential-buyer')
+  })
+})
+
+describe('boardStageFor', () => {
+  it('native stages pass through untouched', () => {
+    expect(boardStageFor({ stage: 'loi' }, 'commercial')).toBe('loi')
+    expect(boardStageFor({ stage: 'pre-list' }, 'residential-seller')).toBe('pre-list')
+  })
+
+  it('every storable token maps to a valid column on every board (no deal can vanish)', () => {
+    for (const trackId of TRACK_ORDER) {
+      for (const s of ALL_DEAL_STAGES) {
+        const col = boardStageFor({ stage: s }, trackId)
+        expect(TRACKS[trackId].stages, `${s} on ${trackId}`).toContain(col)
+      }
+    }
+  })
+
+  it('legacy commercial deals land where the workflow expects', () => {
+    expect(boardStageFor({ stage: 'lead' }, 'commercial')).toBe('pursuit')
+    expect(boardStageFor({ stage: 'under-contract' }, 'commercial')).toBe('psa')
+    expect(boardStageFor({ stage: 'offer' }, 'commercial')).toBe('loi')
+  })
+
+  it('closed/lost stay terminal on every board', () => {
+    for (const trackId of TRACK_ORDER) {
+      expect(boardStageFor({ stage: 'closed' }, trackId)).toBe('closed')
+      expect(boardStageFor({ stage: 'lost' }, trackId)).toBe('lost')
+    }
+  })
+})
+
+describe('isOpenStage', () => {
+  it('only closed and lost are terminal', () => {
+    expect(isOpenStage('closed')).toBe(false)
+    expect(isOpenStage('lost')).toBe(false)
+    expect(isOpenStage('due-diligence')).toBe(true)
+    expect(isOpenStage('lead')).toBe(true)
+  })
+})

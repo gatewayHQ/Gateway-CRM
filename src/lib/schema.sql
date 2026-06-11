@@ -105,9 +105,14 @@ create table if not exists deals (
   contact_id          uuid references contacts(id) on delete set null,
   property_id         uuid references properties(id) on delete set null,
   agent_id            uuid references agents(id) on delete set null,
+  -- stage tokens cover all three boards (src/lib/stages.js): shared/legacy,
+  -- the commercial track, and the residential seller track (Milestone 1)
   stage               text check (stage in (
                         'lead','qualified','showing','offer',
-                        'under-contract','closed','lost'
+                        'under-contract','closed','lost',
+                        'pursuit','om-marketing','listing-agreement','on-market',
+                        'loi','psa','due-diligence',
+                        'pre-list','active'
                       )) default 'lead',
   value               numeric constraint deals_value_nonneg
                         check (value is null or value >= 0),

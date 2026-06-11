@@ -34,6 +34,8 @@ applied to production and the findings, so the repo's history matches reality.
 | Date | File | Status |
 |------|------|--------|
 | 2026-06-10 | `2026-06-10_milestone0_phaseA.sql` | Built and validated against an exact replica (see `scripts/db-verify/production/`) — applied by Daniel via the SQL editor |
+| 2026-06-11 | (Phase B block from this README) | Applied by Daniel — per-agent enforcement is LIVE in production |
+| 2026-06-11 | `2026-06-11_milestone1_stage_tracks.sql` | Applied by Daniel — the track-aware stage tokens are accepted by production |
 
 The bundle: creates `documents` (secure from day one), adds the missing
 `docusign_envelopes` columns, adds `activities.deal_id`, adds the deal value /
@@ -96,3 +98,27 @@ psql -d prod_replica --single-transaction -f migrations/production/2026-06-10_mi
 psql -d prod_replica -f scripts/db-verify/production/replica_behavior.sql
 # expect: PASS ×17 and "ALL REPLICA BEHAVIOR TESTS PASSED"
 ```
+
+## ⚠️ The `supabase/migrations/` folder is LIVE-WIRED to production
+
+Discovered during PR #22 (2026-06-11): the Supabase GitHub integration
+auto-applies **new files** in `supabase/migrations/` to the **production
+database** when they reach `main`. This is how the four dated files got into
+production while the numbered `migrations/` folder never did — it solves the
+drift mystery.
+
+Consequences:
+
+1. **Never add a file to `supabase/migrations/` unless it is meant to run
+   against production unreviewed on merge.** In particular, do NOT add a
+   baseline/schema file there: `src/lib/schema.sql` recreates the `allow_all`
+   policy on `properties` (guarded by if-not-exists), which would re-open the
+   anonymous-write hole the 2026-06-10 bundle closed.
+2. **The "Supabase Preview" CI check fails on any PR that touches that folder
+   (or whose preview branch exists)** because the folder lacks a base schema,
+   so the empty shadow database can't apply the dated deltas ("relation deals
+   does not exist"). This is pre-existing, unrelated to PR content, and was
+   deliberately not fixed in PR #22. The proper fix — a carefully crafted
+   baseline that is safe against BOTH an empty shadow DB and production —
+   is future work; done right, it would give every PR a real preview database
+   and make DB changes deploy automatically on merge.
