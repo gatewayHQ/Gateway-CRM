@@ -200,12 +200,15 @@ async function handleGate(req, res) {
   }
 
   // Lead-capture record (already linked to the created/matched contact).
-  if (session_key && contactId) {
+  // ALWAYS written: the round-robin advances by reading the latest
+  // lead_captures row, so skipping this (the old session_key-only behavior)
+  // froze the rotation on one agent for plain website forms.
+  if (contactId) {
     await fetch(`${SUPABASE_URL}/rest/v1/lead_captures`, {
       method: 'POST',
       headers: { ...headers, Prefer: 'return=minimal' },
       body: JSON.stringify({
-        session_key,
+        session_key:          session_key || null,
         agent_id:             assignedAgentId,
         first_name:           resolvedFirst,
         last_name:            resolvedLast,
@@ -216,6 +219,56 @@ async function handleGate(req, res) {
         converted_contact_id: contactId,
       }),
     }).catch(() => {})
+  }
+
+  // Tell the assigned agent — instantly in-app (realtime channel already
+  // subscribed in App.jsx) and by email. Both best-effort: a notification
+  // failure must never lose the lead.
+  if (assignedAgentId) {
+    const leadName = `${resolvedFirst} ${resolvedLast}`.replace(/ —$/, '').trim()
+    const detail = [
+      property_address ? `Interested in ${property_address}` : null,
+      phone?.trim() ? `Phone: ${phone.trim()}` : null,
+      `Email: ${normalEmail}`,
+      message ? `"${message}"` : null,
+    ].filter(Boolean)
+
+    await fetch(`${SUPABASE_URL}/rest/v1/agent_notifications`, {
+      method: 'POST',
+      headers: { ...headers, Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        agent_id: assignedAgentId,
+        title:    `New website lead: ${leadName}`,
+        message:  detail.join(' · '),
+        type:     'lead',
+      }),
+    }).catch(() => {})
+
+    const RESEND_KEY = process.env.RESEND_API_KEY
+    if (RESEND_KEY) {
+      try {
+        const agentRes = await fetch(
+          `${SUPABASE_URL}/rest/v1/agents?id=eq.${assignedAgentId}&select=name,email&limit=1`,
+          { headers }
+        )
+        const [agentRow] = agentRes.ok ? await agentRes.json() : []
+        if (agentRow?.email) {
+          await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RESEND_KEY}` },
+            body: JSON.stringify({
+              from: process.env.RESEND_FROM || 'Gateway CRM <noreply@gatewayreadvisors.com>',
+              to: agentRow.email,
+              subject: `🔔 New website lead: ${leadName}`,
+              html: `<p>Hi ${agentRow.name?.split(' ')[0] || ''},</p>
+<p>A new website lead was just assigned to you:</p>
+<p><strong>${leadName}</strong><br/>${detail.join('<br/>')}</p>
+<p>They're in your CRM contacts now — reach out while it's hot.</p>`,
+            }),
+          })
+        }
+      } catch { /* email is best-effort */ }
+    }
   }
 
   return res.json({ ok: true, contactId, isNew, assignedAgentId })
