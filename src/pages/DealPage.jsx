@@ -112,21 +112,49 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   const track    = deal ? TRACKS[UNIFIED] : null
   const cd       = deal?.comp_data || {}
 
-  const commission = (db.commissions || []).find(c => c.deal_id === dealId)
+  // Commission numbers are back-office data (2026-06-12): admins compute from
+  // raw rows; everyone else gets ONLY their own slice from the server, so a
+  // co-agent's split never reaches this browser.
+  const commission = isAdmin ? (db.commissions || []).find(c => c.deal_id === dealId) : null
   const breakdown  = useMemo(
-    () => deal ? breakdownForDeal(deal, commission, agents) : null,
-    [deal, commission, agents]
+    () => (deal && isAdmin) ? breakdownForDeal(deal, commission, agents) : null,
+    [deal, commission, agents, isAdmin]
   )
-  // Everyone on the deal: owner + commission participants, deduped
+  const [mySlice, setMySlice] = useState(null)
+  useEffect(() => {
+    if (isAdmin || !dealId) return
+    let alive = true
+    ;(async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession()
+        if (!session?.access_token) return
+        const res = await fetch(`/api/portal?action=my-earnings&deal_id=${dealId}`, {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        })
+        const body = res.ok ? await res.json() : null
+        if (alive) setMySlice(body?.deals?.[0] || null)
+      } catch { /* slice is a nice-to-have on this card */ }
+    })()
+    return () => { alive = false }
+  }, [dealId, isAdmin])
+
+  // Everyone on the deal: owner + legacy co-agents, deduped (participants are
+  // admin-only data, so non-admins see owner + co_agent_ids)
   const team = useMemo(() => {
     if (!deal) return []
-    const ids = [deal.agent_id, ...(breakdown?.participants || []).map(p => p.agent_id)].filter(Boolean)
+    const ids = [
+      deal.agent_id,
+      ...(deal.co_agent_ids || []),
+      ...((breakdown?.participants || []).map(p => p.agent_id)),
+    ].filter(Boolean)
     return [...new Set(ids)].map(id => agents.find(a => a.id === id)).filter(Boolean)
   }, [deal, breakdown, agents])
   const myTake = useMemo(() => {
-    if (!breakdown || !activeAgent) return 0
-    return breakdown.participants.filter(p => p.agent_id === activeAgent.id).reduce((s, p) => s + p.agent_take, 0)
-  }, [breakdown, activeAgent])
+    if (isAdmin && breakdown && activeAgent) {
+      return breakdown.participants.filter(p => p.agent_id === activeAgent.id).reduce((s, p) => s + p.agent_take, 0)
+    }
+    return mySlice?.take || 0
+  }, [breakdown, activeAgent, isAdmin, mySlice])
 
   const dealActivities = useMemo(
     () => (db.activities || []).filter(a => a.deal_id === dealId),
@@ -364,10 +392,15 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
                 {!team.length && !agent && <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>Unassigned</div>}
               </div>
             </div>
-            {breakdown && (deal.value > 0) && (
+            {isAdmin && breakdown && (deal.value > 0) && (
               <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8, display: 'flex', gap: 16, fontSize: 12 }}>
                 <span>Gross comm: <strong>{formatCurrency(breakdown.gross_total)}</strong></span>
-                {myTake > 0 && <span style={{ color: 'var(--gw-green)' }}>Your take: <strong>{formatCurrency(myTake)}</strong></span>}
+              </div>
+            )}
+            {!isAdmin && myTake > 0 && (
+              <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8, fontSize: 12, color: 'var(--gw-green)' }}>
+                Your take: <strong>{formatCurrency(myTake)}</strong>
+                <span style={{ color: 'var(--gw-mist)' }}> · your slice only — splits are managed by the office</span>
               </div>
             )}
           </div>

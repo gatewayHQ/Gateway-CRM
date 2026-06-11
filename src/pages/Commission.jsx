@@ -3,6 +3,8 @@ import { supabase } from '../lib/supabase.js'
 import { Icon, Avatar, Badge, Drawer, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatCurrency } from '../lib/helpers.js'
 import { fetchVisibleDeals, fetchVisibleCommissions } from '../lib/services/deals.js'
+import MyEarnings from './MyEarnings.jsx'
+import { BrokerageReport, CapsEditor } from './BackOffice.jsx'
 import {
   computeCommission, normalizeCommission, breakdownForDeal,
   makeSide, makeParticipant, DEFAULTS,
@@ -678,7 +680,15 @@ function CategoryBreakdown({ closedDeals, calcFn }) {
 }
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
+// Back office (2026-06-12): admins get the full tracker + brokerage report +
+// caps management; every other agent gets My Earnings — their own slice only.
 export default function CommissionPage({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
+  if (!isAdmin) return <MyEarnings activeAgent={activeAgent} />
+  return <AdminBackOffice db={db} setDb={setDb} activeAgent={activeAgent} isAdmin={isAdmin} dealAgentIds={dealAgentIds} />
+}
+
+function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
+  const [boTab, setBoTab]             = useState('tracker')
   const [drawer, setDrawer]           = useState(false)
   const [selectedDeal, setSelectedDeal] = useState(null)
   const [filterStage, setFilterStage] = useState('all')
@@ -688,9 +698,9 @@ export default function CommissionPage({ db, setDb, activeAgent, isAdmin, dealAg
   const [celebration, setCelebration] = useState(false)
   const [prevCapHit, setPrevCapHit]   = useState(false)
 
-  // Cap settings stored per-agent in localStorage
+  // Cap amount: database first (Agents & Caps tab), legacy localStorage fallback
   const capKey   = `gw_cap_${activeAgent?.id || 'default'}`
-  const [capAmt, setCapAmt] = useState(() => Number(localStorage.getItem(capKey) || 25000))
+  const [capAmt, setCapAmt] = useState(() => Number(activeAgent?.cap_amount ?? localStorage.getItem(capKey) ?? 25000))
 
   const saveCapAmt = (val) => { setCapAmt(val); localStorage.setItem(capKey, String(val)) }
 
@@ -832,12 +842,28 @@ export default function CommissionPage({ db, setDb, activeAgent, isAdmin, dealAg
     <div className="page-content">
       <div className="page-header">
         <div>
-          <div className="page-title">Commission Tracker</div>
-          <div className="page-sub">{deals.length} deals · {formatCurrency(deals.reduce((s,d)=>s+(d.value||0),0))} total pipeline</div>
+          <div className="page-title">Back Office</div>
+          <div className="page-sub">{deals.length} deals · {formatCurrency(deals.reduce((s,d)=>s+(d.value||0),0))} total pipeline · commissions are entered here and stay private per agent</div>
         </div>
-        <button className="btn btn--secondary btn--sm" onClick={reload}><Icon name="refresh" size={13} /> Refresh</button>
+        <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+          <div style={{ display:'flex', background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:3, gap:2 }}>
+            {[['tracker','Tracker'],['report','Brokerage Report'],['caps','Agents & Caps']].map(([id, label]) => (
+              <button key={id} onClick={() => setBoTab(id)} style={{
+                padding:'5px 14px', border:'none', borderRadius:'var(--radius)', cursor:'pointer',
+                fontFamily:'var(--font-body)', fontSize:12, fontWeight:600,
+                background: boTab === id ? 'var(--gw-slate)' : 'transparent',
+                color: boTab === id ? '#fff' : 'var(--gw-mist)', transition:'all 150ms ease',
+              }}>{label}</button>
+            ))}
+          </div>
+          {boTab === 'tracker' && <button className="btn btn--secondary btn--sm" onClick={reload}><Icon name="refresh" size={13} /> Refresh</button>}
+        </div>
       </div>
 
+      {boTab === 'report' && <BrokerageReport db={db} />}
+      {boTab === 'caps'   && <CapsEditor db={db} setDb={setDb} />}
+
+      {boTab === 'tracker' && (<>
       {/* ── Summary stats ── */}
       <div className="stats-grid" style={{ gridTemplateColumns:'repeat(4,1fr)', marginBottom:12 }}>
         <div className="stat-card">
@@ -1062,6 +1088,7 @@ export default function CommissionPage({ db, setDb, activeAgent, isAdmin, dealAg
           </div>
         </div>
       )}
+      </>)}
 
       {drawer && selectedDeal && (
         <CommissionDrawer open={drawer} onClose={()=>setDrawer(false)} deal={selectedDeal} commission={getComm(selectedDeal.id)} agents={agents} onSave={reload} />

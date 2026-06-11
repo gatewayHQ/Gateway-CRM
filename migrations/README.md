@@ -31,6 +31,7 @@ file is safe.
 | 0010 | `0010_deal_data_guards.sql` | Cleans and then CHECK-constrains `deals.value` (≥ 0) and `deals.probability` (0–100) so commission math can't be poisoned | Only for out-of-range rows (normally none — see the preview SELECTs in the file) | After 0008 |
 | 0011 | `0011_rls_deals_commissions.sql` | RLS for deals/commissions/documents/envelopes/steps per the decided visibility model (own + team-shared + co-listed; admin sees all). Its Phase B activates enforcement for 0002's tables too | **Phase A: no. Phase B: yes (activates ALL scoping)** | Last, with testing |
 | 0012 | `0012_deal_stage_tracks.sql` | Widens the `deals.stage` CHECK to the track-aware superset (commercial + residential buyer/seller boards, `src/lib/stages.js`) | No (constraint swap; superset includes every legacy token) | Before/with the Milestone 1 app deploy |
+| 0013 | `0013_back_office.sql` | Back office: `agents.cap_amount`/`cap_anniversary`, and commissions become ADMIN-ONLY at the DB level (agents get their slice via `/api/portal?action=my-earnings`) | **Yes — non-admins lose direct commission reads** | With the Back Office app deploy |
 
 > Note the numeric order vs. recommended run order: **0001 → 0003 → 0004 → 0005 → 0006 → 0007 → 0002 (Phase A) → 0008 → 0009 → 0010 → 0011 (Phase A, then Phase B after verification)**.
 > 0011's Phase B is the only step that changes what data the database returns,
