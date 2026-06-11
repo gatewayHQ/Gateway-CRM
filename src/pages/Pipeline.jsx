@@ -2,7 +2,11 @@ import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { fetchVisibleDeals } from '../lib/services/deals.js'
 import { formatCurrency, formatDate, STAGE_LABELS, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
-import { TRACKS, TRACK_ORDER, trackForDeal, boardStageFor, STAGE_AUTO_TASKS } from '../lib/stages.js'
+import { TRACKS, TRACK_ORDER, trackForDeal, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
+import {
+  weightedValue, daysInStage, isRotting, dealActivityState, nextKeyDate,
+  focusItems, pipelineTotals,
+} from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
@@ -2144,6 +2148,16 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const [editing, setEditing] = useState(null)
   const [defaultStage, setDefaultStage] = useState('lead')
   const [pipelineTab, setPipelineTab] = useState('deals')
+  // Board | List | Focus — remembered per agent; first visit defaults by specialty
+  // (commercial agents read few high-value deals best as a table).
+  const viewKey = `gw_deal_view_${activeAgent?.id || 'default'}`
+  const [dealView, setDealView] = useState(() => {
+    const saved = localStorage.getItem(viewKey)
+    if (['board', 'list', 'focus'].includes(saved)) return saved
+    return activeAgent?.specialty === 'commercial' ? 'list' : 'board'
+  })
+  const pickView = (v) => { setDealView(v); localStorage.setItem(viewKey, v) }
+  const [sortBy, setSortBy] = useState({ col: 'updated', dir: 'desc' })
   const [confirm, setConfirm] = useState(null)
   const [confirmProp, setConfirmProp] = useState(null)
   const [dragging, setDragging] = useState(null)
@@ -2156,6 +2170,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const agents     = db.agents     || []
   const contacts   = db.contacts   || []
   const properties = db.properties || []
+  const tasks      = db.tasks      || []
 
   // O(1) lookups — built once per data change, not per-card in render loop
   const contactMap  = useMemo(() => Object.fromEntries(contacts.map(c => [c.id, c])),   [contacts])
@@ -2213,6 +2228,54 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     })
     return { stageGroups: groups, stageTotals: totals, totalValue: total }
   }, [trackDeals, track, resolvedTrack])
+
+  // ── Intelligence bar: open-deal rollups for the active track ───────────────
+  const openTrackDeals = useMemo(() => trackDeals.filter(d => isOpenStage(d.stage)), [trackDeals])
+  const intel = useMemo(() => {
+    const t = pipelineTotals(openTrackDeals)
+    const now = new Date(); const eom = new Date(now.getFullYear(), now.getMonth() + 1, 0)
+    const closingThisMonth = openTrackDeals
+      .filter(d => d.expected_close_date && new Date(d.expected_close_date) <= eom)
+      .reduce((s, d) => s + (Number(d.value) || 0), 0)
+    return { ...t, closingThisMonth }
+  }, [openTrackDeals])
+
+  // ── List view: flat, sortable rows for the active track ────────────────────
+  const listRows = useMemo(() => {
+    const now = new Date()
+    const rows = trackDeals.map(d => {
+      const act = dealActivityState(d, tasks, now)
+      const kd  = nextKeyDate(d, now)
+      return {
+        deal: d, contact: contactMap[d.contact_id], agent: agentMap[d.agent_id],
+        weighted: weightedValue(d), dis: daysInStage(d, now), rotting: isRotting(d, now),
+        activity: act, keyDate: kd,
+      }
+    })
+    const dir = sortBy.dir === 'asc' ? 1 : -1
+    const val = (r) => {
+      switch (sortBy.col) {
+        case 'title':    return (r.deal.title || '').toLowerCase()
+        case 'stage':    return track.stages.indexOf(boardStageFor(r.deal, resolvedTrack))
+        case 'value':    return Number(r.deal.value) || 0
+        case 'weighted': return r.weighted
+        case 'close':    return r.deal.expected_close_date ? new Date(r.deal.expected_close_date).getTime() : Infinity * dir
+        case 'keydate':  return r.keyDate ? r.keyDate.daysUntil : Infinity * dir
+        case 'stale':    return r.dis ?? -1
+        default:         return new Date(r.deal.updated_at || r.deal.created_at || 0).getTime()
+      }
+    }
+    return rows.sort((a, b) => {
+      const av = val(a), bv = val(b)
+      if (typeof av === 'string') return av.localeCompare(bv) * dir
+      return (av - bv) * dir
+    })
+  }, [trackDeals, tasks, contactMap, agentMap, sortBy, track, resolvedTrack])
+  const toggleSort = (col) => setSortBy(s => s.col === col ? { col, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: col === 'title' ? 'asc' : 'desc' })
+
+  // ── Focus view: cross-track "needs attention today" ───────────────────────
+  const focus = useMemo(() => focusItems(visibleDeals, tasks, new Date()), [visibleDeals, tasks])
+  const focusCount = focus.length
 
   // Listings board — filter by agent if needed, group by property status
   const visibleListings = useMemo(() => {
@@ -2294,15 +2357,17 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     setDrawer(true)
   }, [deals, activeAgent])
 
-  // updated_at omitted — handled by DB trigger
+  // updated_at omitted — handled by DB trigger. We stamp comp_data.stage_since
+  // so "days in stage" / rotting is precise going forward (no schema change).
   const moveStage = useCallback(async (dealId, newStage) => {
-    await supabase.from('deals').update({ stage: newStage }).eq('id', dealId)
-    setDb(p => ({ ...p, deals: p.deals.map(d => d.id === dealId ? { ...d, stage: newStage } : d) }))
+    const deal = deals.find(d => d.id === dealId)
+    const comp_data = { ...(deal?.comp_data || {}), stage_since: new Date().toISOString() }
+    await supabase.from('deals').update({ stage: newStage, comp_data }).eq('id', dealId)
+    setDb(p => ({ ...p, deals: p.deals.map(d => d.id === dealId ? { ...d, stage: newStage, comp_data } : d) }))
     pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
 
     const auto = AUTO_TASKS[newStage]
     if (!auto) return
-    const deal = deals.find(d => d.id === dealId)
     if (!deal) return
     const due = new Date()
     due.setDate(due.getDate() + auto.daysOut)
@@ -2343,12 +2408,36 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
             </div>
           </div>
           {pipelineTab === 'deals'
-            ? <div className="page-sub">{track.label} board · {trackDeals.length} deal{trackDeals.length !== 1 ? 's' : ''} · {formatCurrency(totalValue)} total value</div>
+            ? (dealView === 'focus'
+                ? <div className="page-sub">{focusCount === 0 ? 'Nothing needs attention right now — you’re clear.' : `${focusCount} item${focusCount !== 1 ? 's' : ''} need attention across all your open deals`}</div>
+                : <div className="page-sub">
+                    {track.label} · {intel.count} open · {formatCurrency(intel.value)} value
+                    {' · '}<strong style={{ color: 'var(--gw-ink)' }}>{formatCurrency(intel.weighted)}</strong> weighted
+                    {intel.closingThisMonth > 0 && <> · {formatCurrency(intel.closingThisMonth)} closing this month</>}
+                  </div>)
             : <div className="page-sub">Your property inventory by status · {visibleListings.length} listing{visibleListings.length !== 1 ? 's' : ''} · {formatCurrency(totalListingValue)} listed</div>
           }
         </div>
-        <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+        <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
           {pipelineTab === 'deals' && (
+            <div style={{ display:'flex', background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:3, gap:2 }}>
+              {[['board','Board'],['list','List'],['focus','Focus']].map(([id, label]) => (
+                <button key={id} onClick={() => pickView(id)} style={{
+                  padding:'5px 12px', border:'none', borderRadius:'var(--radius)', cursor:'pointer',
+                  fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, display:'flex', alignItems:'center', gap:6,
+                  background: dealView === id ? 'var(--gw-slate)' : 'transparent',
+                  color: dealView === id ? '#fff' : 'var(--gw-mist)', transition:'all 150ms ease',
+                }}>
+                  {label}
+                  {id === 'focus' && focusCount > 0 && (
+                    <span style={{ fontSize:10, fontWeight:700, padding:'0 6px', borderRadius:8, lineHeight:'16px',
+                      background: dealView === id ? 'rgba(255,255,255,0.22)' : '#fde2e2', color: dealView === id ? '#fff' : '#dc2626' }}>{focusCount}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+          {pipelineTab === 'deals' && dealView !== 'focus' && (
             <div style={{ display:'flex', background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:3, gap:2 }}>
               {TRACK_ORDER.map(t => (
                 <button key={t} onClick={() => pickTrack(t)} style={{
@@ -2390,7 +2479,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
         </div>
       </div>
 
-      {pipelineTab === 'deals' && (
+      {pipelineTab === 'deals' && dealView === 'board' && (
         deals.length === 0 ? (
           <EmptyState icon="pipeline" title="No deals yet" message="Add your first deal to start tracking your pipeline." action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Deal</button>} />
         ) : (
@@ -2421,6 +2510,10 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                     const overdue    = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
                     const urgency    = getKeyDateUrgency(deal)
                     const nearestKD  = urgency ? getNearestKeyDate(deal) : null
+                    const act        = dealActivityState(deal, tasks)
+                    const rotting    = isRotting(deal)
+                    const dis        = daysInStage(deal)
+                    const wtd        = weightedValue(deal)
                     const cardBorder = urgency === 'urgent' ? '2px solid #ef4444' : urgency === 'warning' ? '2px solid #f59e0b' : undefined
                     const cardBg     = urgency === 'urgent' ? '#fef2f2' : urgency === 'warning' ? '#fffbeb' : undefined
                     return (
@@ -2437,7 +2530,12 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                             <span>{nearestKD.type}: {nearestKD.daysUntil === 0 ? 'Today' : nearestKD.daysUntil === 1 ? 'Tomorrow' : `${nearestKD.daysUntil} days`}</span>
                           </div>
                         )}
-                        <div className="deal-card__title">{deal.title}</div>
+                        <div style={{ display:'flex', alignItems:'flex-start', gap:6 }}>
+                          <span title={act.state === 'overdue' ? `Task overdue ${act.overdueBy}d` : act.state === 'scheduled' ? 'Next step scheduled' : 'No next step planned'}
+                            style={{ width:8, height:8, borderRadius:'50%', flexShrink:0, marginTop:4,
+                              background: act.color, boxShadow: act.state === 'none' ? 'inset 0 0 0 1px var(--gw-border)' : undefined }} />
+                          <div className="deal-card__title" style={{ flex:1 }}>{deal.title}</div>
+                        </div>
                         {isAdmin && agent && (
                           <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:2 }}>
                             <Avatar agent={agent} size={14} />
@@ -2445,7 +2543,19 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                           </div>
                         )}
                         {contact && <div className="deal-card__contact">{contact.first_name} {contact.last_name}</div>}
-                        {deal.value > 0 && <div className="deal-card__value">{formatCurrency(deal.value)}</div>}
+                        {deal.value > 0 && (
+                          <div className="deal-card__value">
+                            {formatCurrency(deal.value)}
+                            {deal.probability > 0 && deal.probability < 100 && (
+                              <span style={{ fontSize:10, fontWeight:500, color:'var(--gw-mist)', marginLeft:6 }}>wtd {formatCurrency(wtd)}</span>
+                            )}
+                          </div>
+                        )}
+                        {rotting && (
+                          <div style={{ display:'inline-flex', alignItems:'center', gap:3, marginTop:3, fontSize:10, fontWeight:700, color:'#b45309', background:'#fef3c7', padding:'1px 6px', borderRadius:6 }}>
+                            ⚠ Idle {dis}d
+                          </div>
+                        )}
                         <div className="deal-card__meta">
                           <div style={{ fontSize:11, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)' }}>
                             {deal.expected_close_date ? formatDate(deal.expected_close_date) : ''}
@@ -2474,6 +2584,101 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                 </div>
               </div>
             ))}
+          </div>
+        )
+      )}
+
+      {/* ── LIST VIEW ── */}
+      {pipelineTab === 'deals' && dealView === 'list' && (
+        trackDeals.length === 0 ? (
+          <EmptyState icon="pipeline" title={`No ${track.label.toLowerCase()} deals`} message="Switch tracks above, or add a deal to this one." />
+        ) : (
+          <div style={{ flex:1, minHeight:0, overflow:'auto', border:'1px solid var(--gw-border)', borderRadius:'var(--radius-lg)', background:'#fff' }}>
+            <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
+              <thead>
+                <tr style={{ background:'var(--gw-bone)', textAlign:'left' }}>
+                  {[['', ''],['title','Deal'],['stage','Stage'],['value','Value'],['weighted','Weighted'],['close','Close'],['keydate','Next Key Date'],['stale','In Stage'],['agents','Team']].map(([col, label]) => (
+                    <th key={col || 'dot'} onClick={() => col && toggleSort(col)}
+                      style={{ padding:'9px 12px', fontSize:11, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:'0.05em',
+                        cursor: col ? 'pointer' : 'default', whiteSpace:'nowrap', userSelect:'none', position:'sticky', top:0, background:'var(--gw-bone)' }}>
+                      {label}{sortBy.col === col && col ? (sortBy.dir === 'asc' ? ' ▲' : ' ▼') : ''}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {listRows.map(({ deal, contact, weighted, dis, rotting, activity, keyDate }) => {
+                  const col = boardStageFor(deal, resolvedTrack)
+                  const teamAgents = [deal.agent_id, ...((propertyMap[deal.property_id]?.details?.co_agent_ids) || [])]
+                    .filter(Boolean).map(id => agentMap[id]).filter(Boolean)
+                    .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
+                  const kdColor = keyDate == null ? 'var(--gw-mist)' : keyDate.daysUntil <= 2 ? '#dc2626' : keyDate.daysUntil <= 7 ? '#d97706' : 'var(--gw-ink)'
+                  return (
+                    <tr key={deal.id} onClick={() => go(`deal/${deal.id}`)}
+                      style={{ borderTop:'1px solid var(--gw-border)', cursor:'pointer' }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'var(--gw-bone)'}
+                      onMouseLeave={e => e.currentTarget.style.background = ''}>
+                      <td style={{ padding:'9px 12px' }}>
+                        <span title={activity.state === 'overdue' ? `Overdue ${activity.overdueBy}d` : activity.state === 'scheduled' ? 'Next step scheduled' : 'No next step'}
+                          style={{ display:'inline-block', width:8, height:8, borderRadius:'50%', background:activity.color, boxShadow: activity.state === 'none' ? 'inset 0 0 0 1px var(--gw-border)' : undefined }} />
+                      </td>
+                      <td style={{ padding:'9px 12px', maxWidth:260 }}>
+                        <div style={{ fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{deal.title}</div>
+                        {contact && <div style={{ fontSize:11, color:'var(--gw-mist)' }}>{contact.first_name} {contact.last_name}</div>}
+                      </td>
+                      <td style={{ padding:'9px 12px', whiteSpace:'nowrap' }}><Badge variant={col === 'closed' ? 'closed' : col === 'lost' ? 'lost' : 'lead'}>{STAGE_LABELS[col]}</Badge></td>
+                      <td style={{ padding:'9px 12px', whiteSpace:'nowrap', fontWeight:600 }}>{deal.value > 0 ? formatCurrency(deal.value) : '—'}</td>
+                      <td style={{ padding:'9px 12px', whiteSpace:'nowrap', color:'var(--gw-mist)' }}>{deal.value > 0 ? formatCurrency(weighted) : '—'}</td>
+                      <td style={{ padding:'9px 12px', whiteSpace:'nowrap' }}>{deal.expected_close_date ? formatDate(deal.expected_close_date) : '—'}</td>
+                      <td style={{ padding:'9px 12px', whiteSpace:'nowrap', color:kdColor, fontWeight: keyDate && keyDate.daysUntil <= 7 ? 700 : 400 }}>
+                        {keyDate ? `${keyDate.type} · ${keyDate.daysUntil === 0 ? 'today' : keyDate.daysUntil === 1 ? '1d' : `${keyDate.daysUntil}d`}` : '—'}
+                      </td>
+                      <td style={{ padding:'9px 12px', whiteSpace:'nowrap', color: rotting ? '#b45309' : 'var(--gw-mist)', fontWeight: rotting ? 700 : 400 }}>
+                        {dis == null ? '—' : `${dis}d`}{rotting ? ' ⚠' : ''}
+                      </td>
+                      <td style={{ padding:'9px 12px' }}>
+                        <div style={{ display:'flex' }}>
+                          {teamAgents.slice(0, 3).map((a, i) => (
+                            <div key={a.id} style={{ marginLeft: i > 0 ? -5 : 0, zIndex: 10 - i, position:'relative' }}><Avatar agent={a} size={20} /></div>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )
+      )}
+
+      {/* ── FOCUS VIEW ── */}
+      {pipelineTab === 'deals' && dealView === 'focus' && (
+        focus.length === 0 ? (
+          <EmptyState icon="check" title="You're all clear" message="No overdue tasks, looming deadlines, or stalled deals across your pipeline. Nice." />
+        ) : (
+          <div style={{ flex:1, minHeight:0, overflow:'auto', display:'flex', flexDirection:'column', gap:8, maxWidth:760, paddingRight:4 }}>
+            {focus.map((item, i) => {
+              const dot = item.severity === 'critical' ? '#dc2626' : '#d97706'
+              const icon = item.kind === 'task' ? '⏰' : item.kind === 'date' ? '📅' : '⚠'
+              return (
+                <div key={`${item.deal.id}-${item.kind}-${i}`} onClick={() => go(`deal/${item.deal.id}`)}
+                  className="card" style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 16px', cursor:'pointer', borderLeft:`3px solid ${dot}` }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'var(--gw-bone)'}
+                  onMouseLeave={e => e.currentTarget.style.background = ''}>
+                  <span style={{ fontSize:18 }}>{icon}</span>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{item.deal.title}</div>
+                    <div style={{ fontSize:12, color: item.severity === 'critical' ? '#dc2626' : '#b45309', fontWeight:600 }}>
+                      {item.label}{item.detail ? <span style={{ color:'var(--gw-mist)', fontWeight:400 }}> — {item.detail}</span> : ''}
+                    </div>
+                  </div>
+                  <Badge variant={TRACKS[trackForDeal(item.deal)].id === 'commercial' ? 'commercial' : 'residential'}>
+                    {STAGE_LABELS[item.deal.stage] || item.deal.stage}
+                  </Badge>
+                </div>
+              )
+            })}
           </div>
         )
       )}

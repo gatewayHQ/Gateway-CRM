@@ -141,10 +141,12 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   // ── Actions ────────────────────────────────────────────────────────────────
   const setStage = async (newStage) => {
     if (!deal || newStage === deal.stage) return
-    const { error, status } = await withRetry(() => supabase.from('deals').update({ stage: newStage }).eq('id', deal.id))
+    // Stamp stage_since so days-in-stage / rotting stays accurate (no schema change)
+    const comp_data = { ...(deal.comp_data || {}), stage_since: new Date().toISOString() }
+    const { error, status } = await withRetry(() => supabase.from('deals').update({ stage: newStage, comp_data }).eq('id', deal.id))
     if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
-    setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, stage: newStage } : d) }))
-    setFetched(f => f && f.id === deal.id ? { ...f, stage: newStage } : f)
+    setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, stage: newStage, comp_data } : d) }))
+    setFetched(f => f && f.id === deal.id ? { ...f, stage: newStage, comp_data } : f)
     pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
     const auto = STAGE_AUTO_TASKS[newStage]
     if (!auto) return
