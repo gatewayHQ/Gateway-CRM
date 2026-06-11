@@ -83,3 +83,21 @@ describe('isOpenStage', () => {
     expect(isOpenStage('lead')).toBe(true)
   })
 })
+
+describe('unified board (2026-06-12: single pipeline, no res/comm split)', () => {
+  it('uses the original legacy stage columns', () => {
+    expect(TRACKS.unified.stages).toEqual(['lead','qualified','showing','offer','under-contract','closed','lost'])
+  })
+  it('maps every storable token onto a unified column (no deal can vanish)', () => {
+    for (const s of ALL_DEAL_STAGES) {
+      const col = boardStageFor({ stage: s }, 'unified')
+      expect(TRACKS.unified.stages, `${s} on unified`).toContain(col)
+    }
+  })
+  it('maps track-split-era tokens to sensible columns', () => {
+    expect(boardStageFor({ stage: 'loi' }, 'unified')).toBe('offer')
+    expect(boardStageFor({ stage: 'psa' }, 'unified')).toBe('under-contract')
+    expect(boardStageFor({ stage: 'due-diligence' }, 'unified')).toBe('under-contract')
+    expect(boardStageFor({ stage: 'pursuit' }, 'unified')).toBe('lead')
+  })
+})

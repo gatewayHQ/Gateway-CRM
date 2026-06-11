@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatCurrency, formatDate, formatPhone, STAGE_LABELS } from '../lib/helpers.js'
-import { TRACKS, trackForDeal, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
+import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
 import { DealDrawer } from './Pipeline.jsx'
 
@@ -109,7 +109,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   const contact  = deal?.contact_id ? contacts.find(c => c.id === deal.contact_id) : null
   const property = deal?.property_id ? properties.find(p => p.id === deal.property_id) : null
   const agent    = deal?.agent_id ? agents.find(a => a.id === deal.agent_id) : null
-  const track    = deal ? TRACKS[trackForDeal(deal)] : null
+  const track    = deal ? TRACKS[UNIFIED] : null
   const cd       = deal?.comp_data || {}
 
   const commission = (db.commissions || []).find(c => c.deal_id === dealId)
