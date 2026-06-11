@@ -1,7 +1,8 @@
 import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { fetchVisibleDeals } from '../lib/services/deals.js'
-import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
+import { formatCurrency, formatDate, STAGE_LABELS, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
+import { TRACKS, TRACK_ORDER, trackForDeal, boardStageFor } from '../lib/stages.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
@@ -1775,6 +1776,18 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
   const setCD = (k, v) => setForm(p => ({...p, comp_data: {...(p.comp_data||{}), [k]: v}}))
   const cd = form.comp_data || {}
 
+  // The stage list follows the deal's track (commercial / res buyer / res
+  // seller). Changing category or side snaps an out-of-track stage to the
+  // nearest column so the select never shows an invalid value.
+  const formTrack  = trackForDeal(form)
+  const formStages = TRACKS[formTrack].stages
+  const applyTrackChange = (patch) => setForm(p => {
+    const next = { ...p, ...patch, comp_data: { ...(p.comp_data || {}), ...(patch.comp_data || {}) } }
+    const t = trackForDeal(next)
+    if (!TRACKS[t].stages.includes(next.stage)) next.stage = boardStageFor(next, t)
+    return next
+  })
+
   const COMM_SUBTYPES = ['multifamily','office','land','retail','industrial','mixed-use']
 
   const save = async () => {
@@ -1843,7 +1856,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
               <label className="form-label">Property Category</label>
               <div style={{ display:'flex', gap:0, border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
                 {['residential','commercial'].map(cat => (
-                  <button key={cat} type="button" onClick={() => { set('prop_category', cat); if (cat==='residential') set('prop_subtype','') }}
+                  <button key={cat} type="button" onClick={() => applyTrackChange({ prop_category: cat, ...(cat === 'residential' ? { prop_subtype: '' } : {}) })}
                     style={{ flex:1, padding:'7px 0', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, transition:'all 150ms',
                       background: form.prop_category === cat ? 'var(--gw-slate)' : '#fff',
                       color:      form.prop_category === cat ? '#fff'            : 'var(--gw-mist)' }}>
@@ -1852,6 +1865,28 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
                 ))}
               </div>
             </div>
+
+            {/* Residential: which side of the deal we represent — decides the
+                buyer/seller board and stage track. Shares the Forms tab's
+                comp_data.transaction_type field. */}
+            {form.prop_category !== 'commercial' && (
+              <div className="form-group">
+                <label className="form-label">Representing</label>
+                <div style={{ display:'flex', gap:0, border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
+                  {[['buyer','Buyer'],['seller','Seller']].map(([side, label]) => {
+                    const selected = (cd.transaction_type === 'seller') === (side === 'seller')
+                    return (
+                      <button key={side} type="button" onClick={() => applyTrackChange({ comp_data: { transaction_type: side } })}
+                        style={{ flex:1, padding:'7px 0', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, transition:'all 150ms',
+                          background: selected ? 'var(--gw-slate)' : '#fff',
+                          color:      selected ? '#fff'            : 'var(--gw-mist)' }}>
+                        {label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Commercial subtype */}
             {form.prop_category === 'commercial' && (
@@ -1864,7 +1899,7 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
               </div>
             )}
 
-            <div className="form-group"><label className="form-label">Stage</label><select className="form-control" value={form.stage} onChange={e=>set('stage',e.target.value)}>{STAGE_ORDER.map(s=><option key={s} value={s}>{STAGE_LABELS[s]}</option>)}</select></div>
+            <div className="form-group"><label className="form-label">Stage</label><select className="form-control" value={formStages.includes(form.stage) ? form.stage : boardStageFor(form, formTrack)} onChange={e=>set('stage',e.target.value)}>{formStages.map(s=><option key={s} value={s}>{STAGE_LABELS[s]}</option>)}</select></div>
             <div className="form-row">
               <div className="form-group"><label className="form-label">Sale / Deal Value</label><input className="form-control" type="number" value={form.value||''} onChange={e=>set('value',e.target.value)} placeholder="0" /></div>
               <div className="form-group"><label className="form-label">Probability %</label><input className="form-control" type="number" min="0" max="100" value={form.probability||0} onChange={e=>set('probability',e.target.value)} /></div>
@@ -2012,11 +2047,22 @@ function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeA
 }
 
 const AUTO_TASKS = {
+  // shared / residential buyer
   qualified:        { title: d => `Schedule showing — ${d.title}`,            type: 'showing',   priority: 'high',   daysOut: 2 },
   showing:          { title: d => `Send post-showing follow-up — ${d.title}`, type: 'follow-up', priority: 'medium', daysOut: 1 },
   offer:            { title: d => `Prepare & submit offer — ${d.title}`,      type: 'document',  priority: 'high',   daysOut: 2 },
   'under-contract': { title: d => `Order inspection — ${d.title}`,            type: 'follow-up', priority: 'high',   daysOut: 5 },
   closed:           { title: d => `Request referral — ${d.title}`,            type: 'follow-up', priority: 'low',    daysOut: 7 },
+  // residential seller
+  'pre-list':       { title: d => `Prep listing: photos, comps, disclosures — ${d.title}`, type: 'document',  priority: 'high',   daysOut: 3 },
+  active:           { title: d => `Schedule open house / showings — ${d.title}`,           type: 'showing',   priority: 'medium', daysOut: 3 },
+  // commercial
+  'om-marketing':       { title: d => `Build OM & marketing package — ${d.title}`,         type: 'document',  priority: 'high',   daysOut: 3 },
+  'listing-agreement':  { title: d => `Collect signed listing agreement — ${d.title}`,     type: 'document',  priority: 'high',   daysOut: 2 },
+  'on-market':          { title: d => `Syndicate listing (Crexi/LoopNet) — ${d.title}`,    type: 'follow-up', priority: 'medium', daysOut: 2 },
+  loi:                  { title: d => `Review & respond to LOI — ${d.title}`,              type: 'document',  priority: 'high',   daysOut: 2 },
+  psa:                  { title: d => `Open escrow & order title — ${d.title}`,            type: 'document',  priority: 'high',   daysOut: 3 },
+  'due-diligence':      { title: d => `Track DD checklist & deadlines — ${d.title}`,       type: 'follow-up', priority: 'high',   daysOut: 2 },
 }
 
 const LISTING_STATUS_ORDER  = ['active','pending','off-market','sold','leased','cancelled']
@@ -2139,20 +2185,51 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     return deals.filter(d => d.agent_id === agentFilter)
   }, [deals, isAdmin, agentFilter])
 
-  // Single-pass O(n) grouping — replaces repeated stageDeals()/stageValue() calls per render
+  // ── Board track (Commercial / Res Buyers / Res Sellers) ────────────────────
+  // First visit defaults to wherever the agent's open deals live (specialty as
+  // the tie-breaker); after that, their last choice is remembered.
+  const trackKey = `gw_board_track_${activeAgent?.id || 'default'}`
+  const [boardTrack, setBoardTrack] = useState(() => {
+    const saved = localStorage.getItem(trackKey)
+    return TRACKS[saved] ? saved : null
+  })
+  const resolvedTrack = useMemo(() => {
+    if (boardTrack) return boardTrack
+    const counts = Object.fromEntries(TRACK_ORDER.map(t => [t, 0]))
+    deals.forEach(d => { if (d.stage !== 'closed' && d.stage !== 'lost') counts[trackForDeal(d)]++ })
+    const busiest = TRACK_ORDER.reduce((a, b) => (counts[b] > counts[a] ? b : a), TRACK_ORDER[0])
+    if (counts[busiest] > 0) return busiest
+    return activeAgent?.specialty === 'commercial' ? 'commercial' : 'residential-buyer'
+  }, [boardTrack, deals, activeAgent?.specialty])
+  const pickTrack = (t) => { setBoardTrack(t); localStorage.setItem(trackKey, t) }
+
+  const track = TRACKS[resolvedTrack]
+  const trackDeals = useMemo(
+    () => visibleDeals.filter(d => trackForDeal(d) === resolvedTrack),
+    [visibleDeals, resolvedTrack]
+  )
+  // Per-track deal counts for the switcher badges
+  const trackCounts = useMemo(() => {
+    const counts = Object.fromEntries(TRACK_ORDER.map(t => [t, 0]))
+    visibleDeals.forEach(d => { if (d.stage !== 'closed' && d.stage !== 'lost') counts[trackForDeal(d)]++ })
+    return counts
+  }, [visibleDeals])
+
+  // Single-pass O(n) grouping into the active track's columns. Foreign stage
+  // tokens (legacy data) land in the nearest column via boardStageFor — the
+  // stored stage is rewritten only when the card is dragged.
   const { stageGroups, stageTotals, totalValue } = useMemo(() => {
-    const groups = Object.fromEntries(STAGE_ORDER.map(s => [s, []]))
-    const totals = Object.fromEntries(STAGE_ORDER.map(s => [s, 0]))
+    const groups = Object.fromEntries(track.stages.map(s => [s, []]))
+    const totals = Object.fromEntries(track.stages.map(s => [s, 0]))
     let total = 0
-    visibleDeals.forEach(d => {
-      if (groups[d.stage]) {
-        groups[d.stage].push(d)
-        totals[d.stage] += d.value || 0
-        total += d.value || 0
-      }
+    trackDeals.forEach(d => {
+      const col = boardStageFor(d, resolvedTrack)
+      groups[col].push(d)
+      totals[col] += d.value || 0
+      total += d.value || 0
     })
     return { stageGroups: groups, stageTotals: totals, totalValue: total }
-  }, [visibleDeals])
+  }, [trackDeals, track, resolvedTrack])
 
   // Listings board — filter by agent if needed, group by property status
   const visibleListings = useMemo(() => {
@@ -2216,8 +2293,8 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const openListing = useCallback((property) => {
     const linked = deals.filter(d => d.property_id === property.id)
     if (linked.length) {
-      // Prefer an in-progress deal; otherwise the most recent one.
-      setEditing(linked.find(d => d.stage === 'under-contract') || linked[0])
+      // Prefer an in-contract deal (either track's tokens); otherwise the most recent one.
+      setEditing(linked.find(d => ['under-contract','psa','due-diligence','loi'].includes(d.stage)) || linked[0])
     } else {
       // No deal yet — open a new one prefilled from the property. Saving it
       // unlocks the Documents & Signatures tabs (those need an existing deal).
@@ -2281,11 +2358,34 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
             </div>
           </div>
           {pipelineTab === 'deals'
-            ? <div className="page-sub">Active buyer &amp; seller transactions · {visibleDeals.length} open · {formatCurrency(totalValue)} total value</div>
+            ? <div className="page-sub">{track.label} board · {trackDeals.length} deal{trackDeals.length !== 1 ? 's' : ''} · {formatCurrency(totalValue)} total value</div>
             : <div className="page-sub">Your property inventory by status · {visibleListings.length} listing{visibleListings.length !== 1 ? 's' : ''} · {formatCurrency(totalListingValue)} listed</div>
           }
         </div>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+          {pipelineTab === 'deals' && (
+            <div style={{ display:'flex', background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:3, gap:2 }}>
+              {TRACK_ORDER.map(t => (
+                <button key={t} onClick={() => pickTrack(t)} style={{
+                  padding:'5px 12px', border:'none', borderRadius:'var(--radius)', cursor:'pointer',
+                  fontFamily:'var(--font-body)', fontSize:12, fontWeight:600,
+                  display:'flex', alignItems:'center', gap:6,
+                  background: resolvedTrack === t ? 'var(--gw-slate)' : 'transparent',
+                  color: resolvedTrack === t ? '#fff' : 'var(--gw-mist)',
+                  transition:'all 150ms ease',
+                }}>
+                  {TRACKS[t].label}
+                  {trackCounts[t] > 0 && (
+                    <span style={{
+                      fontSize:10, fontWeight:700, padding:'0 6px', borderRadius:8, lineHeight:'16px',
+                      background: resolvedTrack === t ? 'rgba(255,255,255,0.22)' : 'var(--gw-border)',
+                      color: resolvedTrack === t ? '#fff' : 'var(--gw-mist)',
+                    }}>{trackCounts[t]}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
           {isAdmin && (
             <select
               value={agentFilter}
@@ -2298,7 +2398,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
             </select>
           )}
           {!isAdmin && pipelineTab === 'deals' && (
-            <button className="btn btn--primary" onClick={() => { setEditing(null); setDefaultStage('lead'); setDrawer(true) }}>
+            <button className="btn btn--primary" onClick={() => { setEditing(null); setDefaultStage(track.stages[0]); setDrawer(true) }}>
               <Icon name="plus" size={14} /> Add Deal
             </button>
           )}
@@ -2310,7 +2410,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
           <EmptyState icon="pipeline" title="No deals yet" message="Add your first deal to start tracking your pipeline." action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Deal</button>} />
         ) : (
           <div className="kanban-board">
-            {STAGE_ORDER.map(stage => (
+            {track.stages.map(stage => (
               <div key={stage} className="kanban-col">
                 <div className="kanban-col__head">
                   <div>
@@ -2443,7 +2543,14 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
         )
       )}
 
-      <DealDrawer open={drawer} onClose={() => setDrawer(false)} deal={editing ? editing : { stage: defaultStage }} agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} onSave={reload} />
+      <DealDrawer open={drawer} onClose={() => setDrawer(false)}
+        deal={editing ? editing : {
+          // New deal inherits the board it was started from
+          stage: defaultStage,
+          prop_category: resolvedTrack === 'commercial' ? 'commercial' : 'residential',
+          comp_data: resolvedTrack === 'commercial' ? {} : { transaction_type: resolvedTrack === 'residential-seller' ? 'seller' : 'buyer' },
+        }}
+        agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} onSave={reload} />
       {confirm && <ConfirmDialog message="This will permanently delete this deal." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {confirmProp && <ConfirmDialog message="Remove this listing from the pipeline? Any linked deals are kept but will be unlinked from the property." onConfirm={() => delProperty(confirmProp)} onCancel={() => setConfirmProp(null)} />}
     </div>

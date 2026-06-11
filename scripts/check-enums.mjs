@@ -22,6 +22,7 @@ import {
   CONTACT_TYPES, CONTACT_STATUSES, CONTACT_SOURCES,
   PROPERTY_TYPES, PROPERTY_STATUSES,
 } from '../src/lib/enums.js'
+import { ALL_DEAL_STAGES } from '../src/lib/stages.js'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const schema = readFileSync(join(root, 'src/lib/schema.sql'), 'utf8')
@@ -54,6 +55,7 @@ const checks = [
   ['contacts.source',   CONTACT_SOURCES,   checkValues(tableBody('contacts'), 'source')],
   ['properties.type',   PROPERTY_TYPES,    checkValues(tableBody('properties'), 'type')],
   ['properties.status', PROPERTY_STATUSES, checkValues(tableBody('properties'), 'status')],
+  ['deals.stage',       ALL_DEAL_STAGES,   checkValues(tableBody('deals'), 'stage')],
 ]
 
 let failed = false
