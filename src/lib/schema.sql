@@ -26,6 +26,8 @@ create table if not exists agents (
   no_brokerage_split boolean default false,-- true = keeps 100% (capped / no split)
   is_admin   boolean default false,        -- office admin: sees all deals/docs/commissions
   nav_hidden text[] default '{}',          -- nav item IDs hidden from this agent's sidebar
+  cap_amount      numeric,                 -- brokerage cap in dollars; null = no cap configured
+  cap_anniversary date,                    -- cap year resets on this month/day; null = calendar year
   created_at timestamptz default now()
 );
 
@@ -1161,11 +1163,13 @@ create policy deals_agent_scope on deals for all to authenticated
     or id in (select app_visible_deal_ids())
   );
 
--- COMMISSIONS — follow the deal.
+-- COMMISSIONS — back office: ADMIN-ONLY (decided 2026-06-12). Each agent's
+-- split/take-home is private even from co-agents on the same deal; agents get
+-- their own slice via /api/my-earnings (service key, bypasses RLS).
 drop policy if exists commissions_deal_scope on commissions;
-create policy commissions_deal_scope on commissions for all to authenticated
-  using      (deal_id in (select app_visible_deal_ids()))
-  with check (deal_id in (select app_visible_deal_ids()));
+drop policy if exists commissions_admin_only on commissions;
+create policy commissions_admin_only on commissions for all to authenticated
+  using (app_is_admin()) with check (app_is_admin());
 
 -- DOCUMENTS — follow the deal; unattached uploads stay personal.
 drop policy if exists documents_deal_scope on documents;

@@ -36,6 +36,7 @@ applied to production and the findings, so the repo's history matches reality.
 | 2026-06-10 | `2026-06-10_milestone0_phaseA.sql` | Built and validated against an exact replica (see `scripts/db-verify/production/`) — applied by Daniel via the SQL editor |
 | 2026-06-11 | (Phase B block from this README) | Applied by Daniel — per-agent enforcement is LIVE in production |
 | 2026-06-11 | `2026-06-11_milestone1_stage_tracks.sql` | Applied by Daniel — the track-aware stage tokens are accepted by production |
+| 2026-06-12 | `2026-06-12_back_office.sql` | **PENDING** — apply with the Back Office deploy (caps in DB + admin-only commissions; rollback block in the file header). Validated on the replica: `scripts/db-verify/production/backoffice_behavior.sql` |
 
 The bundle: creates `documents` (secure from day one), adds the missing
 `docusign_envelopes` columns, adds `activities.deal_id`, adds the deal value /

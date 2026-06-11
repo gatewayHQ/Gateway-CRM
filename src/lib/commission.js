@@ -272,3 +272,50 @@ function validateAllocations(allocPctSum, participants) {
 export function breakdownForDeal(deal, commission, agents) {
   return computeCommission(normalizeCommission(commission, { deal, agents }))
 }
+
+/**
+ * One agent's slice of a deal: their take, the house revenue they generated,
+ * and the cap-counting portion (brokerage split only — flat transaction fees
+ * are charged on top of cap). Sums every participant row belonging to the
+ * agent; falls back to deal ownership for legacy rows with no participants.
+ * This is THE authoritative per-agent number used by My Earnings, the deal
+ * page, and the brokerage report — one formula, three surfaces.
+ */
+export function agentSliceForDeal(deal, commission, agents, agentId) {
+  const r = breakdownForDeal(deal, commission, agents)
+  const mine = r.participants.filter(p => p.agent_id === agentId)
+  if (mine.length) {
+    return {
+      onDeal: true,
+      take:  round2(mine.reduce((s, p) => s + num(p.agent_take), 0)),
+      house: round2(mine.reduce((s, p) => s + num(p.house_from), 0)),
+      cap:   round2(mine.reduce((s, p) => s + num(p.house_split), 0)),
+      fees:  round2(mine.reduce((s, p) => s + num(p.fee, 0), 0)),
+      splitPct: mine[0] ? num(mine[0].split_pct, null) : null,
+      gross: r.gross_total,
+    }
+  }
+  if (deal.agent_id === agentId) {
+    return {
+      onDeal: true, take: r.agent_total, house: r.house_total,
+      cap: r.house_split_total, fees: r.transaction_fee_total ?? 0,
+      splitPct: r.primary ? num(r.primary.split_pct, null) : null, gross: r.gross_total,
+    }
+  }
+  return { onDeal: false, take: 0, house: 0, cap: 0, fees: 0, splitPct: null, gross: 0 }
+}
+
+/**
+ * Start of an agent's CURRENT cap year. Caps reset on the agent's anniversary
+ * (month + day) each year; agents without an anniversary date fall back to a
+ * calendar year. Returns a Date.
+ */
+export function capWindowStart(capAnniversary, now = new Date()) {
+  if (!capAnniversary) return new Date(now.getFullYear(), 0, 1)
+  // Date-only strings parse as UTC midnight, which shifts a day in negative-
+  // offset timezones — anchor to noon so month/day are stable everywhere.
+  const ann = new Date(/^\d{4}-\d{2}-\d{2}$/.test(capAnniversary) ? `${capAnniversary}T12:00:00` : capAnniversary)
+  if (Number.isNaN(ann.getTime())) return new Date(now.getFullYear(), 0, 1)
+  const thisYear = new Date(now.getFullYear(), ann.getMonth(), ann.getDate())
+  return thisYear <= now ? thisYear : new Date(now.getFullYear() - 1, ann.getMonth(), ann.getDate())
+}

@@ -366,11 +366,12 @@ export default function App() {
         supabase.from('templates').select('*').order('created_at', { ascending: false }),
         supabase.from('activities').select('*').order('created_at', { ascending: false }),
       ])
-      // Commissions follow the visible deals (firm-wide for admins only)
-      const commissionsRes = await fetchVisibleCommissions(supabase, {
-        isAdmin: isAdminAgent,
-        dealIds: (deals.data || []).map(d => d.id),
-      })
+      // Commissions are back-office data: only admins load raw rows. Agents
+      // get their own slice via /api/portal?action=my-earnings (the database
+      // enforces this too — non-admin queries return zero rows).
+      const commissionsRes = isAdminAgent
+        ? await fetchVisibleCommissions(supabase, { isAdmin: true })
+        : { data: [], error: null }
 
       const dbPayload = {
         contacts:         contacts.data     || [],

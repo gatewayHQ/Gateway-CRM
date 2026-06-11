@@ -33,6 +33,11 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
+  // Co-hosted endpoint (Vercel Hobby caps the repo at 12 functions):
+  // GET /api/portal?action=my-earnings — the signed-in agent's own commission
+  // slices, computed server-side. See handleMyEarnings below.
+  if (req.query?.action === 'my-earnings') return handleMyEarnings(req, res)
+
   const token = (req.query?.token || '').trim()
   if (!/^[0-9a-f-]{36}$/i.test(token)) {
     return res.status(400).json({ error: 'Invalid portal link' })
@@ -128,5 +133,104 @@ export default async function handler(req, res) {
     })
   } catch (err) {
     return res.status(500).json({ error: 'Something went wrong loading this portal.' })
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// My Earnings — GET /api/portal?action=my-earnings[&deal_id=<uuid>]
+//
+// Commissions are ADMIN-ONLY at the database level (back office, 2026-06-12):
+// an agent cannot read raw commission rows, because each row contains every
+// participant's split. This endpoint is the privacy boundary: it verifies the
+// caller's Supabase JWT, loads commissions with the SERVICE key, computes the
+// caller's slice per deal with the same engine the admin tracker uses
+// (src/lib/commission.js), and returns ONLY the caller's numbers — partner
+// splits never leave the server.
+//
+// Response: { agent_id, cap: {amount, anniversary, window_start, prepaid,
+//             ytd_cap_paid, ytd_fees, capped}, ytd: {take, deals},
+//             deals: [{deal_id, title, stage, value, closed_at, take, cap,
+//                      fees, split_pct, gross, closed}] }
+// ─────────────────────────────────────────────────────────────────────────────
+import { agentSliceForDeal, capWindowStart } from '../src/lib/commission.js'
+
+async function handleMyEarnings(req, res) {
+  const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
+  const serviceKey   = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
+  const anonKey      = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY
+  if (!serviceKey) return res.status(500).json({ error: 'Server misconfigured' })
+
+  // 1. Verify the caller: their JWT must resolve to a real Supabase user.
+  const jwt = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim()
+  if (!jwt) return res.status(401).json({ error: 'Sign in required' })
+  const userRes = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    headers: { apikey: anonKey || serviceKey, Authorization: `Bearer ${jwt}` },
+  })
+  if (!userRes.ok) return res.status(401).json({ error: 'Invalid session' })
+  const user = await userRes.json()
+  if (!user?.id) return res.status(401).json({ error: 'Invalid session' })
+
+  const svc = createClient(SUPABASE_URL, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+
+  try {
+    // 2. Resolve the agent for this auth user.
+    const { data: me } = await svc.from('agents')
+      .select('id, name, cap_amount, cap_anniversary, no_brokerage_split')
+      .eq('auth_id', user.id).maybeSingle()
+    if (!me) return res.status(403).json({ error: 'No agent profile for this account' })
+
+    // 3. Load context. Deals where the caller is owner, legacy co-agent, or a
+    //    commission participant — everything else is filtered out below anyway.
+    const dealFilter = req.query?.deal_id ? { col: 'id', val: req.query.deal_id } : null
+    let dealQuery = svc.from('deals').select('id, title, stage, value, probability, agent_id, co_agent_ids, expected_close_date, updated_at, created_at, comp_data')
+    if (dealFilter) dealQuery = dealQuery.eq(dealFilter.col, dealFilter.val)
+    const [{ data: deals }, { data: commissions }, { data: agents }] = await Promise.all([
+      dealQuery,
+      svc.from('commissions').select('*'),
+      svc.from('agents').select('id, name, default_split_pct, no_brokerage_split'),
+    ])
+
+    const commByDeal = new Map((commissions || []).map(c => [c.deal_id, c]))
+    const windowStart = capWindowStart(me.cap_anniversary)
+
+    const rows = []
+    let ytdTake = 0, ytdCapPaid = 0, ytdFees = 0, ytdDeals = 0
+    for (const deal of deals || []) {
+      const slice = agentSliceForDeal(deal, commByDeal.get(deal.id), agents || [], me.id)
+      if (!slice.onDeal || (slice.take === 0 && slice.cap === 0 && slice.fees === 0 && deal.agent_id !== me.id)) continue
+      const closed = deal.stage === 'closed'
+      const closedAt = deal.updated_at || deal.created_at
+      rows.push({
+        deal_id: deal.id, title: deal.title, stage: deal.stage,
+        value: deal.value, closed, closed_at: closed ? closedAt : null,
+        take: slice.take, cap: slice.cap, fees: slice.fees,
+        split_pct: slice.splitPct, gross: slice.gross,
+      })
+      if (closed && new Date(closedAt) >= windowStart) {
+        ytdTake += slice.take; ytdCapPaid += slice.cap; ytdFees += slice.fees; ytdDeals += 1
+      }
+    }
+    rows.sort((a, b) => new Date(b.closed_at || '2999') - new Date(a.closed_at || '2999'))
+
+    const capAmount = me.cap_amount != null ? Number(me.cap_amount) : null
+    return res.status(200).json({
+      agent_id: me.id,
+      cap: {
+        amount: capAmount,
+        anniversary: me.cap_anniversary,
+        window_start: windowStart.toISOString().slice(0, 10),
+        prepaid: !!me.no_brokerage_split,
+        ytd_cap_paid: Math.round(ytdCapPaid * 100) / 100,
+        ytd_fees: Math.round(ytdFees * 100) / 100,
+        capped: !!me.no_brokerage_split || (capAmount != null && ytdCapPaid >= capAmount),
+      },
+      ytd: { take: Math.round(ytdTake * 100) / 100, deals: ytdDeals },
+      deals: rows,
+    })
+  } catch (e) {
+    console.error('[my-earnings]', e)
+    return res.status(500).json({ error: 'Could not compute earnings' })
   }
 }
