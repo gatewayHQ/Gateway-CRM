@@ -195,12 +195,17 @@ export default async function handler(req, res) {
       // stay in lockstep (the list now derives its counts from this table).
       // Fire-and-forget; never block the redirect.
       const ip = clientIp(req)
+      // City header is URL-encoded by Vercel ("Sioux%20City"); decode safely.
+      let scanCity = null
+      try { scanCity = req.headers['x-vercel-ip-city'] ? decodeURIComponent(req.headers['x-vercel-ip-city']) : null } catch { scanCity = null }
       db().from('mailing_scans').insert({
         mailing_id:  m.id,
         ip_hash:     hashIp(ip),
         user_agent:  (req.headers['user-agent'] || '').slice(0, 500),
         referrer:    (req.headers.referer || req.headers.referrer || '').slice(0, 500),
         country:     req.headers['x-vercel-ip-country'] || null,
+        region:      req.headers['x-vercel-ip-country-region'] || null,
+        city:        scanCity,
       }).then(({ error }) => {
         if (error) { console.error('[campaigns] scan insert failed:', error.message); return }
         db().from('mailings')
@@ -346,7 +351,7 @@ export default async function handler(req, res) {
 
       const [recRes, scanRes, leadRes] = await Promise.all([
         db().from('mailing_recipients').select('id, responded, scan_count, response_type').eq('mailing_id', mailing_id),
-        db().from('mailing_scans').select('scanned_at, ip_hash').eq('mailing_id', mailing_id),
+        db().from('mailing_scans').select('scanned_at, ip_hash, country, region, city').eq('mailing_id', mailing_id),
         db().from('mailing_leads').select('id').eq('mailing_id', mailing_id),
       ])
 
@@ -373,6 +378,23 @@ export default async function handler(req, res) {
         if (r.response_type) byResponse[r.response_type] = (byResponse[r.response_type] || 0) + 1
       }
 
+      // Top scan locations — "City, REGION" when both are present, falling
+      // back to country code. Scans pre-dating this feature have only country.
+      const byLocation = {}
+      for (const s of scans) {
+        const label = s.city && s.region ? `${s.city}, ${s.region}`
+                    : s.city            ? s.city
+                    : s.region          ? s.region
+                    : s.country         ? s.country
+                    : null
+        if (!label) continue
+        byLocation[label] = (byLocation[label] || 0) + 1
+      }
+      const top_locations = Object.entries(byLocation)
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, 8)
+        .map(([location, count]) => ({ location, count }))
+
       return json(res, 200, {
         recipients_total:    recipients.length,
         recipients_scanned:  recipientsScanned,
@@ -384,6 +406,7 @@ export default async function handler(req, res) {
         response_rate:       recipients.length > 0 ? recipients.filter(r => r.responded).length / recipients.length : 0,
         timeline,
         by_response:         byResponse,
+        top_locations,
       })
     }
 
