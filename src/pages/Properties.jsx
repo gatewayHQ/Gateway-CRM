@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { formatCurrency } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
@@ -279,11 +280,11 @@ function PhotoUploader({ photos = [], propertyId, onAdd, onRemove }) {
     if (!valid.length) return
     setUploading(true)
     for (const file of valid) {
-      const ext  = file.name.split('.').pop().toLowerCase() || 'jpg'
+      const { blob, ext, type } = await compressForUpload(file, 'property')
       const path = `${propertyId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
       const { data, error } = await supabase.storage
         .from('property-photos')
-        .upload(path, file, { contentType: file.type, upsert: false })
+        .upload(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
       if (error) { pushToast(`Upload failed: ${error.message}`, 'error'); continue }
       const { data: { publicUrl } } = supabase.storage.from('property-photos').getPublicUrl(path)
       onAdd(publicUrl)
