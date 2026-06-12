@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '../../lib/supabase.js'
+import { compressForUpload, IMMUTABLE_CACHE } from '../../lib/imageCompress.js'
 import { Icon, Drawer, pushToast } from '../../components/UI.jsx'
 
 const COLORS = ['#2d3561','#4a6fa5','#2e7d5e','#c9a84c','#6b4fa5','#c0392b','#d4820a','#1a1a2e']
@@ -58,10 +59,10 @@ export default function AgentDrawer({ open, onClose, agent, onSave }) {
     if (!file.type.startsWith('image/')) { pushToast('Please choose an image file', 'error'); return }
     setUploading(true)
     try {
-      const ext  = (file.name.split('.').pop() || 'jpg').toLowerCase()
+      const { blob, ext, type } = await compressForUpload(file, 'headshot')
       const path = `agents/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
       const { error } = await supabase.storage
-        .from('campaign-images').upload(path, file, { contentType: file.type, upsert: false })
+        .from('campaign-images').upload(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
       if (error) throw error
       const { data: { publicUrl } } = supabase.storage.from('campaign-images').getPublicUrl(path)
       set('photo_url', publicUrl)

@@ -13,6 +13,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { Icon, Modal, pushToast, EmptyState, ConfirmDialog } from '../components/UI.jsx'
 
 const MAILING_TYPE_OPTS = [
@@ -507,11 +508,11 @@ function MailingForm({ initial, agents, properties, activeAgent, onSave, onCance
 async function uploadImageToStorage(file, setUploading, idx) {
   setUploading(u => ({ ...u, [idx]: true }))
   try {
-    const ext  = (file.name.split('.').pop() || 'jpg').toLowerCase()
+    const { blob, ext, type } = await compressForUpload(file, 'landing')
     const path = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
     const { error: upErr } = await supabase.storage
       .from('campaign-images')
-      .upload(path, file, { contentType: file.type, upsert: false })
+      .upload(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
     if (upErr) throw upErr
     const { data: { publicUrl } } = supabase.storage.from('campaign-images').getPublicUrl(path)
     return publicUrl
