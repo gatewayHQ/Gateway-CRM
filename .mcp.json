@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "signwell": {
+      "command": "npx",
+      "args": ["-y", "@signwell/mcp"]
+    }
+  }
+}
