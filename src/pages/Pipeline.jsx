@@ -869,6 +869,7 @@ with check (bucket_id = 'deal-documents');`}
 }
 
 const DS_STATUS = {
+  draft:     { bg: '#fff3cd', color: '#856404' },
   sent:      { bg: '#e8f4fd', color: 'var(--gw-azure)' },
   delivered: { bg: '#fff3cd', color: '#856404' },
   completed: { bg: 'var(--gw-green-light)', color: 'var(--gw-green)' },
@@ -1057,6 +1058,12 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
 }
 
 // ── Send for Signature modal — drives SignWell document creation ────────────
+// Flow:
+//   1. Agent fills in signers + picks a PDF here in the CRM
+//   2. We create a SignWell draft document via /api/signwell
+//   3. SignWell's editor opens in a new tab where the agent drops
+//      signature/initial/date fields and clicks Send from SignWell's UI
+//   4. SignWell webhook hits /api/signwell → status flips sent → completed
 function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent, onClose, onSent }) {
   // Primary signer: contact linked directly to the deal
   const contact      = contacts?.find(c => c.id === deal?.contact_id)
@@ -1072,21 +1079,14 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const ownerName        = ownerIsDifferent ? `${ownerContact.first_name || ''} ${ownerContact.last_name || ''}`.trim() : ''
   const ownerEmail       = ownerIsDifferent ? (ownerContact.email || '') : ''
 
-  const [step,          setStep]        = React.useState(1)
-  const [subject,       setSubject]     = React.useState(`Please sign: ${deal?.title || 'Document'}`)
-  const [file,          setFile]        = React.useState(null)
-  const [pickedFile,    setPickedFile]  = React.useState('')
-  const [fileUrl,       setFileUrl]     = React.useState(null)
-  const [activeTool,    setActiveTool]  = React.useState('signature')
-  const [activeSignerI, setActiveSignerI] = React.useState(0)
-  const [agentSigns,    setAgentSigns]  = React.useState(false)
-  const [agentTabs,     setAgentTabs]   = React.useState([])
-  const [docAnnotations, setDocAnnotations] = React.useState([])
-  const [sending,       setSending]     = React.useState(false)
-  const [dragOver,      setDragOver]    = React.useState(false)
+  const [subject,    setSubject]   = React.useState(`Please sign: ${deal?.title || 'Document'}`)
+  const [file,       setFile]      = React.useState(null)
+  const [pickedFile, setPickedFile]= React.useState('')
+  const [agentSigns, setAgentSigns]= React.useState(false)
+  const [sending,    setSending]   = React.useState(false)
+  const [dragOver,   setDragOver]  = React.useState(false)
   const fileRef = React.useRef()
 
-  // Each signer has name, email, tabs[] — pre-fill contact + property owner when available
   const [signers, setSigners] = React.useState(() => {
     // Signer 1: deal contact. If they have no email, fall back to property owner.
     let s1Name  = defaultName
@@ -1095,166 +1095,74 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       s1Name  = ownerName
       s1Email = ownerContact.email
     }
-    const base = [{ id: 1, name: s1Name, email: s1Email, tabs: [] }]
-    // Signer 2: property owner when they differ from signer 1 and have an email
+    const base = [{ id: 1, name: s1Name, email: s1Email }]
     if (ownerIsDifferent && ownerEmail && ownerEmail !== s1Email) {
-      base.push({ id: 2, name: ownerName, email: ownerEmail, tabs: [] })
+      base.push({ id: 2, name: ownerName, email: ownerEmail })
     }
     return base
   })
 
-  const addSigner    = () => setSigners(p => [...p, { id: Date.now(), name:'', email:'', tabs:[] }])
+  const addSigner    = () => setSigners(p => [...p, { id: Date.now(), name:'', email:'' }])
   const removeSigner = (id) => setSigners(p => p.filter(s => s.id !== id))
   const updateSigner = (id, k, v) => setSigners(p => p.map(s => s.id===id ? {...s,[k]:v} : s))
 
-  // All signers including optional agent (always last, routingOrder 2)
-  // agentTabs is kept in its own state so placeField can update it independently
   const allSigners = React.useMemo(() => {
     const clients = signers.map(s => ({ ...s, routingOrder: 1 }))
     if (agentSigns && activeAgent) {
-      clients.push({ id:'agent', name: activeAgent.name, email: activeAgent.email, routingOrder: 2, tabs: agentTabs })
+      clients.push({ id:'agent', name: activeAgent.name, email: activeAgent.email, routingOrder: 2 })
     }
     return clients
-  }, [signers, agentSigns, activeAgent, agentTabs])
-
-  // Flat list of all tabs across all signers (for PDFPlacer)
-  const allFields = allSigners.flatMap((s, i) => (s.tabs || []).map(t => ({ ...t, signerIndex: i })))
-
-  const placeField = (field) => {
-    const isAgent = agentSigns && activeSignerI === signers.length
-    if (isAgent) {
-      setAgentTabs(p => [...p, field])
-    } else {
-      setSigners(p => p.map((s, i) => {
-        if (i !== activeSignerI) return s
-        return { ...s, tabs: [...(s.tabs || []), field] }
-      }))
-    }
-  }
-
-  const removeField = (fieldId) => {
-    setSigners(p => p.map(s => ({ ...s, tabs: (s.tabs || []).filter(t => t.id !== fieldId) })))
-    setAgentTabs(p => p.filter(t => t.id !== fieldId))
-  }
+  }, [signers, agentSigns, activeAgent])
 
   const toBase64 = f => new Promise((res, rej) => {
     const r = new FileReader(); r.onload = e => res(e.target.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(f)
   })
 
-  const docName = file ? file.name : (pickedFile ? pickedFile.replace(/^\d+-/, '') : '')
-
-  const goToStep2 = async () => {
+  const openInSignWell = async () => {
     const invalid = signers.find(s => !s.name.trim() || !s.email.trim())
     if (invalid) { pushToast('All signers need a name and email', 'error'); return }
     if (!file && !pickedFile) { pushToast('Select or upload a document', 'error'); return }
-    if (pickedFile && !fileUrl) {
-      const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(`deal-${deal.id}/${pickedFile}`, 300)
-      if (error) { pushToast('Could not load document', 'error'); return }
-      setFileUrl(data.signedUrl)
-    }
-    setStep(2)
-  }
-
-  // Burn highlight/strikethrough annotations into PDF pages using canvas + jsPDF
-  const buildAnnotatedBase64 = async (srcFile, srcUrl, annotations) => {
-    if (!window.jspdf) {
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script')
-        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'
-        s.onload = resolve; s.onerror = reject
-        document.head.appendChild(s)
-      })
-    }
-    const { jsPDF } = window.jspdf
-    let buf
-    if (srcFile) { buf = await srcFile.arrayBuffer() }
-    else { buf = await fetch(srcUrl).then(r => r.arrayBuffer()) }
-
-    const pdfDoc = await window.pdfjsLib.getDocument({ data: buf }).promise
-    const doc    = new jsPDF({ unit: 'pt', compress: true })
-    let firstPage = true
-
-    for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
-      const page     = await pdfDoc.getPage(pageNum)
-      const viewport = page.getViewport({ scale: 2 })
-      const canvas   = document.createElement('canvas')
-      canvas.width   = viewport.width
-      canvas.height  = viewport.height
-      const ctx      = canvas.getContext('2d')
-      await page.render({ canvasContext: ctx, viewport }).promise
-
-      for (const a of annotations.filter(ann => ann.page === pageNum)) {
-        const sx = 2, sy = 2  // scale factor (viewport scale = 2)
-        if (a.type === 'highlight') {
-          ctx.fillStyle = 'rgba(255, 235, 59, 0.42)'
-          ctx.fillRect(a.xCanvas * sx, a.yCanvas * sy, a.width * sx, a.height * sy)
-        } else if (a.type === 'strikethrough') {
-          ctx.strokeStyle = 'rgba(220, 38, 38, 0.85)'
-          ctx.lineWidth   = 3
-          const midY = (a.yCanvas + a.height / 2) * sy
-          ctx.beginPath()
-          ctx.moveTo(a.xCanvas * sx, midY)
-          ctx.lineTo((a.xCanvas + a.width) * sx, midY)
-          ctx.stroke()
-        } else if (a.type === 'checkbox') {
-          ctx.strokeStyle = '#1a2236'
-          ctx.lineWidth   = 2
-          ctx.strokeRect(a.xCanvas * sx, a.yCanvas * sy, a.width * sx, a.height * sy)
-        }
-      }
-
-      const imgData  = canvas.toDataURL('image/jpeg', 0.92)
-      const pdfW     = viewport.width  * 0.75
-      const pdfH     = viewport.height * 0.75
-      if (!firstPage) doc.addPage([pdfW, pdfH])
-      else { doc.internal.pageSize.width = pdfW; doc.internal.pageSize.height = pdfH; firstPage = false }
-      doc.addImage(imgData, 'JPEG', 0, 0, pdfW, pdfH, '', 'FAST')
-    }
-
-    return doc.output('datauristring').split(',')[1]
-  }
-
-  const send = async () => {
-    if (allFields.length === 0) { pushToast('Place at least one field on the PDF', 'error'); return }
     setSending(true)
 
-    let resolvedFileUrl = fileUrl
-    if (!file && pickedFile && !resolvedFileUrl) {
-      const { data: urlData, error: urlErr } = await supabase.storage
-        .from(BUCKET)
-        .createSignedUrl(`deal-${deal.id}/${pickedFile}`, 300)
-      if (urlErr) { pushToast('Could not load document', 'error'); setSending(false); return }
-      resolvedFileUrl = urlData.signedUrl
-      setFileUrl(resolvedFileUrl)
+    let base64, finalDocName
+    try {
+      if (file) {
+        base64 = await toBase64(file)
+        finalDocName = file.name
+      } else {
+        const { data: urlData, error: urlErr } = await supabase.storage
+          .from(BUCKET)
+          .createSignedUrl(`deal-${deal.id}/${pickedFile}`, 300)
+        if (urlErr) throw new Error(urlErr.message)
+        const blob = await fetch(urlData.signedUrl).then(r => r.blob())
+        base64 = await toBase64(blob)
+        finalDocName = pickedFile.replace(/^\d+-/, '')
+      }
+    } catch (err) {
+      setSending(false)
+      pushToast('Could not read document: ' + err.message, 'error')
+      return
     }
 
-    let base64, finalDocName
-    if (docAnnotations.length > 0) {
-      try {
-        base64        = await buildAnnotatedBase64(file, resolvedFileUrl, docAnnotations)
-        finalDocName  = file ? file.name : pickedFile.replace(/^\d+-/, '')
-      } catch (err) {
-        pushToast('Could not process annotations: ' + err.message, 'error')
-        setSending(false); return
-      }
-    } else if (file) { base64 = await toBase64(file); finalDocName = file.name }
-    else { const blob = await fetch(resolvedFileUrl).then(r => r.blob()); base64 = await toBase64(blob); finalDocName = pickedFile.replace(/^\d+-/, '') }
-
     const signerPayload = allSigners.map(s => ({
-      name: s.name, email: s.email, routingOrder: s.routingOrder, tabs: s.tabs || [],
+      name: s.name, email: s.email, routingOrder: s.routingOrder,
     }))
 
     const resp = await fetch('/api/signwell', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        action: 'send', emailSubject: subject,
-        documentBase64: base64, documentName: finalDocName,
-        signers: signerPayload,
+        action:         'send',
+        draft:          true,                // open in SignWell editor, don't send yet
+        emailSubject:   subject,
+        documentBase64: base64,
+        documentName:   finalDocName,
+        signers:        signerPayload,
       }),
     })
     const data = await resp.json()
     setSending(false)
     if (data.error) { pushToast(data.error, 'error'); return }
+    if (!data.embeddedEditUrl) { pushToast('SignWell did not return an editor URL', 'error'); return }
 
     await supabase.from('signwell_documents').insert([{
       deal_id:       deal.id,
@@ -1263,129 +1171,99 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       signer_email:  allSigners.map(s => s.email).join(', '),
       document_name: finalDocName,
       subject,
-      status:        data.status || 'sent',
+      status:        'draft',
     }])
-    pushToast(`Sent to ${allSigners.length} signer${allSigners.length>1?'s':''} for signature`)
+
+    // Pop the SignWell editor — user places fields there and hits Send.
+    window.open(data.embeddedEditUrl, '_blank', 'noopener,noreferrer')
+    pushToast('Opened in SignWell — place fields and click Send there', 'success')
     onSent()
   }
 
   return (
-    <Modal open={true} onClose={onClose} width={step === 2 ? 740 : 500}>
+    <Modal open={true} onClose={onClose} width={520}>
       <div className="modal__head">
         <div>
-          <div className="eyebrow-label">SignWell · Step {step} of 2</div>
-          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>
-            {step === 1 ? 'Set Up Signers' : 'Place Signature Fields'}
-          </h3>
+          <div className="eyebrow-label">SignWell · Send for Signature</div>
+          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Set Up Signers</h3>
         </div>
         <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
       </div>
       <div className="modal__body">
+        {/* Email subject */}
+        <div className="form-group">
+          <label className="form-label">Email Subject</label>
+          <input className="form-control" value={subject} onChange={e=>setSubject(e.target.value)}/>
+        </div>
 
-        {step === 1 && <>
-          {/* Email subject */}
-          <div className="form-group">
-            <label className="form-label">Email Subject</label>
-            <input className="form-control" value={subject} onChange={e=>setSubject(e.target.value)}/>
+        {/* Signers */}
+        <div className="form-group">
+          <label className="form-label required">Signers <span style={{fontSize:11,fontWeight:400,color:'var(--gw-mist)'}}>— sign in parallel (same step)</span></label>
+          {signers.map((s, i) => (
+            <div key={s.id} style={{ display:'flex', gap:8, alignItems:'center', marginBottom:8 }}>
+              <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[i]||SIGNER_COLORS[0], display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700, flexShrink:0 }}>{i+1}</div>
+              <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={s.name} onChange={e=>updateSigner(s.id,'name',e.target.value)}/>
+              <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={s.email} onChange={e=>updateSigner(s.id,'email',e.target.value)}/>
+              {signers.length > 1 && <button className="btn btn--ghost btn--icon btn--sm" onClick={()=>removeSigner(s.id)}><Icon name="x" size={13}/></button>}
+            </div>
+          ))}
+          <button className="btn btn--secondary btn--sm" onClick={addSigner} style={{marginTop:2}}>+ Add another signer</button>
+        </div>
+
+        {/* Agent signs last */}
+        {activeAgent && (
+          <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:16, background:'var(--gw-bone)' }}>
+            <input type="checkbox" id="agentSigns" checked={agentSigns} onChange={e=>setAgentSigns(e.target.checked)} style={{width:15,height:15,cursor:'pointer'}}/>
+            <label htmlFor="agentSigns" style={{ fontSize:13, cursor:'pointer', flex:1 }}>
+              <strong>I need to sign as well</strong> — {activeAgent.name} signs <em>after</em> the client{signers.length>1?'s':''}
+            </label>
+            {agentSigns && <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[signers.length]||'#6b7280', display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700 }}>{signers.length+1}</div>}
           </div>
+        )}
 
-          {/* Signers */}
-          <div className="form-group">
-            <label className="form-label required">Signers <span style={{fontSize:11,fontWeight:400,color:'var(--gw-mist)'}}>— sign in parallel (same step)</span></label>
-            {signers.map((s, i) => (
-              <div key={s.id} style={{ display:'flex', gap:8, alignItems:'center', marginBottom:8 }}>
-                <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[i]||SIGNER_COLORS[0], display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700, flexShrink:0 }}>{i+1}</div>
-                <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={s.name} onChange={e=>updateSigner(s.id,'name',e.target.value)}/>
-                <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={s.email} onChange={e=>updateSigner(s.id,'email',e.target.value)}/>
-                {signers.length > 1 && <button className="btn btn--ghost btn--icon btn--sm" onClick={()=>removeSigner(s.id)}><Icon name="x" size={13}/></button>}
-              </div>
-            ))}
-            <button className="btn btn--secondary btn--sm" onClick={addSigner} style={{marginTop:2}}>+ Add another signer</button>
-          </div>
-
-          {/* Agent signs last */}
-          {activeAgent && (
-            <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:16, background:'var(--gw-bone)' }}>
-              <input type="checkbox" id="agentSigns" checked={agentSigns} onChange={e=>setAgentSigns(e.target.checked)} style={{width:15,height:15,cursor:'pointer'}}/>
-              <label htmlFor="agentSigns" style={{ fontSize:13, cursor:'pointer', flex:1 }}>
-                <strong>I need to sign as well</strong> — {activeAgent.name} signs <em>after</em> the client{signers.length>1?'s':''}
-              </label>
-              {agentSigns && <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[signers.length]||'#6b7280', display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700 }}>{signers.length+1}</div>}
+        {/* Document */}
+        <div className="form-group">
+          <label className="form-label required">Document (PDF)</label>
+          {dealFiles.length > 0 && (
+            <div style={{ marginBottom:10 }}>
+              <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:6 }}>Pick from deal documents:</div>
+              {dealFiles.map(f => {
+                const name = f.name.replace(/^\d+-/,'')
+                const picked = pickedFile === f.name
+                return (
+                  <div key={f.name} onClick={()=>{ setPickedFile(picked?'':f.name); if(!picked){setFile(null)} }}
+                    style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', border:`1px solid ${picked?'var(--gw-azure)':'var(--gw-border)'}`, borderRadius:'var(--radius)', marginBottom:4, cursor:'pointer', background:picked?'var(--gw-sky)':'#fff' }}>
+                    <Icon name="file" size={13} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
+                    <span style={{ fontSize:12, flex:1, fontWeight:picked?700:400 }}>{name}</span>
+                    {picked && <Icon name="check" size={13} style={{ color:'var(--gw-azure)' }}/>}
+                  </div>
+                )
+              })}
+              <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'8px 0 4px' }}>— or upload a different file —</div>
             </div>
           )}
-
-          {/* Document */}
-          <div className="form-group">
-            <label className="form-label required">Document (PDF)</label>
-            {dealFiles.length > 0 && (
-              <div style={{ marginBottom:10 }}>
-                <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:6 }}>Pick from deal documents:</div>
-                {dealFiles.map(f => {
-                  const name = f.name.replace(/^\d+-/,'')
-                  const picked = pickedFile === f.name
-                  return (
-                    <div key={f.name} onClick={()=>{ setPickedFile(picked?'':f.name); if(!picked){setFile(null);setFileUrl(null)} }}
-                      style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', border:`1px solid ${picked?'var(--gw-azure)':'var(--gw-border)'}`, borderRadius:'var(--radius)', marginBottom:4, cursor:'pointer', background:picked?'var(--gw-sky)':'#fff' }}>
-                      <Icon name="file" size={13} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
-                      <span style={{ fontSize:12, flex:1, fontWeight:picked?700:400 }}>{name}</span>
-                      {picked && <Icon name="check" size={13} style={{ color:'var(--gw-azure)' }}/>}
-                    </div>
-                  )
-                })}
-                <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'8px 0 4px' }}>— or upload a different file —</div>
-              </div>
-            )}
-            <div style={{ border:`2px dashed ${dragOver?'var(--gw-azure)':file?'var(--gw-green)':'var(--gw-border)'}`, borderRadius:'var(--radius)', padding:'14px 16px', textAlign:'center', cursor:'pointer', background:dragOver?'var(--gw-sky)':file?'var(--gw-green-light)':'transparent', transition:'all 150ms' }}
-              onClick={()=>fileRef.current.click()}
-              onDragOver={e=>{e.preventDefault();setDragOver(true)}}
-              onDragLeave={()=>setDragOver(false)}
-              onDrop={e=>{e.preventDefault();setDragOver(false);setFile(e.dataTransfer.files[0]);setPickedFile('');setFileUrl(null)}}>
-              <input ref={fileRef} type="file" accept=".pdf" style={{display:'none'}} onChange={e=>{setFile(e.target.files[0]);setPickedFile('');setFileUrl(null)}}/>
-              {file ? <div style={{fontSize:12,fontWeight:600,color:'var(--gw-green)'}}>{file.name}</div>
-                : <><Icon name="upload" size={18} style={{color:'var(--gw-border)',marginBottom:4}}/><div style={{fontSize:12}}>Drop PDF or click to browse</div></>}
-            </div>
+          <div style={{ border:`2px dashed ${dragOver?'var(--gw-azure)':file?'var(--gw-green)':'var(--gw-border)'}`, borderRadius:'var(--radius)', padding:'14px 16px', textAlign:'center', cursor:'pointer', background:dragOver?'var(--gw-sky)':file?'var(--gw-green-light)':'transparent', transition:'all 150ms' }}
+            onClick={()=>fileRef.current.click()}
+            onDragOver={e=>{e.preventDefault();setDragOver(true)}}
+            onDragLeave={()=>setDragOver(false)}
+            onDrop={e=>{e.preventDefault();setDragOver(false);setFile(e.dataTransfer.files[0]);setPickedFile('')}}>
+            <input ref={fileRef} type="file" accept=".pdf" style={{display:'none'}} onChange={e=>{setFile(e.target.files[0]);setPickedFile('')}}/>
+            {file ? <div style={{fontSize:12,fontWeight:600,color:'var(--gw-green)'}}>{file.name}</div>
+              : <><Icon name="upload" size={18} style={{color:'var(--gw-border)',marginBottom:4}}/><div style={{fontSize:12}}>Drop PDF or click to browse</div></>}
           </div>
+        </div>
 
-        </>}
-
-        {step === 2 && <>
-          {/* Signer tabs — switch to place fields for each */}
-          <div style={{ display:'flex', gap:6, marginBottom:12, flexWrap:'wrap' }}>
-            {allSigners.map((s, i) => (
-              <button key={s.id || i} onClick={()=>{ setActiveSignerI(i); setActiveTool('signature') }}
-                style={{ display:'flex', alignItems:'center', gap:6, padding:'5px 12px', border:`2px solid ${activeSignerI===i?SIGNER_COLORS[i]||SIGNER_COLORS[0]:'var(--gw-border)'}`, borderRadius:'var(--radius)', fontSize:12, fontWeight:700, cursor:'pointer', background:activeSignerI===i?(SIGNER_BGS[i]||SIGNER_BGS[0]):'#fff', color:activeSignerI===i?(SIGNER_COLORS[i]||SIGNER_COLORS[0]):'var(--gw-mist)' }}>
-                <span style={{ width:16, height:16, borderRadius:'50%', background:SIGNER_COLORS[i]||'#6b7280', display:'inline-flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:10 }}>{i+1}</span>
-                {s.name || `Signer ${i+1}`}
-                {s.routingOrder === 2 && <span style={{fontSize:10,opacity:0.7}}>(signs last)</span>}
-                {(s.tabs||[]).length > 0 && <span style={{fontSize:10,background:SIGNER_COLORS[i]||'#6b7280',color:'#fff',borderRadius:8,padding:'0 5px'}}>{s.tabs.length}</span>}
-              </button>
-            ))}
-          </div>
-          <PDFPlacer
-            file={file} fileUrl={fileUrl}
-            allFields={allFields}
-            onPlace={placeField}
-            onRemove={removeField}
-            activeTool={activeTool}
-            setActiveTool={setActiveTool}
-            activeSignerIndex={activeSignerI}
-            docAnnotations={docAnnotations}
-            onPlaceAnnotation={a => setDocAnnotations(p => [...p, a])}
-            onRemoveAnnotation={id => setDocAnnotations(p => p.filter(a => a.id !== id))}
-          />
-        </>}
+        {/* What happens next */}
+        <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, color:'var(--gw-mist)', lineHeight:1.5 }}>
+          <strong style={{ color:'var(--gw-ink)' }}>Next:</strong> SignWell's editor will open in a new tab.
+          Drag signature, initial, and date fields onto the document, assign each to a signer, then click <strong>Send</strong> inside SignWell. The status here will update automatically.
+        </div>
       </div>
       <div className="modal__foot">
-        {step===1 && <>
-          <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary" onClick={goToStep2}>Next: Place Fields</button>
-        </>}
-        {step===2 && <>
-          <button className="btn btn--secondary" onClick={()=>setStep(1)}>Back</button>
-          <button className="btn btn--primary" onClick={send} disabled={sending||allFields.length===0}>
-            {sending ? 'Sending…' : `Send to ${allSigners.length} Signer${allSigners.length>1?'s':''}${allFields.length>0?` · ${allFields.length} fields`:''}`}
-          </button>
-        </>}
+        <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
+        <button className="btn btn--primary" onClick={openInSignWell} disabled={sending}>
+          {sending ? 'Uploading…' : 'Open in SignWell to place fields'}
+        </button>
       </div>
     </Modal>
   )
@@ -1541,6 +1419,10 @@ create policy "agent_notifications_policy" on agent_notifications
           : envelopes.map(env => {
               const sc        = DS_STATUS[env.status] || DS_STATUS.sent
               const completed = env.status === 'completed'
+              const isDraft   = env.status === 'draft'
+              const editUrl   = env.document_id
+                ? `https://www.signwell.com/edit/document/${env.document_id}/`
+                : null
               return (
                 <div key={env.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:8, background:'#fff', overflow:'hidden' }}>
                   <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px' }}>
@@ -1559,6 +1441,16 @@ create policy "agent_notifications_policy" on agent_notifications
                       <Icon name="refresh" size={12}/>
                     </button>
                   </div>
+                  {isDraft && editUrl && (
+                    <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'#fffbeb', display:'flex', alignItems:'center', gap:8 }}>
+                      <Icon name="edit" size={13} style={{ color:'#856404', flexShrink:0 }}/>
+                      <span style={{ fontSize:12, color:'#856404', flex:1, fontWeight:600 }}>Draft — open in SignWell to place fields and send</span>
+                      <a className="btn btn--sm" href={editUrl} target="_blank" rel="noopener noreferrer"
+                         style={{ background:'#d97706', color:'#fff', border:'none', fontSize:11 }}>
+                        Continue in SignWell
+                      </a>
+                    </div>
+                  )}
                   {completed && (
                     <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'var(--gw-green-light)', display:'flex', alignItems:'center', gap:8 }}>
                       <Icon name="check" size={13} style={{ color:'var(--gw-green)', flexShrink:0 }}/>

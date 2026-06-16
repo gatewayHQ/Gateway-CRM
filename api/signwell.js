@@ -117,7 +117,7 @@ export default async function handler(req, res) {
 
   try {
     if (body.action === 'send') {
-      const { signers, documentBase64, documentName, emailSubject } = body
+      const { signers, documentBase64, documentName, emailSubject, draft } = body
       if (!documentBase64) return res.status(400).json({ error: 'documentBase64 required' })
       if (!signers?.length) return res.status(400).json({ error: 'At least one signer required' })
 
@@ -125,6 +125,7 @@ export default async function handler(req, res) {
         Number(a.routingOrder || 1) - Number(b.routingOrder || 1)
       )
       const hasOrder = orderedSigners.some(s => Number(s.routingOrder || 1) !== 1)
+      const isDraft  = Boolean(draft)
 
       const recipients = orderedSigners.map((s, i) => ({
         id:            String(i + 1),
@@ -137,22 +138,24 @@ export default async function handler(req, res) {
         test_mode:           TEST_MODE,
         name:                documentName || 'Document',
         subject:             emailSubject || 'Please sign this document',
-        draft:               false,
+        draft:               isDraft,
         apply_signing_order: hasOrder,
         files: [{
           name:        documentName || 'document.pdf',
           file_base64: documentBase64,
         }],
         recipients,
-        fields: buildFields(orderedSigners),
+        // Drafts open in SignWell's editor — fields are placed there.
+        // Direct sends require fields up front.
+        ...(isDraft ? {} : { fields: buildFields(orderedSigners) }),
       }
 
       const data = await signwell('/documents', { method: 'POST', body: payload })
 
       return res.json({
-        envelopeId:   data.id,           // alias for app compatibility
-        documentId:   data.id,
-        status:       normalizeStatus(data.status),
+        envelopeId:      data.id,           // alias for app compatibility
+        documentId:      data.id,
+        status:          normalizeStatus(data.status),
         embeddedEditUrl: data.embedded_edit_url || null,
       })
     }
