@@ -1056,6 +1056,7 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
   )
 }
 
+// ── Send for Signature modal — drives SignWell document creation ────────────
 function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent, onClose, onSent }) {
   // Primary signer: contact linked directly to the deal
   const contact      = contacts?.find(c => c.id === deal?.contact_id)
@@ -1083,9 +1084,6 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const [docAnnotations, setDocAnnotations] = React.useState([])
   const [sending,       setSending]     = React.useState(false)
   const [dragOver,      setDragOver]    = React.useState(false)
-  const [autoDetecting, setAutoDetecting] = React.useState(false)
-  const [autoResult,    setAutoResult]  = React.useState(null)   // { docType, label, signerTabs }
-  const [useAnchorTabs, setUseAnchorTabs] = React.useState(false)
   const fileRef = React.useRef()
 
   // Each signer has name, email, tabs[] — pre-fill contact + property owner when available
@@ -1144,31 +1142,6 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   })
 
   const docName = file ? file.name : (pickedFile ? pickedFile.replace(/^\d+-/, '') : '')
-
-  const autoDetect = async () => {
-    if (!docName) { pushToast('Select a document first', 'error'); return }
-    const invalid = signers.find(s => !s.name.trim() || !s.email.trim())
-    if (invalid) { pushToast('Fill in all signer names and emails first', 'error'); return }
-    setAutoDetecting(true)
-    try {
-      const signerRoles = allSigners.map((s, i) => ({
-        name: s.name, email: s.email, routingOrder: s.routingOrder,
-        role: i === 0 ? '' : i === allSigners.length - 1 && agentSigns ? 'agent' : '',
-      }))
-      const resp = await fetch('/api/docusign', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'analyze', documentName: docName, signers: signerRoles }),
-      })
-      const data = await resp.json()
-      if (data.error) { pushToast(data.error, 'error'); return }
-      setAutoResult(data)
-      setUseAnchorTabs(true)
-    } catch (err) {
-      pushToast('Auto-detect failed: ' + err.message, 'error')
-    } finally {
-      setAutoDetecting(false)
-    }
-  }
 
   const goToStep2 = async () => {
     const invalid = signers.find(s => !s.name.trim() || !s.email.trim())
@@ -1242,11 +1215,9 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   }
 
   const send = async () => {
-    if (!useAnchorTabs && allFields.length === 0) { pushToast('Place at least one field on the PDF', 'error'); return }
+    if (allFields.length === 0) { pushToast('Place at least one field on the PDF', 'error'); return }
     setSending(true)
 
-    // When anchor tabs bypass step 2, the signed URL may not have been fetched yet.
-    // Resolve it now before trying to read the file.
     let resolvedFileUrl = fileUrl
     if (!file && pickedFile && !resolvedFileUrl) {
       const { data: urlData, error: urlErr } = await supabase.storage
@@ -1258,7 +1229,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     }
 
     let base64, finalDocName
-    if (!useAnchorTabs && docAnnotations.length > 0) {
+    if (docAnnotations.length > 0) {
       try {
         base64        = await buildAnnotatedBase64(file, resolvedFileUrl, docAnnotations)
         finalDocName  = file ? file.name : pickedFile.replace(/^\d+-/, '')
@@ -1269,47 +1240,42 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     } else if (file) { base64 = await toBase64(file); finalDocName = file.name }
     else { const blob = await fetch(resolvedFileUrl).then(r => r.blob()); base64 = await toBase64(blob); finalDocName = pickedFile.replace(/^\d+-/, '') }
 
-    // When using anchor tabs, tabs[] is empty — server applies them from doc-type detection
-    const signerPayload = allSigners.map((s, i) => {
-      if (useAnchorTabs && autoResult?.signerTabs) {
-        const st = autoResult.signerTabs.find(t => t.signerIndex === i)
-        return { name: s.name, email: s.email, routingOrder: s.routingOrder, tabs: st?.tabs || [] }
-      }
-      return { name: s.name, email: s.email, routingOrder: s.routingOrder, tabs: s.tabs || [] }
-    })
+    const signerPayload = allSigners.map(s => ({
+      name: s.name, email: s.email, routingOrder: s.routingOrder, tabs: s.tabs || [],
+    }))
 
-    const resp = await fetch('/api/docusign', {
+    const resp = await fetch('/api/signwell', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         action: 'send', emailSubject: subject,
         documentBase64: base64, documentName: finalDocName,
         signers: signerPayload,
-        useAnchorTabs,
       }),
     })
     const data = await resp.json()
     setSending(false)
     if (data.error) { pushToast(data.error, 'error'); return }
 
-    await supabase.from('docusign_envelopes').insert([{
-      deal_id: deal.id, envelope_id: data.envelopeId,
-      signer_name:  allSigners.map(s=>s.name).join(', '),
-      signer_email: allSigners.map(s=>s.email).join(', '),
-      document_name: finalDocName, subject, status: data.status || 'sent',
+    await supabase.from('signwell_documents').insert([{
+      deal_id:       deal.id,
+      document_id:   data.documentId || data.envelopeId,
+      signer_name:   allSigners.map(s => s.name).join(', '),
+      signer_email:  allSigners.map(s => s.email).join(', '),
+      document_name: finalDocName,
+      subject,
+      status:        data.status || 'sent',
     }])
     pushToast(`Sent to ${allSigners.length} signer${allSigners.length>1?'s':''} for signature`)
     onSent()
   }
 
   return (
-    <Modal open={true} onClose={onClose} width={step === 2 && !useAnchorTabs ? 740 : 500}>
+    <Modal open={true} onClose={onClose} width={step === 2 ? 740 : 500}>
       <div className="modal__head">
         <div>
-          <div className="eyebrow-label">
-            {useAnchorTabs ? 'DocuSign · Auto-fields' : `DocuSign · Step ${step} of 2`}
-          </div>
+          <div className="eyebrow-label">SignWell · Step {step} of 2</div>
           <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>
-            {step===1 ? 'Set Up Signers' : useAnchorTabs ? 'Send for Signature' : 'Place Signature Fields'}
+            {step === 1 ? 'Set Up Signers' : 'Place Signature Fields'}
           </h3>
         </div>
         <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
@@ -1373,60 +1339,13 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
               onClick={()=>fileRef.current.click()}
               onDragOver={e=>{e.preventDefault();setDragOver(true)}}
               onDragLeave={()=>setDragOver(false)}
-              onDrop={e=>{e.preventDefault();setDragOver(false);setFile(e.dataTransfer.files[0]);setPickedFile('');setFileUrl(null);setAutoResult(null);setUseAnchorTabs(false)}}>
-              <input ref={fileRef} type="file" accept=".pdf" style={{display:'none'}} onChange={e=>{setFile(e.target.files[0]);setPickedFile('');setFileUrl(null);setAutoResult(null);setUseAnchorTabs(false)}}/>
+              onDrop={e=>{e.preventDefault();setDragOver(false);setFile(e.dataTransfer.files[0]);setPickedFile('');setFileUrl(null)}}>
+              <input ref={fileRef} type="file" accept=".pdf" style={{display:'none'}} onChange={e=>{setFile(e.target.files[0]);setPickedFile('');setFileUrl(null)}}/>
               {file ? <div style={{fontSize:12,fontWeight:600,color:'var(--gw-green)'}}>{file.name}</div>
                 : <><Icon name="upload" size={18} style={{color:'var(--gw-border)',marginBottom:4}}/><div style={{fontSize:12}}>Drop PDF or click to browse</div></>}
             </div>
           </div>
 
-          {/* ── Auto-detect signature fields ─────────────────────────────── */}
-          {(file || pickedFile) && (
-            <div style={{ marginTop:4 }}>
-              {!autoResult && (
-                <button className="btn btn--secondary btn--sm" style={{ width:'100%', justifyContent:'center' }}
-                  onClick={autoDetect} disabled={autoDetecting}>
-                  {autoDetecting
-                    ? '⟳ Detecting fields…'
-                    : '✦ Auto-detect Signature Fields'}
-                </button>
-              )}
-              {autoResult && (
-                <div style={{ border:'1.5px solid var(--gw-green)', borderRadius:'var(--radius)', padding:'12px 14px', background:'var(--gw-green-light)' }}>
-                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
-                    <div>
-                      <span style={{ fontWeight:700, fontSize:13, color:'var(--gw-ink)' }}>✓ Detected: {autoResult.label}</span>
-                      {autoResult.confidence < 1 && <span style={{ fontSize:11, color:'var(--gw-mist)', marginLeft:6 }}>(partial match)</span>}
-                    </div>
-                    <button onClick={() => { setAutoResult(null); setUseAnchorTabs(false) }}
-                      style={{ background:'none', border:'none', cursor:'pointer', fontSize:16, color:'var(--gw-mist)', lineHeight:1 }}>×</button>
-                  </div>
-                  <div style={{ display:'flex', flexDirection:'column', gap:3, marginBottom:10 }}>
-                    {autoResult.signerTabs?.map((st, i) => (
-                      <div key={i} style={{ fontSize:12 }}>
-                        <span style={{ width:16, height:16, borderRadius:'50%', background:SIGNER_COLORS[i]||SIGNER_COLORS[0], display:'inline-flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:10, marginRight:6 }}>{i+1}</span>
-                        <strong>{allSigners[i]?.name || `Signer ${i+1}`}</strong>
-                        <span style={{ color:'var(--gw-mist)', marginLeft:6 }}>({st.role})</span>
-                        <span style={{ marginLeft:8, color:'var(--gw-ink)' }}>
-                          {st.tabs.filter(t=>t.type==='signature').length} sig ·{' '}
-                          {st.tabs.filter(t=>t.type==='initials').length} initials ·{' '}
-                          {st.tabs.filter(t=>t.type==='date').length} date
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{ display:'flex', gap:8, alignItems:'center' }}>
-                    <div style={{ flex:1, fontSize:11, color:'var(--gw-mist)' }}>
-                      DocuSign will find these fields in your document automatically — no manual placement needed.
-                    </div>
-                    <button className="btn btn--ghost btn--sm" onClick={()=>setUseAnchorTabs(false)} style={{ whiteSpace:'nowrap', fontSize:11 }}>
-                      Place manually instead
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
         </>}
 
         {step === 2 && <>
@@ -1459,12 +1378,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       <div className="modal__foot">
         {step===1 && <>
           <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-          {useAnchorTabs
-            ? <button className="btn btn--primary" onClick={send} disabled={sending}>
-                {sending ? 'Sending…' : `Send for Signature (${autoResult?.totalTabs || 0} auto-fields)`}
-              </button>
-            : <button className="btn btn--primary" onClick={goToStep2}>Next: Place Fields</button>
-          }
+          <button className="btn btn--primary" onClick={goToStep2}>Next: Place Fields</button>
         </>}
         {step===2 && <>
           <button className="btn btn--secondary" onClick={()=>setStep(1)}>Back</button>
@@ -1481,7 +1395,6 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
-  const [notifReady,  setNotifReady]  = React.useState(true)
   const [sendOpen,    setSendOpen]    = React.useState(false)
   const [dealFiles,   setDealFiles]   = React.useState([])
   const [downloading, setDownloading] = React.useState({})
@@ -1492,9 +1405,9 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
     loadDealFiles()
 
     // Realtime subscription — auto-update status when webhook fires
-    const channel = supabase.channel(`sig-envelopes-${deal.id}`)
+    const channel = supabase.channel(`sig-documents-${deal.id}`)
       .on('postgres_changes', {
-        event: 'UPDATE', schema: 'public', table: 'docusign_envelopes',
+        event: 'UPDATE', schema: 'public', table: 'signwell_documents',
         filter: `deal_id=eq.${deal.id}`,
       }, payload => {
         setEnvelopes(prev => prev.map(e => e.id === payload.new.id ? { ...e, ...payload.new } : e))
@@ -1510,7 +1423,7 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
 
   const loadEnvelopes = async () => {
     setLoading(true)
-    const { data, error } = await supabase.from('docusign_envelopes').select('*').eq('deal_id', deal.id).order('created_at', { ascending: false })
+    const { data, error } = await supabase.from('signwell_documents').select('*').eq('deal_id', deal.id).order('created_at', { ascending: false })
     if (error?.code === '42P01') { setTableReady(false); setLoading(false); return }
     setEnvelopes(data || [])
     setLoading(false)
@@ -1522,15 +1435,15 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
   }
 
   const refreshStatus = async (env) => {
-    const res = await fetch('/api/docusign', {
+    const res = await fetch('/api/signwell', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'status', envelopeId: env.envelope_id }),
+      body: JSON.stringify({ action: 'status', documentId: env.document_id }),
     })
     const data = await res.json()
     if (data.error) { pushToast(data.error, 'error'); return }
     const patch = { status: data.status, completed_at: data.completedDateTime || null }
-    await supabase.from('docusign_envelopes').update(patch).eq('id', env.id)
+    await supabase.from('signwell_documents').update(patch).eq('id', env.id)
     setEnvelopes(prev => prev.map(e => e.id === env.id ? { ...e, ...patch } : e))
     pushToast(`Status: ${data.status}`, 'info')
   }
@@ -1539,7 +1452,7 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
     setDownloading(p => ({ ...p, [env.id]: true }))
 
     // First check if the signed copy was saved to storage by the webhook
-    const signedFile = dealFiles.find(f => f.name.includes('signed-') && f.name.includes(env.envelope_id?.slice(0, 8) || ''))
+    const signedFile = dealFiles.find(f => f.name.includes('signed-') && f.name.includes(env.document_id?.slice(0, 8) || ''))
       || dealFiles.find(f => f.name.includes('signed-'))
 
     if (signedFile) {
@@ -1551,10 +1464,10 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
       }
     }
 
-    // Fall back: download directly from DocuSign API
-    const res = await fetch('/api/docusign', {
+    // Fall back: download directly from SignWell API
+    const res = await fetch('/api/signwell', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'download', envelopeId: env.envelope_id }),
+      body: JSON.stringify({ action: 'download', documentId: env.document_id }),
     })
     const data = await res.json()
     setDownloading(p => ({ ...p, [env.id]: false }))
@@ -1572,10 +1485,10 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
       <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:16, fontSize:13, lineHeight:1.7 }}>
         <strong>Run this SQL in your Supabase dashboard:</strong>
         <pre style={{ background:'var(--gw-slate)', color:'#e2e8f0', padding:10, borderRadius:6, fontSize:11, marginTop:8, overflowX:'auto' }}>
-{`create table if not exists docusign_envelopes (
+{`create table if not exists signwell_documents (
   id            uuid primary key default gen_random_uuid(),
   deal_id       uuid references deals(id) on delete cascade,
-  envelope_id   text not null,
+  document_id   text not null,
   signer_name   text,
   signer_email  text,
   document_name text,
@@ -1585,8 +1498,8 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
   completed_at  timestamptz,
   created_at    timestamptz default now()
 );
-alter table docusign_envelopes enable row level security;
-create policy "agents_envelopes" on docusign_envelopes
+alter table signwell_documents enable row level security;
+create policy "agents_signwell_documents" on signwell_documents
   for all to authenticated using (true) with check (true);
 
 -- Also run this for agent notifications:
