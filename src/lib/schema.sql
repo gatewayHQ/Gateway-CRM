@@ -657,7 +657,9 @@ create table if not exists mailing_scans (
   ip_hash       text,                          -- sha256(ip + daily-salt) — privacy-preserving uniqueness
   user_agent    text,
   referrer      text,
-  country       text,                          -- inferred from Vercel headers
+  country       text,                          -- inferred from Vercel headers (x-vercel-ip-country)
+  region        text,                          -- state/region code (x-vercel-ip-country-region)
+  city          text,                          -- city name, URL-decoded (x-vercel-ip-city)
   scanned_at    timestamptz default now()
 );
 

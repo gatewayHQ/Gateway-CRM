@@ -1606,6 +1606,30 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
                 </div>
               )}
 
+              {analytics?.top_locations?.length > 0 && (
+                <div style={{ marginTop:18 }}>
+                  <div style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)', marginBottom:8 }}>Top Locations</div>
+                  <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                    {(() => {
+                      const max = Math.max(1, ...analytics.top_locations.map(l => l.count))
+                      return analytics.top_locations.map(l => (
+                        <div key={l.location} style={{ display:'flex', alignItems:'center', gap:10, fontSize:12 }}>
+                          <div style={{ flex:'0 0 38%', color:'var(--gw-ink)' }}>{l.location}</div>
+                          <div style={{ flex:1, height:8, background:'var(--gw-bone)', borderRadius:4, overflow:'hidden' }}>
+                            <div style={{ width:`${(l.count / max) * 100}%`, height:'100%',
+                                          background:'var(--gw-azure)', borderRadius:4 }} />
+                          </div>
+                          <div style={{ flex:'0 0 36px', textAlign:'right', color:'var(--gw-mist)' }}>{l.count}</div>
+                        </div>
+                      ))
+                    })()}
+                  </div>
+                  <div style={{ fontSize:10, color:'var(--gw-mist)', marginTop:6 }}>
+                    Based on IP geolocation — metro-area accurate. Mobile carriers can resolve to a hub city.
+                  </div>
+                </div>
+              )}
+
               <div style={{ marginTop:18, display:'flex', gap:8 }}>
                 <button className="btn btn--ghost" onClick={() => {
                   const path = mailing.landing_type === 'custom' && mailing.landing_custom_url
@@ -1703,20 +1727,24 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
                   <thead style={{ background:'var(--gw-bone)' }}>
                     <tr>
                       <th style={{ padding:'8px 12px', textAlign:'left', fontSize:11, textTransform:'uppercase' }}>When</th>
-                      <th style={{ padding:'8px 12px', textAlign:'left', fontSize:11, textTransform:'uppercase' }}>Country</th>
+                      <th style={{ padding:'8px 12px', textAlign:'left', fontSize:11, textTransform:'uppercase' }}>Location</th>
                       <th style={{ padding:'8px 12px', textAlign:'left', fontSize:11, textTransform:'uppercase' }}>Device</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {scans.map(s => (
-                      <tr key={s.id} style={{ borderTop:'1px solid var(--gw-border)' }}>
-                        <td style={{ padding:'8px 12px' }}>{new Date(s.scanned_at).toLocaleString()}</td>
-                        <td style={{ padding:'8px 12px' }}>{s.country || '—'}</td>
-                        <td style={{ padding:'8px 12px', color:'var(--gw-mist)', fontSize:11 }}>
-                          {(s.user_agent || '').slice(0, 80) || '—'}
-                        </td>
-                      </tr>
-                    ))}
+                    {scans.map(s => {
+                      const cityRegion = [s.city, s.region].filter(Boolean).join(', ')
+                      const location = cityRegion || s.country || '—'
+                      return (
+                        <tr key={s.id} style={{ borderTop:'1px solid var(--gw-border)' }}>
+                          <td style={{ padding:'8px 12px' }}>{new Date(s.scanned_at).toLocaleString()}</td>
+                          <td style={{ padding:'8px 12px' }}>{location}</td>
+                          <td style={{ padding:'8px 12px', color:'var(--gw-mist)', fontSize:11 }}>
+                            {(s.user_agent || '').slice(0, 80) || '—'}
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>
