@@ -83,7 +83,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     if (!dealId) return
     const [f, e, s] = await Promise.all([
       supabase.storage.from(BUCKET).list(`deal-${dealId}`, { sortBy: { column: 'created_at', order: 'desc' } }),
-      supabase.from('docusign_envelopes').select('*').eq('deal_id', dealId).order('created_at', { ascending: false }),
+      supabase.from('signwell_documents').select('*').eq('deal_id', dealId).order('created_at', { ascending: false }),
       supabase.from('transaction_steps').select('id, title, completed, sort_order').eq('deal_id', dealId).order('sort_order', { ascending: true }),
     ])
     setFiles((f.data || []).filter(x => x.name !== '.emptyFolderPlaceholder'))

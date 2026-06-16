@@ -225,7 +225,7 @@ create table if not exists commissions (
 --   • SHARED tables (agents, properties, templates, …) keep a permissive
 --     allow_all policy — created just below.
 --   • SCOPED tables (contacts, deals, commissions, activities, tasks, and the
---     deal-children: documents, docusign_envelopes, transaction_steps,
+--     deal-children: documents, signwell_documents, transaction_steps,
 --     deadline_reminders, agent_notifications) are governed by the agent/team/
 --     co-listing policies defined in the "SCOPED RLS POLICIES" section at the
 --     END of this file (they depend on tables created later). Fresh installs
@@ -319,14 +319,14 @@ alter table agent_notifications enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- DOCUSIGN ENVELOPES  (named to match app code)
+-- SIGNWELL DOCUMENTS  (e-signature requests tracked per deal)
 -- ─────────────────────────────────────────────────────────────────────────────
-create table if not exists docusign_envelopes (
+create table if not exists signwell_documents (
   id            uuid primary key default uuid_generate_v4(),
   deal_id       uuid references deals(id) on delete cascade,
-  document_id   uuid references documents(id) on delete set null,
+  document_ref  uuid references documents(id) on delete set null,
   agent_id      uuid references agents(id) on delete set null,
-  envelope_id   text not null,
+  document_id   text not null,
   status        text default 'sent',
   subject       text,
   signer_name   text,
@@ -338,7 +338,7 @@ create table if not exists docusign_envelopes (
   created_at    timestamptz default now()
 );
 
-alter table docusign_envelopes enable row level security;
+alter table signwell_documents enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -359,26 +359,6 @@ create table if not exists transaction_steps (
 
 alter table transaction_steps enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
-
--- ─────────────────────────────────────────────────────────────────────────────
--- DOCUSIGN FIELD TEMPLATES  (pre-built anchor tab configs per document type)
--- ─────────────────────────────────────────────────────────────────────────────
-create table if not exists docusign_field_templates (
-  id            uuid primary key default uuid_generate_v4(),
-  name          text not null,             -- e.g. "Purchase Agreement"
-  doc_type      text not null unique,      -- key for lookup (purchase_agreement, listing_agreement…)
-  description   text,
-  anchor_tabs   jsonb not null default '[]',  -- array of anchor tab definitions
-  agent_id      uuid references agents(id) on delete set null,  -- null = system default
-  created_at    timestamptz default now()
-);
-
-alter table docusign_field_templates enable row level security;
-do $$ begin
-  if not exists (select 1 from pg_policies where tablename='docusign_field_templates' and policyname='allow_all') then
-    create policy "allow_all" on docusign_field_templates for all using (true) with check (true);
-  end if;
-end $$;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- MIGRATION  (run this block if upgrading an existing database)
@@ -480,10 +460,11 @@ create index if not exists idx_commissions_deal    on commissions(deal_id);
 create index if not exists idx_notif_agent_unread on agent_notifications(agent_id, read) where read = false;
 create index if not exists idx_notif_created      on agent_notifications(created_at desc);
 
--- docusign_envelopes — deal document queries
-create index if not exists idx_ds_envelopes_deal   on docusign_envelopes(deal_id);
-create index if not exists idx_ds_envelopes_agent  on docusign_envelopes(agent_id);
-create index if not exists idx_ds_envelopes_status on docusign_envelopes(status) where status not in ('completed','voided');
+-- signwell_documents — deal document queries
+create index if not exists idx_signwell_docs_deal   on signwell_documents(deal_id);
+create index if not exists idx_signwell_docs_agent  on signwell_documents(agent_id);
+create index if not exists idx_signwell_docs_status on signwell_documents(status) where status not in ('completed','voided');
+create index if not exists idx_signwell_docs_docid  on signwell_documents(document_id);
 
 -- transaction_steps — deal checklist queries
 create index if not exists idx_txn_steps_deal  on transaction_steps(deal_id, sort_order);
@@ -1185,9 +1166,9 @@ create policy documents_deal_scope on documents for all to authenticated
     or (deal_id is null and agent_id = app_current_agent_id())
   );
 
--- DOCUSIGN ENVELOPES — follow the deal; sender always sees their own.
-drop policy if exists docusign_envelopes_deal_scope on docusign_envelopes;
-create policy docusign_envelopes_deal_scope on docusign_envelopes for all to authenticated
+-- SIGNWELL DOCUMENTS — follow the deal; sender always sees their own.
+drop policy if exists signwell_documents_deal_scope on signwell_documents;
+create policy signwell_documents_deal_scope on signwell_documents for all to authenticated
   using (
     app_is_admin()
     or deal_id in (select app_visible_deal_ids())
