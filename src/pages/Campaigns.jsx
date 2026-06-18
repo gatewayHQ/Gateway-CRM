@@ -261,8 +261,9 @@ function AdvisorsField({ agents, primaryId, form, setCfg }) {
     <div style={{ border:'1px solid var(--gw-border)', borderRadius:10, padding:14 }}>
       <div style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Agents on this landing page</div>
       <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'2px 0 12px', lineHeight:1.5 }}>
-        Each agent’s headshot &amp; bio come from their profile (Team → edit agent). Add a co-agent for shared
-        listings, and optionally tailor what shows on this mailing.
+        Each agent’s headshot &amp; bio come from their published profile (Team → edit agent). Add a co-agent for
+        shared listings, tweak the copy for just this mailing, or publish a new version back to their profile so
+        it’s the default the next time anyone runs a campaign with them.
       </div>
 
       <label style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)' }}>Co-agent (optional)</label>
@@ -285,11 +286,37 @@ function AdvisorsField({ agents, primaryId, form, setCfg }) {
 function AdvisorCustomize({ agent, role, ov, onPatch, onClear }) {
   const [open, setOpen] = useState(false)
   const [uploading, setUploading] = useState({})
+  const [publishing, setPublishing] = useState(false)
   if (!agent) return null
   const photo       = ov.photo_url || agent.photo_url
   const profileBio  = (agent.bio || '').trim()
+  const effectiveBio = (ov.bio && ov.bio.trim()) || profileBio
   const hasOverride = Boolean((ov.bio && ov.bio.trim()) || ov.photo_url)
+  const hasProfile  = Boolean(profileBio || agent.photo_url)
   const inits       = (agent.name || '?').split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase()
+
+  // "Publish" the current overrides (or current profile fields) back to the
+  // agent's saved profile, so other agents creating campaigns with/for them
+  // can drop in their bio & headshot with one click.
+  const publishToProfile = async () => {
+    const nextBio   = (ov.bio && ov.bio.trim()) || profileBio
+    const nextPhoto = ov.photo_url || agent.photo_url || ''
+    if (!nextBio && !nextPhoto) {
+      pushToast('Add a bio or headshot first', 'error'); return
+    }
+    setPublishing(true)
+    const { error } = await supabase.from('agents')
+      .update({ bio: nextBio || null, photo_url: nextPhoto || null })
+      .eq('id', agent.id)
+    setPublishing(false)
+    if (error) { pushToast(error.message, 'error'); return }
+    // Mutate the in-memory agent so subsequent reads (and other mailings)
+    // immediately see the published values without a full reload.
+    agent.bio = nextBio
+    agent.photo_url = nextPhoto
+    onClear()
+    pushToast(`Published to ${agent.name}'s profile`)
+  }
 
   return (
     <div style={{ border:'1px solid var(--gw-border)', borderRadius:8, padding:10, background:'#fff' }}>
@@ -303,7 +330,11 @@ function AdvisorCustomize({ agent, role, ov, onPatch, onClear }) {
             {agent.name} <span style={{ fontSize:10, color:'var(--gw-mist)', fontWeight:600 }}>· {role}</span>
           </div>
           <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
-            {hasOverride ? 'Customized for this mailing' : profileBio ? 'Using their profile bio' : 'No bio on file — add one in their profile'}
+            {hasOverride
+              ? 'Customized for this mailing'
+              : hasProfile
+                ? 'Using their published bio & headshot'
+                : 'No bio on file — add one in their profile'}
           </div>
         </div>
         <button type="button" className="btn btn--ghost btn--sm" style={{ fontSize:11 }} onClick={() => setOpen(o => !o)}>
@@ -313,11 +344,28 @@ function AdvisorCustomize({ agent, role, ov, onPatch, onClear }) {
 
       {open && (
         <div style={{ marginTop:10, display:'flex', flexDirection:'column', gap:8 }}>
+          {/* Show the agent's saved/published bio so it's clear what will run
+              on the landing page when there's no override. */}
+          {hasProfile && (
+            <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)',
+                          borderRadius:6, padding:'8px 10px', fontSize:11.5, lineHeight:1.45 }}>
+              <div style={{ fontSize:10, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase',
+                            letterSpacing:0.5, marginBottom:4 }}>
+                Published profile {hasOverride ? '(not used — override active)' : '(in use)'}
+              </div>
+              {profileBio
+                ? <div style={{ color:'var(--gw-ink)' }}>{profileBio}</div>
+                : <div style={{ color:'var(--gw-mist)', fontStyle:'italic' }}>Headshot published, no bio yet.</div>}
+            </div>
+          )}
+
           <textarea className="input" rows={3} maxLength={600} value={ov.bio ?? ''}
             placeholder={profileBio || 'Bio shown on this mailing…'}
             onChange={e => onPatch({ bio: e.target.value })} />
-          <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Leave blank to use their profile bio.</div>
-          <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+          <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
+            Leave blank to use their published bio. Edits here only affect this mailing unless you publish them.
+          </div>
+          <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
             <label className="btn btn--secondary btn--sm" style={{ cursor:'pointer', fontSize:11 }}>
               {uploading.photo ? 'Uploading…' : 'Upload photo'}
               <input type="file" accept="image/*" style={{ display:'none' }}
@@ -329,7 +377,14 @@ function AdvisorCustomize({ agent, role, ov, onPatch, onClear }) {
             </label>
             {hasOverride && (
               <button type="button" className="btn btn--ghost btn--sm" style={{ fontSize:11 }} onClick={onClear}>
-                Reset to profile
+                Use published bio &amp; headshot
+              </button>
+            )}
+            {(hasOverride || (effectiveBio && effectiveBio !== profileBio) || (photo && photo !== agent.photo_url)) && (
+              <button type="button" className="btn btn--primary btn--sm" style={{ fontSize:11 }}
+                      disabled={publishing} onClick={publishToProfile}
+                      title={`Save these as ${agent.name}'s default bio & headshot`}>
+                {publishing ? 'Publishing…' : `Publish to ${agent.name}'s profile`}
               </button>
             )}
           </div>
