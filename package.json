@@ -11,8 +11,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "0.91.1",
-    "@supabase/supabase-js": "^2.39.0",
+    "@anthropic-ai/sdk": "0.105.0",
+    "@supabase/supabase-js": "^2.108.2",
     "@vercel/analytics": "^2.0.1",
     "pptxgenjs": "^4.0.1",
     "react": "^18.3.1",
