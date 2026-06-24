@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, pushToast } from '../components/UI.jsx'
 
@@ -120,6 +120,59 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
     if (error) { pushToast(error.message, 'error'); return }
     setDb(p => ({ ...p, agents: (p.agents || []).map(a => a.id === activeAgentId ? { ...a, nav_hidden: hiddenNav } : a) }))
     pushToast('Sidebar preferences saved')
+  }
+
+  // ── Lead Form Security (HMAC signing for agent_id) ─────────────────────────
+  // Probes /api/property-public?sign=... to learn whether LEAD_AGENT_SECRET is
+  // configured. If yes, lets admins/agents copy per-agent embed snippets.
+  const isAdmin = !!activeAgent?.is_admin
+  const visibleAgentsForSecurity = useMemo(() => {
+    const all = db.agents || []
+    return isAdmin ? all : all.filter(a => a.id === activeAgentId)
+  }, [db.agents, isAdmin, activeAgentId])
+
+  const [securityState, setSecurityState] = useState('checking') // checking | configured | unconfigured | error
+  const [agentSigs, setAgentSigs]         = useState({})         // { [agent_id]: sig }
+  const [signingFor, setSigningFor]       = useState(null)
+
+  useEffect(() => {
+    if (!activeAgentId) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession()
+        const token = session?.access_token
+        if (!token) { if (!cancelled) setSecurityState('error'); return }
+        const r = await fetch(`/api/property-public?sign=${encodeURIComponent(activeAgentId)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (cancelled) return
+        if (r.status === 412)      setSecurityState('unconfigured')
+        else if (r.status === 200) {
+          const data = await r.json()
+          setAgentSigs(p => ({ ...p, [activeAgentId]: data.sig }))
+          setSecurityState('configured')
+        } else                     setSecurityState('error')
+      } catch { if (!cancelled) setSecurityState('error') }
+    })()
+    return () => { cancelled = true }
+  }, [activeAgentId])
+
+  const fetchSig = async (agentId) => {
+    if (agentSigs[agentId]) return
+    setSigningFor(agentId)
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      const token = session?.access_token
+      const r = await fetch(`/api/property-public?sign=${encodeURIComponent(agentId)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!r.ok) { pushToast('Could not generate embed code', 'error'); return }
+      const data = await r.json()
+      setAgentSigs(p => ({ ...p, [agentId]: data.sig }))
+    } finally {
+      setSigningFor(null)
+    }
   }
 
   // AI key — loaded from Supabase auth metadata (persists across devices)
@@ -414,6 +467,74 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
               }
             </div>
           </div>
+        )}
+      </div>
+
+      {/* ── Lead Form Security ── */}
+      <div className="settings-section">
+        <div className="settings-section__title">Lead Form Security</div>
+        <div className="settings-section__sub">
+          When enabled, agent-pinned leads from your landing pages require a signed token.
+          Without it, anyone could pin a lead to any agent. Set <code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3, fontSize: 11 }}>LEAD_AGENT_SECRET</code> in your Vercel env to turn this on — leads still arrive either way, only the agent assignment is gated.
+        </div>
+
+        {securityState === 'checking' && (
+          <div style={{ fontSize: 13, color: 'var(--gw-mist)' }}>Checking server configuration…</div>
+        )}
+
+        {securityState === 'unconfigured' && (
+          <div style={{ padding: '12px 14px', background: 'var(--gw-bone)', border: '1px dashed var(--gw-border)', borderRadius: 'var(--radius)' }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Signing is not configured</div>
+            <div style={{ fontSize: 12, color: 'var(--gw-mist)', lineHeight: 1.5 }}>
+              Add <code style={{ background: '#fff', padding: '1px 5px', borderRadius: 3, fontSize: 11 }}>LEAD_AGENT_SECRET</code> to your Vercel project's environment variables (any 32+ random characters), then redeploy. Agent-pinned leads will keep working in the meantime — they just aren't signature-verified yet.
+            </div>
+          </div>
+        )}
+
+        {securityState === 'error' && (
+          <div style={{ fontSize: 12, color: 'var(--gw-red)' }}>Could not check signing status. Refresh to retry.</div>
+        )}
+
+        {securityState === 'configured' && (
+          <>
+            <div style={{ background: 'var(--gw-green-light)', border: '1px solid var(--gw-green)', borderRadius: 'var(--radius)', padding: '10px 12px', fontSize: 12, color: 'var(--gw-green)', fontWeight: 600, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Icon name="check" size={13} /> Signing is active — agent pinning requires a valid signature
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 14, lineHeight: 1.5 }}>
+              Copy the snippet for each agent's landing page. The hidden inputs travel with the lead form POST — <code>agent_id</code> tells us who, <code>agent_id_sig</code> proves it.
+            </div>
+            {visibleAgentsForSecurity.map(a => {
+              const sig = agentSigs[a.id]
+              const snippet = sig
+                ? `<input type="hidden" name="agent_id" value="${a.id}">\n<input type="hidden" name="agent_id_sig" value="${sig}">`
+                : ''
+              return (
+                <div key={a.id} style={{ marginBottom: 14, padding: 12, border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', background: '#fff' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: sig ? 8 : 0, gap: 12 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>{a.name}</div>
+                      <div style={{ fontSize: 11, color: 'var(--gw-mist)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.email}</div>
+                    </div>
+                    {!sig ? (
+                      <button className="btn btn--secondary btn--sm" disabled={signingFor === a.id} onClick={() => fetchSig(a.id)}>
+                        {signingFor === a.id ? 'Generating…' : 'Show embed code'}
+                      </button>
+                    ) : (
+                      <button className="btn btn--ghost btn--sm" onClick={() => copy(snippet, `sig-${a.id}`)}>
+                        <Icon name="copy" size={12} /> {copied === `sig-${a.id}` ? 'Copied!' : 'Copy'}
+                      </button>
+                    )}
+                  </div>
+                  {sig && (
+                    <pre style={{ ...codeStyle, marginTop: 0, fontSize: 10, padding: 10, maxHeight: 'none' }}>{snippet}</pre>
+                  )}
+                </div>
+              )
+            })}
+            {visibleAgentsForSecurity.length === 0 && (
+              <div style={{ fontSize: 13, color: 'var(--gw-mist)' }}>No agents to show.</div>
+            )}
+          </>
         )}
       </div>
 

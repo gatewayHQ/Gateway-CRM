@@ -359,16 +359,35 @@ async function handleGate(req, res) {
   return res.json({ ok: true, contactId, isNew, assignedAgentId })
 }
 
-// Round-robin: pull non-admin producing agents by specialty, find the most
-// recently assigned agent in that pool, and return the next one in alphabetical
-// rotation. Falls back to the other specialty, then any non-admin agent, then
-// null. Admins are excluded by design — they're transaction coordinators, not
-// the people the brokerage wants leads routed to.
+// Round-robin: delegate to the atomic RPC (migration 0017). The Postgres
+// function takes a transaction-scoped advisory lock so concurrent inbound
+// leads can't both observe the same "last assigned" row and double-route.
+// Falls back to the JS implementation if the RPC isn't installed yet
+// (lets us deploy the API before the migration is run).
 async function pickRoundRobinAgent(supabaseUrl, headers, propertyType) {
+  const rpcRes = await fetch(`${supabaseUrl}/rest/v1/rpc/pick_round_robin_agent`, {
+    method: 'POST',
+    headers: { ...headers, Prefer: 'return=representation' },
+    body: JSON.stringify({ p_property_type: propertyType || 'residential' }),
+  })
+  if (rpcRes.ok) {
+    const body = await rpcRes.text()
+    // RPC returning a scalar uuid comes back as a JSON string ("uuid") or
+    // null. Strip the quotes either way.
+    const trimmed = body.trim().replace(/^"|"$/g, '')
+    return trimmed && trimmed !== 'null' ? trimmed : null
+  }
+  // Function not installed yet — fall back to the legacy JS picker. Logged
+  // so ops notice they should run the migration.
+  console.warn('[lead intake] pick_round_robin_agent RPC not available; using JS fallback')
+  return pickRoundRobinAgentJs(supabaseUrl, headers, propertyType)
+}
+
+// Legacy JS picker. Same algorithm as the RPC but susceptible to the race
+// (two concurrent inserts can both read the same "last assigned" row).
+// Retained only as a fallback during migration rollout.
+async function pickRoundRobinAgentJs(supabaseUrl, headers, propertyType) {
   const specialty = propertyType === 'commercial' ? 'commercial' : 'residential'
-  // is_admin.is.false — PostgREST encoding for "is_admin = false" (NULL is
-  // treated as "not admin" too via the second OR; brand-new agents may not
-  // have the flag set explicitly).
   const adminFilter = 'is_admin=is.false'
   const pools = [
     `${adminFilter}&specialty=eq.${specialty}`,
@@ -399,7 +418,7 @@ async function pickRoundRobinAgent(supabaseUrl, headers, propertyType) {
     return agents[nextIdx].id
   }
 
-  return null  // no non-admin agents configured at all
+  return null
 }
 
 // Auto-enroll a new website lead in the assigned agent's chosen drip. Picks
@@ -486,13 +505,13 @@ async function autoEnroll({ supabaseUrl, headers, contactId, contactType, proper
 }
 
 // GET /api/property-public?sign=<agent_uuid>
-// Authenticated admins can fetch the HMAC for an agent's id so the Settings
-// "Lead Form Security" tile can render a copy-paste embed snippet. Requires
-// LEAD_AGENT_SECRET to be set on the server.
+// Authenticated callers fetch an HMAC for an agent's id so the Settings UI
+// can render a copy-paste embed snippet for landing pages.
 //
 // Auth: pass the Supabase access token as `Authorization: Bearer <token>`.
-// We use it as the apikey too so PostgREST evaluates the request under the
-// caller's RLS context — agents.is_admin then tells us whether to sign.
+// We resolve the caller via the Supabase auth endpoint (no JWT decoding),
+// then look up their agent row with the service key to check is_admin /
+// self. Admins can sign any agent's id; producers can sign their own.
 async function handleSign(req, res) {
   const agentId = String(req.query.sign || '')
   if (!/^[0-9a-f-]{36}$/i.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' })
@@ -505,26 +524,30 @@ async function handleSign(req, res) {
   if (!auth?.startsWith('Bearer ')) return res.status(401).json({ error: 'Authorization required' })
 
   const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL
-  if (!SUPABASE_URL) return res.status(500).json({ error: 'Server configuration error' })
+  const ANON_KEY     = process.env.VITE_SUPABASE_ANON_KEY
+  const SERVICE_KEY  = process.env.SUPABASE_SERVICE_KEY
+  if (!SUPABASE_URL || !SERVICE_KEY || !ANON_KEY) return res.status(500).json({ error: 'Server configuration error' })
 
-  // Verify the caller is an admin under their own RLS by reading the agents
-  // table with their bearer token. Anything that lets a non-admin sign means
-  // they could pin every lead to themselves — gate this carefully.
-  const meRes = await fetch(
-    `${SUPABASE_URL}/rest/v1/agents?select=id,is_admin&auth_id=eq.&limit=1`,
-    { headers: { apikey: auth.slice(7), Authorization: auth } }
+  // Resolve the caller's user id from their access token.
+  const meRes = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    headers: { apikey: ANON_KEY, Authorization: auth },
+  })
+  if (!meRes.ok) return res.status(401).json({ error: 'Invalid session' })
+  const user = await meRes.json().catch(() => null)
+  const userId = user?.id
+  if (!userId) return res.status(401).json({ error: 'Invalid session' })
+
+  // Look up the caller's agent row with the service key so we get is_admin
+  // straight from the source (don't trust client claims).
+  const agentRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/agents?auth_id=eq.${userId}&select=id,is_admin&limit=1`,
+    { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } }
   )
-  // The above shape requires the agents table to expose auth_id via PostgREST;
-  // simpler: rely on RLS — fetch the row whose auth_id matches the caller.
-  const meRes2 = await fetch(
-    `${SUPABASE_URL}/rest/v1/agents?select=id,is_admin&limit=1`,
-    { headers: { apikey: auth.slice(7), Authorization: auth, 'Accept-Profile': 'public' } }
-  )
-  const me = meRes2.ok ? (await meRes2.json())[0] : null
-  // Either the caller is themselves an admin (allowed to sign any agent), or
-  // the caller is signing their OWN agent id (so producers can copy their own
-  // embed). Both checks happen against RLS-filtered data.
-  if (!me || (!me.is_admin && me.id !== agentId)) {
+  const me = agentRes.ok ? (await agentRes.json())[0] : null
+  if (!me) return res.status(403).json({ error: 'No agent profile linked to this user' })
+
+  // Admin can sign anyone's id. Producers can only sign their own.
+  if (!me.is_admin && me.id !== agentId) {
     return res.status(403).json({ error: 'Forbidden' })
   }
 
