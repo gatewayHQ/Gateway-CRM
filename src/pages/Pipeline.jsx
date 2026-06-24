@@ -15,6 +15,8 @@ import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDr
 import ChecklistTab from './pipeline/ChecklistTab.jsx'
 import KeyDatesTab  from './pipeline/KeyDatesTab.jsx'
 import PortalTab    from './pipeline/PortalTab.jsx'
+import { uploadWithProgress } from '../lib/uploadWithProgress.js'
+import { fireWebhooks } from '../lib/webhooks.js'
 
 
 const BUCKET = 'deal-documents'
@@ -105,10 +107,11 @@ function RequiredFormsPanel() {
   )
 }
 
-function DocumentsTab({ deal }) {
+function DocumentsTab({ deal, onUpload }) {
   const [files, setFiles]         = useState([])
   const [loading, setLoading]     = useState(true)
   const [uploading, setUploading] = useState(false)
+  const [progress, setProgress]   = useState(0)   // 0–100 while uploading
   const [bucketReady, setBucketReady] = useState(true)
   const [dragOver, setDragOver]   = useState(false)
   const [sharedDocs, setSharedDocs] = useState([])   // filenames shared to the client portal
@@ -149,12 +152,17 @@ function DocumentsTab({ deal }) {
     if (!file) return
     if (file.size > 50 * 1024 * 1024) { pushToast('File must be under 50 MB', 'error'); return }
     setUploading(true)
+    setProgress(1)
     const path = `deal-${deal.id}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`
-    const { error } = await supabase.storage.from(BUCKET).upload(path, file, { upsert: false })
+    const { error } = await uploadWithProgress(BUCKET, path, file, {
+      onProgress: setProgress,
+    })
     setUploading(false)
+    setProgress(0)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast(`${file.name} uploaded`)
     loadFiles()
+    onUpload?.()  // notify siblings (SignaturesTab) that the file list changed
   }
 
   const download = async (fileName) => {
@@ -206,7 +214,14 @@ with check (bucket_id = 'deal-documents');`}
         onDrop={e => { e.preventDefault(); setDragOver(false); upload(e.dataTransfer.files[0]) }}>
         <input ref={fileRef} type="file" style={{ display: 'none' }} onChange={e => upload(e.target.files[0])} />
         {uploading ? (
-          <div style={{ fontSize: 13, color: 'var(--gw-azure)', fontWeight: 600 }}>Uploading…</div>
+          <div onClick={e => e.stopPropagation()} style={{ cursor: 'default' }}>
+            <div style={{ fontSize: 13, color: 'var(--gw-azure)', fontWeight: 600, marginBottom: 8 }}>
+              Uploading… {progress}%
+            </div>
+            <div style={{ height: 5, background: 'var(--gw-border)', borderRadius: 3, overflow: 'hidden', maxWidth: 280, margin: '0 auto' }}>
+              <div style={{ width: `${progress}%`, height: '100%', background: 'var(--gw-azure)', transition: 'width 120ms ease' }} />
+            </div>
+          </div>
         ) : (
           <>
             <Icon name="upload" size={22} style={{ color: 'var(--gw-border)', marginBottom: 6 }} />
@@ -665,7 +680,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   )
 }
 
-function SignaturesTab({ deal, contacts, properties, activeAgent }) {
+function SignaturesTab({ deal, contacts, properties, activeAgent, filesVersion = 0 }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
@@ -673,10 +688,16 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
   const [dealFiles,   setDealFiles]   = React.useState([])
   const [downloading, setDownloading] = React.useState({})
 
+  // Reload the file list whenever DocumentsTab bumps the shared version
+  // (sibling-tab sync). Cheap — Supabase storage.list is one round-trip.
+  React.useEffect(() => {
+    if (!deal?.id) return
+    loadDealFiles()
+  }, [deal?.id, filesVersion])
+
   React.useEffect(() => {
     if (!deal?.id) return
     loadEnvelopes()
-    loadDealFiles()
 
     // Realtime subscription — auto-update status when webhook fires
     const channel = supabase.channel(`sig-documents-${deal.id}`)
@@ -885,6 +906,10 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
   const [tab, setTab]       = useState(initialTab)
+  // Bumped every time DocumentsTab uploads a new file. SignaturesTab listens
+  // to this so a doc uploaded in the same drawer session is immediately
+  // selectable for signing, instead of requiring a drawer reopen.
+  const [filesVersion, setFilesVersion] = useState(0)
 
   React.useEffect(() => {
     setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {} } : blank)
@@ -1147,12 +1172,12 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
       {/* Documents tab */}
       {tab === 'documents' && isExisting && (
-        <DocumentsTab deal={deal} />
+        <DocumentsTab deal={deal} onUpload={() => setFilesVersion(v => v + 1)} />
       )}
 
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
-        <SignaturesTab deal={deal} contacts={contacts} properties={properties} activeAgent={activeAgent} />
+        <SignaturesTab deal={deal} contacts={contacts} properties={properties} activeAgent={activeAgent} filesVersion={filesVersion} />
       )}
 
       {/* Client Portal tab */}
@@ -1453,6 +1478,12 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     await supabase.from('deals').update({ stage: newStage, comp_data }).eq('id', dealId)
     setDb(p => ({ ...p, deals: p.deals.map(d => d.id === dealId ? { ...d, stage: newStage, comp_data } : d) }))
     pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
+    // Outbound webhooks — same shape as the DealPage stage-change emit.
+    if (deal && deal.stage !== newStage) {
+      const payload = { id: dealId, title: deal.title, value: deal.value, agent_id: deal.agent_id, from_stage: deal.stage, to_stage: newStage }
+      fireWebhooks('deal.stage_changed', payload)
+      if (newStage === 'closed') fireWebhooks('deal.closed', payload)
+    }
 
     const auto = AUTO_TASKS[newStage]
     if (!auto) return

@@ -4,6 +4,7 @@ import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { formatCurrency } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
+import { uploadWithProgress } from '../lib/uploadWithProgress.js'
 import { findMatchingBuyers } from '../lib/matching.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
 import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
@@ -272,6 +273,9 @@ function CommercialFields({ form, set }) {
 function PhotoUploader({ photos = [], propertyId, onAdd, onRemove }) {
   const [uploading, setUploading] = useState(false)
   const [dragOver, setDragOver]   = useState(false)
+  // Aggregate progress while a batch is uploading. Tracks (done + currentPct/100)
+  // out of total files so the bar advances smoothly across multi-photo batches.
+  const [batchProgress, setBatchProgress] = useState({ done: 0, total: 0, pct: 0 })
   const inputRef = useRef(null)
 
   const upload = async (files) => {
@@ -279,17 +283,27 @@ function PhotoUploader({ photos = [], propertyId, onAdd, onRemove }) {
     if (valid.length < files.length) pushToast('Images only, max 10 MB each', 'error')
     if (!valid.length) return
     setUploading(true)
+    setBatchProgress({ done: 0, total: valid.length, pct: 0 })
+    let done = 0
     for (const file of valid) {
       const { blob, ext, type } = await compressForUpload(file, 'property')
       const path = `${propertyId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
-      const { data, error } = await supabase.storage
-        .from('property-photos')
-        .upload(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
+      const { error } = await uploadWithProgress('property-photos', path, blob, {
+        upsert: false,
+        contentType: type,
+        cacheControl: IMMUTABLE_CACHE,
+        // Blend per-file pct into the batch so the bar moves smoothly. e.g.
+        // file 1 of 3 at 50% = (0 + 0.5) / 3 = 17% of the batch.
+        onProgress: (pct) => setBatchProgress({ done, total: valid.length, pct: Math.round(((done + pct / 100) / valid.length) * 100) }),
+      })
       if (error) { pushToast(`Upload failed: ${error.message}`, 'error'); continue }
       const { data: { publicUrl } } = supabase.storage.from('property-photos').getPublicUrl(path)
       onAdd(publicUrl)
+      done += 1
+      setBatchProgress({ done, total: valid.length, pct: Math.round((done / valid.length) * 100) })
     }
     setUploading(false)
+    setBatchProgress({ done: 0, total: 0, pct: 0 })
     if (inputRef.current) inputRef.current.value = ''
   }
 
@@ -327,8 +341,19 @@ function PhotoUploader({ photos = [], propertyId, onAdd, onRemove }) {
         <input ref={inputRef} type="file" accept="image/*" multiple style={{ display: 'none' }}
           onChange={e => upload(e.target.files)} />
         <Icon name="upload" size={16} style={{ marginBottom: 4 }} />
-        <span style={{ fontSize: 12 }}>{uploading ? 'Uploading…' : 'Drop photos or click to browse'}</span>
+        <span style={{ fontSize: 12 }}>
+          {uploading
+            ? (batchProgress.total > 1
+                ? `Uploading… ${batchProgress.done}/${batchProgress.total} (${batchProgress.pct}%)`
+                : `Uploading… ${batchProgress.pct}%`)
+            : 'Drop photos or click to browse'}
+        </span>
         {!uploading && <span style={{ fontSize: 11, color: 'var(--gw-mist)' }}>JPEG, PNG, WEBP — up to 10 MB</span>}
+        {uploading && (
+          <div style={{ width: '70%', maxWidth: 240, marginTop: 6, height: 4, background: 'var(--gw-border)', borderRadius: 2, overflow: 'hidden' }}>
+            <div style={{ width: `${batchProgress.pct}%`, height: '100%', background: 'var(--gw-azure)', transition: 'width 120ms ease' }} />
+          </div>
+        )}
       </div>
     </div>
   )

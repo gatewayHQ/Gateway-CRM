@@ -6,6 +6,7 @@ import { formatCurrency, formatDate, formatPhone, STAGE_LABELS } from '../lib/he
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
 import { DealDrawer } from './Pipeline.jsx'
+import { fireWebhooks } from '../lib/webhooks.js'
 
 const BUCKET = 'deal-documents'
 
@@ -179,6 +180,16 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, stage: newStage, comp_data } : d) }))
     setFetched(f => f && f.id === deal.id ? { ...f, stage: newStage, comp_data } : f)
     pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
+
+    // Outbound webhooks — best-effort, swallowed on failure inside fireWebhooks.
+    // 'deal.closed' is a separate event so subscribers can pin on the
+    // closing moment without filtering stage_changed payloads.
+    const payload = {
+      id: deal.id, title: deal.title, value: deal.value, agent_id: deal.agent_id,
+      from_stage: deal.stage, to_stage: newStage,
+    }
+    fireWebhooks('deal.stage_changed', payload)
+    if (newStage === 'closed') fireWebhooks('deal.closed', payload)
     const auto = STAGE_AUTO_TASKS[newStage]
     if (!auto) return
     const due = new Date(); due.setDate(due.getDate() + auto.daysOut); due.setHours(9, 0, 0, 0)

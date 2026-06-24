@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { uploadWithProgress } from '../lib/uploadWithProgress.js'
 import { Icon, pushToast, EmptyState, Modal } from '../components/UI.jsx'
 
 const TRANSACTION_TYPES = [
@@ -29,6 +30,7 @@ function UploadModal({ packet, onClose, onSaved, defaultCategory = 'state_packet
   const [form, setForm]   = useState(packet ? { ...blank, ...packet } : blank)
   const [file, setFile]   = useState(null)
   const [saving, setSaving] = useState(false)
+  const [progress, setProgress] = useState(0)   // 0–100 while uploading
   const fileRef = useRef()
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }))
@@ -46,7 +48,11 @@ function UploadModal({ packet, onClose, onSaved, defaultCategory = 'state_packet
           ? `${form.state.trim().toUpperCase()}/${form.transaction_type}`
           : `_resources/${form.transaction_type || 'general'}`
         const path = `${folder}/${Date.now()}-${file.name}`
-        const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, file, { upsert: true })
+        setProgress(1)  // flip the bar visible before the first xhr tick
+        const { error: upErr } = await uploadWithProgress(BUCKET, path, file, {
+          upsert: true,
+          onProgress: setProgress,
+        })
         if (upErr) {
           // Most common failure on a fresh environment: the bucket doesn't
           // exist yet. Show actionable instructions inline instead of a raw
@@ -81,6 +87,7 @@ function UploadModal({ packet, onClose, onSaved, defaultCategory = 'state_packet
       onSaved()
     } finally {
       setSaving(false)
+      setProgress(0)
     }
   }
 
@@ -131,11 +138,23 @@ function UploadModal({ packet, onClose, onSaved, defaultCategory = 'state_packet
           {packet?.storage_path && !file && (
             <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Current file on file — leave blank to keep it.</div>
           )}
+          {progress > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontWeight: 600, color: 'var(--gw-mist)', marginBottom: 4 }}>
+                <span>Uploading…</span><span>{progress}%</span>
+              </div>
+              <div style={{ height: 4, background: 'var(--gw-border)', borderRadius: 2, overflow: 'hidden' }}>
+                <div style={{ width: `${progress}%`, height: '100%', background: 'var(--gw-azure)', transition: 'width 120ms ease' }} />
+              </div>
+            </div>
+          )}
         </div>
       </div>
       <div style={{ padding: '12px 24px 20px', borderTop: '1px solid var(--gw-border)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-        <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-        <button className="btn btn--primary" onClick={save} disabled={saving}>{saving ? 'Saving…' : isNew ? 'Add Packet' : 'Save Changes'}</button>
+        <button className="btn btn--secondary" onClick={onClose} disabled={saving}>Cancel</button>
+        <button className="btn btn--primary" onClick={save} disabled={saving}>
+          {saving ? (progress > 0 && progress < 100 ? `Uploading… ${progress}%` : 'Saving…') : isNew ? 'Add Packet' : 'Save Changes'}
+        </button>
       </div>
     </Modal>
   )

@@ -289,6 +289,20 @@ async function handleGate(req, res) {
     }).catch(() => {})
   }
 
+  // Unassignable lead: the round-robin came back empty (no non-admin agents
+  // configured, or all matching agents are admins). The contact is still
+  // created — leads must never be lost — but every admin gets a high-priority
+  // alert so the office knows to triage it manually.
+  if (contactId && !assignedAgentId) {
+    await notifyAdminsOfUnassignedLead({
+      supabaseUrl: SUPABASE_URL,
+      headers,
+      leadName: `${resolvedFirst} ${resolvedLast}`.trim(),
+      email: normalEmail,
+      propertyAddress: property_address,
+    }).catch(err => console.error('[lead intake] unassigned-lead alert failed:', err?.message))
+  }
+
   // Auto-enroll the new contact in the assigned agent's drip. Only fires for
   // brand-new contacts created via this endpoint (isNew) — manual contact
   // creation in the UI is unaffected. If the agent has no default sequence
@@ -419,6 +433,38 @@ async function pickRoundRobinAgentJs(supabaseUrl, headers, propertyType) {
   }
 
   return null
+}
+
+// Tell every admin that a lead arrived with no producing agent to route to.
+// Fires when the round-robin returns null — usually means the brokerage has
+// no non-admin agents configured yet (e.g. early setup, or every account
+// happens to have is_admin=true). Without this alert the lead would sit in
+// contacts with assigned_agent_id=null and nobody watching.
+async function notifyAdminsOfUnassignedLead({ supabaseUrl, headers, leadName, email, propertyAddress }) {
+  const adminsRes = await fetch(
+    `${supabaseUrl}/rest/v1/agents?is_admin=is.true&select=id`,
+    { headers }
+  )
+  const admins = adminsRes.ok ? await adminsRes.json() : []
+  if (!admins.length) return  // no admins either — nothing more we can do
+
+  const detail = [
+    propertyAddress ? `Interested in ${propertyAddress}` : null,
+    `Email: ${email}`,
+  ].filter(Boolean).join(' · ')
+
+  const payload = admins.map(a => ({
+    agent_id: a.id,
+    title:    'Lead arrived but couldn\'t be assigned',
+    message:  `${leadName} just submitted the website form — no non-admin agent was available to route to. The contact is in the CRM but unassigned; pick it up manually or add a producing agent.`,
+    type:     'setup_needed',
+  }))
+
+  await fetch(`${supabaseUrl}/rest/v1/agent_notifications`, {
+    method: 'POST',
+    headers: { ...headers, Prefer: 'return=minimal' },
+    body: JSON.stringify(payload),
+  }).catch(() => {})
 }
 
 // Auto-enroll a new website lead in the assigned agent's chosen drip. Picks
