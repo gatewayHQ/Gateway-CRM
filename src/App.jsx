@@ -495,7 +495,7 @@ export default function App() {
 
         <nav className="sidebar__nav" aria-label="Main navigation">
           {/* ── Core ── */}
-          {NAV_CORE.filter(n => !(isAdmin && n.id === 'contacts') && !hiddenNav.includes(n.id)).map(n => (
+          {NAV_CORE.filter(n => !hiddenNav.includes(n.id)).map(n => (
             <div key={n.id} className={`nav-item${route === n.id || (n.id === 'pipeline' && route.startsWith('deal/')) ? ' active' : ''}`}
               onClick={() => setRoute(n.id)} title={n.label}
               role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
@@ -700,7 +700,7 @@ export default function App() {
 
       {/* ── Mobile bottom nav ── */}
       <nav className="mobile-nav">
-        {['dashboard', ...(isAdmin ? [] : ['contacts']), 'pipeline', 'tasks'].map(id => {
+        {['dashboard', 'contacts', 'pipeline', 'tasks'].map(id => {
           const n = NAV.find(x => x.id === id)
           if (!n) return null
           return (
