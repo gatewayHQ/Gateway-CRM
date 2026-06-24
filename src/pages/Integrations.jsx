@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Modal, pushToast } from '../components/UI.jsx'
 import { WEBHOOK_EVENTS } from '../lib/webhooks.js'
@@ -413,8 +413,109 @@ function WebhooksSection() {
         </div>
       </div>
 
+      <DeliveryLogPanel webhooks={webhooks} />
+
       {testingWebhook && (
         <TestWebhookModal webhook={testingWebhook} onClose={() => setTestingWebhook(null)} />
+      )}
+    </div>
+  )
+}
+
+// ─── Webhook delivery log ────────────────────────────────────────────────────
+// Reads webhook_deliveries (migration 0019) so admins can see at a glance
+// which subscribers are failing. Shows the most recent 50 attempts across all
+// webhooks, with status, error, and duration. Click a row to see the payload.
+function DeliveryLogPanel({ webhooks }) {
+  const [rows, setRows]     = useState([])
+  const [loading, setLoading] = useState(true)
+  const [tableReady, setTableReady] = useState(true)
+  const [expanded, setExpanded] = useState(null)
+  const [filter, setFilter] = useState('all')  // all | failed
+
+  const whName = useMemo(() => {
+    const m = new Map(); for (const w of webhooks) m.set(w.id, w.name); return m
+  }, [webhooks])
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    let q = supabase.from('webhook_deliveries').select('*').order('created_at', { ascending: false }).limit(50)
+    if (filter === 'failed') q = q.eq('ok', false)
+    const { data, error } = await q
+    if (error) {
+      if (error.code === '42P01') { setTableReady(false); setLoading(false); return }
+    } else {
+      setRows(data || [])
+    }
+    setLoading(false)
+  }, [filter])
+
+  useEffect(() => { load() }, [load])
+
+  if (!tableReady) return (
+    <div className="card" style={{ padding: 20, maxWidth: 680, marginTop: 12, background: '#fff8ec', border: '1px solid var(--gw-amber)' }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>Delivery log not installed</div>
+      <div style={{ fontSize: 13, color: 'var(--gw-mist)' }}>
+        Run migration <code>0019_webhook_deliveries.sql</code> in Supabase → SQL Editor to enable the delivery log.
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="card" style={{ padding: 0, maxWidth: 680, marginTop: 12, overflow: 'hidden' }}>
+      <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--gw-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+        <div style={{ fontSize: 14, fontWeight: 700 }}>Recent Deliveries</div>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <select className="form-control" style={{ fontSize: 12, padding: '4px 8px', width: 'auto' }} value={filter} onChange={e => setFilter(e.target.value)}>
+            <option value="all">All</option>
+            <option value="failed">Failures only</option>
+          </select>
+          <button className="btn btn--ghost btn--sm" onClick={load}><Icon name="refresh" size={12} /></button>
+        </div>
+      </div>
+      {loading ? (
+        <div style={{ padding: 20, color: 'var(--gw-mist)', fontSize: 13, textAlign: 'center' }}>Loading…</div>
+      ) : rows.length === 0 ? (
+        <div style={{ padding: 24, color: 'var(--gw-mist)', fontSize: 13, textAlign: 'center' }}>
+          No deliveries logged{filter === 'failed' ? ' that failed' : ' yet'}.
+        </div>
+      ) : (
+        <div>
+          {rows.map(r => {
+            const isOpen = expanded === r.id
+            return (
+              <div key={r.id} style={{ borderTop: '1px solid var(--gw-border)' }}>
+                <div onClick={() => setExpanded(isOpen ? null : r.id)} style={{ padding: '10px 18px', display: 'grid', gridTemplateColumns: '120px 1fr 110px 60px 70px', alignItems: 'center', gap: 10, cursor: 'pointer', fontSize: 12 }}>
+                  <span style={{ color: 'var(--gw-mist)', whiteSpace: 'nowrap' }}>
+                    {new Date(r.created_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                  </span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <strong style={{ fontWeight: 600 }}>{r.event}</strong>
+                    <span style={{ color: 'var(--gw-mist)', marginLeft: 6 }}>· {whName.get(r.webhook_id) || 'unknown webhook'}</span>
+                  </span>
+                  <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 10, textAlign: 'center',
+                    background: r.ok ? '#f0fdf4'        : '#fef2f2',
+                    color:      r.ok ? '#15803d'        : '#b91c1c',
+                    border: `1px solid ${r.ok ? '#bbf7d0' : '#fecaca'}` }}>
+                    {r.ok ? `OK ${r.status_code || ''}` : (r.status_code ? `HTTP ${r.status_code}` : 'ERR')}
+                  </span>
+                  <span style={{ color: 'var(--gw-mist)', textAlign: 'right' }}>{r.duration_ms != null ? `${r.duration_ms}ms` : ''}</span>
+                  <Icon name="chevronDown" size={12} style={{ color: 'var(--gw-mist)', transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform 120ms' }} />
+                </div>
+                {isOpen && (
+                  <div style={{ padding: '0 18px 14px', background: 'var(--gw-bone)' }}>
+                    {r.error && (
+                      <div style={{ fontSize: 12, color: 'var(--gw-red)', marginBottom: 8, fontFamily: 'var(--font-mono)' }}>{r.error}</div>
+                    )}
+                    <pre style={{ background: '#fff', border: '1px solid var(--gw-border)', borderRadius: 6, padding: 10, fontFamily: 'var(--font-mono)', fontSize: 11, lineHeight: 1.5, margin: 0, maxHeight: 240, overflow: 'auto' }}>
+                      {JSON.stringify(r.payload, null, 2)}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
       )}
     </div>
   )

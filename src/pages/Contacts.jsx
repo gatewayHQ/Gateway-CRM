@@ -65,7 +65,7 @@ function compareValues(a, b, dir = 'asc') {
 
 const HEAT_ORDER = { hot: 0, warm: 1, cold: 2 }
 
-export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, visibleAgentIds }) {
+export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, visibleAgentIds, initialContactId }) {
   // ── Persistent filter state ─────────────────────────────────────────────
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebounce(search, 150)
@@ -78,6 +78,19 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
   // ── UI state ────────────────────────────────────────────────────────────
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [editing, setEditing] = useState(null)
+
+  // Deep link: /contact/<uuid> opens that contact's drawer directly. Used by
+  // DealPage's People card so the contact name behaves like a link. Runs once
+  // when the id changes — if the contact isn't in the cached list yet (initial
+  // load timing), the effect re-fires once db.contacts populates.
+  useEffect(() => {
+    if (!initialContactId) return
+    const target = (db.contacts || []).find(c => c.id === initialContactId)
+    if (target) {
+      setEditing(target)
+      setDrawerOpen(true)
+    }
+  }, [initialContactId, db.contacts])
   const [confirm, setConfirm] = useState(null)
   const [importModal, setImportModal] = useState(false)
   const [selected, setSelected] = useState(new Set())

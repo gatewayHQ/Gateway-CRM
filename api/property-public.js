@@ -508,20 +508,39 @@ async function fireWebhooksServer(supabaseUrl, headers, event, data) {
     const configs = await configsRes.json()
     if (!configs?.length) return
 
-    const body = JSON.stringify({
-      event,
-      timestamp: new Date().toISOString(),
-      source: 'gateway-crm',
-      data,
-    })
+    const payload = { event, timestamp: new Date().toISOString(), source: 'gateway-crm', data }
+    const body    = JSON.stringify(payload)
 
-    await Promise.allSettled(configs.map(cfg =>
-      fetch(cfg.url, {
+    await Promise.allSettled(configs.map(async cfg => {
+      const startedAt = Date.now()
+      let result
+      try {
+        const r = await fetch(cfg.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+        })
+        result = { ok: r.ok, status_code: r.status, error: r.ok ? null : `HTTP ${r.status} ${r.statusText || ''}`.trim() }
+      } catch (err) {
+        result = { ok: false, status_code: null, error: err?.message || 'Network error' }
+        console.warn(`[webhook] "${cfg.name}" failed:`, err?.message)
+      }
+      // Mirror the client-side delivery log so server-emitted webhooks (lead
+      // capture etc.) also show up in the admin debugging UI.
+      fetch(`${supabaseUrl}/rest/v1/webhook_deliveries`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-      }).catch(err => console.warn(`[webhook] "${cfg.name}" failed:`, err?.message))
-    ))
+        headers: { ...headers, Prefer: 'return=minimal' },
+        body: JSON.stringify({
+          webhook_id:  cfg.id,
+          event,
+          payload,
+          status_code: result.status_code,
+          ok:          result.ok,
+          error:       result.error,
+          duration_ms: Date.now() - startedAt,
+        }),
+      }).catch(() => {})
+    }))
   } catch (err) {
     console.warn('[fireWebhooksServer]', err?.message)
   }

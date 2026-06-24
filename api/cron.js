@@ -42,7 +42,17 @@ async function sendResend(apiKey, from, to, subject, html, text, idempotencyKey)
 // ─────────────────────────────────────────────────────────────────────────────
 // Task: deadline reminders (formerly /api/reminders)
 // ─────────────────────────────────────────────────────────────────────────────
-const ACTIVE_STAGES = ['lead', 'qualified', 'showing', 'offer', 'under-contract']
+// Every open stage across all three tracks (residential, commercial, listing).
+// Mirrors src/lib/stages.js#isOpenStage — anything not 'closed' or 'lost' is a
+// deal still in progress and worth reminding the agent about. Previously this
+// list was residential-only, so the whole commercial track (pursuit / loi /
+// psa / due-diligence) never received reminders.
+const ACTIVE_STAGES = [
+  'lead', 'qualified', 'showing', 'offer', 'under-contract',
+  'pursuit', 'om-marketing', 'listing-agreement', 'on-market',
+  'loi', 'psa', 'due-diligence',
+  'pre-list', 'active',
+]
 
 function daysUntil(dateStr, today) {
   if (!dateStr) return null
@@ -353,10 +363,19 @@ async function runSequences(supabase) {
 // Dispatcher
 // ─────────────────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
-  // Auth — header or ?secret= query (Vercel Cron sets the header automatically)
+  // Auth — header or ?secret= query (Vercel Cron sets the header automatically).
+  // Fail-CLOSED: if GATEWAY_CRON_SECRET is not configured, refuse to run.
+  // Previously this fail-OPEN'd, which meant /api/cron?task=sequence was
+  // publicly fireable by anyone — they could spam every active drip queue.
+  // Vercel Cron also accepts an Authorization: Bearer <secret> header, which
+  // we accept here too for compatibility with the platform default.
   const expectedSecret = process.env.GATEWAY_CRON_SECRET
-  const providedSecret = req.headers['x-gateway-secret'] || req.query?.secret
-  if (expectedSecret && providedSecret !== expectedSecret) {
+  if (!expectedSecret) {
+    return res.status(503).json({ error: 'Cron not configured — set GATEWAY_CRON_SECRET' })
+  }
+  const bearer = (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '')
+  const providedSecret = req.headers['x-gateway-secret'] || bearer || req.query?.secret
+  if (providedSecret !== expectedSecret) {
     return res.status(401).json({ error: 'Unauthorized' })
   }
 

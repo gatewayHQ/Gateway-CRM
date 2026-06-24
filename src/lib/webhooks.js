@@ -30,22 +30,38 @@ export async function fireWebhooks(event, data = {}) {
 
     if (error || !configs?.length) return
 
-    const body = JSON.stringify({
-      event,
-      timestamp: new Date().toISOString(),
-      source: 'gateway-crm',
-      data,
-    })
+    const payload = { event, timestamp: new Date().toISOString(), source: 'gateway-crm', data }
+    const body    = JSON.stringify(payload)
 
-    await Promise.allSettled(
-      configs.map(cfg =>
-        fetch(cfg.url, {
+    // Fire all subscribers in parallel; record each result. The delivery log
+    // (migration 0019) lets admins see at a glance which subscribers are
+    // failing — previously a 500 from the destination was a console.warn that
+    // disappeared into the ether.
+    await Promise.allSettled(configs.map(async cfg => {
+      const startedAt = Date.now()
+      let result
+      try {
+        const r = await fetch(cfg.url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body,
-        }).catch(err => console.warn(`[webhook] "${cfg.name}" failed:`, err.message))
-      )
-    )
+        })
+        result = { ok: r.ok, status_code: r.status, error: r.ok ? null : `HTTP ${r.status} ${r.statusText || ''}`.trim() }
+      } catch (err) {
+        result = { ok: false, status_code: null, error: err?.message || 'Network error' }
+        console.warn(`[webhook] "${cfg.name}" failed:`, err.message)
+      }
+      // Best-effort log write. A logging failure shouldn't crash the firer.
+      supabase.from('webhook_deliveries').insert({
+        webhook_id:  cfg.id,
+        event,
+        payload,
+        status_code: result.status_code,
+        ok:          result.ok,
+        error:       result.error,
+        duration_ms: Date.now() - startedAt,
+      }).then(() => {}).catch(() => {})
+    }))
   } catch (err) {
     // Never let webhook errors bubble up to the calling CRM action
     console.warn('[fireWebhooks] error:', err.message)

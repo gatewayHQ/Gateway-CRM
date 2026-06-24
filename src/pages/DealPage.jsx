@@ -412,7 +412,11 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {contact ? (
               <div>
-                <div style={{ fontWeight: 700, fontSize: 13.5 }}>{contact.first_name} {contact.last_name}</div>
+                <button onClick={() => go(`contact/${contact.id}`)}
+                  title="Open this contact"
+                  style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textAlign: 'left', fontWeight: 700, fontSize: 13.5, color: 'var(--gw-azure)' }}>
+                  {contact.first_name} {contact.last_name}
+                </button>
                 <div style={{ fontSize: 12, color: 'var(--gw-mist)', display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 2 }}>
                   {contact.phone && <a href={`tel:${contact.phone}`} style={{ color: 'inherit' }}>{formatPhone(contact.phone)}</a>}
                   {contact.email && <a href={`mailto:${contact.email}`} style={{ color: 'inherit' }}>{contact.email}</a>}

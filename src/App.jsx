@@ -670,6 +670,7 @@ export default function App() {
         <ErrorBoundary>
           {route === 'dashboard'  && <Dashboard {...props} />}
           {route === 'contacts'   && <ContactsPage {...props} />}
+          {route.startsWith('contact/') && <ContactsPage {...props} initialContactId={route.slice(8)} />}
           {route === 'properties' && <PropertiesPage {...props} />}
           {route === 'pipeline'   && <PipelinePage {...props} isAdmin={isAdmin} />}
           {route.startsWith('deal/') && <DealPage {...props} dealId={route.slice(5)} />}
