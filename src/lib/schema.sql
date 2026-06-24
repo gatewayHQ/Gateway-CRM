@@ -822,6 +822,7 @@ create table if not exists contact_sequences (
   current_step int default 0,
   status       text default 'active',
   auto_enrolled boolean default false,     -- true = system-enrolled from website lead; false = manual UI
+  last_sent_at  timestamptz,               -- last step's actual send time; cron uses this to compute next step's dueAt
   created_at   timestamptz default now()
 );
 create index if not exists idx_contact_seq_contact on contact_sequences(contact_id);

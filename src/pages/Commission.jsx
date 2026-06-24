@@ -4,7 +4,7 @@ import { Icon, Avatar, Badge, Drawer, EmptyState, pushToast } from '../component
 import { formatCurrency } from '../lib/helpers.js'
 import { fetchVisibleDeals, fetchVisibleCommissions } from '../lib/services/deals.js'
 import MyEarnings from './MyEarnings.jsx'
-import { BrokerageReport, CapsEditor, ComplianceExport } from './BackOffice.jsx'
+import { BrokerageReport, CapsEditor, ComplianceExport, RoutingAudit } from './BackOffice.jsx'
 import {
   computeCommission, normalizeCommission, breakdownForDeal,
   makeSide, makeParticipant, DEFAULTS,
@@ -847,7 +847,7 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
         </div>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
           <div style={{ display:'flex', background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:3, gap:2 }}>
-            {[['tracker','Tracker'],['report','Brokerage Report'],['caps','Agents & Caps'],['compliance','Compliance']].map(([id, label]) => (
+            {[['tracker','Tracker'],['report','Brokerage Report'],['caps','Agents & Caps'],['compliance','Compliance'],['routing','Routing']].map(([id, label]) => (
               <button key={id} onClick={() => setBoTab(id)} style={{
                 padding:'5px 14px', border:'none', borderRadius:'var(--radius)', cursor:'pointer',
                 fontFamily:'var(--font-body)', fontSize:12, fontWeight:600,
@@ -863,6 +863,7 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
       {boTab === 'report'     && <BrokerageReport db={db} />}
       {boTab === 'caps'       && <CapsEditor db={db} setDb={setDb} />}
       {boTab === 'compliance' && <ComplianceExport db={db} />}
+      {boTab === 'routing'    && <RoutingAudit db={db} />}
 
       {boTab === 'tracker' && (<>
       {/* ── Summary stats ── */}

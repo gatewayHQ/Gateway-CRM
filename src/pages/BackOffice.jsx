@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, pushToast } from '../components/UI.jsx'
@@ -415,6 +415,201 @@ export function ComplianceExport({ db }) {
                 </span>
               ))}
             </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Routing Audit — reads lead_routing_log to answer the questions admins ask
+// most: "Where are leads going?", "Why did this one go to X?", "Are signatures
+// being rejected?". One row per lead intake decision; we summarize the last
+// 30 days plus show the most recent 50 rows verbatim.
+// ─────────────────────────────────────────────────────────────────────────────
+export function RoutingAudit({ db }) {
+  const agents     = db.agents || []
+  const agentById  = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents])
+
+  const [rows, setRows]     = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError]   = useState(null)
+  const [tableReady, setTableReady] = useState(true)
+
+  const load = async () => {
+    setLoading(true)
+    const { data, error } = await supabase
+      .from('lead_routing_log')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(500)
+    if (error) {
+      if (error.code === '42P01') { setTableReady(false); setLoading(false); return }
+      setError(error.message)
+    } else {
+      setRows(data || [])
+      setError(null)
+    }
+    setLoading(false)
+  }
+
+  useEffect(() => { load() }, [])
+
+  const last30 = useMemo(() => {
+    const cutoff = Date.now() - 30 * 86400 * 1000
+    return rows.filter(r => new Date(r.created_at).getTime() >= cutoff)
+  }, [rows])
+
+  const counts = useMemo(() => {
+    const c = { total: last30.length, pinned: 0, round_robin: 0, unassigned: 0, sig_rejected: 0 }
+    for (const r of last30) {
+      c[r.method] = (c[r.method] || 0) + 1
+      if (r.sig_rejected) c.sig_rejected += 1
+    }
+    return c
+  }, [last30])
+
+  const byAgent = useMemo(() => {
+    const m = new Map()
+    for (const r of last30) {
+      if (!r.assigned_agent) continue
+      m.set(r.assigned_agent, (m.get(r.assigned_agent) || 0) + 1)
+    }
+    return [...m.entries()]
+      .map(([id, n]) => ({ agent: agentById.get(id), n }))
+      .filter(x => x.agent)
+      .sort((a, b) => b.n - a.n)
+  }, [last30, agentById])
+
+  if (!tableReady) return (
+    <div style={{ padding: 20, background: '#fff8ec', border: '1px solid var(--gw-amber)', borderRadius: 'var(--radius-lg)' }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>Routing audit table not installed</div>
+      <div style={{ fontSize: 13, color: 'var(--gw-mist)', marginBottom: 8 }}>
+        Run migration <code>0018_lead_routing_log.sql</code> in Supabase → SQL Editor, then refresh.
+      </div>
+      <button className="btn btn--secondary btn--sm" onClick={() => { setTableReady(true); load() }}>
+        <Icon name="refresh" size={12} /> Retry
+      </button>
+    </div>
+  )
+
+  if (loading) return <div style={{ padding: 20, color: 'var(--gw-mist)', fontSize: 13 }}>Loading routing log…</div>
+  if (error)   return <div style={{ padding: 20, color: 'var(--gw-red)',  fontSize: 13 }}>Could not load routing log: {error}</div>
+
+  const methodBadge = {
+    pinned:      { label: 'Pinned',       bg: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe' },
+    round_robin: { label: 'Round robin',  bg: '#f0fdf4', color: '#15803d', border: '#bbf7d0' },
+    unassigned:  { label: 'Unassigned',   bg: '#fef2f2', color: '#b91c1c', border: '#fecaca' },
+  }
+
+  return (
+    <div>
+      {/* ── Summary row — last 30 days ── */}
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5,1fr)', marginBottom: 16 }}>
+        <div className="stat-card">
+          <div className="stat-card__value">{counts.total}</div>
+          <div className="stat-card__label">Leads (30d)</div>
+        </div>
+        <div className="stat-card" style={{ borderLeft: '3px solid #1d4ed8' }}>
+          <div className="stat-card__value" style={{ color: '#1d4ed8' }}>
+            {counts.pinned} <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--gw-mist)' }}>{counts.total ? `(${Math.round(counts.pinned / counts.total * 100)}%)` : ''}</span>
+          </div>
+          <div className="stat-card__label">Pinned to agent</div>
+        </div>
+        <div className="stat-card" style={{ borderLeft: '3px solid var(--gw-green)' }}>
+          <div className="stat-card__value" style={{ color: 'var(--gw-green)' }}>
+            {counts.round_robin} <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--gw-mist)' }}>{counts.total ? `(${Math.round(counts.round_robin / counts.total * 100)}%)` : ''}</span>
+          </div>
+          <div className="stat-card__label">Round robin</div>
+        </div>
+        <div className="stat-card" style={{ borderLeft: `3px solid ${counts.unassigned ? 'var(--gw-red)' : 'var(--gw-border)'}` }}>
+          <div className="stat-card__value" style={{ color: counts.unassigned ? 'var(--gw-red)' : 'var(--gw-mist)' }}>{counts.unassigned}</div>
+          <div className="stat-card__label">Unassigned</div>
+        </div>
+        <div className="stat-card" style={{ borderLeft: `3px solid ${counts.sig_rejected ? 'var(--gw-amber)' : 'var(--gw-border)'}` }}>
+          <div className="stat-card__value" style={{ color: counts.sig_rejected ? 'var(--gw-amber)' : 'var(--gw-mist)' }}>{counts.sig_rejected}</div>
+          <div className="stat-card__label">Sig rejected</div>
+        </div>
+      </div>
+
+      {/* ── Distribution by agent ── */}
+      {byAgent.length > 0 && (
+        <div style={{ background: '#fff', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius-lg)', padding: 16, marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Distribution by agent (30d)</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {byAgent.map(({ agent, n }) => {
+              const pct = Math.round(n / last30.length * 100)
+              return (
+                <div key={agent.id} style={{ display: 'grid', gridTemplateColumns: '160px 1fr 60px', alignItems: 'center', gap: 10, fontSize: 12.5 }}>
+                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>{agent.name}</div>
+                  <div style={{ height: 8, background: 'var(--gw-bone)', borderRadius: 4, overflow: 'hidden' }}>
+                    <div style={{ width: `${pct}%`, height: '100%', background: 'var(--gw-azure)' }} />
+                  </div>
+                  <div style={{ textAlign: 'right', color: 'var(--gw-mist)' }}>{n} · {pct}%</div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── Recent decisions ── */}
+      <div style={{ background: '#fff', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius-lg)', overflow: 'hidden' }}>
+        <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--gw-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>Recent decisions ({rows.length} shown, newest first)</div>
+          <button className="btn btn--ghost btn--sm" onClick={load}><Icon name="refresh" size={12} /> Refresh</button>
+        </div>
+        {rows.length === 0 ? (
+          <div style={{ padding: 20, color: 'var(--gw-mist)', fontSize: 13, textAlign: 'center' }}>
+            No routing decisions logged yet. Once a website lead arrives, it'll appear here.
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+              <thead>
+                <tr style={{ background: 'var(--gw-bone)', textAlign: 'left' }}>
+                  {['When', 'Lead', 'Method', 'Agent', 'Type', 'Notes'].map(h => (
+                    <th key={h} style={{ padding: '8px 12px', fontSize: 11, fontWeight: 700, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.slice(0, 50).map(r => {
+                  const badge = methodBadge[r.method] || methodBadge.unassigned
+                  const agent = r.assigned_agent && agentById.get(r.assigned_agent)
+                  return (
+                    <tr key={r.id} style={{ borderTop: '1px solid var(--gw-border)' }}>
+                      <td style={{ padding: '8px 12px', whiteSpace: 'nowrap', color: 'var(--gw-mist)' }}>
+                        {new Date(r.created_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                      </td>
+                      <td style={{ padding: '8px 12px', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {r.lead_email || <span style={{ color: 'var(--gw-mist)' }}>—</span>}
+                      </td>
+                      <td style={{ padding: '8px 12px' }}>
+                        <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: badge.bg, color: badge.color, border: `1px solid ${badge.border}`, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                          {badge.label}
+                        </span>
+                        {r.sig_rejected && (
+                          <span title="Signature rejected — fell back to round-robin" style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 10, background: '#fffbeb', color: '#b45309', border: '1px solid #fde68a' }}>
+                            BAD SIG
+                          </span>
+                        )}
+                      </td>
+                      <td style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>
+                        {agent ? agent.name : <span style={{ color: 'var(--gw-mist)' }}>—</span>}
+                      </td>
+                      <td style={{ padding: '8px 12px', color: 'var(--gw-mist)', whiteSpace: 'nowrap' }}>
+                        {[r.property_type, r.contact_type].filter(Boolean).join(' / ') || '—'}
+                      </td>
+                      <td style={{ padding: '8px 12px', color: 'var(--gw-mist)', maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.notes || ''}>
+                        {r.notes || ''}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </div>

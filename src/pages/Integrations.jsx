@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { Icon, pushToast } from '../components/UI.jsx'
+import { Icon, Modal, pushToast } from '../components/UI.jsx'
 import { WEBHOOK_EVENTS } from '../lib/webhooks.js'
 
 // ─── Geocode helpers (shared with Properties radius tool) ────────────────────
@@ -347,23 +347,8 @@ function WebhooksSection() {
     pushToast('Webhook deleted', 'info')
   }, [])
 
-  const test = useCallback(async (wh) => {
-    try {
-      await fetch(wh.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          event: 'test',
-          timestamp: new Date().toISOString(),
-          source: 'gateway-crm',
-          data: { message: 'Test webhook from Gateway CRM ✓' },
-        }),
-      })
-      pushToast(`Test sent to "${wh.name}"`)
-    } catch {
-      pushToast(`Could not reach "${wh.name}"`, 'error')
-    }
-  }, [])
+  const [testingWebhook, setTestingWebhook] = useState(null)
+  const test = useCallback((wh) => setTestingWebhook(wh), [])
 
   const add = useCallback((wh) => { setWebhooks(p => [...p, wh]); setAdding(false) }, [])
 
@@ -427,7 +412,116 @@ function WebhooksSection() {
           </ol>
         </div>
       </div>
+
+      {testingWebhook && (
+        <TestWebhookModal webhook={testingWebhook} onClose={() => setTestingWebhook(null)} />
+      )}
     </div>
+  )
+}
+
+// ─── Webhook tester ──────────────────────────────────────────────────────────
+// Realistic per-event sample payloads so the user can verify their handler
+// parses each event shape, not just "did the URL respond at all".
+const SAMPLE_PAYLOADS = {
+  'contact.created':    { id: '00000000-0000-0000-0000-000000000001', first_name: 'Test', last_name: 'Lead', email: 'test+lead@example.com', phone: '+15555550123', source: 'website', source_url: 'https://example.com/contact', type: 'buyer', status: 'active', assigned_agent_id: '00000000-0000-0000-0000-0000000000aa' },
+  'contact.updated':    { id: '00000000-0000-0000-0000-000000000001', first_name: 'Test', last_name: 'Lead', email: 'test+lead@example.com', phone: '+15555550123', type: 'buyer', status: 'opportunity', source: 'website', assigned_agent_id: '00000000-0000-0000-0000-0000000000aa' },
+  'deal.created':       { id: '00000000-0000-0000-0000-000000000002', title: '123 Main St Purchase', value: 425000, stage: 'lead',           agent_id: '00000000-0000-0000-0000-0000000000aa', contact_id: '00000000-0000-0000-0000-000000000001', property_id: '00000000-0000-0000-0000-000000000003' },
+  'deal.stage_changed': { id: '00000000-0000-0000-0000-000000000002', title: '123 Main St Purchase', value: 425000, agent_id: '00000000-0000-0000-0000-0000000000aa', from_stage: 'under-contract', to_stage: 'closed' },
+  'deal.closed':        { id: '00000000-0000-0000-0000-000000000002', title: '123 Main St Purchase', value: 425000, agent_id: '00000000-0000-0000-0000-0000000000aa', from_stage: 'under-contract', to_stage: 'closed' },
+  'task.completed':     { id: '00000000-0000-0000-0000-000000000004', title: 'Follow up with John', type: 'call', deal_id: '00000000-0000-0000-0000-000000000002', contact_id: '00000000-0000-0000-0000-000000000001', agent_id: '00000000-0000-0000-0000-0000000000aa' },
+  'property.added':     { id: '00000000-0000-0000-0000-000000000003', address: '123 Main St', city: 'Sioux City', type: 'residential', status: 'active' },
+  'lead.captured':      { contact_id: '00000000-0000-0000-0000-000000000001', first_name: 'Test', last_name: 'Lead', email: 'test+lead@example.com', phone: '+15555550123', property_address: '123 Main St, Sioux City IA', property_type: 'residential', message: 'Just looking', source_url: 'https://example.com/listing/123-main', assigned_agent_id: '00000000-0000-0000-0000-0000000000aa', is_new_contact: true },
+  'radius_sync':        { property_id: '00000000-0000-0000-0000-000000000003', address: '123 Main St', radius_miles: 0.5, contacts_synced: 142 },
+}
+
+function TestWebhookModal({ webhook, onClose }) {
+  // Default to the first event the webhook is actually subscribed to so the
+  // test exercises a realistic path. Falls back to contact.created if the
+  // subscription set is empty (shouldn't happen, but guards against it).
+  const subscribed = (webhook.events || []).filter(e => SAMPLE_PAYLOADS[e])
+  const [eventId, setEventId] = useState(subscribed[0] || 'contact.created')
+  const [sending, setSending] = useState(false)
+  const [result, setResult]   = useState(null)
+
+  const send = async () => {
+    setSending(true); setResult(null)
+    const body = JSON.stringify({
+      event:     eventId,
+      timestamp: new Date().toISOString(),
+      source:    'gateway-crm',
+      data:      SAMPLE_PAYLOADS[eventId] || { message: 'Sample payload' },
+    })
+    try {
+      const r = await fetch(webhook.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      })
+      setResult({ ok: r.ok, status: r.status, statusText: r.statusText })
+    } catch (e) {
+      setResult({ ok: false, error: e.message || 'Network error' })
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const previewBody = JSON.stringify({
+    event: eventId,
+    timestamp: 'YYYY-MM-DDTHH:MM:SS.sssZ',
+    source: 'gateway-crm',
+    data: SAMPLE_PAYLOADS[eventId] || {},
+  }, null, 2)
+
+  return (
+    <Modal open onClose={onClose} title={`Test webhook: ${webhook.name}`} width={560}>
+      <div style={{ padding: '18px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div>
+          <label className="form-label">Event to send</label>
+          <select className="form-control" value={eventId} onChange={e => setEventId(e.target.value)}>
+            {WEBHOOK_EVENTS.filter(e => SAMPLE_PAYLOADS[e.id]).map(e => {
+              const subbed = (webhook.events || []).includes(e.id)
+              return (
+                <option key={e.id} value={e.id}>
+                  {e.label} {subbed ? '' : '(not subscribed)'}
+                </option>
+              )
+            })}
+          </select>
+          <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>
+            "(not subscribed)" events won't fire in production for this URL — testing them only verifies your handler parses the shape.
+          </div>
+        </div>
+
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--gw-mist)', marginBottom: 6 }}>Payload preview</div>
+          <pre style={{ background: 'var(--gw-bone)', padding: 12, borderRadius: 'var(--radius)', fontFamily: 'var(--font-mono)', fontSize: 11, lineHeight: 1.5, margin: 0, maxHeight: 240, overflow: 'auto' }}>{previewBody}</pre>
+        </div>
+
+        {result && (
+          <div style={{ padding: '10px 12px', borderRadius: 'var(--radius)',
+            background: result.ok ? 'var(--gw-green-light)' : '#fef2f2',
+            color:      result.ok ? 'var(--gw-green)'       : 'var(--gw-red)',
+            border:     `1px solid ${result.ok ? 'var(--gw-green)' : '#fecaca'}`,
+            fontSize: 12, fontWeight: 600 }}>
+            {result.ok
+              ? `✓ Delivered — ${result.status} ${result.statusText || ''}`
+              : result.error
+                ? `✗ ${result.error}`
+                : `✗ ${result.status} ${result.statusText || 'Error'}`}
+            <div style={{ fontWeight: 400, marginTop: 4, fontSize: 11 }}>
+              Note: many endpoints (Zapier, n8n) return 200 even on parse errors — check the destination directly to confirm.
+            </div>
+          </div>
+        )}
+      </div>
+      <div style={{ padding: '12px 24px 20px', borderTop: '1px solid var(--gw-border)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+        <button className="btn btn--secondary" onClick={onClose}>Close</button>
+        <button className="btn btn--primary" onClick={send} disabled={sending}>
+          {sending ? 'Sending…' : 'Send Test'}
+        </button>
+      </div>
+    </Modal>
   )
 }
 
