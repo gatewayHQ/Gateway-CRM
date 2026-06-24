@@ -4,6 +4,7 @@ import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, pushToast } from '../components/UI.jsx'
 import { formatCurrency, formatDate } from '../lib/helpers.js'
 import { agentSliceForDeal, capWindowStart } from '../lib/commission.js'
+import { buildZip, safePathSegment } from '../lib/zipStore.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Back Office (admin-only) — quarterly brokerage reporting and cap management.
@@ -256,6 +257,166 @@ export function CapsEditor({ db, setDb }) {
       <div style={{ fontSize: 11.5, color: 'var(--gw-mist)', padding: '10px 12px' }}>
         Anniversary = the date the agent's cap year restarts (year is ignored; only month/day matter). Leave blank for calendar-year resets.
         "Cap pre-paid" marks agents who paid up front and keep 100% of splits — flat transaction fees still apply.
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Compliance Export — packages every deal's documents into a ZIP organized as
+// State/Address/file.pdf so a State auditor can find anything in two clicks.
+// Underlying storage keeps the deal-{id} path scheme (stable, no rename risk);
+// this layer just rewrites the layout into auditor-friendly folders at export
+// time. Runs entirely in the browser; nothing else has to change.
+// ─────────────────────────────────────────────────────────────────────────────
+export function ComplianceExport({ db }) {
+  const deals      = db.deals      || []
+  const properties = db.properties || []
+  const propById   = useMemo(() => new Map(properties.map(p => [p.id, p])), [properties])
+
+  const [scope, setScope]       = useState('closed')   // closed | all
+  const [busy, setBusy]         = useState(false)
+  const [progress, setProgress] = useState({ done: 0, total: 0, label: '' })
+
+  const dealsInScope = deals.filter(d => scope === 'all' ? true : d.stage === 'closed')
+
+  // Build a display label for a deal — used both for the folder name and the
+  // empty-state preview list.
+  const dealFolder = (deal) => {
+    const prop  = propById.get(deal.property_id)
+    const cd    = deal.comp_data || {}
+    const state = (prop?.state || cd.state || 'NoState').toString().toUpperCase()
+    const addressBits = [prop?.address, prop?.city].filter(Boolean).join(', ')
+    const address     = addressBits || deal.title || `deal-${deal.id.slice(0, 8)}`
+    return { state: safePathSegment(state), address: safePathSegment(address) }
+  }
+
+  const stateBreakdown = useMemo(() => {
+    const m = new Map()
+    for (const d of dealsInScope) {
+      const { state } = dealFolder(d)
+      m.set(state, (m.get(state) || 0) + 1)
+    }
+    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+  }, [dealsInScope, properties])
+
+  const runExport = async () => {
+    if (busy || dealsInScope.length === 0) return
+    setBusy(true)
+    setProgress({ done: 0, total: dealsInScope.length, label: 'Listing files…' })
+    const entries = []
+    let i = 0
+    try {
+      for (const deal of dealsInScope) {
+        i++
+        const { state, address } = dealFolder(deal)
+        setProgress({ done: i, total: dealsInScope.length, label: `${state} / ${address}` })
+
+        const { data: files, error: listErr } = await supabase.storage
+          .from('deal-documents')
+          .list(`deal-${deal.id}`, { sortBy: { column: 'name', order: 'asc' } })
+        if (listErr || !files || files.length === 0) continue
+
+        for (const f of files) {
+          if (!f.name) continue
+          const { data: signed, error: urlErr } = await supabase.storage
+            .from('deal-documents')
+            .createSignedUrl(`deal-${deal.id}/${f.name}`, 120)
+          if (urlErr || !signed?.signedUrl) continue
+          try {
+            const res   = await fetch(signed.signedUrl)
+            if (!res.ok) continue
+            const bytes = new Uint8Array(await res.arrayBuffer())
+            entries.push({
+              path: `${state}/${address}/${safePathSegment(f.name)}`,
+              bytes,
+            })
+          } catch (_) { /* skip the file, keep the rest */ }
+        }
+      }
+
+      if (entries.length === 0) {
+        pushToast('No documents found in scope', 'info')
+        return
+      }
+
+      // Manifest CSV — gives auditors a one-page index of what's in the ZIP.
+      const manifestLines = [
+        'state,address,file,deal_id,deal_stage,closed_at',
+        ...entries.map(e => {
+          const [st, ad, fn] = e.path.split('/')
+          return [st, ad, fn, '', '', ''].map(v => `"${(v || '').replace(/"/g, '""')}"`).join(',')
+        }),
+      ]
+      entries.push({
+        path: 'INDEX.csv',
+        bytes: new TextEncoder().encode(manifestLines.join('\n')),
+      })
+
+      setProgress({ done: dealsInScope.length, total: dealsInScope.length, label: 'Compressing…' })
+      const zipBytes = buildZip(entries)
+      const blob = new Blob([zipBytes], { type: 'application/zip' })
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      const ts   = new Date().toISOString().slice(0, 10)
+      a.href     = url
+      a.download = `gateway-compliance-${scope}-${ts}.zip`
+      document.body.appendChild(a); a.click(); a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 60_000)
+      pushToast(`Exported ${entries.length - 1} documents`, 'success')
+    } catch (err) {
+      pushToast('Export failed: ' + (err?.message || 'unknown error'), 'error')
+    } finally {
+      setBusy(false)
+      setProgress({ done: 0, total: 0, label: '' })
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ background: '#fff', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius-lg)', padding: 18 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>State Audit Export</div>
+        <div style={{ fontSize: 12.5, color: 'var(--gw-mist)', marginBottom: 14, lineHeight: 1.5 }}>
+          Downloads every deal document as a single ZIP, organized as
+          {' '}<code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3 }}>State / Address / file.pdf</code>.
+          {' '}An <code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3 }}>INDEX.csv</code> is added at the root so auditors can search the whole archive in one place.
+        </div>
+
+        <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
+          <label style={{ fontSize: 12.5, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+            <input type="radio" name="scope" checked={scope === 'closed'} onChange={() => setScope('closed')} />
+            Closed deals only
+          </label>
+          <label style={{ fontSize: 12.5, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+            <input type="radio" name="scope" checked={scope === 'all'} onChange={() => setScope('all')} />
+            Every deal
+          </label>
+          <span style={{ fontSize: 12, color: 'var(--gw-mist)' }}>
+            {dealsInScope.length} deal{dealsInScope.length === 1 ? '' : 's'} in scope
+          </span>
+        </div>
+
+        <button className="btn btn--primary" onClick={runExport} disabled={busy || dealsInScope.length === 0}>
+          <Icon name="download" size={13} />
+          {busy
+            ? `Building ZIP… ${progress.done}/${progress.total}${progress.label ? ` · ${progress.label}` : ''}`
+            : 'Download Audit ZIP'}
+        </button>
+
+        {stateBreakdown.length > 0 && (
+          <div style={{ marginTop: 18, paddingTop: 14, borderTop: '1px solid var(--gw-border)' }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 8 }}>
+              Will produce folders for
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {stateBreakdown.map(([s, n]) => (
+                <span key={s} style={{ fontSize: 11, padding: '3px 9px', background: 'var(--gw-bone)', border: '1px solid var(--gw-border)', borderRadius: 12 }}>
+                  {s} · {n}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

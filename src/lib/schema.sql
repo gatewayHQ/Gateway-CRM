@@ -995,8 +995,11 @@ create table if not exists form_packets (
   name             text not null,
   description      text,
   storage_path     text,
+  category         text not null default 'state_packet'
+                     check (category in ('state_packet','agent_resource')),
   created_at       timestamptz default now()
 );
+create index if not exists idx_form_packets_category on form_packets(category);
 alter table form_packets enable row level security;
 drop policy if exists "form_packets_all" on form_packets;
 create policy "form_packets_all" on form_packets
@@ -1180,11 +1183,31 @@ create policy signwell_documents_deal_scope on signwell_documents for all to aut
     or agent_id = app_current_agent_id()
   );
 
--- TRANSACTION STEPS — follow the deal.
-drop policy if exists transaction_steps_deal_scope on transaction_steps;
-create policy transaction_steps_deal_scope on transaction_steps for all to authenticated
-  using      (deal_id in (select app_visible_deal_ids()))
-  with check (deal_id in (select app_visible_deal_ids()));
+-- TRANSACTION STEPS — agents read, only admins write.
+-- State audits require a checklist that only the transaction coordinator can
+-- mark complete. RLS enforces this server-side; the UI hides the controls.
+drop policy if exists transaction_steps_deal_scope   on transaction_steps;
+drop policy if exists transaction_steps_select       on transaction_steps;
+drop policy if exists transaction_steps_admin_write  on transaction_steps;
+drop policy if exists transaction_steps_admin_update on transaction_steps;
+drop policy if exists transaction_steps_admin_delete on transaction_steps;
+
+create policy transaction_steps_select on transaction_steps
+  for select to authenticated
+  using (deal_id in (select app_visible_deal_ids()));
+
+create policy transaction_steps_admin_write on transaction_steps
+  for insert to authenticated
+  with check (app_is_admin() and deal_id in (select app_visible_deal_ids()));
+
+create policy transaction_steps_admin_update on transaction_steps
+  for update to authenticated
+  using      (app_is_admin() and deal_id in (select app_visible_deal_ids()))
+  with check (app_is_admin() and deal_id in (select app_visible_deal_ids()));
+
+create policy transaction_steps_admin_delete on transaction_steps
+  for delete to authenticated
+  using (app_is_admin() and deal_id in (select app_visible_deal_ids()));
 
 -- DEADLINE REMINDERS — follow the deal (written by cron via service key).
 drop policy if exists deadline_reminders_deal_scope on deadline_reminders;
