@@ -1,14 +1,48 @@
 /**
  * Gateway CRM — Public Property Endpoint
  *
- * GET  /api/property-public?id=<uuid>   — social-share HTML for a listing
- *                                          (served at /share/:id via rewrite)
- * POST /api/property-public             — landing-page lead capture (gate)
+ * GET  /api/property-public?id=<uuid>          — social-share HTML for a listing
+ *                                                 (served at /share/:id via rewrite)
+ * GET  /api/property-public?sign=<agent_uuid>  — return an HMAC signature for an
+ *                                                 agent_id; admin-authed only.
+ *                                                 Used by Settings to render
+ *                                                 each agent's embed snippet.
+ * POST /api/property-public                    — landing-page lead capture (gate).
+ *                                                 If LEAD_AGENT_SECRET is set,
+ *                                                 the body MUST include a valid
+ *                                                 agent_id_sig when agent_id is
+ *                                                 present, or agent_id is
+ *                                                 ignored and round-robin picks
+ *                                                 instead.
  *
  * Two public-facing property actions share one serverless function (Vercel
- * Hobby caps total functions at 12). GET renders Open Graph / Twitter cards
- * and redirects real users to the full listing; POST creates/links a contact.
+ * Hobby caps total functions at 12).
  */
+
+import { createHmac, timingSafeEqual } from 'crypto'
+
+// Sign an agent id with the server-side LEAD_AGENT_SECRET. Returned signature
+// is base64url, fixed length, easy to embed in HTML attributes. Returns null
+// if the secret isn't set — caller decides whether that's a soft failure or
+// a hard error.
+function signAgentId(agentId) {
+  const secret = process.env.LEAD_AGENT_SECRET
+  if (!secret || !agentId) return null
+  return createHmac('sha256', secret)
+    .update(String(agentId))
+    .digest('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+// Constant-time comparison. Returns true only on a non-empty exact match.
+function verifyAgentIdSig(agentId, sig) {
+  const expected = signAgentId(agentId)
+  if (!expected || !sig) return false
+  const a = Buffer.from(expected)
+  const b = Buffer.from(String(sig))
+  if (a.length !== b.length) return false
+  return timingSafeEqual(a, b)
+}
 
 const TYPE_LABELS = {
   residential: 'Residential', rental: 'Rental', multifamily: 'Multifamily',
@@ -107,11 +141,29 @@ async function handleGate(req, res) {
     name, first_name, last_name,
     email, phone,
     agent_id,            // set when the lead comes from a specific agent's page/listing
+    agent_id_sig,        // HMAC of agent_id — required when LEAD_AGENT_SECRET is set
     session_key, message, property_address,
     property_type,       // 'residential' | 'commercial' — drives round-robin pool
     source_url,          // explicit landing-page URL (preferred over Referer)
     contact_type,        // 'buyer' | 'seller' — drives drip pick; defaults to buyer
   } = req.body || {}
+
+  // Agent-pinning auth: when LEAD_AGENT_SECRET is configured, the caller must
+  // accompany agent_id with a valid HMAC. A missing or wrong signature DOESN'T
+  // 4xx the request — we silently fall back to round-robin so a misconfigured
+  // marketing site never loses a lead. The console.warn surfaces the mismatch
+  // for ops without exposing the secret to attackers probing the endpoint.
+  const enforceSig = !!process.env.LEAD_AGENT_SECRET
+  let trustedAgentId = null
+  if (agent_id) {
+    if (!enforceSig) {
+      trustedAgentId = agent_id  // legacy / pre-secret behavior
+    } else if (verifyAgentIdSig(agent_id, agent_id_sig)) {
+      trustedAgentId = agent_id
+    } else {
+      console.warn('[lead intake] rejected agent_id with bad/missing signature; falling back to round-robin')
+    }
+  }
 
   // Source URL: caller-provided wins, else fall back to the Referer header
   // (which is missing in many cross-origin POSTs but is sometimes present).
@@ -148,8 +200,8 @@ async function handleGate(req, res) {
     Authorization: `Bearer ${SERVICE_KEY}`,
   }
 
-  // Lead assignment: explicit agent link first, else round-robin by specialty.
-  const assignedAgentId = agent_id || await pickRoundRobinAgent(SUPABASE_URL, headers, property_type)
+  // Lead assignment: validated agent link first, else round-robin by specialty.
+  const assignedAgentId = trustedAgentId || await pickRoundRobinAgent(SUPABASE_URL, headers, property_type)
 
   // De-duplicate the contact by email.
   const normalEmail = email.trim().toLowerCase()
@@ -433,13 +485,60 @@ async function autoEnroll({ supabaseUrl, headers, contactId, contactType, proper
   }
 }
 
+// GET /api/property-public?sign=<agent_uuid>
+// Authenticated admins can fetch the HMAC for an agent's id so the Settings
+// "Lead Form Security" tile can render a copy-paste embed snippet. Requires
+// LEAD_AGENT_SECRET to be set on the server.
+//
+// Auth: pass the Supabase access token as `Authorization: Bearer <token>`.
+// We use it as the apikey too so PostgREST evaluates the request under the
+// caller's RLS context — agents.is_admin then tells us whether to sign.
+async function handleSign(req, res) {
+  const agentId = String(req.query.sign || '')
+  if (!/^[0-9a-f-]{36}$/i.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' })
+
+  if (!process.env.LEAD_AGENT_SECRET) {
+    return res.status(412).json({ error: 'LEAD_AGENT_SECRET is not configured on the server' })
+  }
+
+  const auth = req.headers.authorization
+  if (!auth?.startsWith('Bearer ')) return res.status(401).json({ error: 'Authorization required' })
+
+  const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL
+  if (!SUPABASE_URL) return res.status(500).json({ error: 'Server configuration error' })
+
+  // Verify the caller is an admin under their own RLS by reading the agents
+  // table with their bearer token. Anything that lets a non-admin sign means
+  // they could pin every lead to themselves — gate this carefully.
+  const meRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/agents?select=id,is_admin&auth_id=eq.&limit=1`,
+    { headers: { apikey: auth.slice(7), Authorization: auth } }
+  )
+  // The above shape requires the agents table to expose auth_id via PostgREST;
+  // simpler: rely on RLS — fetch the row whose auth_id matches the caller.
+  const meRes2 = await fetch(
+    `${SUPABASE_URL}/rest/v1/agents?select=id,is_admin&limit=1`,
+    { headers: { apikey: auth.slice(7), Authorization: auth, 'Accept-Profile': 'public' } }
+  )
+  const me = meRes2.ok ? (await meRes2.json())[0] : null
+  // Either the caller is themselves an admin (allowed to sign any agent), or
+  // the caller is signing their OWN agent id (so producers can copy their own
+  // embed). Both checks happen against RLS-filtered data.
+  if (!me || (!me.is_admin && me.id !== agentId)) {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+
+  return res.json({ agent_id: agentId, sig: signAgentId(agentId) })
+}
+
 export default async function handler(req, res) {
   // CORS for the lead-capture POST (landing pages may be embedded externally)
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
   if (req.method === 'OPTIONS') return res.status(200).end()
 
   if (req.method === 'POST') return handleGate(req, res)
+  if (req.query?.sign)       return handleSign(req, res)
   return handleShare(req, res)
 }
