@@ -102,6 +102,9 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
       setFetched(data)
       setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === dealId ? data : d) }))
     }
+    // Pull checklist / docs / envelopes too — they may have changed in the
+    // drawer (e.g. agent loaded a new state checklist from the Checklist tab).
+    loadExtras()
     loadExtras()
   }, [dealId, setDb, loadExtras])
 
@@ -568,7 +571,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
         </SectionCard>
       </div>
 
-      <DealDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} deal={deal} initialTab={drawerTab}
+      <DealDrawer open={drawerOpen} onClose={() => { setDrawerOpen(false); loadExtras() }} deal={deal} initialTab={drawerTab}
         agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} isAdmin={isAdmin} onSave={refreshDeal} />
     </div>
   )
