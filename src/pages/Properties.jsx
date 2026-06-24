@@ -825,6 +825,54 @@ function CompsTab({ property, onUpdateComps }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Compact cross-flow card at the top of the property drawer. Shows the
+// primary linked contact (click → /contact/<id>) and every deal tied to this
+// property (click → /deal/<id>). Closes the property drawer on navigate so
+// the user doesn't end up with two drawers stacked.
+function LinkedItemsCard({ property, contacts, go, onClose }) {
+  const [deals, setDeals] = useState([])
+  const [loading, setLoading] = useState(true)
+  const primaryContact = property?.linked_contact_id
+    ? contacts.find(c => c.id === property.linked_contact_id)
+    : null
+
+  useEffect(() => {
+    if (!property?.id) return
+    supabase.from('deals')
+      .select('id, title, stage, value')
+      .eq('property_id', property.id)
+      .order('created_at', { ascending: false })
+      .then(({ data }) => { setDeals(data || []); setLoading(false) })
+  }, [property?.id])
+
+  const goTo = (route) => { onClose?.(); go?.(route) }
+
+  if (loading) return null
+  if (!primaryContact && deals.length === 0) return null
+
+  return (
+    <div style={{ background: 'var(--gw-bone)', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', padding: 12, marginBottom: 16 }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--gw-mist)', marginBottom: 8 }}>Linked</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {primaryContact && (
+          <button onClick={() => goTo(`contact/${primaryContact.id}`)} style={{ background: 'none', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Icon name="contacts" size={13} style={{ color: 'var(--gw-mist)' }} />
+            <span style={{ color: 'var(--gw-azure)', fontWeight: 600 }}>{primaryContact.first_name} {primaryContact.last_name}</span>
+            <span style={{ color: 'var(--gw-mist)', fontSize: 11 }}>primary contact</span>
+          </button>
+        )}
+        {deals.map(d => (
+          <button key={d.id} onClick={() => goTo(`deal/${d.id}`)} style={{ background: 'none', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Icon name="pipeline" size={13} style={{ color: 'var(--gw-mist)' }} />
+            <span style={{ color: 'var(--gw-azure)', fontWeight: 600 }}>{d.title}</span>
+            <span style={{ color: 'var(--gw-mist)', fontSize: 11 }}>{d.stage}{d.value ? ` · ${formatCurrency(d.value)}` : ''}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave, go, setDb }) {
   const blank = { address:'', city:'', state:'', zip:'', county:'', submarket:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{}, listing_expiry_date:'', price_history:[], comps:[] }
   const [form, setForm]             = useState(property || blank)
@@ -976,6 +1024,9 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
       {/* Details tab (also shown for new properties) */}
       {(tab === 'details' || !isExisting) && (<>
       <div className="drawer__body">
+        {isExisting && (
+          <LinkedItemsCard property={property} contacts={contacts} go={go} onClose={onClose} />
+        )}
         {/* Photos */}
         <div className="form-group">
           <PhotoUploader

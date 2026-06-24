@@ -51,15 +51,19 @@ export async function fireWebhooks(event, data = {}) {
         result = { ok: false, status_code: null, error: err?.message || 'Network error' }
         console.warn(`[webhook] "${cfg.name}" failed:`, err.message)
       }
-      // Best-effort log write. A logging failure shouldn't crash the firer.
+      // Best-effort log write. Stamp next_retry_at on failures so the cron's
+      // webhook-retries pass picks it up — first retry runs 1 minute later
+      // (matches RETRY_BACKOFF_MIN[0] on the server).
+      const nextRetryAt = result.ok ? null : new Date(Date.now() + 60_000).toISOString()
       supabase.from('webhook_deliveries').insert({
-        webhook_id:  cfg.id,
+        webhook_id:    cfg.id,
         event,
         payload,
-        status_code: result.status_code,
-        ok:          result.ok,
-        error:       result.error,
-        duration_ms: Date.now() - startedAt,
+        status_code:   result.status_code,
+        ok:            result.ok,
+        error:         result.error,
+        duration_ms:   Date.now() - startedAt,
+        next_retry_at: nextRetryAt,
       }).then(() => {}).catch(() => {})
     }))
   } catch (err) {

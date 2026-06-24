@@ -436,6 +436,7 @@ export function RoutingAudit({ db }) {
   const [loading, setLoading] = useState(true)
   const [error, setError]   = useState(null)
   const [tableReady, setTableReady] = useState(true)
+  const [cronRuns, setCronRuns]   = useState({})  // { task: { latest_run, stale_hours, ok } }
 
   const load = async () => {
     setLoading(true)
@@ -454,7 +455,24 @@ export function RoutingAudit({ db }) {
     setLoading(false)
   }
 
-  useEffect(() => { load() }, [])
+  // Cron health — pull the most recent run per task so the tile can warn if
+  // any of them have gone silent (deploy regressed, secret changed, etc.).
+  const loadCronHealth = async () => {
+    const tasks = ['sequence', 'reminders', 'webhook-retries']
+    const out = {}
+    for (const t of tasks) {
+      const { data } = await supabase
+        .from('cron_runs')
+        .select('started_at, finished_at, ok, error, summary')
+        .eq('task', t)
+        .order('started_at', { ascending: false })
+        .limit(1)
+      out[t] = data?.[0] || null
+    }
+    setCronRuns(out)
+  }
+
+  useEffect(() => { load(); loadCronHealth() }, [])
 
   const last30 = useMemo(() => {
     const cutoff = Date.now() - 30 * 86400 * 1000
@@ -503,8 +521,45 @@ export function RoutingAudit({ db }) {
     unassigned:  { label: 'Unassigned',   bg: '#fef2f2', color: '#b91c1c', border: '#fecaca' },
   }
 
+  // Hard expected interval per task (matches vercel.json). If the latest run
+  // is older than 1.5× the expected interval, surface a warning so silent
+  // breakage doesn't sit for days.
+  const cronExpectations = [
+    { task: 'sequence',        label: 'Drip sender',     maxHours: 26 },   // daily
+    { task: 'reminders',       label: 'Key-date reminders', maxHours: 26 }, // daily
+    { task: 'webhook-retries', label: 'Webhook retries', maxHours: 1 },    // every 15m
+  ]
+  const now = Date.now()
+
   return (
     <div>
+      {/* ── Cron health ── */}
+      <div style={{ background: '#fff', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius-lg)', padding: 16, marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Cron health</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+          {cronExpectations.map(({ task, label, maxHours }) => {
+            const run = cronRuns[task]
+            const startedAt = run?.started_at ? new Date(run.started_at).getTime() : null
+            const ageHours  = startedAt ? (now - startedAt) / 3_600_000 : null
+            let state, hint
+            if (!run)                       { state = 'unknown'; hint = 'Never run' }
+            else if (ageHours > maxHours)   { state = 'stale';   hint = `Last ran ${Math.round(ageHours)}h ago — expected every ${maxHours}h` }
+            else if (run.ok === false)      { state = 'error';   hint = run.error || 'Last run errored' }
+            else                            { state = 'ok';      hint = `Last ran ${Math.round(ageHours)}h ago` }
+            const color = state === 'ok' ? 'var(--gw-green)' : state === 'stale' || state === 'unknown' ? 'var(--gw-amber)' : 'var(--gw-red)'
+            return (
+              <div key={task} style={{ padding: '10px 12px', border: `1px solid ${color}`, borderLeft: `3px solid ${color}`, borderRadius: 'var(--radius)', background: '#fff' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700 }}>{label}</div>
+                  <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color }}>{state}</div>
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--gw-mist)', marginTop: 4 }}>{hint}</div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
       {/* ── Summary row — last 30 days ── */}
       <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5,1fr)', marginBottom: 16 }}>
         <div className="stat-card">

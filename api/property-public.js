@@ -526,18 +526,21 @@ async function fireWebhooksServer(supabaseUrl, headers, event, data) {
         console.warn(`[webhook] "${cfg.name}" failed:`, err?.message)
       }
       // Mirror the client-side delivery log so server-emitted webhooks (lead
-      // capture etc.) also show up in the admin debugging UI.
+      // capture etc.) also show up in the admin debugging UI. On failure,
+      // stamp next_retry_at so the retry cron picks it up after 1 minute.
+      const nextRetryAt = result.ok ? null : new Date(Date.now() + 60_000).toISOString()
       fetch(`${supabaseUrl}/rest/v1/webhook_deliveries`, {
         method: 'POST',
         headers: { ...headers, Prefer: 'return=minimal' },
         body: JSON.stringify({
-          webhook_id:  cfg.id,
+          webhook_id:    cfg.id,
           event,
           payload,
-          status_code: result.status_code,
-          ok:          result.ok,
-          error:       result.error,
-          duration_ms: Date.now() - startedAt,
+          status_code:   result.status_code,
+          ok:            result.ok,
+          error:         result.error,
+          duration_ms:   Date.now() - startedAt,
+          next_retry_at: nextRetryAt,
         }),
       }).catch(() => {})
     }))

@@ -360,6 +360,103 @@ async function runSequences(supabase) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Task: webhook delivery retries (migration 0020)
+//
+// Exponential backoff so a flaky subscriber doesn't get hammered: 1m, 5m,
+// 30m, 2h, 8h. After 5 attempts the row is left in place (ok=false,
+// retry_count=5) — admins can re-fire manually from the UI if they fix the
+// destination.
+// ─────────────────────────────────────────────────────────────────────────────
+const RETRY_BACKOFF_MIN = [1, 5, 30, 120, 480]   // minutes
+const RETRY_MAX_ATTEMPTS = 5
+
+async function runWebhookRetries(supabase) {
+  const nowIso = new Date().toISOString()
+  const { data: due, error } = await supabase
+    .from('webhook_deliveries')
+    .select('id, webhook_id, event, payload, retry_count')
+    .eq('ok', false)
+    .lt('retry_count', RETRY_MAX_ATTEMPTS)
+    .lte('next_retry_at', nowIso)
+    .order('next_retry_at', { ascending: true })
+    .limit(50)
+  if (error) return { status: 500, body: { error: error.message } }
+  if (!due?.length) return { status: 200, body: { ok: true, retried: 0 } }
+
+  // Pull the matching webhook configs in one round-trip; an active config
+  // might have been deleted or disabled since the original attempt, in which
+  // case we mark the original row as no-longer-retryable.
+  const whIds = [...new Set(due.map(d => d.webhook_id).filter(Boolean))]
+  const { data: configs } = whIds.length
+    ? await supabase.from('webhook_configs').select('id, name, url, active').in('id', whIds)
+    : { data: [] }
+  const configById = new Map((configs || []).map(c => [c.id, c]))
+
+  const result = { retried: 0, recovered: 0, failed_again: 0, abandoned: 0 }
+
+  for (const row of due) {
+    const cfg = configById.get(row.webhook_id)
+    if (!cfg || !cfg.active) {
+      // Subscriber gone — stop retrying. Bump retry_count to the cap so the
+      // partial index drops it out of future passes.
+      await supabase.from('webhook_deliveries')
+        .update({ retry_count: RETRY_MAX_ATTEMPTS, next_retry_at: null, error: 'subscriber no longer active' })
+        .eq('id', row.id)
+      result.abandoned++
+      continue
+    }
+
+    const attempt = (row.retry_count || 0) + 1
+    const startedAt = Date.now()
+    let outcome
+    try {
+      const r = await fetch(cfg.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(row.payload),
+      })
+      outcome = { ok: r.ok, status_code: r.status, error: r.ok ? null : `HTTP ${r.status} ${r.statusText || ''}`.trim() }
+    } catch (err) {
+      outcome = { ok: false, status_code: null, error: err?.message || 'Network error' }
+    }
+    const durationMs = Date.now() - startedAt
+
+    // Write a NEW row for this attempt so the delivery history is complete.
+    await supabase.from('webhook_deliveries').insert({
+      webhook_id:         cfg.id,
+      event:              row.event,
+      payload:            row.payload,
+      status_code:        outcome.status_code,
+      ok:                 outcome.ok,
+      error:              outcome.error,
+      duration_ms:        durationMs,
+      retry_count:        attempt,
+      parent_delivery_id: row.id,
+    })
+
+    // Update the ORIGINAL row's retry pointer so we don't re-schedule it.
+    const stillRetryable = !outcome.ok && attempt < RETRY_MAX_ATTEMPTS
+    const nextRetryAt = stillRetryable
+      ? new Date(Date.now() + RETRY_BACKOFF_MIN[attempt] * 60 * 1000).toISOString()
+      : null
+    await supabase.from('webhook_deliveries')
+      .update({
+        ok:            outcome.ok || row.ok,   // sticky: once a retry succeeds, the original is considered resolved
+        retry_count:   attempt,
+        next_retry_at: nextRetryAt,
+      })
+      .eq('id', row.id)
+
+    result.retried++
+    if (outcome.ok)         result.recovered++
+    else if (!stillRetryable) result.abandoned++
+    else                      result.failed_again++
+  }
+
+  return { status: 200, body: { ok: true, ...result } }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Dispatcher
 // ─────────────────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
@@ -389,13 +486,47 @@ export default async function handler(req, res) {
   })
 
   const task = (req.query?.task || 'reminders').toLowerCase()
+
+  // Cron health logging — every run writes a row so the admin tile can warn
+  // if the daily tasks haven't fired in over a day. Best-effort; a logging
+  // failure must not block the actual cron work.
+  const runStart = Date.now()
+  const { data: runRow } = await supabase.from('cron_runs').insert({
+    task, started_at: new Date(runStart).toISOString(),
+  }).select('id').maybeSingle().catch(() => ({ data: null }))
+
   let result
-  if (task === 'reminders') {
-    result = await runReminders(supabase)
-  } else if (task === 'sequence' || task === 'sequence-run' || task === 'sequences') {
-    result = await runSequences(supabase)
-  } else {
-    return res.status(400).json({ error: `Unknown task "${task}" — use ?task=reminders or ?task=sequence` })
+  try {
+    if (task === 'reminders') {
+      result = await runReminders(supabase)
+    } else if (task === 'sequence' || task === 'sequence-run' || task === 'sequences') {
+      result = await runSequences(supabase)
+    } else if (task === 'webhook-retries' || task === 'webhooks') {
+      result = await runWebhookRetries(supabase)
+    } else {
+      if (runRow?.id) {
+        await supabase.from('cron_runs').update({
+          finished_at: new Date().toISOString(), ok: false, error: `Unknown task "${task}"`,
+        }).eq('id', runRow.id).catch(() => {})
+      }
+      return res.status(400).json({ error: `Unknown task "${task}" — use ?task=reminders, ?task=sequence, or ?task=webhook-retries` })
+    }
+  } catch (err) {
+    if (runRow?.id) {
+      await supabase.from('cron_runs').update({
+        finished_at: new Date().toISOString(), ok: false, error: err?.message || 'Unhandled error',
+      }).eq('id', runRow.id).catch(() => {})
+    }
+    return res.status(500).json({ error: err?.message || 'Cron task failed' })
+  }
+
+  if (runRow?.id) {
+    await supabase.from('cron_runs').update({
+      finished_at: new Date().toISOString(),
+      ok:          result.status >= 200 && result.status < 300,
+      error:       result.body?.error || null,
+      summary:     result.body || null,
+    }).eq('id', runRow.id).catch(() => {})
   }
 
   return res.status(result.status).json(result.body)

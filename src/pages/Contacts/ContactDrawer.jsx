@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { supabase } from '../../lib/supabase.js'
-import { Drawer, Tabs, pushToast } from '../../components/UI.jsx'
+import { Drawer, Tabs, Icon, pushToast } from '../../components/UI.jsx'
 import { normalizePhone } from '../../lib/phone.js'
 import { validateEmail, validateRequired, validateForm } from '../../lib/validation.js'
 import { CONTACT_TYPES, CONTACT_STATUSES, CONTACT_SOURCES, COMMERCIAL_PROPERTY_TYPES, titleCase } from '../../lib/enums.js'
@@ -33,6 +33,7 @@ export default function ContactDrawer({
   properties = [],
   onSave, onActivityAdded,
   onDuplicateCheck,  // optional: (form) => existingContact | null
+  go,                // (route) => void — used by the Linked card cross-flow
 }) {
   const [form, setForm] = useState(BLANK)
   const [errors, setErrors] = useState({})
@@ -273,6 +274,9 @@ export default function ContactDrawer({
       {tab === 'details' && (
         <>
           <div className="drawer__body">
+            {contact?.id && go && (
+              <ContactLinkedCard contact={contact} deals={deals} properties={properties} go={go} />
+            )}
             {duplicateWarn && (
               <div style={{
                 background: 'var(--gw-amber-light, #fef3c7)',
@@ -714,6 +718,38 @@ function CriteriaCard({ isBuyer, isSeller, contactType, form, set }) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// Compact cross-flow card at the top of the contact's Details tab. Lists
+// every deal the contact appears on and every property where they're the
+// primary linked contact. Click navigates to the corresponding detail page
+// and closes the drawer (the `go` callback handles both).
+function ContactLinkedCard({ contact, deals, properties, go }) {
+  const linkedDeals = (deals || []).filter(d => d.contact_id === contact.id)
+  const linkedProps = (properties || []).filter(p => p.linked_contact_id === contact.id)
+  if (linkedDeals.length === 0 && linkedProps.length === 0) return null
+
+  return (
+    <div style={{ background: 'var(--gw-bone)', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', padding: 12, marginBottom: 14 }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--gw-mist)', marginBottom: 8 }}>Linked</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {linkedDeals.map(d => (
+          <button key={d.id} onClick={() => go(`deal/${d.id}`)} style={{ background: 'none', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Icon name="pipeline" size={13} style={{ color: 'var(--gw-mist)' }} />
+            <span style={{ color: 'var(--gw-azure)', fontWeight: 600 }}>{d.title}</span>
+            <span style={{ color: 'var(--gw-mist)', fontSize: 11 }}>{d.stage}</span>
+          </button>
+        ))}
+        {linkedProps.map(p => (
+          <button key={p.id} onClick={() => go('properties')} style={{ background: 'none', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Icon name="building" size={13} style={{ color: 'var(--gw-mist)' }} />
+            <span style={{ color: 'var(--gw-azure)', fontWeight: 600 }}>{p.address}</span>
+            <span style={{ color: 'var(--gw-mist)', fontSize: 11 }}>{p.status}</span>
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
