@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { formatDate } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import { fireWebhooks } from '../lib/webhooks.js'
 
 function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave }) {
   const blank = { title:'', type:'follow-up', priority:'medium', due_date:'', contact_id:'', deal_id:'', agent_id:'', notes:'', completed:false }
@@ -179,6 +180,14 @@ export default function TasksPage({ db, setDb, activeAgent }) {
     await supabase.from('tasks').update({ completed }).eq('id', task.id)
     setDb(p => ({ ...p, tasks: p.tasks.map(t => t.id === task.id ? { ...t, completed } : t) }))
     pushToast(completed ? 'Task completed! ✓' : 'Task reopened')
+    // Outbound webhook — fires only on the false→true transition. Reopening
+    // a task doesn't trigger; that's the natural read of "task.completed".
+    if (completed) {
+      fireWebhooks('task.completed', {
+        id: task.id, title: task.title, type: task.type,
+        deal_id: task.deal_id, contact_id: task.contact_id, agent_id: task.agent_id,
+      })
+    }
   }, [setDb])
 
   const del = useCallback(async (id) => {

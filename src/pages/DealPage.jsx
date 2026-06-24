@@ -240,6 +240,10 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     await supabase.from('tasks').update({ completed: true }).eq('id', task.id)
     setDb(p => ({ ...p, tasks: (p.tasks || []).map(t => t.id === task.id ? { ...t, completed: true } : t) }))
     pushToast('Task completed')
+    fireWebhooks('task.completed', {
+      id: task.id, title: task.title, type: task.type,
+      deal_id: task.deal_id, contact_id: task.contact_id, agent_id: task.agent_id,
+    })
   }
 
   const toggleStep = async (step) => {

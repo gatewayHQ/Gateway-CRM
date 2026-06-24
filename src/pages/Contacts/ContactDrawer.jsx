@@ -5,6 +5,7 @@ import { normalizePhone } from '../../lib/phone.js'
 import { validateEmail, validateRequired, validateForm } from '../../lib/validation.js'
 import { CONTACT_TYPES, CONTACT_STATUSES, CONTACT_SOURCES, COMMERCIAL_PROPERTY_TYPES, titleCase } from '../../lib/enums.js'
 import { withRetry, mutationErrorMessage } from '../../lib/services/db.js'
+import { fireWebhooks } from '../../lib/webhooks.js'
 import OptionMultiSelect from '../../components/OptionMultiSelect.jsx'
 import ChipToggleGroup from '../../components/ChipToggleGroup.jsx'
 import ActivityTab from './ActivityTab.jsx'
@@ -192,6 +193,24 @@ export default function ContactDrawer({
     }
 
     const contactId = saved?.id || contact?.id
+
+    // Outbound webhooks — best-effort. WAS_NEW determines the event id; the
+    // payload mirrors what the public lead endpoint emits so subscribers can
+    // share a single handler.
+    if (contactId) {
+      const wasNew = !contact?.id
+      fireWebhooks(wasNew ? 'contact.created' : 'contact.updated', {
+        id:                contactId,
+        first_name:        payload.first_name,
+        last_name:         payload.last_name,
+        email:             payload.email,
+        phone:             payload.phone,
+        type:              payload.type,
+        status:            payload.status,
+        source:            payload.source,
+        assigned_agent_id: payload.assigned_agent_id,
+      })
+    }
 
     if (addProp && propForm.address.trim() && contactId) {
       const propPayload = {

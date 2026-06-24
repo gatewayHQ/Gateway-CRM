@@ -201,7 +201,14 @@ async function handleGate(req, res) {
   }
 
   // Lead assignment: validated agent link first, else round-robin by specialty.
-  const assignedAgentId = trustedAgentId || await pickRoundRobinAgent(SUPABASE_URL, headers, property_type)
+  // Track HOW we picked so the audit log captures the routing decision.
+  let assignedAgentId = trustedAgentId
+  let routingMethod   = trustedAgentId ? 'pinned' : null
+  if (!assignedAgentId) {
+    assignedAgentId = await pickRoundRobinAgent(SUPABASE_URL, headers, property_type)
+    routingMethod   = assignedAgentId ? 'round_robin' : 'unassigned'
+  }
+  const sigRejected = !!agent_id && !trustedAgentId  // request asked for a pin but we couldn't honor it
 
   // De-duplicate the contact by email.
   const normalEmail = email.trim().toLowerCase()
@@ -289,6 +296,25 @@ async function handleGate(req, res) {
     }).catch(() => {})
   }
 
+  // Routing audit log — one row per decision so admins can see distribution
+  // and catch misconfigurations. Best-effort: a logging failure must never
+  // break lead intake.
+  await fetch(`${SUPABASE_URL}/rest/v1/lead_routing_log`, {
+    method: 'POST',
+    headers: { ...headers, Prefer: 'return=minimal' },
+    body: JSON.stringify({
+      lead_email:     normalEmail,
+      property_type:  property_type || null,
+      contact_type:   resolvedContactType,
+      source_url:     resolvedSourceUrl,
+      method:         routingMethod,
+      assigned_agent: assignedAgentId,
+      sig_rejected:   sigRejected,
+      contact_id:     contactId,
+      notes:          sigRejected ? 'agent_id sent but signature missing/invalid; fell back to round-robin' : null,
+    }),
+  }).catch(() => {})
+
   // Unassignable lead: the round-robin came back empty (no non-admin agents
   // configured, or all matching agents are admins). The contact is still
   // created — leads must never be lost — but every admin gets a high-priority
@@ -301,6 +327,39 @@ async function handleGate(req, res) {
       email: normalEmail,
       propertyAddress: property_address,
     }).catch(err => console.error('[lead intake] unassigned-lead alert failed:', err?.message))
+  }
+
+  // Outbound webhooks for the lead intake. Always fires 'lead.captured';
+  // also fires 'contact.created' the first time we see this email. Both are
+  // best-effort — webhook failures never block the lead.
+  if (contactId) {
+    fireWebhooksServer(SUPABASE_URL, headers, 'lead.captured', {
+      contact_id:       contactId,
+      first_name:       resolvedFirst,
+      last_name:        resolvedLast,
+      email:            normalEmail,
+      phone:            phone?.trim() || null,
+      property_address: property_address || null,
+      property_type:    property_type || null,
+      message:          message || null,
+      source_url:       resolvedSourceUrl,
+      assigned_agent_id: assignedAgentId,
+      is_new_contact:   isNew,
+    }).catch(() => {})
+    if (isNew) {
+      fireWebhooksServer(SUPABASE_URL, headers, 'contact.created', {
+        id:                contactId,
+        first_name:        resolvedFirst,
+        last_name:         resolvedLast,
+        email:             normalEmail,
+        phone:             phone?.trim() || null,
+        source:            'website',
+        source_url:        resolvedSourceUrl,
+        type:              'buyer',
+        status:            'active',
+        assigned_agent_id: assignedAgentId,
+      }).catch(() => {})
+    }
   }
 
   // Auto-enroll the new contact in the assigned agent's drip. Only fires for
@@ -433,6 +492,39 @@ async function pickRoundRobinAgentJs(supabaseUrl, headers, propertyType) {
   }
 
   return null
+}
+
+// Server-side mirror of src/lib/webhooks.js#fireWebhooks. The client lib uses
+// the supabase-js SDK; this endpoint uses raw fetch so we duplicate the read
+// here rather than pull in the SDK for one event. Failures are swallowed —
+// outbound subscriber issues must never block lead intake.
+async function fireWebhooksServer(supabaseUrl, headers, event, data) {
+  try {
+    const configsRes = await fetch(
+      `${supabaseUrl}/rest/v1/webhook_configs?active=is.true&events=cs.{${encodeURIComponent(event)}}&select=id,name,url`,
+      { headers }
+    )
+    if (!configsRes.ok) return
+    const configs = await configsRes.json()
+    if (!configs?.length) return
+
+    const body = JSON.stringify({
+      event,
+      timestamp: new Date().toISOString(),
+      source: 'gateway-crm',
+      data,
+    })
+
+    await Promise.allSettled(configs.map(cfg =>
+      fetch(cfg.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      }).catch(err => console.warn(`[webhook] "${cfg.name}" failed:`, err?.message))
+    ))
+  } catch (err) {
+    console.warn('[fireWebhooksServer]', err?.message)
+  }
 }
 
 // Tell every admin that a lead arrived with no producing agent to route to.

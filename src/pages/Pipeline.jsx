@@ -954,14 +954,23 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         prop_subtype:        form.prop_subtype  || null,
         comp_data:           form.comp_data     || null,
       }
-      let error
+      let error, saved
       if (deal?.id) {
         ;({ error } = await supabase.from('deals').update(payload).eq('id', deal.id))
       } else {
-        ;({ error } = await supabase.from('deals').insert([payload]))
+        ;({ data: saved, error } = await supabase.from('deals').insert([payload]).select().maybeSingle())
       }
       if (error) { pushToast(error.message, 'error'); return }
       pushToast(deal?.id ? 'Deal updated' : 'Deal added')
+      // Outbound webhook — deal.created only on first save; stage changes are
+      // emitted from setStage/moveStage so we don't double-fire here.
+      if (!deal?.id && saved?.id) {
+        fireWebhooks('deal.created', {
+          id: saved.id, title: payload.title, value: payload.value,
+          stage: payload.stage, agent_id: payload.agent_id,
+          contact_id: payload.contact_id, property_id: payload.property_id,
+        })
+      }
       await onSave()
       onClose()
     } catch(err) {
