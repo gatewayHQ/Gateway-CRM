@@ -109,7 +109,22 @@ async function handleGate(req, res) {
     agent_id,            // set when the lead comes from a specific agent's page/listing
     session_key, message, property_address,
     property_type,       // 'residential' | 'commercial' — drives round-robin pool
+    source_url,          // explicit landing-page URL (preferred over Referer)
+    contact_type,        // 'buyer' | 'seller' — drives drip pick; defaults to buyer
   } = req.body || {}
+
+  // Source URL: caller-provided wins, else fall back to the Referer header
+  // (which is missing in many cross-origin POSTs but is sometimes present).
+  const resolvedSourceUrl =
+    (typeof source_url === 'string' && source_url.trim()) ||
+    (req.headers?.referer || req.headers?.referrer || null)
+
+  // Contact type drives which of the agent's three drip slots gets used.
+  // The public form is buyer-side today; commercial property → commercial.
+  const resolvedContactType =
+    contact_type === 'seller'  ? 'seller' :
+    property_type === 'commercial' ? 'buyer'  : // commercial buyer leads → commercial drip below
+    'buyer'
 
   const resolvedFirst = first_name?.trim() || name?.trim().split(/\s+/)[0] || ''
   const resolvedLast  = last_name?.trim()  || name?.trim().split(/\s+/).slice(1).join(' ') || '—'
@@ -164,6 +179,7 @@ async function handleGate(req, res) {
         email:             normalEmail,
         phone:             phone?.trim() || null,
         source:            'website',
+        source_url:        resolvedSourceUrl,
         type:              'buyer',
         status:            'active',
         assigned_agent_id: assignedAgentId,
@@ -221,6 +237,23 @@ async function handleGate(req, res) {
     }).catch(() => {})
   }
 
+  // Auto-enroll the new contact in the assigned agent's drip. Only fires for
+  // brand-new contacts created via this endpoint (isNew) — manual contact
+  // creation in the UI is unaffected. If the agent has no default sequence
+  // set for the relevant slot, notify the office admins so they can fix it
+  // (option b from the audit) rather than silently dropping the enrollment.
+  if (isNew && contactId && assignedAgentId) {
+    await autoEnroll({
+      supabaseUrl: SUPABASE_URL,
+      headers,
+      contactId,
+      contactType:   resolvedContactType,
+      propertyType:  property_type,
+      assignedAgentId,
+      leadName:      `${resolvedFirst} ${resolvedLast}`.trim(),
+    }).catch(err => console.error('[lead intake] auto-enroll failed:', err?.message))
+  }
+
   // Tell the assigned agent — instantly in-app (realtime channel already
   // subscribed in App.jsx) and by email. Both best-effort: a notification
   // failure must never lose the lead.
@@ -274,21 +307,26 @@ async function handleGate(req, res) {
   return res.json({ ok: true, contactId, isNew, assignedAgentId })
 }
 
-// Round-robin: pull agents by specialty, find the most recently assigned agent
-// in that pool, and return the next one in alphabetical rotation. Falls back to
-// the other specialty, then any agent, then null if none are configured.
+// Round-robin: pull non-admin producing agents by specialty, find the most
+// recently assigned agent in that pool, and return the next one in alphabetical
+// rotation. Falls back to the other specialty, then any non-admin agent, then
+// null. Admins are excluded by design — they're transaction coordinators, not
+// the people the brokerage wants leads routed to.
 async function pickRoundRobinAgent(supabaseUrl, headers, propertyType) {
   const specialty = propertyType === 'commercial' ? 'commercial' : 'residential'
+  // is_admin.is.false — PostgREST encoding for "is_admin = false" (NULL is
+  // treated as "not admin" too via the second OR; brand-new agents may not
+  // have the flag set explicitly).
+  const adminFilter = 'is_admin=is.false'
   const pools = [
-    `specialty=eq.${specialty}`,
-    `specialty=eq.${specialty === 'residential' ? 'commercial' : 'residential'}`,
-    '',  // all agents
+    `${adminFilter}&specialty=eq.${specialty}`,
+    `${adminFilter}&specialty=eq.${specialty === 'residential' ? 'commercial' : 'residential'}`,
+    adminFilter,
   ]
 
   for (const filter of pools) {
-    const qs = filter ? `${filter}&` : ''
     const agentsRes = await fetch(
-      `${supabaseUrl}/rest/v1/agents?${qs}select=id,name&order=name.asc`,
+      `${supabaseUrl}/rest/v1/agents?${filter}&select=id,name&order=name.asc`,
       { headers }
     )
     if (!agentsRes.ok) continue
@@ -309,7 +347,90 @@ async function pickRoundRobinAgent(supabaseUrl, headers, propertyType) {
     return agents[nextIdx].id
   }
 
-  return null  // no agents configured at all
+  return null  // no non-admin agents configured at all
+}
+
+// Auto-enroll a new website lead in the assigned agent's chosen drip. Picks
+// the sequence slot by lead type: buyer/seller/commercial. If the agent
+// hasn't configured that slot, raises a setup_needed notification on every
+// admin so the office can backfill the setting (option b from the audit).
+async function autoEnroll({ supabaseUrl, headers, contactId, contactType, propertyType, assignedAgentId, leadName }) {
+  // Pick which slot to read. Commercial property always wins; otherwise
+  // buyer is the default since the public form is buyer-side today.
+  const slotColumn =
+    propertyType === 'commercial' ? 'default_commercial_sequence_id' :
+    contactType === 'seller'      ? 'default_seller_sequence_id'     :
+    'default_buyer_sequence_id'
+  const slotLabel = slotColumn.replace('default_', '').replace('_sequence_id', '')
+
+  const agentRes = await fetch(
+    `${supabaseUrl}/rest/v1/agents?id=eq.${assignedAgentId}&select=name,${slotColumn}&limit=1`,
+    { headers }
+  )
+  if (!agentRes.ok) return
+  const [agentRow] = await agentRes.json()
+  const sequenceId = agentRow?.[slotColumn]
+
+  if (!sequenceId) {
+    // Agent has no default drip for this lead type. Tell every admin so they
+    // can either set the agent's default, or step in manually. The lead itself
+    // is already created and assigned — this only reports the setup gap.
+    const adminsRes = await fetch(
+      `${supabaseUrl}/rest/v1/agents?is_admin=is.true&select=id`,
+      { headers }
+    )
+    const admins = adminsRes.ok ? await adminsRes.json() : []
+    if (admins.length) {
+      const payload = admins.map(a => ({
+        agent_id: a.id,
+        title:    'Lead routed without a drip',
+        message:  `${leadName} was routed to ${agentRow?.name || 'an agent'}, but they don't have a default ${slotLabel} drip configured. Set one on their agent profile so future leads auto-enroll.`,
+        type:     'setup_needed',
+      }))
+      await fetch(`${supabaseUrl}/rest/v1/agent_notifications`, {
+        method: 'POST',
+        headers: { ...headers, Prefer: 'return=minimal' },
+        body: JSON.stringify(payload),
+      }).catch(() => {})
+    }
+    return
+  }
+
+  // Enroll. The unique partial index on (contact_id, sequence_id) where
+  // status='active' makes this idempotent — a duplicate insert from a retried
+  // request collapses to a 409 we swallow.
+  const enrollRes = await fetch(`${supabaseUrl}/rest/v1/contact_sequences`, {
+    method: 'POST',
+    headers: { ...headers, Prefer: 'return=representation' },
+    body: JSON.stringify({
+      contact_id:    contactId,
+      sequence_id:   sequenceId,
+      agent_id:      assignedAgentId,
+      current_step:  0,
+      status:        'active',
+      auto_enrolled: true,
+    }),
+  })
+
+  if (enrollRes.ok) {
+    // Log it on the contact timeline so the agent sees the auto-enrollment
+    // alongside everything else they care about for this lead.
+    const seqRes = await fetch(
+      `${supabaseUrl}/rest/v1/sequences?id=eq.${sequenceId}&select=name&limit=1`,
+      { headers }
+    )
+    const [seq] = seqRes.ok ? await seqRes.json() : []
+    await fetch(`${supabaseUrl}/rest/v1/activities`, {
+      method: 'POST',
+      headers: { ...headers, Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        contact_id: contactId,
+        agent_id:   assignedAgentId,
+        type:       'note',
+        body:       `Auto-enrolled in drip: ${seq?.name || 'default sequence'}`,
+      }),
+    }).catch(() => {})
+  }
 }
 
 export default async function handler(req, res) {

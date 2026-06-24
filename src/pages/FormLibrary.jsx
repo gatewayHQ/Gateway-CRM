@@ -47,7 +47,19 @@ function UploadModal({ packet, onClose, onSaved, defaultCategory = 'state_packet
           : `_resources/${form.transaction_type || 'general'}`
         const path = `${folder}/${Date.now()}-${file.name}`
         const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, file, { upsert: true })
-        if (upErr) { pushToast(upErr.message, 'error'); setSaving(false); return }
+        if (upErr) {
+          // Most common failure on a fresh environment: the bucket doesn't
+          // exist yet. Show actionable instructions inline instead of a raw
+          // toast that the user can't act on.
+          const msg = upErr.message || ''
+          if (/bucket not found/i.test(msg) || upErr.statusCode === '404' || upErr.status === 404) {
+            pushToast('Storage bucket "form-packets" is missing — run migration 0016 or create it manually in Supabase → Storage.', 'error')
+          } else {
+            pushToast(`Upload failed: ${msg}`, 'error')
+          }
+          setSaving(false)
+          return
+        }
         storage_path = path
       }
       const payload = {

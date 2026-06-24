@@ -335,7 +335,14 @@ export default function SequencesPage({ db, setDb, activeAgent }) {
                           {(c?.first_name || '')[0]}{(c?.last_name || '')[0]}
                         </div>
                         <div style={{ flex: 1 }}>
-                          <div className="seq-enrollment__name">{c?.first_name} {c?.last_name}</div>
+                          <div className="seq-enrollment__name">
+                            {c?.first_name} {c?.last_name}
+                            {e.auto_enrolled && (
+                              <span title="Auto-enrolled from a website lead" style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                                Auto
+                              </span>
+                            )}
+                          </div>
                           <div className="seq-enrollment__meta">
                             Step {e.current_step + 1}/{steps.length}
                             {currentStep && <> · Next: {nextDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</>}

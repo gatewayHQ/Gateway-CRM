@@ -28,6 +28,9 @@ create table if not exists agents (
   nav_hidden text[] default '{}',          -- nav item IDs hidden from this agent's sidebar
   cap_amount      numeric,                 -- brokerage cap in dollars; null = no cap configured
   cap_anniversary date,                    -- cap year resets on this month/day; null = calendar year
+  default_buyer_sequence_id      uuid,     -- auto-enroll buyers from website leads into this drip (FK added below)
+  default_seller_sequence_id     uuid,     -- ditto for seller leads
+  default_commercial_sequence_id uuid,     -- ditto for commercial leads
   created_at timestamptz default now()
 );
 
@@ -43,6 +46,7 @@ create table if not exists contacts (
   type              text check (type in ('buyer','seller','landlord','tenant','investor')) default 'buyer',
   status            text check (status in ('active','cold','closed','lead','opportunity','pending')) default 'active',
   source            text check (source in ('referral','website','open house','social','cold call','team','paid service','other')) default 'other',
+  source_url        text,  -- landing page URL the website lead came from (null for non-web contacts)
   assigned_agent_id uuid references agents(id) on delete set null,
   notes             text,
   tags              text[],
@@ -817,10 +821,31 @@ create table if not exists contact_sequences (
   started_at   timestamptz default now(),
   current_step int default 0,
   status       text default 'active',
+  auto_enrolled boolean default false,     -- true = system-enrolled from website lead; false = manual UI
   created_at   timestamptz default now()
 );
 create index if not exists idx_contact_seq_contact on contact_sequences(contact_id);
 create index if not exists idx_contact_seq_status   on contact_sequences(status);
+-- Block double-enrolling the same contact in the same sequence while active.
+create unique index if not exists uniq_contact_seq_active
+  on contact_sequences(contact_id, sequence_id)
+  where status = 'active';
+
+-- Per-agent drip defaults — picked up by the website-lead intake to
+-- auto-enroll new leads into the agent's chosen sequence. Declared as
+-- ALTER ... ADD CONSTRAINT to avoid a forward reference in the agents table.
+alter table agents
+  drop constraint if exists agents_default_buyer_sequence_fk,
+  add  constraint agents_default_buyer_sequence_fk
+    foreign key (default_buyer_sequence_id) references sequences(id) on delete set null;
+alter table agents
+  drop constraint if exists agents_default_seller_sequence_fk,
+  add  constraint agents_default_seller_sequence_fk
+    foreign key (default_seller_sequence_id) references sequences(id) on delete set null;
+alter table agents
+  drop constraint if exists agents_default_commercial_sequence_fk,
+  add  constraint agents_default_commercial_sequence_fk
+    foreign key (default_commercial_sequence_id) references sequences(id) on delete set null;
 
 -- ─── Twilio SMS ──────────────────────────────────────────────────────────────
 alter table agents add column if not exists twilio_number text;

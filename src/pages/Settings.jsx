@@ -73,6 +73,45 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
     setHiddenNav(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
   }
 
+  // ── Drip defaults (auto-enrollment for website leads) ──────────────────────
+  // Each agent picks one sequence per lead type. The website-lead intake
+  // (api/property-public.js) reads these on each inbound lead and enrolls the
+  // new contact automatically. Empty = the office admin gets a setup-needed
+  // notification, no enrollment fires.
+  const [sequences, setSequences] = useState([])
+  const [dripDefaults, setDripDefaults] = useState({ buyer: '', seller: '', commercial: '' })
+  const [dripSaving, setDripSaving]     = useState(false)
+
+  useEffect(() => {
+    supabase.from('sequences').select('id, name').order('name').then(({ data }) => {
+      setSequences(data || [])
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!activeAgent) return
+    setDripDefaults({
+      buyer:      activeAgent.default_buyer_sequence_id      || '',
+      seller:     activeAgent.default_seller_sequence_id     || '',
+      commercial: activeAgent.default_commercial_sequence_id || '',
+    })
+  }, [activeAgent?.id, activeAgent?.default_buyer_sequence_id, activeAgent?.default_seller_sequence_id, activeAgent?.default_commercial_sequence_id])
+
+  const saveDripDefaults = async () => {
+    if (!activeAgentId) return
+    setDripSaving(true)
+    const patch = {
+      default_buyer_sequence_id:      dripDefaults.buyer      || null,
+      default_seller_sequence_id:     dripDefaults.seller     || null,
+      default_commercial_sequence_id: dripDefaults.commercial || null,
+    }
+    const { error } = await supabase.from('agents').update(patch).eq('id', activeAgentId)
+    setDripSaving(false)
+    if (error) { pushToast(error.message, 'error'); return }
+    setDb(p => ({ ...p, agents: (p.agents || []).map(a => a.id === activeAgentId ? { ...a, ...patch } : a) }))
+    pushToast('Drip defaults saved')
+  }
+
   const saveNavPrefs = async () => {
     if (!activeAgentId) return
     setNavSaving(true)
@@ -233,6 +272,50 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
                 Show all
               </button>
             )}
+          </>
+        )}
+      </div>
+
+      {/* ── Drip defaults — auto-enrollment for website leads ── */}
+      <div className="settings-section">
+        <div className="settings-section__title">My Drip Campaigns</div>
+        <div className="settings-section__sub">
+          Pick one sequence per lead type. When a website lead is routed to you,
+          we'll auto-enroll them in the matching drip. Leave a slot empty if you
+          don't take that kind of lead — admins are alerted if a lead arrives
+          without a drip configured.
+        </div>
+        {!activeAgentId ? (
+          <div style={{ fontSize: 13, color: 'var(--gw-mist)' }}>No agent profile detected.</div>
+        ) : sequences.length === 0 ? (
+          <div style={{ fontSize: 13, color: 'var(--gw-mist)', padding: '12px 14px', background: 'var(--gw-bone)', border: '1px dashed var(--gw-border)', borderRadius: 'var(--radius)' }}>
+            No sequences exist yet. Build one on the <strong>Sequences</strong> page, then come back to pick it as a default.
+          </div>
+        ) : (
+          <>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14, marginBottom: 14 }}>
+              {[
+                { key: 'buyer',      label: 'Buyer leads',      hint: 'Residential buyer inquiries' },
+                { key: 'seller',     label: 'Seller leads',     hint: 'Listing / sell-side inquiries' },
+                { key: 'commercial', label: 'Commercial leads', hint: 'Multifamily, office, land, etc.' },
+              ].map(slot => (
+                <div key={slot.key} className="form-group" style={{ margin: 0 }}>
+                  <label className="form-label">{slot.label}</label>
+                  <select
+                    className="form-control"
+                    value={dripDefaults[slot.key]}
+                    onChange={e => setDripDefaults(p => ({ ...p, [slot.key]: e.target.value }))}
+                  >
+                    <option value="">— No auto-enrollment —</option>
+                    {sequences.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                  <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>{slot.hint}</div>
+                </div>
+              ))}
+            </div>
+            <button className="btn btn--primary btn--sm" onClick={saveDripDefaults} disabled={dripSaving}>
+              {dripSaving ? 'Saving…' : 'Save Drip Defaults'}
+            </button>
           </>
         )}
       </div>
