@@ -317,24 +317,49 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
         </div>
 
         {/* ── Stage rail ── */}
-        <div style={{ display: 'flex', gap: 4, overflowX: 'auto', paddingBottom: 2 }}>
-          {railStages.map((s, i) => {
-            const isCurrent = i === currentIdx
-            const isPast    = i < currentIdx
-            return (
-              <button key={s} onClick={() => setStage(s)} title={`Move to ${STAGE_LABELS[s]}`}
-                style={{
-                  flex: 1, minWidth: 86, padding: '8px 6px', border: 'none', cursor: 'pointer',
-                  fontFamily: 'var(--font-body)', fontSize: 11.5, fontWeight: isCurrent ? 700 : 600,
-                  borderRadius: i === 0 ? '8px 2px 2px 8px' : i === railStages.length - 1 ? '2px 8px 8px 2px' : 2,
-                  background: isCurrent ? 'var(--gw-slate)' : isPast ? '#e7efe9' : 'var(--gw-bone)',
-                  color: isCurrent ? '#fff' : isPast ? 'var(--gw-green)' : 'var(--gw-mist)',
-                  transition: 'all 150ms ease', whiteSpace: 'nowrap',
-                }}>
-                {isPast ? '✓ ' : ''}{STAGE_LABELS[s]}
-              </button>
-            )
-          })}
+        <div>
+          <div style={{
+            fontSize: 10.5, fontWeight: 700, color: 'var(--gw-mist)',
+            textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6,
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <Icon name="chevronRight" size={11} />
+            Deal stage — click a step to move this deal forward
+          </div>
+          <div style={{ display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 4 }}>
+            {railStages.map((s, i) => {
+              const isCurrent = i === currentIdx
+              const isPast    = i < currentIdx
+              return (
+                <button key={s} onClick={() => setStage(s)} title={`Move this deal to ${STAGE_LABELS[s]}`}
+                  style={{
+                    flex: 1, minWidth: 96, padding: '10px 8px', cursor: 'pointer',
+                    fontFamily: 'var(--font-body)', fontSize: 12, fontWeight: isCurrent ? 700 : 600,
+                    borderRadius: 'var(--radius)',
+                    border: `1.5px solid ${isCurrent ? 'var(--gw-slate)' : isPast ? 'var(--gw-green)' : 'var(--gw-border)'}`,
+                    background: isCurrent ? 'var(--gw-slate)' : isPast ? '#eaf5ee' : '#fff',
+                    color: isCurrent ? '#fff' : isPast ? 'var(--gw-green)' : 'var(--gw-ink)',
+                    boxShadow: isCurrent ? '0 1px 3px rgba(0,0,0,0.12)' : 'none',
+                    transition: 'all 150ms ease', whiteSpace: 'nowrap',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  }}
+                  onMouseEnter={e => { if (!isCurrent) e.currentTarget.style.borderColor = 'var(--gw-azure)' }}
+                  onMouseLeave={e => { if (!isCurrent) e.currentTarget.style.borderColor = isPast ? 'var(--gw-green)' : 'var(--gw-border)' }}
+                >
+                  <span style={{
+                    width: 16, height: 16, borderRadius: 8, fontSize: 9.5, fontWeight: 800,
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                    background: isCurrent ? 'rgba(255,255,255,0.22)' : isPast ? 'var(--gw-green)' : 'var(--gw-bone)',
+                    color: isCurrent ? '#fff' : isPast ? '#fff' : 'var(--gw-mist)',
+                    border: isCurrent || isPast ? 'none' : '1px solid var(--gw-border)',
+                  }}>
+                    {isPast ? '✓' : i + 1}
+                  </span>
+                  {STAGE_LABELS[s]}
+                </button>
+              )
+            })}
+          </div>
         </div>
       </div>
 
