@@ -246,7 +246,7 @@ async function api(action, payload = {}, method = 'POST') {
 // stored in landing_config.agent_ids. Per-mailing bio/photo tweaks (without
 // touching the agent's profile) live in landing_config.agent_overrides[id].
 
-function AdvisorsField({ agents, primaryId, form, setCfg }) {
+function AdvisorsField({ agents, primaryId, form, setCfg, setDb }) {
   const cfg       = form.landing_config || {}
   const secondId  = (Array.isArray(cfg.agent_ids) ? cfg.agent_ids : [])[0] || ''
   const overrides = cfg.agent_overrides || {}
@@ -256,6 +256,16 @@ function AdvisorsField({ agents, primaryId, form, setCfg }) {
   const setSecond   = (id) => setCfg('agent_ids', id ? [id] : [])
   const setOverride = (id, patch) => setCfg('agent_overrides', { ...overrides, [id]: { ...(overrides[id] || {}), ...patch } })
   const clearOverride = (id) => { const next = { ...overrides }; delete next[id]; setCfg('agent_overrides', next) }
+
+  // Persist a campaign-side edit back to the agent's profile so every future
+  // campaign that adds them inherits the bio/headshot automatically.
+  const saveToProfile = async (agent, patch) => {
+    const { error } = await supabase.from('agents').update(patch).eq('id', agent.id)
+    if (error) { pushToast(error.message, 'error'); return false }
+    setDb?.(d => ({ ...d, agents: (d.agents || []).map(a => a.id === agent.id ? { ...a, ...patch } : a) }))
+    pushToast(`Saved to ${agent.name}'s profile`)
+    return true
+  }
 
   return (
     <div style={{ border:'1px solid var(--gw-border)', borderRadius:10, padding:14 }}>
@@ -275,27 +285,46 @@ function AdvisorsField({ agents, primaryId, form, setCfg }) {
       <div style={{ display:'flex', flexDirection:'column', gap:8, marginTop:12 }}>
         {ids.map((id, i) => (
           <AdvisorCustomize key={id} agent={byId(id)} role={i === 0 ? 'Primary' : 'Co-agent'}
-            ov={overrides[id] || {}} onPatch={(patch) => setOverride(id, patch)} onClear={() => clearOverride(id)} />
+            ov={overrides[id] || {}} onPatch={(patch) => setOverride(id, patch)} onClear={() => clearOverride(id)}
+            onSaveToProfile={saveToProfile} />
         ))}
       </div>
     </div>
   )
 }
 
-function AdvisorCustomize({ agent, role, ov, onPatch, onClear }) {
+function AdvisorCustomize({ agent, role, ov, onPatch, onClear, onSaveToProfile }) {
   const [open, setOpen] = useState(false)
   const [uploading, setUploading] = useState({})
+  const [savingProfile, setSavingProfile] = useState(false)
   if (!agent) return null
-  const photo       = ov.photo_url || agent.photo_url
-  const profileBio  = (agent.bio || '').trim()
-  const hasOverride = Boolean((ov.bio && ov.bio.trim()) || ov.photo_url)
-  const inits       = (agent.name || '?').split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase()
+
+  const profileBio   = (agent.bio || '').trim()
+  const profilePhoto = agent.photo_url || ''
+  // Effective values shown in the editor: override wins, else profile.
+  const bioValue    = ov.bio !== undefined ? ov.bio : profileBio
+  const photoValue  = ov.photo_url || profilePhoto
+  const bioDiffers  = ov.bio !== undefined && ov.bio.trim() !== profileBio
+  const photoDiffers = !!ov.photo_url && ov.photo_url !== profilePhoto
+  const hasOverride = bioDiffers || photoDiffers
+  const inits = (agent.name || '?').split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase()
+
+  const pushOverrideToProfile = async () => {
+    const patch = {}
+    if (bioDiffers)   patch.bio = ov.bio.trim() || null
+    if (photoDiffers) patch.photo_url = ov.photo_url
+    if (!Object.keys(patch).length) return
+    setSavingProfile(true)
+    const ok = await onSaveToProfile?.(agent, patch)
+    setSavingProfile(false)
+    if (ok) onClear()
+  }
 
   return (
     <div style={{ border:'1px solid var(--gw-border)', borderRadius:8, padding:10, background:'#fff' }}>
       <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-        {photo
-          ? <img src={photo} alt="" style={{ width:38, height:38, borderRadius:8, objectFit:'cover' }} />
+        {photoValue
+          ? <img src={photoValue} alt="" style={{ width:38, height:38, borderRadius:8, objectFit:'cover' }} />
           : <div style={{ width:38, height:38, borderRadius:8, background:agent.color || '#2d3561', color:'#fff',
                           display:'flex', alignItems:'center', justifyContent:'center', fontWeight:700, fontSize:13 }}>{inits}</div>}
         <div style={{ flex:1, minWidth:0 }}>
@@ -303,7 +332,7 @@ function AdvisorCustomize({ agent, role, ov, onPatch, onClear }) {
             {agent.name} <span style={{ fontSize:10, color:'var(--gw-mist)', fontWeight:600 }}>· {role}</span>
           </div>
           <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
-            {hasOverride ? 'Customized for this mailing' : profileBio ? 'Using their profile bio' : 'No bio on file — add one in their profile'}
+            {hasOverride ? 'Customized for this mailing' : profileBio ? 'Using their profile bio' : 'No bio on file — add one below'}
           </div>
         </div>
         <button type="button" className="btn btn--ghost btn--sm" style={{ fontSize:11 }} onClick={() => setOpen(o => !o)}>
@@ -313,13 +342,17 @@ function AdvisorCustomize({ agent, role, ov, onPatch, onClear }) {
 
       {open && (
         <div style={{ marginTop:10, display:'flex', flexDirection:'column', gap:8 }}>
-          <textarea className="input" rows={3} maxLength={600} value={ov.bio ?? ''}
-            placeholder={profileBio || 'Bio shown on this mailing…'}
+          <textarea className="input" rows={3} maxLength={600} value={bioValue}
+            placeholder={profileBio ? '' : `Short bio for ${agent.name} — appears on the landing page.`}
             onChange={e => onPatch({ bio: e.target.value })} />
-          <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Leave blank to use their profile bio.</div>
-          <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+          <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
+            {hasOverride
+              ? 'This edit only applies to this mailing — save to profile to reuse across every campaign.'
+              : 'Editing here creates a per-mailing override. Use “Save to profile” to make it the default.'}
+          </div>
+          <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
             <label className="btn btn--secondary btn--sm" style={{ cursor:'pointer', fontSize:11 }}>
-              {uploading.photo ? 'Uploading…' : 'Upload photo'}
+              {uploading.photo ? 'Uploading…' : photoValue ? 'Replace photo' : 'Upload photo'}
               <input type="file" accept="image/*" style={{ display:'none' }}
                 onChange={async e => {
                   const f = e.target.files?.[0]; if (!f) return
@@ -328,9 +361,15 @@ function AdvisorCustomize({ agent, role, ov, onPatch, onClear }) {
                 }} />
             </label>
             {hasOverride && (
-              <button type="button" className="btn btn--ghost btn--sm" style={{ fontSize:11 }} onClick={onClear}>
-                Reset to profile
-              </button>
+              <>
+                <button type="button" className="btn btn--primary btn--sm" style={{ fontSize:11 }}
+                  disabled={savingProfile} onClick={pushOverrideToProfile}>
+                  {savingProfile ? 'Saving…' : 'Save to profile'}
+                </button>
+                <button type="button" className="btn btn--ghost btn--sm" style={{ fontSize:11 }} onClick={onClear}>
+                  Reset to profile
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -341,7 +380,7 @@ function AdvisorCustomize({ agent, role, ov, onPatch, onClear }) {
 
 // ─── New / Edit Mailing form ──────────────────────────────────────────────────
 
-function MailingForm({ initial, agents, properties, activeAgent, onSave, onCancel, saving, initialTemplate }) {
+function MailingForm({ initial, agents, properties, activeAgent, onSave, onCancel, saving, initialTemplate, setDb }) {
   const [form, setForm] = useState(() => ({
     name:               initial?.name               || initialTemplate?.fields?.name               || '',
     description:        initial?.description        || initialTemplate?.fields?.description        || '',
@@ -433,7 +472,7 @@ function MailingForm({ initial, agents, properties, activeAgent, onSave, onCance
         </div>
       </div>
 
-      <AdvisorsField agents={agents} primaryId={form.agent_id} form={form} setCfg={setCfg} />
+      <AdvisorsField agents={agents} primaryId={form.agent_id} form={form} setCfg={setCfg} setDb={setDb} />
 
       <div>
         <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)', display:'block', marginBottom:8 }}>
@@ -1417,7 +1456,7 @@ function RecipientImporter({ mailingId, contacts, onDone, onCancel }) {
 
 // ─── Mailing detail drawer ────────────────────────────────────────────────────
 
-function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onClose, onUpdate, onDelete }) {
+function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onClose, onUpdate, onDelete, setDb }) {
   const [tab, setTab] = useState('overview') // overview | recipients | scans | leads | edit
   const [recipients, setRecipients] = useState([])
   const [scans, setScans] = useState([])
@@ -1752,7 +1791,7 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
 
         {tab === 'edit' && (
           <MailingForm initial={mailing} agents={agents} properties={properties} activeAgent={activeAgent}
-                       saving={saving} onSave={saveEdit} onCancel={() => setTab('overview')} />
+                       saving={saving} onSave={saveEdit} onCancel={() => setTab('overview')} setDb={setDb} />
         )}
       </div>
 
@@ -1795,7 +1834,7 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
-export default function CampaignsPage({ db, isAdmin, activeAgent }) {
+export default function CampaignsPage({ db, setDb, isAdmin, activeAgent }) {
   const agents     = db?.agents     || []
   const properties = db?.properties || []
 
@@ -2096,6 +2135,7 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
               saving={saving}
               onSave={createMailing}
               onCancel={() => { setCreating(false); setTemplateSel(null) }}
+              setDb={setDb}
             />
           </div>
         </Modal>
@@ -2111,6 +2151,7 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
           onClose={() => setSelected(null)}
           onUpdate={updateMailing}
           onDelete={handleDelete}
+          setDb={setDb}
         />
       )}
     </div>
