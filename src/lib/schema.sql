@@ -1002,6 +1002,66 @@ drop policy if exists "form_packets_all" on form_packets;
 create policy "form_packets_all" on form_packets
   for all to authenticated using (true) with check (true);
 
+-- Storage bucket (private — downloads use signed URLs)
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'form-packets',
+  'form-packets',
+  false,
+  52428800,
+  array['application/pdf']
+)
+on conflict (id) do nothing;
+
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename='objects' and schemaname='storage'
+    and policyname='form-packets: authenticated upload'
+  ) then
+    create policy "form-packets: authenticated upload"
+      on storage.objects for insert to authenticated
+      with check (bucket_id = 'form-packets');
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename='objects' and schemaname='storage'
+    and policyname='form-packets: authenticated read'
+  ) then
+    create policy "form-packets: authenticated read"
+      on storage.objects for select to authenticated
+      using (bucket_id = 'form-packets');
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename='objects' and schemaname='storage'
+    and policyname='form-packets: authenticated update'
+  ) then
+    create policy "form-packets: authenticated update"
+      on storage.objects for update to authenticated
+      using (bucket_id = 'form-packets')
+      with check (bucket_id = 'form-packets');
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename='objects' and schemaname='storage'
+    and policyname='form-packets: authenticated delete'
+  ) then
+    create policy "form-packets: authenticated delete"
+      on storage.objects for delete to authenticated
+      using (bucket_id = 'form-packets');
+  end if;
+end $$;
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- DEADLINE REMINDERS (cron-sent, dedup log)
 -- ─────────────────────────────────────────────────────────────────────────────
