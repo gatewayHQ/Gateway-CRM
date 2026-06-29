@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Drawer, pushToast } from '../components/UI.jsx'
 import { STAGE_ORDER, STAGE_LABELS } from '../lib/helpers.js'
+import { fireWebhooks } from '../lib/webhooks.js'
 
 function QuickContactDrawer({ open, onClose, agents, activeAgent, onSaved }) {
   const blank = () => ({ first_name: '', last_name: '', phone: '', email: '', type: 'buyer', assigned_agent_id: activeAgent?.id || '' })
@@ -14,10 +15,12 @@ function QuickContactDrawer({ open, onClose, agents, activeAgent, onSaved }) {
   const save = async () => {
     if (!form.first_name.trim() || !form.last_name.trim()) { pushToast('First and last name required', 'error'); return }
     setSaving(true)
-    const { error } = await supabase.from('contacts').insert([{ ...form, status: 'active', source: 'other', tags: [], assigned_agent_id: form.assigned_agent_id || null }])
+    const payload = { ...form, status: 'active', source: 'other', tags: [], assigned_agent_id: form.assigned_agent_id || null }
+    const { data: saved, error } = await supabase.from('contacts').insert([payload]).select().maybeSingle()
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast(`${form.first_name} ${form.last_name} added to Contacts`)
+    if (saved?.id) fireWebhooks('contact.created', { id: saved.id, ...payload })
     onSaved(); onClose()
   }
 
@@ -77,16 +80,18 @@ function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
   const save = async () => {
     if (!form.title.trim()) { pushToast('Deal title required', 'error'); return }
     setSaving(true)
-    const { error } = await supabase.from('deals').insert([{
+    const payload = {
       ...form,
       value: form.value ? Number(form.value) : null,
       probability: 25,
       updated_at: new Date().toISOString(),
       agent_id: form.agent_id || null,
-    }])
+    }
+    const { data: saved, error } = await supabase.from('deals').insert([payload]).select().maybeSingle()
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast(`Deal "${form.title}" added`)
+    if (saved?.id) fireWebhooks('deal.created', { id: saved.id, title: payload.title, value: payload.value, stage: payload.stage, agent_id: payload.agent_id })
     onSaved(); onClose()
   }
 

@@ -346,20 +346,25 @@ async function handleGate(req, res) {
       assigned_agent_id: assignedAgentId,
       is_new_contact:   isNew,
     }).catch(() => {})
-    if (isNew) {
-      fireWebhooksServer(SUPABASE_URL, headers, 'contact.created', {
-        id:                contactId,
-        first_name:        resolvedFirst,
-        last_name:         resolvedLast,
-        email:             normalEmail,
-        phone:             phone?.trim() || null,
-        source:            'website',
-        source_url:        resolvedSourceUrl,
-        type:              'buyer',
-        status:            'active',
-        assigned_agent_id: assignedAgentId,
-      }).catch(() => {})
+    const contactEventPayload = {
+      id:                contactId,
+      first_name:        resolvedFirst,
+      last_name:         resolvedLast,
+      email:             normalEmail,
+      phone:             phone?.trim() || null,
+      source:            'website',
+      source_url:        resolvedSourceUrl,
+      type:              'buyer',
+      status:            'active',
+      assigned_agent_id: assignedAgentId,
     }
+    // First touch fires 'contact.created'; subsequent submissions from the
+    // same email fire 'contact.updated' so subscribers see the re-engagement
+    // signal (e.g. someone returning to a different listing).
+    fireWebhooksServer(SUPABASE_URL, headers,
+      isNew ? 'contact.created' : 'contact.updated',
+      contactEventPayload,
+    ).catch(() => {})
   }
 
   // Auto-enroll the new contact in the assigned agent's drip. Only fires for

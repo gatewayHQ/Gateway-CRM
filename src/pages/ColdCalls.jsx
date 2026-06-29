@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Modal, pushToast } from '../components/UI.jsx'
 import { CONTACT_TYPES, PROPERTY_TYPES, titleCase } from '../lib/enums.js'
+import { fireWebhooks } from '../lib/webhooks.js'
 
 // ── SQL shown when tables are missing ─────────────────────────────────────
 const SQL_SETUP = `create table if not exists cold_call_lists (
@@ -320,6 +321,7 @@ function ConvertModal({ lead, agents, activeAgent, setDb, onClose, onConverted }
     const { data, error } = await supabase.from('contacts').insert([contactPayload]).select().single()
     if (error) { setSaving(false); pushToast(error.message, 'error'); return }
     if (setDb) setDb(p => ({ ...p, contacts: [data, ...(p.contacts || [])] }))
+    if (data?.id) fireWebhooks('contact.created', { id: data.id, ...contactPayload })
 
     // Create linked property and sync into in-memory db
     if (lead?.property_address) {

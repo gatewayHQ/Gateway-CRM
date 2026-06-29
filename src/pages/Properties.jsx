@@ -919,6 +919,10 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
     if (error) { pushToast(error.message, 'error'); return }
     if (setDb) setDb(p => ({ ...p, deals: [data, ...(p.deals || [])] }))
     pushToast('Deal created — opening Pipeline')
+    fireWebhooks('deal.created', {
+      id: data.id, title: data.title, value: data.value, stage: data.stage,
+      agent_id: data.agent_id, contact_id: data.contact_id, property_id: data.property_id,
+    })
     onClose()
     if (go) go('pipeline')
   }

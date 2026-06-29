@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Badge, Avatar, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatDate } from '../lib/helpers.js'
+import { fireWebhooks } from '../lib/webhooks.js'
 
 function StatCard({ label, value, sub }) {
   return (
@@ -61,6 +62,11 @@ export default function LeadsPage({ db }) {
       await supabase.from('lead_captures').update({ converted_contact_id: data.id }).eq('id', capture.id)
       setCaptures(prev => prev.map(c => c.id === capture.id ? { ...c, converted_contact_id: data.id } : c))
       pushToast(`${capture.first_name} added to Contacts`)
+      fireWebhooks('contact.created', {
+        id: data.id, first_name: data.first_name, last_name: data.last_name,
+        email: data.email, phone: data.phone, source: 'website',
+        type: data.type, status: data.status, assigned_agent_id: data.assigned_agent_id,
+      })
     } else {
       pushToast('Failed to add contact', 'error')
     }
