@@ -6,6 +6,8 @@ import { formatCurrency, formatDate, formatPhone, STAGE_LABELS } from '../lib/he
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
 import { DealDrawer } from './Pipeline.jsx'
+import { getClosingGate, gateBadge } from '../lib/compliance.js'
+import { audit, useDealAudit } from '../lib/audit.js'
 
 const BUCKET = 'deal-documents'
 
@@ -166,9 +168,29 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     [db.tasks, dealId]
   )
 
+  // ── Compliance gate ────────────────────────────────────────────────────────
+  // Single source of truth for "is this deal ready to close?". Same shape on
+  // Pipeline + AdminReview + the cron nudges. The badge is always visible; the
+  // detail card appears under the stage rail when there are open issues.
+  const gate = useMemo(
+    () => getClosingGate(deal, { steps, envelopes, commission, hasCommissionVisibility: isAdmin }),
+    [deal, steps, envelopes, commission, isAdmin]
+  )
+
   // ── Actions ────────────────────────────────────────────────────────────────
   const setStage = async (newStage) => {
     if (!deal || newStage === deal.stage) return
+    // Compliance gate: 'closed' is gated. Admin can override with confirm;
+    // non-admin gets blocked and pointed at the review queue.
+    if (newStage === 'closed' && !gate.canClose) {
+      if (!isAdmin) {
+        pushToast(`Cannot close: ${gate.issues[0].label}`, 'error')
+        return
+      }
+      const issueList = gate.issues.map(i => `• ${i.label}`).join('\n')
+      if (!window.confirm(`This deal has open compliance items:\n\n${issueList}\n\nOverride and close anyway?`)) return
+    }
+    const fromStage = deal.stage
     // Stamp stage_since so days-in-stage / rotting stays accurate (no schema change)
     const comp_data = { ...(deal.comp_data || {}), stage_since: new Date().toISOString() }
     const { error, status } = await withRetry(() => supabase.from('deals').update({ stage: newStage, comp_data }).eq('id', deal.id))
@@ -176,6 +198,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, stage: newStage, comp_data } : d) }))
     setFetched(f => f && f.id === deal.id ? { ...f, stage: newStage, comp_data } : f)
     pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
+    audit.stageChange(deal, fromStage, newStage, activeAgent?.id)
     const auto = STAGE_AUTO_TASKS[newStage]
     if (!auto) return
     const due = new Date(); due.setDate(due.getDate() + auto.daysOut); due.setHours(9, 0, 0, 0)
@@ -189,6 +212,84 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
       pushToast(`Task auto-created: ${newTask.title}`, 'info')
     }
   }
+
+  // ── Submit for admin review (agent-initiated) ──────────────────────────────
+  const [submittingReview, setSubmittingReview] = useState(false)
+  const submitForReview = async () => {
+    if (!deal) return
+    setSubmittingReview(true)
+    const patch = {
+      review_status: 'pending',
+      review_requested_at: new Date().toISOString(),
+      review_requested_by: activeAgent?.id || null,
+    }
+    const { error, status } = await withRetry(() => supabase.from('deals').update(patch).eq('id', deal.id))
+    setSubmittingReview(false)
+    if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
+    setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, ...patch } : d) }))
+    setFetched(f => f && f.id === deal.id ? { ...f, ...patch } : f)
+    audit.reviewSubmitted(deal, activeAgent?.id)
+    pushToast('Submitted to admin for review')
+  }
+
+  // ── Admin review decisions ─────────────────────────────────────────────────
+  const decideReview = async (decision /* 'approved' | 'changes_requested' */, notes = null) => {
+    if (!deal || !isAdmin) return
+    const patch = {
+      review_status: decision,
+      review_decided_at: new Date().toISOString(),
+      review_decided_by: activeAgent?.id || null,
+      review_notes: notes,
+    }
+    const { error, status } = await withRetry(() => supabase.from('deals').update(patch).eq('id', deal.id))
+    if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
+    setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, ...patch } : d) }))
+    setFetched(f => f && f.id === deal.id ? { ...f, ...patch } : f)
+    if (decision === 'approved') audit.reviewApproved(deal, activeAgent?.id, notes)
+    else                          audit.reviewChanges(deal, activeAgent?.id, notes)
+    pushToast(decision === 'approved' ? 'Deal approved for closing' : 'Changes requested — agent notified')
+  }
+
+  // ── Closing packet (admin) ─────────────────────────────────────────────────
+  const [packetBusy, setPacketBusy] = useState(false)
+  const [packets,    setPackets]    = useState([])
+  const loadPackets = useCallback(async () => {
+    if (!dealId) return
+    const { data } = await supabase.from('closing_packets').select('*').eq('deal_id', dealId).order('created_at', { ascending: false }).limit(5)
+    setPackets(data || [])
+  }, [dealId])
+  useEffect(() => { loadPackets() }, [loadPackets])
+
+  const generateClosingPacket = async () => {
+    if (!deal || !isAdmin) return
+    setPacketBusy(true)
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session?.access_token) { pushToast('Sign in required', 'error'); return }
+      const res = await fetch('/api/signwell', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body:    JSON.stringify({ action: 'closing-packet', deal_id: deal.id }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) { pushToast(body.error || 'Packet failed', 'error'); return }
+      pushToast(`Packet ready — ${body.doc_count} document${body.doc_count === 1 ? '' : 's'} merged`)
+      audit.packetGenerated(deal, body.doc_count, activeAgent?.id)
+      loadPackets()
+    } catch (e) {
+      pushToast(e.message || 'Packet failed', 'error')
+    } finally {
+      setPacketBusy(false)
+    }
+  }
+  const downloadPacket = async (storagePath) => {
+    const { data } = await supabase.storage.from('closing-packets').createSignedUrl(storagePath, 120)
+    if (data?.signedUrl) window.open(data.signedUrl, '_blank', 'noopener')
+    else pushToast('Could not open packet', 'error')
+  }
+
+  // ── Audit log (timeline) ───────────────────────────────────────────────────
+  const { rows: auditRows } = useDealAudit(dealId)
 
   const [logType, setLogType] = useState('note')
   const [logBody, setLogBody] = useState('')
@@ -232,6 +333,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     const completed = !step.completed
     await supabase.from('transaction_steps').update({ completed, completed_at: completed ? new Date().toISOString() : null }).eq('id', step.id)
     setSteps(s => s.map(x => x.id === step.id ? { ...x, completed } : x))
+    audit.stepToggled(deal, step, activeAgent?.id)
   }
 
   const persistKeyDate = async (idx, date) => {
@@ -247,10 +349,23 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   const uploadFile = async (file) => {
     if (!file || !deal) return
     setUploading(true)
-    const { error } = await supabase.storage.from(BUCKET).upload(`deal-${deal.id}/${file.name}`, file, { upsert: false })
+    const storagePath = `deal-${deal.id}/${file.name}`
+    const { error } = await supabase.storage.from(BUCKET).upload(storagePath, file, { upsert: false })
     setUploading(false)
     if (error) { pushToast(error.message, 'error'); return }
-    pushToast('Document uploaded')
+    // Record a document_versions row so the audit + closing packet have a
+    // canonical list to read from (storage alone has no metadata).
+    const { data: existing } = await supabase.from('document_versions')
+      .select('version_num').eq('deal_id', deal.id).eq('document_name', file.name)
+      .order('version_num', { ascending: false }).limit(1)
+    const nextVersion = ((existing?.[0]?.version_num) || 0) + 1
+    await supabase.from('document_versions').insert([{
+      deal_id: deal.id, document_name: file.name, storage_path: storagePath,
+      size: file.size, mime_type: file.type || null, version_num: nextVersion,
+      source: 'upload', uploaded_by: activeAgent?.id || null,
+    }])
+    audit.documentUploaded(deal, file.name, activeAgent?.id)
+    pushToast(`Document uploaded${nextVersion > 1 ? ` (v${nextVersion})` : ''}`)
     loadExtras()
   }
   const downloadFile = async (name) => {
@@ -336,6 +451,38 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
             )
           })}
         </div>
+
+        {/* ── Compliance gate banner — only shows when there's something to do ── */}
+        {isOpenStage(deal.stage) && !gate.canClose && (
+          <div className="card" style={{
+            padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 12,
+            background: '#fff7ed', border: '1px solid #fed7aa', borderLeft: '4px solid #d97706',
+          }}>
+            <Icon name="warning" size={18} style={{ color: '#d97706', flexShrink: 0 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: '#7c2d12' }}>
+                {gate.issues.length} item{gate.issues.length === 1 ? '' : 's'} before this deal can close
+              </div>
+              <div style={{ fontSize: 12, color: '#9a3412', marginTop: 2 }}>
+                {gate.issues.slice(0, 3).map(i => i.label).join(' · ')}
+                {gate.issues.length > 3 ? ` · +${gate.issues.length - 3} more` : ''}
+              </div>
+            </div>
+            {deal.review_status === 'none' && (
+              <button className="btn btn--secondary btn--sm" onClick={submitForReview} disabled={submittingReview}>
+                {submittingReview ? 'Submitting…' : 'Submit for admin review'}
+              </button>
+            )}
+            {deal.review_status === 'pending' && (
+              <Badge variant="pending">Awaiting admin review</Badge>
+            )}
+            {deal.review_status === 'changes_requested' && (
+              <button className="btn btn--secondary btn--sm" onClick={submitForReview} disabled={submittingReview}>
+                Resubmit
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ── Cards grid ── */}
@@ -506,6 +653,77 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
           </div>
         </SectionCard>
 
+        {/* Compliance & Review */}
+        <SectionCard title="Compliance">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ width: 9, height: 9, borderRadius: '50%', background: gateBadge(gate).color, flexShrink: 0 }} />
+            <strong style={{ fontSize: 13.5 }}>{gateBadge(gate).label}</strong>
+            <span style={{ flex: 1 }} />
+            {deal.review_status === 'approved' && <Badge variant="closed">Approved</Badge>}
+            {deal.review_status === 'pending'  && <Badge variant="pending">In review</Badge>}
+            {deal.review_status === 'changes_requested' && <Badge variant="lost">Changes</Badge>}
+          </div>
+          {gate.issues.length === 0 ? (
+            <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>
+              All closing checks pass. Move stage to <strong>Closed</strong> when ready.
+            </div>
+          ) : (
+            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: 'var(--gw-ink)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {gate.issues.slice(0, 6).map(i => (
+                <li key={i.code}>
+                  {i.label}
+                  {i.tab && (
+                    <button className="btn btn--ghost btn--sm" style={{ marginLeft: 6, padding: '0 6px', fontSize: 11 }} onClick={() => openDrawer(i.tab)}>
+                      Fix
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {isAdmin && deal.review_status === 'pending' && (
+            <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Admin decision</div>
+              <AdminReviewActions deal={deal} onDecide={decideReview} />
+            </div>
+          )}
+          {deal.review_status === 'changes_requested' && deal.review_notes && (
+            <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '8px 10px', fontSize: 12.5 }}>
+              <div style={{ fontWeight: 700, color: '#7f1d1d', fontSize: 11, marginBottom: 2 }}>Admin notes</div>
+              <div style={{ color: '#7f1d1d' }}>{deal.review_notes}</div>
+            </div>
+          )}
+        </SectionCard>
+
+        {/* Closing Packet — admin-only, surfaces once a deal is in the closing lane */}
+        {isAdmin && (deal.stage === 'under-contract' || deal.stage === 'closed' || deal.stage === 'psa' || deal.stage === 'due-diligence') && (
+          <SectionCard title="Closing Packet"
+            action={(
+              <button className="btn btn--primary btn--sm" onClick={generateClosingPacket} disabled={packetBusy}>
+                {packetBusy ? 'Generating…' : packets.length > 0 ? 'Regenerate' : 'Generate'}
+              </button>
+            )}>
+            {packets.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>
+                Merges every signed envelope and uploaded document into one PDF. Run once everything is signed.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {packets.map(p => (
+                  <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
+                    <Icon name="document" size={13} />
+                    <button onClick={() => downloadPacket(p.storage_path)}
+                      style={{ flex: 1, textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--gw-ink)', fontFamily: 'var(--font-body)', fontSize: 12.5, padding: 0 }}>
+                      Packet · {p.doc_count} doc{p.doc_count === 1 ? '' : 's'}
+                    </button>
+                    <span style={{ fontSize: 10.5, color: 'var(--gw-mist)' }}>{timeAgo(p.created_at)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </SectionCard>
+        )}
+
         {/* Timeline */}
         <SectionCard title="Timeline" style={{ gridColumn: '1 / -1' }}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
@@ -541,10 +759,71 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
             </div>
           )}
         </SectionCard>
+
+        {/* Activity Log — system-generated audit trail (stages, docs, reviews, packets) */}
+        <SectionCard title="Activity Log" style={{ gridColumn: '1 / -1' }}>
+          {auditRows.length === 0 ? (
+            <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>
+              Stage moves, document uploads, signatures, reviews, and packet generations all show up here.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {auditRows.slice(0, 30).map(row => {
+                const actor = agents.find(x => x.id === row.actor_id)
+                const iconMap = { stage: 'pipeline', insert: 'document', update: 'edit', pin: 'star', doc_signed: 'check', packet_generated: 'document', review_submit: 'send', review_approve: 'check', review_changes: 'warning', delete: 'x' }
+                return (
+                  <div key={row.id} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 12.5 }}>
+                    <div style={{ width: 22, height: 22, borderRadius: '50%', background: 'var(--gw-bone)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      <Icon name={iconMap[row.action] || 'edit'} size={11} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div>{row.summary || `${row.action} on ${row.table_name}`}</div>
+                      <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 1 }}>
+                        {actor ? `${actor.name} · ` : ''}{timeAgo(row.created_at)}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </SectionCard>
       </div>
 
       <DealDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} deal={deal} initialTab={drawerTab}
         agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} onSave={refreshDeal} />
+    </div>
+  )
+}
+
+// Admin review action buttons — inline UI so the admin doesn't have to leave
+// the deal page to approve/request changes. The agent never sees these.
+function AdminReviewActions({ deal, onDecide }) {
+  const [notes, setNotes] = useState('')
+  const [busy,  setBusy]  = useState(null)
+  const decide = async (kind) => {
+    if (kind === 'changes_requested' && !notes.trim()) return
+    setBusy(kind)
+    await onDecide(kind, notes.trim() || null)
+    setBusy(null)
+    setNotes('')
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <textarea className="form-control" rows={2} style={{ fontSize: 12.5, resize: 'vertical' }}
+        placeholder="Notes (required to request changes; optional on approval)…"
+        value={notes} onChange={e => setNotes(e.target.value)} />
+      <div style={{ display: 'flex', gap: 6 }}>
+        <button className="btn btn--primary btn--sm" style={{ flex: 1 }}
+          onClick={() => decide('approved')} disabled={busy !== null}>
+          {busy === 'approved' ? 'Approving…' : 'Approve for closing'}
+        </button>
+        <button className="btn btn--secondary btn--sm" style={{ flex: 1 }}
+          onClick={() => decide('changes_requested')} disabled={busy !== null || !notes.trim()}
+          title={!notes.trim() ? 'Notes required to request changes' : ''}>
+          {busy === 'changes_requested' ? 'Sending…' : 'Request changes'}
+        </button>
+      </div>
     </div>
   )
 }

@@ -361,6 +361,78 @@ alter table transaction_steps enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- TRANSACTION MANAGEMENT LAYER (audit log, doc versions, closing packets,
+-- nudge ledger). Broker-review columns live directly on deals — added by the
+-- alter blocks below for existing installs; fresh installs see them on the
+-- deals create above.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists audit_log (
+  id          uuid primary key default uuid_generate_v4(),
+  table_name  text not null,
+  record_id   uuid,
+  deal_id     uuid references deals(id) on delete cascade,
+  actor_id    uuid references agents(id) on delete set null,
+  action      text not null,
+  old_values  jsonb,
+  new_values  jsonb,
+  summary     text,
+  created_at  timestamptz default now()
+);
+create index if not exists idx_audit_log_deal      on audit_log(deal_id, created_at desc);
+create index if not exists idx_audit_log_actor     on audit_log(actor_id, created_at desc);
+create index if not exists idx_audit_log_table_rec on audit_log(table_name, record_id);
+alter table audit_log enable row level security;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+create table if not exists document_versions (
+  id            uuid primary key default uuid_generate_v4(),
+  deal_id       uuid references deals(id) on delete cascade not null,
+  document_name text not null,
+  storage_path  text not null,
+  size          bigint,
+  mime_type     text,
+  version_num   integer not null default 1,
+  pinned_as     text check (pinned_as in ('final','signed','superseded') or pinned_as is null),
+  source        text default 'upload' check (source in ('upload','signwell','closing_packet','import')),
+  uploaded_by   uuid references agents(id) on delete set null,
+  note          text,
+  created_at    timestamptz default now()
+);
+create index if not exists idx_docver_deal      on document_versions(deal_id);
+create index if not exists idx_docver_deal_name on document_versions(deal_id, document_name, version_num desc);
+create index if not exists idx_docver_pinned    on document_versions(deal_id, pinned_as) where pinned_as is not null;
+alter table document_versions enable row level security;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+create table if not exists closing_packets (
+  id           uuid primary key default uuid_generate_v4(),
+  deal_id      uuid references deals(id) on delete cascade not null,
+  storage_path text not null,
+  size         bigint,
+  doc_count    integer default 0,
+  generated_by uuid references agents(id) on delete set null,
+  notes        text,
+  created_at   timestamptz default now()
+);
+create index if not exists idx_closing_packets_deal on closing_packets(deal_id, created_at desc);
+alter table closing_packets enable row level security;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+create table if not exists agent_nudges (
+  id          uuid primary key default uuid_generate_v4(),
+  agent_id    uuid references agents(id) on delete cascade not null,
+  deal_id     uuid references deals(id) on delete cascade not null,
+  nudge_kind  text not null,
+  sent_at     timestamptz default now(),
+  sent_on     date generated always as ((sent_at at time zone 'UTC')::date) stored
+);
+create unique index if not exists uq_agent_nudges_per_day
+  on agent_nudges(agent_id, deal_id, nudge_kind, sent_on);
+create index if not exists idx_agent_nudges_deal on agent_nudges(deal_id, sent_at desc);
+alter table agent_nudges enable row level security;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- MIGRATION  (run this block if upgrading an existing database)
 -- ─────────────────────────────────────────────────────────────────────────────
 -- alter table agents      add column if not exists auth_id uuid unique;
@@ -1197,3 +1269,27 @@ drop policy if exists agent_notifications_own on agent_notifications;
 create policy agent_notifications_own on agent_notifications for all to authenticated
   using      (agent_id = app_current_agent_id())
   with check (agent_id = app_current_agent_id());
+
+-- AUDIT LOG — visible if you can see the deal, OR you authored it. Admins see all.
+drop policy if exists audit_log_scope on audit_log;
+create policy audit_log_scope on audit_log for all to authenticated
+  using      (app_is_admin() or deal_id in (select app_visible_deal_ids()) or actor_id = app_current_agent_id())
+  with check (app_is_admin() or deal_id in (select app_visible_deal_ids()) or actor_id = app_current_agent_id());
+
+-- DOCUMENT VERSIONS — follow the deal.
+drop policy if exists document_versions_scope on document_versions;
+create policy document_versions_scope on document_versions for all to authenticated
+  using      (app_is_admin() or deal_id in (select app_visible_deal_ids()))
+  with check (app_is_admin() or deal_id in (select app_visible_deal_ids()));
+
+-- CLOSING PACKETS — follow the deal.
+drop policy if exists closing_packets_scope on closing_packets;
+create policy closing_packets_scope on closing_packets for all to authenticated
+  using      (app_is_admin() or deal_id in (select app_visible_deal_ids()))
+  with check (app_is_admin() or deal_id in (select app_visible_deal_ids()));
+
+-- AGENT NUDGES — follow the deal OR the agent (written by cron via service key).
+drop policy if exists agent_nudges_scope on agent_nudges;
+create policy agent_nudges_scope on agent_nudges for all to authenticated
+  using      (app_is_admin() or agent_id = app_current_agent_id() or deal_id in (select app_visible_deal_ids()))
+  with check (app_is_admin() or agent_id = app_current_agent_id() or deal_id in (select app_visible_deal_ids()));

@@ -65,7 +65,7 @@ function compareValues(a, b, dir = 'asc') {
 
 const HEAT_ORDER = { hot: 0, warm: 1, cold: 2 }
 
-export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, visibleAgentIds }) {
+export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, visibleAgentIds, isAdmin }) {
   // ── Persistent filter state ─────────────────────────────────────────────
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebounce(search, 150)
@@ -198,14 +198,17 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
   }, [setDb])
 
   // ── Mutations ───────────────────────────────────────────────────────────
+  // Admins see firm-wide on initial load (App.jsx); a reload here must match
+  // or the list silently collapses to team-scope after any save.
   const reload = useCallback(async () => {
-    if (!visibleAgentIds?.length) return
-    const { data } = await supabase.from('contacts').select('*')
-      .in('assigned_agent_id', visibleAgentIds)
+    if (!isAdmin && !visibleAgentIds?.length) return
+    let q = supabase.from('contacts').select('*')
       .is('deleted_at', null)
       .order('created_at', { ascending: false })
+    if (!isAdmin) q = q.in('assigned_agent_id', visibleAgentIds)
+    const { data } = await q
     if (data) setDb(p => ({ ...p, contacts: data }))
-  }, [visibleAgentIds, setDb])
+  }, [visibleAgentIds, isAdmin, setDb])
 
   const softDeleteContacts = useCallback(async (ids) => {
     const arr = Array.isArray(ids) ? ids : [ids]
