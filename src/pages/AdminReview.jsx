@@ -1,11 +1,11 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatCurrency, formatDate, STAGE_LABELS } from '../lib/helpers.js'
 import { getClosingGate, gateBadge } from '../lib/compliance.js'
-import { audit } from '../lib/audit.js'
 import { daysBetween } from '../lib/pipeline.js'
+import { TABLES, REVIEW_STATUS } from '../lib/constants.js'
+import { decideDealReview } from '../lib/services/review.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AdminReview — the broker's review inbox.
@@ -40,8 +40,8 @@ export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin })
   const loadDealDetails = useCallback(async (dealId) => {
     if (!dealId || stepsByDeal[dealId]) return
     const [s, e] = await Promise.all([
-      supabase.from('transaction_steps').select('id, title, completed, if_applicable, doc_action').eq('deal_id', dealId),
-      supabase.from('signwell_documents').select('id, status, document_name').eq('deal_id', dealId),
+      supabase.from(TABLES.TRANSACTION_STEPS).select('id, title, completed, if_applicable, doc_action').eq('deal_id', dealId),
+      supabase.from(TABLES.SIGNWELL_DOCUMENTS).select('id, status, document_name').eq('deal_id', dealId),
     ])
     setStepsByDeal(p => ({ ...p, [dealId]: s.data || [] }))
     setEnvByDeal(p => ({ ...p, [dealId]: e.data || [] }))
@@ -74,23 +74,14 @@ export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin })
 
   const decide = async (deal, decision) => {
     if (!isAdmin) return
-    if (decision === 'changes_requested' && !notes.trim()) return
     setBusy(`${deal.id}-${decision}`)
-    const patch = {
-      review_status: decision,
-      review_decided_at: new Date().toISOString(),
-      review_decided_by: activeAgent?.id || null,
-      review_notes: notes.trim() || null,
-    }
-    const { error, status } = await withRetry(() => supabase.from('deals').update(patch).eq('id', deal.id))
+    const r = await decideDealReview(deal, decision, { actorId: activeAgent?.id, notes })
     setBusy(null)
-    if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
-    setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, ...patch } : d) }))
-    if (decision === 'approved') audit.reviewApproved(deal, activeAgent?.id, notes.trim() || null)
-    else                          audit.reviewChanges(deal, activeAgent?.id, notes.trim() || null)
+    if (!r.ok) { pushToast(r.error, 'error'); return }
+    setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, ...r.patch } : d) }))
     setNotes('')
     setOpenId(null)
-    pushToast(decision === 'approved' ? 'Approved' : 'Changes requested')
+    pushToast(decision === REVIEW_STATUS.APPROVED ? 'Approved' : 'Changes requested')
   }
 
   if (!isAdmin) {
@@ -208,14 +199,14 @@ export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin })
                           placeholder="Notes — required if requesting changes, optional on approval"
                           value={openId === deal.id ? notes : ''} onChange={e => setNotes(e.target.value)} />
                         <div style={{ display: 'flex', gap: 8 }}>
-                          <button className="btn btn--primary btn--sm" onClick={() => decide(deal, 'approved')}
-                            disabled={busy === `${deal.id}-approved`}>
-                            {busy === `${deal.id}-approved` ? 'Approving…' : 'Approve for closing'}
+                          <button className="btn btn--primary btn--sm" onClick={() => decide(deal, REVIEW_STATUS.APPROVED)}
+                            disabled={busy === `${deal.id}-${REVIEW_STATUS.APPROVED}`}>
+                            {busy === `${deal.id}-${REVIEW_STATUS.APPROVED}` ? 'Approving…' : 'Approve for closing'}
                           </button>
-                          <button className="btn btn--secondary btn--sm" onClick={() => decide(deal, 'changes_requested')}
-                            disabled={busy === `${deal.id}-changes_requested` || !notes.trim()}
+                          <button className="btn btn--secondary btn--sm" onClick={() => decide(deal, REVIEW_STATUS.CHANGES_REQUESTED)}
+                            disabled={busy === `${deal.id}-${REVIEW_STATUS.CHANGES_REQUESTED}` || !notes.trim()}
                             title={!notes.trim() ? 'Notes required to request changes' : ''}>
-                            {busy === `${deal.id}-changes_requested` ? 'Sending…' : 'Request changes'}
+                            {busy === `${deal.id}-${REVIEW_STATUS.CHANGES_REQUESTED}` ? 'Sending…' : 'Request changes'}
                           </button>
                         </div>
                       </div>

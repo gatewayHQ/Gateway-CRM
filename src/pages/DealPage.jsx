@@ -8,8 +8,11 @@ import { breakdownForDeal } from '../lib/commission.js'
 import { DealDrawer } from './Pipeline.jsx'
 import { getClosingGate, gateBadge } from '../lib/compliance.js'
 import { audit, useDealAudit } from '../lib/audit.js'
-
-const BUCKET = 'deal-documents'
+import { BUCKETS, TABLES, REVIEW_STATUS } from '../lib/constants.js'
+import { uploadDealDocument, signDealDocumentUrl } from '../lib/services/documents.js'
+import { submitDealForReview, decideDealReview } from '../lib/services/review.js'
+import { generateClosingPacket, listClosingPackets, openClosingPacket } from '../lib/services/closingPacket.js'
+import { listDealSteps, toggleDealStep } from '../lib/services/steps.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Deal Page — the whole deal on one screen: stage rail, property, people,
@@ -84,13 +87,13 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   const loadExtras = useCallback(async () => {
     if (!dealId) return
     const [f, e, s] = await Promise.all([
-      supabase.storage.from(BUCKET).list(`deal-${dealId}`, { sortBy: { column: 'created_at', order: 'desc' } }),
-      supabase.from('signwell_documents').select('*').eq('deal_id', dealId).order('created_at', { ascending: false }),
-      supabase.from('transaction_steps').select('id, title, completed, sort_order').eq('deal_id', dealId).order('sort_order', { ascending: true }),
+      supabase.storage.from(BUCKETS.DEAL_DOCS).list(`deal-${dealId}`, { sortBy: { column: 'created_at', order: 'desc' } }),
+      supabase.from(TABLES.SIGNWELL_DOCUMENTS).select('*').eq('deal_id', dealId).order('created_at', { ascending: false }),
+      listDealSteps(dealId),
     ])
     setFiles((f.data || []).filter(x => x.name !== '.emptyFolderPlaceholder'))
     setEnvelopes(e.data || [])
-    setSteps(s.data || [])
+    setSteps(s.steps)
   }, [dealId])
   useEffect(() => { loadExtras() }, [loadExtras])
 
@@ -218,36 +221,22 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   const submitForReview = async () => {
     if (!deal) return
     setSubmittingReview(true)
-    const patch = {
-      review_status: 'pending',
-      review_requested_at: new Date().toISOString(),
-      review_requested_by: activeAgent?.id || null,
-    }
-    const { error, status } = await withRetry(() => supabase.from('deals').update(patch).eq('id', deal.id))
+    const r = await submitDealForReview(deal, { actorId: activeAgent?.id })
     setSubmittingReview(false)
-    if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
-    setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, ...patch } : d) }))
-    setFetched(f => f && f.id === deal.id ? { ...f, ...patch } : f)
-    audit.reviewSubmitted(deal, activeAgent?.id)
+    if (!r.ok) { pushToast(r.error, 'error'); return }
+    setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, ...r.patch } : d) }))
+    setFetched(f => f && f.id === deal.id ? { ...f, ...r.patch } : f)
     pushToast('Submitted to admin for review')
   }
 
   // ── Admin review decisions ─────────────────────────────────────────────────
-  const decideReview = async (decision /* 'approved' | 'changes_requested' */, notes = null) => {
+  const decideReview = async (decision /* REVIEW_STATUS.APPROVED | .CHANGES_REQUESTED */, notes = null) => {
     if (!deal || !isAdmin) return
-    const patch = {
-      review_status: decision,
-      review_decided_at: new Date().toISOString(),
-      review_decided_by: activeAgent?.id || null,
-      review_notes: notes,
-    }
-    const { error, status } = await withRetry(() => supabase.from('deals').update(patch).eq('id', deal.id))
-    if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
-    setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, ...patch } : d) }))
-    setFetched(f => f && f.id === deal.id ? { ...f, ...patch } : f)
-    if (decision === 'approved') audit.reviewApproved(deal, activeAgent?.id, notes)
-    else                          audit.reviewChanges(deal, activeAgent?.id, notes)
-    pushToast(decision === 'approved' ? 'Deal approved for closing' : 'Changes requested — agent notified')
+    const r = await decideDealReview(deal, decision, { actorId: activeAgent?.id, notes })
+    if (!r.ok) { pushToast(r.error, 'error'); return }
+    setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, ...r.patch } : d) }))
+    setFetched(f => f && f.id === deal.id ? { ...f, ...r.patch } : f)
+    pushToast(decision === REVIEW_STATUS.APPROVED ? 'Deal approved for closing' : 'Changes requested — agent notified')
   }
 
   // ── Closing packet (admin) ─────────────────────────────────────────────────
@@ -255,37 +244,24 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   const [packets,    setPackets]    = useState([])
   const loadPackets = useCallback(async () => {
     if (!dealId) return
-    const { data } = await supabase.from('closing_packets').select('*').eq('deal_id', dealId).order('created_at', { ascending: false }).limit(5)
-    setPackets(data || [])
+    const { packets } = await listClosingPackets(dealId)
+    setPackets(packets)
   }, [dealId])
   useEffect(() => { loadPackets() }, [loadPackets])
 
-  const generateClosingPacket = async () => {
+  const onGeneratePacket = async () => {
     if (!deal || !isAdmin) return
     setPacketBusy(true)
-    try {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session?.access_token) { pushToast('Sign in required', 'error'); return }
-      const res = await fetch('/api/signwell', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-        body:    JSON.stringify({ action: 'closing-packet', deal_id: deal.id }),
-      })
-      const body = await res.json().catch(() => ({}))
-      if (!res.ok) { pushToast(body.error || 'Packet failed', 'error'); return }
-      pushToast(`Packet ready — ${body.doc_count} document${body.doc_count === 1 ? '' : 's'} merged`)
-      audit.packetGenerated(deal, body.doc_count, activeAgent?.id)
-      loadPackets()
-    } catch (e) {
-      pushToast(e.message || 'Packet failed', 'error')
-    } finally {
-      setPacketBusy(false)
-    }
+    const r = await generateClosingPacket(deal.id)
+    setPacketBusy(false)
+    if (!r.ok) { pushToast(r.error, 'error'); return }
+    pushToast(`Packet ready — ${r.doc_count} document${r.doc_count === 1 ? '' : 's'} merged`)
+    audit.packetGenerated(deal, r.doc_count, activeAgent?.id)
+    loadPackets()
   }
   const downloadPacket = async (storagePath) => {
-    const { data } = await supabase.storage.from('closing-packets').createSignedUrl(storagePath, 120)
-    if (data?.signedUrl) window.open(data.signedUrl, '_blank', 'noopener')
-    else pushToast('Could not open packet', 'error')
+    const r = await openClosingPacket(storagePath)
+    if (!r.ok) pushToast(r.error, 'error')
   }
 
   // ── Audit log (timeline) ───────────────────────────────────────────────────
@@ -330,10 +306,9 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   }
 
   const toggleStep = async (step) => {
-    const completed = !step.completed
-    await supabase.from('transaction_steps').update({ completed, completed_at: completed ? new Date().toISOString() : null }).eq('id', step.id)
-    setSteps(s => s.map(x => x.id === step.id ? { ...x, completed } : x))
-    audit.stepToggled(deal, step, activeAgent?.id)
+    const r = await toggleDealStep(deal, step, { actorId: activeAgent?.id })
+    if (!r.ok) { pushToast(r.error, 'error'); return }
+    setSteps(s => s.map(x => x.id === step.id ? { ...x, completed: r.completed } : x))
   }
 
   const persistKeyDate = async (idx, date) => {
@@ -349,29 +324,17 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   const uploadFile = async (file) => {
     if (!file || !deal) return
     setUploading(true)
-    const storagePath = `deal-${deal.id}/${file.name}`
-    const { error } = await supabase.storage.from(BUCKET).upload(storagePath, file, { upsert: false })
+    const r = await uploadDealDocument(deal, file, { actorId: activeAgent?.id })
     setUploading(false)
-    if (error) { pushToast(error.message, 'error'); return }
-    // Record a document_versions row so the audit + closing packet have a
-    // canonical list to read from (storage alone has no metadata).
-    const { data: existing } = await supabase.from('document_versions')
-      .select('version_num').eq('deal_id', deal.id).eq('document_name', file.name)
-      .order('version_num', { ascending: false }).limit(1)
-    const nextVersion = ((existing?.[0]?.version_num) || 0) + 1
-    await supabase.from('document_versions').insert([{
-      deal_id: deal.id, document_name: file.name, storage_path: storagePath,
-      size: file.size, mime_type: file.type || null, version_num: nextVersion,
-      source: 'upload', uploaded_by: activeAgent?.id || null,
-    }])
-    audit.documentUploaded(deal, file.name, activeAgent?.id)
-    pushToast(`Document uploaded${nextVersion > 1 ? ` (v${nextVersion})` : ''}`)
+    if (!r.ok) { pushToast(r.error, 'error'); return }
+    const v = r.version?.version_num || 1
+    pushToast(`Document uploaded${v > 1 ? ` (v${v})` : ''}`)
     loadExtras()
   }
   const downloadFile = async (name) => {
-    const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(`deal-${deal.id}/${name}`, 60)
-    if (error || !data?.signedUrl) { pushToast('Could not open file', 'error'); return }
-    window.open(data.signedUrl, '_blank', 'noopener')
+    const { url, error } = await signDealDocumentUrl(`deal-${deal.id}/${name}`)
+    if (!url) { pushToast(error || 'Could not open file', 'error'); return }
+    window.open(url, '_blank', 'noopener')
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -699,7 +662,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
         {isAdmin && (deal.stage === 'under-contract' || deal.stage === 'closed' || deal.stage === 'psa' || deal.stage === 'due-diligence') && (
           <SectionCard title="Closing Packet"
             action={(
-              <button className="btn btn--primary btn--sm" onClick={generateClosingPacket} disabled={packetBusy}>
+              <button className="btn btn--primary btn--sm" onClick={onGeneratePacket} disabled={packetBusy}>
                 {packetBusy ? 'Generating…' : packets.length > 0 ? 'Regenerate' : 'Generate'}
               </button>
             )}>

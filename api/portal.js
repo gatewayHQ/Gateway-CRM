@@ -153,29 +153,18 @@ export default async function handler(req, res) {
 //                      fees, split_pct, gross, closed}] }
 // ─────────────────────────────────────────────────────────────────────────────
 import { agentSliceForDeal, capWindowStart } from '../src/lib/commission.js'
+import { requireAuthUser, getServiceClient, errorResponse } from './_lib/auth.js'
 
 async function handleMyEarnings(req, res) {
-  const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
-  const serviceKey   = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
-  const anonKey      = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY
-  if (!serviceKey) return res.status(500).json({ error: 'Server misconfigured' })
-
-  // 1. Verify the caller: their JWT must resolve to a real Supabase user.
-  const jwt = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim()
-  if (!jwt) return res.status(401).json({ error: 'Sign in required' })
-  const userRes = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
-    headers: { apikey: anonKey || serviceKey, Authorization: `Bearer ${jwt}` },
-  })
-  if (!userRes.ok) return res.status(401).json({ error: 'Invalid session' })
-  const user = await userRes.json()
-  if (!user?.id) return res.status(401).json({ error: 'Invalid session' })
-
-  const svc = createClient(SUPABASE_URL, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  })
+  let user, svc
+  try {
+    user = await requireAuthUser(req)
+    svc  = getServiceClient()
+  } catch (e) { return errorResponse(res, e) }
 
   try {
-    // 2. Resolve the agent for this auth user.
+    // Resolve the agent for this auth user (with the cap-window fields the
+    // earnings computation needs).
     const { data: me } = await svc.from('agents')
       .select('id, name, cap_amount, cap_anniversary, no_brokerage_split')
       .eq('auth_id', user.id).maybeSingle()
