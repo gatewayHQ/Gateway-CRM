@@ -5,7 +5,8 @@
   "framework": "vite",
   "crons": [
     { "path": "/api/cron?task=sequence",  "schedule": "0 9 * * *" },
-    { "path": "/api/cron?task=reminders", "schedule": "0 8 * * *" }
+    { "path": "/api/cron?task=reminders", "schedule": "0 8 * * *" },
+    { "path": "/api/cron?task=nudges",    "schedule": "0 14 * * *" }
   ],
   "rewrites": [
     { "source": "/m/:token",  "destination": "/api/campaigns?action=scan&token=:token" },

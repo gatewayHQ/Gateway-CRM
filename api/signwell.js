@@ -1,4 +1,5 @@
-import { createClient } from '@supabase/supabase-js'
+import { applyJsonCors, requireAgent, errorResponse, getServiceClient } from './_lib/auth.js'
+import closingPacketHandler from './_handlers/closing-packet.js'
 
 // ─── SignWell REST API client ────────────────────────────────────────────────
 // https://developers.signwell.com — auth via X-Api-Key header, base /api/v1.
@@ -87,17 +88,20 @@ function normalizeStatus(s) {
 
 // ─── Handler ─────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin',  '*')
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Api-Key')
+  applyJsonCors(res)
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' })
 
   const body = req.body || {}
 
   // SignWell webhook payloads do NOT carry an `action` field. Route those to
-  // the webhook handler. All frontend calls include `action`.
+  // the webhook handler. The webhook authenticates by document-id round-trip
+  // (the document must exist in signwell_documents for the update to happen).
   if (!body.action) return handleWebhook(req, res)
+
+  // Co-hosted closing-packet handler (lives in api/_handlers/, no extra Vercel
+  // function). Admin auth is enforced inside the handler.
+  if (body.action === 'closing-packet') return closingPacketHandler(req, res)
 
   if (!API_KEY) {
     return res.status(500).json({
@@ -106,12 +110,19 @@ export default async function handler(req, res) {
     })
   }
 
+  // Every authenticated frontend action — send, status, download, remind —
+  // requires a real session. Without this gate, anyone with the public URL
+  // could send signature requests on the brokerage's SignWell account.
+  let actor
+  try { actor = await requireAgent(req) } catch (e) { return errorResponse(res, e) }
+
   if (body.action === 'debug') {
     return res.json({
       apiBase:        API_BASE,
       apiKeyPresent:  Boolean(API_KEY),
       apiKeyPrefix:   API_KEY ? `${API_KEY.slice(0, 6)}…` : null,
       testMode:       TEST_MODE,
+      actor:          { agent: actor.agent.name, isAdmin: actor.isAdmin },
     })
   }
 
@@ -214,12 +225,9 @@ export default async function handler(req, res) {
 //     -d '{"callback_url":"https://<your-domain>/api/signwell"}'
 //
 async function handleWebhook(req, res) {
-  const SUPABASE_URL = process.env.SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
-  const serviceKey   = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!serviceKey) {
-    return res.status(200).json({ received: true, error: 'Server misconfigured: set SUPABASE_SERVICE_KEY' })
-  }
-  const supabase = createClient(SUPABASE_URL, serviceKey)
+  let supabase
+  try { supabase = getServiceClient() }
+  catch (e) { return res.status(200).json({ received: true, error: e.message }) }
 
   try {
     const body = req.body || {}
@@ -294,3 +302,5 @@ async function handleWebhook(req, res) {
     return res.status(200).json({ received: true, error: err.message })
   }
 }
+
+// (Closing packet generator moved to api/_handlers/closing-packet.js)

@@ -23,6 +23,7 @@ const ColdCallsPage    = React.lazy(() => import('./pages/ColdCalls.jsx'))
 const IntegrationsPage = React.lazy(() => import('./pages/Integrations.jsx'))
 const CampaignsPage    = React.lazy(() => import('./pages/Campaigns.jsx'))
 const FormLibraryPage  = React.lazy(() => import('./pages/FormLibrary.jsx'))
+const AdminReviewPage  = React.lazy(() => import('./pages/AdminReview.jsx'))
 import LoginPage from './pages/Login.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
 import { Analytics } from '@vercel/analytics/react'
@@ -44,6 +45,7 @@ const NAV_CORE = [
 // Office: business operations, reviewed regularly
 const NAV_OFFICE = [
   { id: 'commission', label: 'Commission', icon: 'commission' },
+  { id: 'review',     label: 'Review Queue', icon: 'check', adminOnly: true },
   { id: 'coldcalls',  label: 'Cold Calls', icon: 'phone' },
   { id: 'campaigns',  label: 'Campaigns',  icon: 'mail' },
   { id: 'reports',    label: 'Reports',    icon: 'reports' },
@@ -101,6 +103,7 @@ const TITLES = {
   templates:  { title: 'Email Templates',  crumb: 'Communications · Library' },
   sequences:  { title: 'Drip Sequences',   crumb: 'Marketing · Automation' },
   reports:    { title: 'Reports',          crumb: 'Analytics · ROI' },
+  review:     { title: 'Review Queue',     crumb: 'Admin · Closing Approvals' },
   'form-library': { title: 'Form Library',  crumb: 'Documents · State Forms' },
   toolkit:    { title: 'Toolkit',          crumb: 'Tools · Gateway Suite' },
   leads:      { title: 'Website Leads',    crumb: 'Marketing · Captures' },
@@ -256,9 +259,16 @@ export default function App() {
 
   // Flat list for mobile nav (filter leads + hidden items)
   const toolsBase = websiteEnabled ? NAV_TOOLS : NAV_TOOLS.filter(n => n.id !== 'leads')
+  // Admin-only items disappear from the nav for everyone else (isAdmin is also
+  // computed lower for prop-passing, but the nav builds before that)
+  const navAdmin = (() => {
+    const a = db.agents?.find(x => x.id === activeAgentId)
+    return a?.is_admin === true || (a?.role?.toLowerCase().includes('admin') ?? false)
+  })()
+  const officeBase = NAV_OFFICE.filter(n => navAdmin || !n.adminOnly)
   const NAV = [
     ...NAV_CORE.filter(n => !hiddenNav.includes(n.id)),
-    ...NAV_OFFICE.filter(n => !hiddenNav.includes(n.id)),
+    ...officeBase.filter(n => !hiddenNav.includes(n.id)),
     ...toolsBase.filter(n => !hiddenNav.includes(n.id)),
     ...NAV_ADMIN,
   ]
@@ -510,7 +520,7 @@ export default function App() {
           {/* ── Office ── */}
           {!collapsed && <div className="nav-section-label" style={{ marginTop: 8 }}>Office</div>}
           {collapsed && <div className="nav-section-divider" />}
-          {NAV_OFFICE.filter(n => !hiddenNav.includes(n.id)).map(n => (
+          {officeBase.filter(n => !hiddenNav.includes(n.id)).map(n => (
             <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}`}
               onClick={() => setRoute(n.id)} title={n.label}
               role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
@@ -682,6 +692,7 @@ export default function App() {
           {route === 'templates'  && <TemplatesPage {...props} />}
           {route === 'sequences'  && <SequencesPage {...props} />}
           {route === 'reports'    && <ReportsPage {...props} />}
+          {route === 'review'     && <AdminReviewPage {...props} />}
           {route === 'form-library' && <FormLibraryPage isAdmin={isAdmin} />}
           {route === 'leads'      && <LeadsPage {...props} />}
           {route === 'integrations'      && <IntegrationsPage db={db} />}
