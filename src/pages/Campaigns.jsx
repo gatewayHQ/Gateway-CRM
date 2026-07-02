@@ -25,10 +25,12 @@ const MAILING_TYPE_OPTS = [
 ]
 
 const LANDING_OPTS = [
-  { value: 'property',    label: 'Property Showcase',     icon: 'building',    sub: 'Hero photo + details of a property in your CRM. Best when you have a clean listing.' },
-  { value: 'multifamily', label: 'Multifamily Valuation', icon: 'trending-up', sub: 'Dark, premium "what\'s your multifamily worth?" page. Bring your own photos + market stats.' },
-  { value: 'valuation',   label: 'Home Valuation',        icon: 'dollar',      sub: 'Single-family / general "what\'s your home worth?" page. Captures seller leads.' },
-  { value: 'custom',      label: 'Custom URL',            icon: 'link',        sub: 'Redirect the QR to any URL you control — your own site, MLS, video, etc.' },
+  { value: 'property',    label: 'Listing Spotlight',      icon: 'building', sub: 'Hero photo + details of a specific property. Best when you have a clean listing.' },
+  { value: 'valuation',   label: 'Home Valuation',         icon: 'dollar',   sub: 'Personalized "what\'s your home worth?" page with your photo + two-step form. Captures seller leads.' },
+  { value: 'agent',       label: 'Agent Profile',          icon: 'contacts', sub: 'Personal-brand page — headshot, bio, track record, active listings, contact form.' },
+  { value: 'deal',        label: 'Off-Market Deal',        icon: 'eye',      sub: 'Confidential teaser with limited details and a gated "request the full OM" form.' },
+  { value: 'multifamily', label: 'Multifamily Valuation',  icon: 'home',     sub: 'Investor-brief "what\'s your multifamily worth?" page. Bring your own photos + market stats.' },
+  { value: 'custom',      label: 'Custom URL',             icon: 'link',     sub: 'Redirect the QR to any URL you control — your own site, MLS, video, etc.' },
 ]
 
 // Quick-start templates — pre-fill the form so an agent can spin up a mailing in 5 seconds
@@ -100,6 +102,40 @@ const TEMPLATES = [
       landing_type: 'property',
     },
   },
+  {
+    id:          'agent-brand',
+    label:       'Agent Brand',
+    description: 'Personal-brand page for an advisor — bio, track record, listings.',
+    accent:      '#3730a3',
+    icon:        'contacts',
+    fields: {
+      name:         'Agent Brand — [Agent Name]',
+      description:  'Evergreen QR for signs, cards, and open-house materials.',
+      mailing_type: 'other',
+      landing_type: 'agent',
+      landing_config: {
+        headline: 'Every client gets my direct line — and my full attention.',
+        cta_text: 'Work with me',
+      },
+    },
+  },
+  {
+    id:          'off-market',
+    label:       'Off-Market Deal',
+    description: 'Confidential teaser that gates the full OM behind a request form.',
+    accent:      '#991b1b',
+    icon:        'eye',
+    fields: {
+      name:         'Off-Market — [Property]',
+      description:  'Quiet mailing to a short list of qualified buyers.',
+      mailing_type: 'letter',
+      landing_type: 'deal',
+      landing_config: {
+        headline: 'An off-market opportunity, shared quietly.',
+        cta_text: 'Request the OM',
+      },
+    },
+  },
 ]
 
 const STATUS_CONFIG = {
@@ -116,9 +152,11 @@ function StatusBadge({ status }) {
 
 function LandingTypeChip({ type }) {
   const cfg = {
-    property:    { label: 'Property',    bg: '#dbeafe',   color: '#1d4ed8' },
+    property:    { label: 'Listing',     bg: '#dbeafe',   color: '#1d4ed8' },
     multifamily: { label: 'Multifamily', bg: '#fef3c7',   color: '#92400e' },
     valuation:   { label: 'Valuation',   bg: '#dcfce7',   color: '#166534' },
+    agent:       { label: 'Agent',       bg: '#e0e7ff',   color: '#3730a3' },
+    deal:        { label: 'Off-Market',  bg: '#fee2e2',   color: '#991b1b' },
     custom:      { label: 'Custom URL',  bg: '#f3e8ff',   color: '#6b21a8' },
   }
   const c = cfg[type] || cfg.property
@@ -375,7 +413,27 @@ function MailingForm({ initial, agents, properties, activeAgent, onSave, onCance
         return pushToast('Add at least one photo for the multifamily landing page', 'error')
       }
     }
+    if (form.landing_type === 'agent' && !form.agent_id) {
+      return pushToast('Pick a primary agent — their headshot and bio power the profile page', 'error')
+    }
     const cfg = { ...(form.landing_config || {}) }
+    if (Array.isArray(cfg.listings)) {
+      cfg.listings = cfg.listings
+        .map(l => ({
+          image:  (l.image  || '').trim(),
+          title:  (l.title  || '').trim(),
+          price:  (l.price  || '').trim(),
+          status: (l.status || '').trim(),
+          link:   (l.link   || '').trim(),
+        }))
+        .filter(l => l.image || l.title)
+    }
+    if (Array.isArray(cfg.teaser_points)) cfg.teaser_points = cfg.teaser_points.map(p => (p || '').trim()).filter(Boolean)
+    if (cfg.socials) {
+      cfg.socials = Object.fromEntries(Object.entries(cfg.socials)
+        .map(([k, v]) => [k, (v || '').trim()])
+        .filter(([, v]) => v))
+    }
     if (Array.isArray(cfg.images)) {
       cfg.images = cfg.images.map(img => {
         if (typeof img === 'string') return { url: img.trim(), units: '', price: '', caption: '' }
@@ -483,6 +541,15 @@ function MailingForm({ initial, agents, properties, activeAgent, onSave, onCance
         <CollageBuilder cfg={form.landing_config || {}} setCfg={setCfg} variant="multifamily" />
       )}
 
+      {form.landing_type === 'agent' && (
+        <AgentPageBuilder cfg={form.landing_config || {}} setCfg={setCfg}
+                          agent={agents.find(a => a.id === form.agent_id)} />
+      )}
+
+      {form.landing_type === 'deal' && (
+        <DealPageBuilder cfg={form.landing_config || {}} setCfg={setCfg} />
+      )}
+
       <div>
         <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Status</label>
         <select className="input" value={form.status} onChange={e => set('status', e.target.value)}>
@@ -519,6 +586,228 @@ async function uploadImageToStorage(file, setUploading, idx) {
   } finally {
     setUploading(u => { const n = { ...u }; delete n[idx]; return n })
   }
+}
+
+// ─── Shared stat-highlights editor (agent + deal builders) ───────────────────
+
+function HighlightsEditor({ cfg, setCfg, hint }) {
+  const highlights = Array.isArray(cfg.highlights) ? cfg.highlights : []
+  const setHighlight = (i, key, v) => {
+    const next = [...highlights]; next[i] = { ...(next[i] || {}), [key]: v }
+    setCfg('highlights', next)
+  }
+  return (
+    <div>
+      <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Stats</label>
+      <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'2px 0 6px' }}>{hint}</div>
+      {highlights.map((h, i) => (
+        <div key={i} style={{ display:'flex', gap:6, marginBottom:6 }}>
+          <input className="input" style={{ flex:1 }} placeholder="Value (e.g. $400M+)"
+                 value={h.value || ''} onChange={e => setHighlight(i, 'value', e.target.value)} />
+          <input className="input" style={{ flex:1.4 }} placeholder="Label (e.g. Career volume)"
+                 value={h.label || ''} onChange={e => setHighlight(i, 'label', e.target.value)} />
+          <button type="button" className="btn btn--ghost btn--sm"
+                  onClick={() => setCfg('highlights', highlights.filter((_, idx) => idx !== i))}>
+            <Icon name="x" size={12} />
+          </button>
+        </div>
+      ))}
+      {highlights.length < 4 && (
+        <button type="button" className="btn btn--ghost btn--sm"
+                onClick={() => setCfg('highlights', [...highlights, { label:'', value:'' }])}>
+          + Add stat
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ─── Agent Profile page builder ──────────────────────────────────────────────
+
+const LISTING_STATUSES = ['For Sale', 'In Escrow', 'Just Sold', 'Off Market']
+
+function AgentPageBuilder({ cfg, setCfg, agent }) {
+  const [uploading, setUploading] = useState({})
+  const listings = Array.isArray(cfg.listings) ? cfg.listings : []
+  const socials  = cfg.socials || {}
+
+  const setListing = (i, key, v) => {
+    const next = listings.map((l, idx) => idx === i ? { ...l, [key]: v } : l)
+    setCfg('listings', next)
+  }
+  const uploadListingImage = async (i, file) => {
+    if (!file) return
+    try {
+      const url = await uploadImageToStorage(file, setUploading, i)
+      setListing(i, 'image', url)
+    } catch (err) { pushToast('Upload failed: ' + err.message, 'error') }
+  }
+
+  return (
+    <div style={{ border:'1px solid var(--gw-border)', borderRadius:10, padding:14, background:'#fafaf7', display:'flex', flexDirection:'column', gap:12 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+        <Icon name="contacts" size={14} />
+        <div style={{ fontSize:13, fontWeight:700 }}>Agent Profile Page Builder</div>
+      </div>
+      <div style={{ fontSize:11.5, color:'var(--gw-mist)', lineHeight:1.5, marginTop:-6 }}>
+        Headshot, bio, phone, and email come from {agent ? <strong>{agent.name}</strong> : 'the primary agent'}'s
+        profile (Settings → Team). Everything below is optional polish.
+      </div>
+
+      <div>
+        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Tagline</label>
+        <input className="input" value={cfg.headline || ''} onChange={e => setCfg('headline', e.target.value)}
+               placeholder='e.g. "Every client gets my direct line — and my full attention."' />
+      </div>
+      <div>
+        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Intro paragraph</label>
+        <textarea className="input" rows={2} value={cfg.subheadline || ''} onChange={e => setCfg('subheadline', e.target.value)}
+                  placeholder="One or two sentences under the tagline — who you serve, how you work." />
+      </div>
+
+      <HighlightsEditor cfg={cfg} setCfg={setCfg}
+                        hint='Track record, up to 4 — e.g. "$400M+ Career volume", "310 Homes closed"' />
+
+      <div>
+        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Listings to feature</label>
+        {listings.map((l, i) => (
+          <div key={i} style={{ display:'grid', gridTemplateColumns:'58px 1fr 1fr auto', gap:6, alignItems:'start', marginBottom:6 }}>
+            <label style={{ width:58, height:44, border:'1px dashed var(--gw-border)', borderRadius:6, cursor:'pointer',
+                            display:'grid', placeItems:'center', overflow:'hidden', background:'#fff' }}>
+              {uploading[i]
+                ? <span style={{ fontSize:9, color:'var(--gw-mist)' }}>…</span>
+                : l.image
+                  ? <img src={l.image} alt="" style={{ width:'100%', height:'100%', objectFit:'cover' }} />
+                  : <Icon name="upload" size={13} style={{ color:'var(--gw-mist)' }} />}
+              <input type="file" accept="image/*" style={{ display:'none' }}
+                     onChange={e => uploadListingImage(i, e.target.files?.[0])} />
+            </label>
+            <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+              <input className="input" placeholder="Title (e.g. 14 Cliffside Terrace)"
+                     value={l.title || ''} onChange={e => setListing(i, 'title', e.target.value)} />
+              <input className="input" placeholder="Link (optional)"
+                     value={l.link || ''} onChange={e => setListing(i, 'link', e.target.value)} />
+            </div>
+            <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+              <input className="input" placeholder="Price (e.g. $1,395,000)"
+                     value={l.price || ''} onChange={e => setListing(i, 'price', e.target.value)} />
+              <select className="input" value={l.status || 'For Sale'} onChange={e => setListing(i, 'status', e.target.value)}>
+                {LISTING_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <button type="button" className="btn btn--ghost btn--sm" style={{ marginTop:2 }}
+                    onClick={() => setCfg('listings', listings.filter((_, idx) => idx !== i))}>
+              <Icon name="x" size={12} />
+            </button>
+          </div>
+        ))}
+        {listings.length < 6 && (
+          <button type="button" className="btn btn--ghost btn--sm"
+                  onClick={() => setCfg('listings', [...listings, { image:'', title:'', price:'', status:'For Sale', link:'' }])}>
+            + Add listing
+          </button>
+        )}
+      </div>
+
+      <div>
+        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Social links</label>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:6, marginTop:4 }}>
+          {[['instagram','Instagram URL'],['linkedin','LinkedIn URL'],['facebook','Facebook URL'],['website','Website URL']].map(([k, ph]) => (
+            <input key={k} className="input" placeholder={ph} value={socials[k] || ''}
+                   onChange={e => setCfg('socials', { ...socials, [k]: e.target.value })} />
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Form button text</label>
+        <input className="input" value={cfg.cta_text || ''} onChange={e => setCfg('cta_text', e.target.value)}
+               placeholder="Work with me" />
+      </div>
+    </div>
+  )
+}
+
+// ─── Off-Market Deal page builder ────────────────────────────────────────────
+
+function DealPageBuilder({ cfg, setCfg }) {
+  const [uploading, setUploading] = useState({})
+  const heroUrl = (() => {
+    const first = Array.isArray(cfg.images) ? cfg.images[0] : null
+    return typeof first === 'string' ? first : first?.url || ''
+  })()
+
+  const uploadHero = async (file) => {
+    if (!file) return
+    try {
+      const url = await uploadImageToStorage(file, setUploading, 0)
+      setCfg('images', [{ url }])
+    } catch (err) { pushToast('Upload failed: ' + err.message, 'error') }
+  }
+
+  const points = Array.isArray(cfg.teaser_points) ? cfg.teaser_points : []
+
+  return (
+    <div style={{ border:'1px solid var(--gw-border)', borderRadius:10, padding:14, background:'#fafaf7', display:'flex', flexDirection:'column', gap:12 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+        <Icon name="eye" size={14} />
+        <div style={{ fontSize:13, fontWeight:700 }}>Off-Market Deal Page Builder</div>
+      </div>
+      <div style={{ fontSize:11.5, color:'var(--gw-mist)', lineHeight:1.5, marginTop:-6 }}>
+        A teaser, not a listing — share just enough to make qualified buyers request the full OM.
+        Leads land in this campaign and in Contacts as investors.
+      </div>
+
+      <div>
+        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Headline</label>
+        <input className="input" value={cfg.headline || ''} onChange={e => setCfg('headline', e.target.value)}
+               placeholder='e.g. "32 units, two parcels, first offering in 40 years."' />
+      </div>
+      <div>
+        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Subheadline</label>
+        <textarea className="input" rows={2} value={cfg.subheadline || ''} onChange={e => setCfg('subheadline', e.target.value)}
+                  placeholder="One sentence of context — asset class, submarket, why it's special." />
+      </div>
+
+      <div>
+        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Hero photo</label>
+        <div style={{ display:'flex', gap:10, alignItems:'center', marginTop:4 }}>
+          <label style={{ width:96, height:64, border:'1px dashed var(--gw-border)', borderRadius:8, cursor:'pointer',
+                          display:'grid', placeItems:'center', overflow:'hidden', background:'#fff', flexShrink:0 }}>
+            {uploading[0]
+              ? <span style={{ fontSize:10, color:'var(--gw-mist)' }}>Uploading…</span>
+              : heroUrl
+                ? <img src={heroUrl} alt="" style={{ width:'100%', height:'100%', objectFit:'cover' }} />
+                : <Icon name="upload" size={16} style={{ color:'var(--gw-mist)' }} />}
+            <input type="file" accept="image/*" style={{ display:'none' }}
+                   onChange={e => uploadHero(e.target.files?.[0])} />
+          </label>
+          <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:12.5, cursor:'pointer' }}>
+            <input type="checkbox" checked={!Boolean(cfg.reveal_photo)}
+                   onChange={e => setCfg('reveal_photo', !e.target.checked)}
+                   style={{ width:14, height:14, cursor:'pointer' }} />
+            Blur the photo until the OM is requested (recommended for confidentiality)
+          </label>
+        </div>
+      </div>
+
+      <HighlightsEditor cfg={cfg} setCfg={setCfg}
+                        hint='Teaser metrics, up to 4 — e.g. "32 Units", "5.4% Current cap", "97% Occupancy"' />
+
+      <div>
+        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Teaser bullets (one per line)</label>
+        <textarea className="input" rows={4} value={points.join('\n')}
+                  onChange={e => setCfg('teaser_points', e.target.value.split('\n'))}
+                  placeholder={'Average in-place rents ~18% below market\nAssumable financing available\nFull OM includes rent roll, T-12, and pricing guidance'} />
+      </div>
+
+      <div>
+        <label style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Form button text</label>
+        <input className="input" value={cfg.cta_text || ''} onChange={e => setCfg('cta_text', e.target.value)}
+               placeholder="Request the OM" />
+      </div>
+    </div>
+  )
 }
 
 const normImg = v => typeof v === 'string' || !v
@@ -1610,7 +1899,7 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
                 <button className="btn btn--ghost" onClick={() => {
                   const path = mailing.landing_type === 'custom' && mailing.landing_custom_url
                     ? mailing.landing_custom_url
-                    : `/lp/${['valuation','multifamily','property'].includes(mailing.landing_type) ? mailing.landing_type : 'property'}/${mailing.id}`
+                    : `/lp/${['valuation','multifamily','property','agent','deal'].includes(mailing.landing_type) ? mailing.landing_type : 'property'}/${mailing.id}`
                   window.open(path, '_blank')
                 }}>
                   <Icon name="external" size={12} /> Preview Landing Page

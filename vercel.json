@@ -20,6 +20,12 @@
     { "source": "/lp/multifamily/:id",
       "has": [{ "type": "header", "key": "user-agent", "value": "(?i).*(facebookexternalhit|facebot|twitterbot|linkedinbot|slackbot|slack-imgproxy|whatsapp|telegrambot|discordbot|pinterest|redditbot|embedly|skypeuripreview|applebot|googlebot|bingbot|iframely|vkshare).*" }],
       "destination": "/api/campaigns?action=og&id=:id&lt=multifamily" },
+    { "source": "/lp/agent/:id",
+      "has": [{ "type": "header", "key": "user-agent", "value": "(?i).*(facebookexternalhit|facebot|twitterbot|linkedinbot|slackbot|slack-imgproxy|whatsapp|telegrambot|discordbot|pinterest|redditbot|embedly|skypeuripreview|applebot|googlebot|bingbot|iframely|vkshare).*" }],
+      "destination": "/api/campaigns?action=og&id=:id&lt=agent" },
+    { "source": "/lp/deal/:id",
+      "has": [{ "type": "header", "key": "user-agent", "value": "(?i).*(facebookexternalhit|facebot|twitterbot|linkedinbot|slackbot|slack-imgproxy|whatsapp|telegrambot|discordbot|pinterest|redditbot|embedly|skypeuripreview|applebot|googlebot|bingbot|iframely|vkshare).*" }],
+      "destination": "/api/campaigns?action=og&id=:id&lt=deal" },
     { "source": "/((?!api/)(?!share/)(?!m/).*)", "destination": "/index.html" }
   ],
   "headers": [

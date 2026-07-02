@@ -68,3 +68,98 @@ export const DEMO_LISTING = {
     ],
   },
 }
+
+// ── Demo payloads for the other landing templates ─────────────────────────────
+// Each matches the { config, agents } preview contract of its page:
+//   /lp/demo/valuation → LandingValuation, /lp/demo/multifamily →
+//   LandingMultifamily, /lp/demo/agent → LandingAgent, /lp/demo/deal →
+//   LandingDeal.
+
+export const DEMO_VALUATION = {
+  agents: DEMO_LISTING.agents.slice(0, 1),
+  config: {
+    accent: '#1e2642',
+    headline: 'Find out what your home with a pool is worth today',
+    subheadline:
+      'Backyard pools are commanding a premium in this market. Get a private, broker-prepared valuation — real comps, not a software estimate.',
+    cta_text: 'Get my free valuation',
+    images: [{ url: img('photo-1564013799919-ab600027ffc6'), caption: 'Homes like yours are in demand' }],
+    highlights: [
+      { label: 'Homeowners served', value: '120+' },
+      { label: 'Avg days to close', value: '18' },
+      { label: 'Sold above ask',    value: '64%' },
+    ],
+  },
+}
+
+export const DEMO_MULTIFAMILY = {
+  agents: DEMO_LISTING.agents.slice(0, 1),
+  config: {
+    accent: '#1e2642',
+    headline: "What's your multifamily really worth in today's market?",
+    subheadline:
+      'Rates moved. Comps moved. Get a fresh cap-rate-driven number from a broker who actually closes deals in your submarket.',
+    cta_text: 'Get my free valuation',
+    images: [
+      { url: img('photo-1545324418-cc1a3fa10c00'), units: '24 units',  price: 'Sold $6.2M' },
+      { url: img('photo-1460317442991-0ec209397118'), units: '12 units', price: 'Sold $3.1M' },
+      { url: img('photo-1512917774080-9991f1c4c750'), units: '8 units' },
+    ],
+    highlights: [
+      { label: 'Closed volume',      value: '$240M+' },
+      { label: 'Avg days on market', value: '38' },
+      { label: 'Owners served',      value: '120+' },
+    ],
+  },
+}
+
+export const DEMO_AGENT_PAGE = {
+  agents: DEMO_LISTING.agents.slice(0, 1),
+  config: {
+    accent: '#1e2642',
+    headline: 'Every client gets my direct line — and my full attention.',
+    subheadline:
+      'From waterfront estates to first investments, I treat every transaction like my own. Most of my business comes from repeat clients and referrals — that only happens when people are taken care of.',
+    cta_text: 'Work with Daniel',
+    highlights: [
+      { label: 'Career volume', value: '$400M+' },
+      { label: 'Homes closed',  value: '310' },
+      { label: 'Years',         value: '14' },
+      { label: 'Referral rate', value: '92%' },
+    ],
+    listings: [
+      { image: img('photo-1600596542815-ffad4c1539a9', 80, 900), title: '14 Cliffside Terrace',   price: '$4,750,000', status: 'For Sale' },
+      { image: img('photo-1600585154340-be6161a56a0c', 80, 900), title: '228 Juniper Hollow',     price: '$1,395,000', status: 'In Escrow' },
+      { image: img('photo-1600607687939-ce8a6c25118c', 80, 900), title: '9 Bluff View Court',     price: '$2,180,000', status: 'Just Sold' },
+    ],
+    socials: {
+      instagram: 'https://instagram.com/gatewayreadvisors',
+      linkedin:  'https://linkedin.com/company/gateway-real-estate-advisors',
+      website:   'https://gatewayreadvisors.com',
+    },
+  },
+}
+
+export const DEMO_DEAL = {
+  agents: DEMO_LISTING.agents.slice(0, 1),
+  config: {
+    accent: '#1e2642',
+    headline: '32 units, two parcels, first offering in 40 years.',
+    subheadline:
+      'A generational multifamily asset in a supply-constrained submarket — being shared quietly with a short list of qualified buyers before any public marketing.',
+    cta_text: 'Request the OM',
+    images: [{ url: img('photo-1486406146926-c627a92ad1ab') }],
+    reveal_photo: false,
+    highlights: [
+      { label: 'Units',        value: '32' },
+      { label: 'Current cap',  value: '5.4%' },
+      { label: 'Occupancy',    value: '97%' },
+    ],
+    teaser_points: [
+      'Two contiguous parcels with existing upside through RUBS and unit turns.',
+      'Average in-place rents ~18% below market comparables.',
+      'Assumable financing available to qualified buyers.',
+      'Full OM includes rent roll, T-12, and pricing guidance.',
+    ],
+  },
+}

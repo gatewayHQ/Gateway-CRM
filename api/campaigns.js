@@ -170,10 +170,8 @@ export default async function handler(req, res) {
       let dest
       if (m.landing_type === 'custom' && m.landing_custom_url) {
         dest = m.landing_custom_url
-      } else if (m.landing_type === 'valuation') {
-        dest = `/lp/valuation/${m.id}`
-      } else if (m.landing_type === 'multifamily') {
-        dest = `/lp/multifamily/${m.id}`
+      } else if (['valuation', 'multifamily', 'agent', 'deal'].includes(m.landing_type)) {
+        dest = `/lp/${m.landing_type}/${m.id}`
       } else {
         dest = `/lp/property/${m.id}`
       }
@@ -229,7 +227,7 @@ export default async function handler(req, res) {
         .single()
       if (!m) return res.status(404).send('Mailing not found')
 
-      const type = lt === 'valuation' ? 'valuation' : lt === 'multifamily' ? 'multifamily' : 'property'
+      const type = ['valuation', 'multifamily', 'agent', 'deal'].includes(lt) ? lt : 'property'
       const dest = `/lp/${type}/${m.id}`
       const { title, description, image } = mailingOgFields(m)
       res.setHeader('Content-Type', 'text/html; charset=utf-8')
@@ -570,7 +568,7 @@ export default async function handler(req, res) {
         message:          message?.trim() || null,
         property_address: property_address?.trim() || null,
         property_type:    property_type || null,
-        source_landing:   ['property','valuation','custom','multifamily'].includes(source_landing) ? source_landing : 'property',
+        source_landing:   ['property','valuation','custom','multifamily','agent','deal'].includes(source_landing) ? source_landing : 'property',
         ip_hash:          ipHash,
       }]).select().single()
       if (leadErr) throw leadErr
@@ -588,15 +586,24 @@ export default async function handler(req, res) {
             if (existing?.length) contactId = existing[0].id
           }
           if (!contactId) {
-            const { data: created } = await db().from('contacts').insert([{
+            // source must satisfy the contacts_source_check constraint —
+            // 'mailing-landing' isn't in the allowed set and made this insert
+            // fail silently, so campaign leads never reached the contacts
+            // pipeline. 'other' is the closest allowed value.
+            const contactType =
+              source_landing === 'deal' ? 'investor'
+              : ['valuation', 'multifamily'].includes(source_landing) ? 'seller'
+              : 'buyer'
+            const { data: created, error: contactErr } = await db().from('contacts').insert([{
               first_name: first || '—',
               last_name:  last  || '—',
               email:      email?.trim()?.toLowerCase() || null,
               phone:      phone?.trim() || null,
-              source:     'mailing-landing',
-              type:       source_landing === 'valuation' ? 'seller' : 'buyer',
-              status:     'active',
+              source:     'other',
+              type:       contactType,
+              status:     'lead',
             }]).select('id').single()
+            if (contactErr) console.error('[campaigns] contact insert failed:', contactErr.message)
             contactId = created?.id || null
           }
           if (contactId) {
