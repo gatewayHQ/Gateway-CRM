@@ -225,7 +225,7 @@ create table if not exists commissions (
 --   • SHARED tables (agents, properties, templates, …) keep a permissive
 --     allow_all policy — created just below.
 --   • SCOPED tables (contacts, deals, commissions, activities, tasks, and the
---     deal-children: documents, signwell_documents, transaction_steps,
+--     deal-children: documents, esign_documents, transaction_steps,
 --     deadline_reminders, agent_notifications) are governed by the agent/team/
 --     co-listing policies defined in the "SCOPED RLS POLICIES" section at the
 --     END of this file (they depend on tables created later). Fresh installs
@@ -319,26 +319,33 @@ alter table agent_notifications enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- SIGNWELL DOCUMENTS  (e-signature requests tracked per deal)
+-- ESIGN DOCUMENTS  (e-signature requests tracked per deal)
+-- provider is 'boldsign' for new sends; rows created before migration 0016
+-- carry 'signwell' and are display-only history.
 -- ─────────────────────────────────────────────────────────────────────────────
-create table if not exists signwell_documents (
+create table if not exists esign_documents (
   id            uuid primary key default uuid_generate_v4(),
   deal_id       uuid references deals(id) on delete cascade,
   document_ref  uuid references documents(id) on delete set null,
   agent_id      uuid references agents(id) on delete set null,
   document_id   text not null,
+  provider      text not null default 'boldsign' check (provider in ('signwell','boldsign')),
+  template_id   text,
+  prepare_url   text,
   status        text default 'sent',
   subject       text,
   signer_name   text,
   signer_email  text,
   document_name text,
   signers       jsonb default '[]',
+  signer_status jsonb not null default '[]',
+  error         text,
   sent_at       timestamptz default now(),
   completed_at  timestamptz,
   created_at    timestamptz default now()
 );
 
-alter table signwell_documents enable row level security;
+alter table esign_documents enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -393,7 +400,7 @@ create table if not exists document_versions (
   mime_type     text,
   version_num   integer not null default 1,
   pinned_as     text check (pinned_as in ('final','signed','superseded') or pinned_as is null),
-  source        text default 'upload' check (source in ('upload','signwell','closing_packet','import')),
+  source        text default 'upload' check (source in ('upload','signwell','boldsign','closing_packet','import')),
   uploaded_by   uuid references agents(id) on delete set null,
   note          text,
   created_at    timestamptz default now()
@@ -532,11 +539,11 @@ create index if not exists idx_commissions_deal    on commissions(deal_id);
 create index if not exists idx_notif_agent_unread on agent_notifications(agent_id, read) where read = false;
 create index if not exists idx_notif_created      on agent_notifications(created_at desc);
 
--- signwell_documents — deal document queries
-create index if not exists idx_signwell_docs_deal   on signwell_documents(deal_id);
-create index if not exists idx_signwell_docs_agent  on signwell_documents(agent_id);
-create index if not exists idx_signwell_docs_status on signwell_documents(status) where status not in ('completed','voided');
-create index if not exists idx_signwell_docs_docid  on signwell_documents(document_id);
+-- esign_documents — deal document queries
+create index if not exists idx_esign_docs_deal   on esign_documents(deal_id);
+create index if not exists idx_esign_docs_agent  on esign_documents(agent_id);
+create index if not exists idx_esign_docs_status on esign_documents(status) where status not in ('completed','voided');
+create index if not exists idx_esign_docs_docid  on esign_documents(document_id);
 
 -- transaction_steps — deal checklist queries
 create index if not exists idx_txn_steps_deal  on transaction_steps(deal_id, sort_order);
@@ -1238,9 +1245,9 @@ create policy documents_deal_scope on documents for all to authenticated
     or (deal_id is null and agent_id = app_current_agent_id())
   );
 
--- SIGNWELL DOCUMENTS — follow the deal; sender always sees their own.
-drop policy if exists signwell_documents_deal_scope on signwell_documents;
-create policy signwell_documents_deal_scope on signwell_documents for all to authenticated
+-- ESIGN DOCUMENTS — follow the deal; sender always sees their own.
+drop policy if exists esign_documents_deal_scope on esign_documents;
+create policy esign_documents_deal_scope on esign_documents for all to authenticated
   using (
     app_is_admin()
     or deal_id in (select app_visible_deal_ids())

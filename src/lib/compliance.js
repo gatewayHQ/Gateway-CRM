@@ -48,7 +48,7 @@ export function getClosingGate(deal, { steps = [], envelopes = [], commission = 
     })
   }
 
-  // 2) Every sign-action step needs a completed signwell envelope on the deal.
+  // 2) Every sign-action step needs a completed e-sign envelope on the deal.
   //    (Steps mark intent; envelopes are the proof.)
   const signSteps = req.filter(s => s.doc_action === 'sign')
   const completedSigs = envelopes.filter(e => e.status === 'completed').length

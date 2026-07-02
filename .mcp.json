@@ -1,10 +1,11 @@
 {
   "mcpServers": {
-    "signwell": {
+    "boldsign": {
       "command": "npx",
-      "args": ["-y", "@signwell/mcp"],
+      "args": ["-y", "@boldsign/mcp"],
       "env": {
-        "SIGNWELL_API_KEY": "${SIGNWELL_API_KEY}"
+        "BOLDSIGN_API_KEY": "${BOLDSIGN_API_KEY}",
+        "BOLDSIGN_API_REGION": "US"
       }
     }
   }
