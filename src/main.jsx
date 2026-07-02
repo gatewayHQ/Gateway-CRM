@@ -9,7 +9,7 @@ import LandingMultifamily from './pages/LandingMultifamily.jsx'
 import LandingAgent from './pages/LandingAgent.jsx'
 import LandingDeal from './pages/LandingDeal.jsx'
 import AdvisorProfile from './pages/AdvisorProfile.jsx'
-import { DEMO_LISTING, DEMO_VALUATION, DEMO_MULTIFAMILY, DEMO_AGENT_PAGE, DEMO_DEAL } from './pages/landingDemoData.js'
+import { DEMO_LISTING, DEMO_VALUATION, DEMO_AGENT_PAGE, DEMO_DEAL } from './pages/landingDemoData.js'
 import ClientPortal from './pages/ClientPortal.jsx'
 import { initWebVitals } from './lib/perf.js'
 import './styles/app.css'
@@ -55,12 +55,14 @@ const advisorMatch   = pathname.match(/^\/advisor\/([0-9a-f-]{36})/i)
 const portalMatch    = pathname.match(/^\/portal\/([0-9a-f-]{36})/i)
 
 const isDemoPage     = pathname === '/lp/demo'
-const demoMatch      = pathname.match(/^\/lp\/demo\/(valuation|multifamily|agent|deal)$/)
+// Multifamily has no demo route — it's staying on its current live dark
+// design (LandingMultifamily doesn't support a `preview` prop), so there's
+// nothing new to preview there.
+const demoMatch      = pathname.match(/^\/lp\/demo\/(valuation|agent|deal)$/)
 const DEMO_PAGES = {
-  valuation:   <LandingValuation  preview={DEMO_VALUATION} />,
-  multifamily: <LandingMultifamily preview={DEMO_MULTIFAMILY} />,
-  agent:       <LandingAgent      preview={DEMO_AGENT_PAGE} />,
-  deal:        <LandingDeal       preview={DEMO_DEAL} />,
+  valuation: <LandingValuation preview={DEMO_VALUATION} />,
+  agent:     <LandingAgent    preview={DEMO_AGENT_PAGE} />,
+  deal:      <LandingDeal     preview={DEMO_DEAL} />,
 }
 
 let publicView = null

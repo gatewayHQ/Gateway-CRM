@@ -29,7 +29,7 @@ const LANDING_OPTS = [
   { value: 'valuation',   label: 'Home Valuation',         icon: 'dollar',   sub: 'Personalized "what\'s your home worth?" page with your photo + two-step form. Captures seller leads.' },
   { value: 'agent',       label: 'Agent Profile',          icon: 'contacts', sub: 'Personal-brand page — headshot, bio, track record, active listings, contact form.' },
   { value: 'deal',        label: 'Off-Market Deal',        icon: 'eye',      sub: 'Confidential teaser with limited details and a gated "request the full OM" form.' },
-  { value: 'multifamily', label: 'Multifamily Valuation',  icon: 'home',     sub: 'Investor-brief "what\'s your multifamily worth?" page. Bring your own photos + market stats.' },
+  { value: 'multifamily', label: 'Multifamily Valuation',  icon: 'home',     sub: 'Dark, premium "what\'s your multifamily worth?" page. Bring your own photos + market stats.' },
   { value: 'custom',      label: 'Custom URL',             icon: 'link',     sub: 'Redirect the QR to any URL you control — your own site, MLS, video, etc.' },
 ]
 

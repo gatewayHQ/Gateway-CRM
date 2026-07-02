@@ -92,27 +92,6 @@ export const DEMO_VALUATION = {
   },
 }
 
-export const DEMO_MULTIFAMILY = {
-  agents: DEMO_LISTING.agents.slice(0, 1),
-  config: {
-    accent: '#1e2642',
-    headline: "What's your multifamily really worth in today's market?",
-    subheadline:
-      'Rates moved. Comps moved. Get a fresh cap-rate-driven number from a broker who actually closes deals in your submarket.',
-    cta_text: 'Get my free valuation',
-    images: [
-      { url: img('photo-1545324418-cc1a3fa10c00'), units: '24 units',  price: 'Sold $6.2M' },
-      { url: img('photo-1460317442991-0ec209397118'), units: '12 units', price: 'Sold $3.1M' },
-      { url: img('photo-1512917774080-9991f1c4c750'), units: '8 units' },
-    ],
-    highlights: [
-      { label: 'Closed volume',      value: '$240M+' },
-      { label: 'Avg days on market', value: '38' },
-      { label: 'Owners served',      value: '120+' },
-    ],
-  },
-}
-
 export const DEMO_AGENT_PAGE = {
   agents: DEMO_LISTING.agents.slice(0, 1),
   config: {
