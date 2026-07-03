@@ -28,6 +28,27 @@
 
 import { createClient } from '@supabase/supabase-js'
 import crypto from 'crypto'
+import { requireAgent } from './_lib/auth.js'
+
+// Actions callable without a login. Everything else requires a verified agent
+// JWT — see the gate at the top of the handler. 'scan'/'og' are the public QR
+// + crawler paths; 'capture_lead' is the landing-page form submit; 'health'
+// is an uptime probe.
+const PUBLIC_ACTIONS = new Set(['scan', 'og', 'health', 'capture_lead'])
+
+// Non-admins may only touch mailings they own (primary agent) or collaborate
+// on (listed in landing_config.agent_ids). Throws 403/404 otherwise. Admins
+// pass through. Keeps one authenticated agent from reading another agent's
+// leads/recipients by guessing mailing ids.
+async function assertMailingAccess(supa, mailingId, actor) {
+  if (!mailingId) { const e = new Error('mailing_id required'); e.status = 400; throw e }
+  if (actor?.isAdmin) return
+  const { data: m } = await supa.from('mailings').select('agent_id, landing_config').eq('id', mailingId).maybeSingle()
+  if (!m) { const e = new Error('Mailing not found'); e.status = 404; throw e }
+  const ids = m.landing_config?.agent_ids
+  const ok = m.agent_id === actor.agent.id || (Array.isArray(ids) && ids.includes(actor.agent.id))
+  if (!ok) { const e = new Error('Not authorized for this campaign'); e.status = 403; throw e }
+}
 
 // ─── Supabase client (lazy singleton — avoids cold-start env-var crashes) ───
 let _supabase = null
@@ -153,6 +174,17 @@ export default async function handler(req, res) {
   const action = req.body?.action || req.query?.action
   if (!action) return json(res, 400, { error: 'action is required' })
 
+  // ── Auth gate ─────────────────────────────────────────────────────────────
+  // Public actions (QR scan, crawler OG, health, lead capture) run for anyone.
+  // Every other action reads/writes brokerage data and requires a verified
+  // agent. This endpoint uses the service key (RLS-bypassing), so this JWT
+  // check is the access boundary.
+  let actor = null
+  if (!PUBLIC_ACTIONS.has(action)) {
+    try { actor = await requireAgent(req) }
+    catch (e) { return json(res, e.status || 401, { error: e.message || 'Sign in required' }) }
+  }
+
   try {
     // ── Public: QR scan tracking + redirect ─────────────────────────────────
     if (action === 'scan') {
@@ -249,8 +281,11 @@ export default async function handler(req, res) {
     // this endpoint runs on the service key, so DB-level RLS (migration 0002,
     // deferred) is the eventual hard guarantee — this filter is the product rule.
     if (action === 'list') {
-      const agentId = req.query.agent_id || null
-      const all = req.query.all === '1' || req.query.all === 'true'
+      // Identity comes from the verified token, not client-supplied params.
+      // Only admins may request the org-wide list; everyone else is scoped to
+      // their own + collaborated campaigns.
+      const agentId = actor.agent.id
+      const all = actor.isAdmin && (req.query.all === '1' || req.query.all === 'true')
 
       const { data, error } = await db()
         .from('mailings')
@@ -294,6 +329,7 @@ export default async function handler(req, res) {
     if (action === 'get') {
       const { id } = req.query
       if (!id) return json(res, 400, { error: 'id required' })
+      await assertMailingAccess(db(), id, actor)
       const { data, error } = await db().from('mailings').select('*').eq('id', id).single()
       if (error) throw error
       return json(res, 200, { mailing: data })
@@ -302,7 +338,7 @@ export default async function handler(req, res) {
     // ── List recipients ─────────────────────────────────────────────────────
     if (action === 'recipients') {
       const { mailing_id } = req.query
-      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      await assertMailingAccess(db(), mailing_id, actor)
       const { data, error } = await db()
         .from('mailing_recipients')
         .select('*')
@@ -315,7 +351,7 @@ export default async function handler(req, res) {
     // ── List scans ──────────────────────────────────────────────────────────
     if (action === 'scans') {
       const { mailing_id, limit = 100 } = req.query
-      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      await assertMailingAccess(db(), mailing_id, actor)
       const { data, error } = await db()
         .from('mailing_scans')
         .select('*')
@@ -329,7 +365,7 @@ export default async function handler(req, res) {
     // ── List leads ──────────────────────────────────────────────────────────
     if (action === 'leads') {
       const { mailing_id } = req.query
-      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      await assertMailingAccess(db(), mailing_id, actor)
       const { data, error } = await db()
         .from('mailing_leads')
         .select('*')
@@ -342,7 +378,7 @@ export default async function handler(req, res) {
     // ── Per-mailing analytics rollup ────────────────────────────────────────
     if (action === 'analytics') {
       const { mailing_id } = req.query
-      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      await assertMailingAccess(db(), mailing_id, actor)
 
       const [recRes, scanRes, leadRes] = await Promise.all([
         db().from('mailing_recipients').select('id, responded, scan_count, response_type').eq('mailing_id', mailing_id),
@@ -449,7 +485,9 @@ export default async function handler(req, res) {
       const payload = {
         name:               name.trim(),
         description:        description?.trim() || null,
-        agent_id:           agent_id || null,
+        // Non-admins can only create campaigns owned by themselves; admins may
+        // assign any agent.
+        agent_id:           actor.isAdmin ? (agent_id || null) : actor.agent.id,
         property_id:        property_id || null,
         mailing_type:       mailing_type || 'postcard',
         landing_type:       landing_type || 'property',
@@ -469,6 +507,7 @@ export default async function handler(req, res) {
     if (action === 'update') {
       const { id } = req.body
       if (!id) return json(res, 400, { error: 'id required' })
+      await assertMailingAccess(db(), id, actor)
       const ALLOWED = ['name','description','agent_id','property_id','mailing_type','status','landing_type','landing_custom_url','landing_config','send_date']
       const patch = {}
       for (const k of ALLOWED) if (k in req.body) patch[k] = req.body[k]
@@ -483,6 +522,7 @@ export default async function handler(req, res) {
     if (action === 'delete') {
       const { id } = req.body
       if (!id) return json(res, 400, { error: 'id required' })
+      await assertMailingAccess(db(), id, actor)
       const { error } = await db().from('mailings').delete().eq('id', id)
       if (error) throw error
       return json(res, 200, { ok: true })
@@ -669,6 +709,8 @@ export default async function handler(req, res) {
     return json(res, 400, { error: `Unknown action: ${action}` })
   } catch (err) {
     console.error('[api/campaigns]', err)
-    return json(res, 500, { error: err.message || 'Internal error' })
+    // Surface intentional auth/scope errors (403/404/400) with their status;
+    // everything else is a 500.
+    return json(res, err.status || 500, { error: err.message || 'Internal error' })
   }
 }

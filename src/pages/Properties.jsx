@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { apiPost } from '../lib/apiClient.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { formatCurrency } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -1229,16 +1230,12 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
       const label  = campaignType === 'Custom' ? customName : campaignType
       const tag    = `${label} — ${property.address}`
 
-      const res = await fetch('/api/mailchimp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'syncMembers',
-          apiKey: mcConfig.api_key,
-          listId: mcConfig.list_id,
-          tag,
-          members: toSync.map(r => ({ email: r.contact.email, first_name: r.contact.first_name, last_name: r.contact.last_name })),
-        }),
+      const res = await apiPost('/api/mailchimp', {
+        action: 'syncMembers',
+        apiKey: mcConfig.api_key,
+        listId: mcConfig.list_id,
+        tag,
+        members: toSync.map(r => ({ email: r.contact.email, first_name: r.contact.first_name, last_name: r.contact.last_name })),
       })
       const data = await res.json()
       if (!res.ok) { pushToast(data.error || 'Mailchimp sync failed', 'error'); return }
