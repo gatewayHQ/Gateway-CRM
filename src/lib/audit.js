@@ -54,7 +54,7 @@ export const audit = {
     summary: `Pinned "${filename}" as ${pinKind}`,
   }),
   documentSigned: (deal, filename, signerName) => logAudit({
-    table_name: 'signwell_documents', deal_id: deal.id,
+    table_name: 'esign_documents', deal_id: deal.id,
     action: 'doc_signed', new_values: { document_name: filename, signer: signerName },
     summary: `"${filename}" signed by ${signerName || 'signer'}`,
   }),

@@ -25,8 +25,8 @@ export const TABLES = Object.freeze({
   DEALS:               'deals',
   DOCUMENTS:           'documents',
   DOCUMENT_VERSIONS:   'document_versions',
+  ESIGN_DOCUMENTS:     'esign_documents',
   PROPERTIES:          'properties',
-  SIGNWELL_DOCUMENTS:  'signwell_documents',
   TASKS:               'tasks',
   TEAMS:               'teams',
   TEAM_SPLITS:         'team_splits',
@@ -43,11 +43,14 @@ export const REVIEW_STATUS = Object.freeze({
 })
 
 // Document-version "source" values. Mirrors the CHECK constraint.
+// 'signwell' is legacy-only — historical rows created before the BoldSign
+// migration keep it; new e-sign versions use 'boldsign'.
 export const DOC_SOURCE = Object.freeze({
-  UPLOAD:         'upload',
-  SIGNWELL:       'signwell',
-  CLOSING_PACKET: 'closing_packet',
-  IMPORT:         'import',
+  UPLOAD:          'upload',
+  BOLDSIGN:        'boldsign',
+  SIGNWELL_LEGACY: 'signwell',
+  CLOSING_PACKET:  'closing_packet',
+  IMPORT:          'import',
 })
 
 // Audit action codes — keep aligned with audit.js writers and the UI icon map

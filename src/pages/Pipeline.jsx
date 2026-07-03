@@ -9,6 +9,11 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import { TABLES } from '../lib/constants.js'
+import {
+  listEsignTemplates, getEsignTemplateFields, sendEsignFromTemplate,
+  sendEsignForPrep, getEsignStatus, downloadEsignPdf, remindEsignSigners,
+} from '../lib/services/esign.js'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
   'Title Search Ordered',
@@ -874,196 +879,22 @@ const DS_STATUS = {
   delivered: { bg: '#fff3cd', color: '#856404' },
   completed: { bg: 'var(--gw-green-light)', color: 'var(--gw-green)' },
   declined:  { bg: 'var(--gw-red-light)',   color: 'var(--gw-red)' },
+  expired:   { bg: 'var(--gw-red-light)',   color: 'var(--gw-red)' },
+  error:     { bg: 'var(--gw-red-light)',   color: 'var(--gw-red)' },
   voided:    { bg: 'var(--gw-bone)',         color: 'var(--gw-mist)' },
 }
 
-const FIELD_TYPES = {
-  signature: { label: 'Sign Here', color: '#2563eb', bg: '#dbeafe' },
-  initials:  { label: 'Initials',  color: '#7c3aed', bg: '#ede9fe' },
-  date:      { label: 'Date',      color: '#059669', bg: '#d1fae5' },
-}
-
-// Document-level annotation tools (not tied to a signer)
-const ANNOTATION_TYPES = {
-  highlight:     { label: 'Highlight',     color: '#d97706', bg: 'rgba(253,224,71,0.45)', w: 160, h: 14 },
-  strikethrough: { label: 'Strike-through', color: '#dc2626', bg: 'rgba(220,38,38,0.7)',  w: 160, h: 3  },
-  checkbox:      { label: 'Checkbox',       color: '#1a2236', bg: 'rgba(26,34,54,0.06)',  w: 18,  h: 18 },
-}
-
-// Per-signer accent colors for multi-signer field placement
+// Per-signer accent colors for the signer badges in the send modal
 const SIGNER_COLORS = ['#2563eb','#d97706','#dc2626','#0891b2']
-const SIGNER_BGS    = ['#dbeafe','#fef3c7','#fee2e2','#cffafe']
-
-const PDF_SCALE = 1.3
-
-// allFields = flat array of all signers' tabs, each with signerIndex for color-coding
-// docAnnotations = document-level highlight/strikethrough marks (not per-signer)
-function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, setActiveTool, activeSignerIndex, docAnnotations, onPlaceAnnotation, onRemoveAnnotation }) {
-  const [pages,   setPages]   = React.useState([])
-  const [loading, setLoading] = React.useState(true)
-  const canvasRefs = React.useRef({})
-
-  React.useEffect(() => { loadPDF() }, [])
-  React.useEffect(() => { if (pages.length > 0) renderPages() }, [pages])
-
-  const loadPDF = async () => {
-    setLoading(true)
-    if (!window.pdfjsLib) {
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script')
-        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
-        s.onload = resolve; s.onerror = reject
-        document.head.appendChild(s)
-      })
-      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
-    }
-    let buf
-    if (file) { buf = await file.arrayBuffer() }
-    else { buf = await fetch(fileUrl).then(r => r.arrayBuffer()) }
-    const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise
-    const list = []
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const pageObj  = await pdf.getPage(i)
-      const viewport = pageObj.getViewport({ scale: PDF_SCALE })
-      list.push({ pageObj, viewport })
-    }
-    setPages(list)
-    setLoading(false)
-  }
-
-  const renderPages = async () => {
-    for (let i = 0; i < pages.length; i++) {
-      const canvas = canvasRefs.current[i]
-      if (!canvas) continue
-      const { pageObj, viewport } = pages[i]
-      canvas.width  = viewport.width
-      canvas.height = viewport.height
-      await pageObj.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
-    }
-  }
-
-  const handleClick = (e, pageIndex) => {
-    if (!activeTool) return
-    const rect    = e.currentTarget.getBoundingClientRect()
-    const xCanvas = e.clientX - rect.left
-    const yCanvas = e.clientY - rect.top
-    // Annotation tools are document-level, not per-signer
-    if (ANNOTATION_TYPES[activeTool]) {
-      const ann = ANNOTATION_TYPES[activeTool]
-      onPlaceAnnotation({
-        id: Date.now(), type: activeTool,
-        page: pageIndex + 1, pageIndex,
-        xCanvas: xCanvas - ann.w / 2,
-        yCanvas: yCanvas - ann.h / 2,
-        xPosition: String(Math.round((xCanvas - ann.w / 2) / PDF_SCALE)),
-        yPosition: String(Math.round((yCanvas - ann.h / 2) / PDF_SCALE)),
-        width: ann.w, height: ann.h,
-      })
-    } else {
-      onPlace({
-        id: Date.now(), type: activeTool,
-        page: pageIndex + 1,
-        xPosition: String(Math.round(xCanvas / PDF_SCALE)),
-        yPosition: String(Math.round(yCanvas / PDF_SCALE)),
-        xCanvas, yCanvas, pageIndex,
-        signerIndex: activeSignerIndex,
-      })
-    }
-  }
-
-  if (loading) return <div style={{ padding:'40px 0', textAlign:'center', color:'var(--gw-mist)', fontSize:13 }}>Loading PDF…</div>
-
-  return (
-    <div>
-      <div style={{ display:'flex', gap:6, marginBottom:6, alignItems:'center', flexWrap:'wrap' }}>
-        <span style={{ fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.07em', color:'var(--gw-mist)', flexBasis:'100%' }}>Signature Fields</span>
-        {Object.entries(FIELD_TYPES).map(([key, { label }]) => {
-          const color = SIGNER_COLORS[activeSignerIndex] || SIGNER_COLORS[0]
-          const bg    = SIGNER_BGS[activeSignerIndex]    || SIGNER_BGS[0]
-          const active = activeTool === key
-          return (
-            <button key={key} onClick={() => setActiveTool(active ? null : key)}
-              style={{ padding:'5px 12px', borderRadius:'var(--radius)', fontSize:12, fontWeight:700, cursor:'pointer', border:`2px solid ${active?color:'var(--gw-border)'}`, background:active?bg:'#fff', color:active?color:'var(--gw-mist)' }}>
-              + {label}
-            </button>
-          )
-        })}
-      </div>
-      <div style={{ display:'flex', gap:6, marginBottom:10, alignItems:'center', flexWrap:'wrap' }}>
-        <span style={{ fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.07em', color:'var(--gw-mist)', flexBasis:'100%' }}>Document Markup</span>
-        {Object.entries(ANNOTATION_TYPES).map(([key, { label, color, bg }]) => {
-          const active = activeTool === key
-          return (
-            <button key={key} onClick={() => setActiveTool(active ? null : key)}
-              style={{ padding:'5px 12px', borderRadius:'var(--radius)', fontSize:12, fontWeight:700, cursor:'pointer', border:`2px solid ${active?color:'var(--gw-border)'}`, background:active?bg:'#fff', color:active?color:'var(--gw-mist)' }}>
-              {key === 'highlight' ? '🖊 ' : key === 'strikethrough' ? '—— ' : '☐ '}{label}
-            </button>
-          )
-        })}
-        <span style={{ fontSize:11, color:'var(--gw-mist)', marginLeft:4 }}>
-          {activeTool ? (ANNOTATION_TYPES[activeTool] ? 'Click to mark area' : 'Click PDF to place') : 'Select a tool above'}
-        </span>
-        {(allFields.length + (docAnnotations?.length||0)) > 0 && (
-          <span style={{ marginLeft:'auto', fontSize:11, fontWeight:700 }}>
-            {allFields.length} field{allFields.length !== 1 ? 's' : ''}
-            {(docAnnotations?.length||0) > 0 && ` · ${docAnnotations.length} mark${docAnnotations.length !== 1 ? 's' : ''}`}
-          </span>
-        )}
-      </div>
-      <div style={{ maxHeight:420, overflowY:'auto', overflowX:'auto', background:'#e5e7eb', borderRadius:'var(--radius)', padding:12, display:'flex', flexDirection:'column', alignItems:'flex-start', gap:12 }}>
-        {pages.map((_, i) => (
-          <div key={i} style={{ position:'relative' }}>
-            <div style={{ fontSize:10, color:'#6b7280', marginBottom:4, textAlign:'center' }}>Page {i + 1}</div>
-            <canvas ref={el => { if (el) canvasRefs.current[i] = el }} style={{ display:'block', boxShadow:'0 2px 8px rgba(0,0,0,0.2)' }}/>
-            <div style={{ position:'absolute', inset:0, cursor:activeTool?'crosshair':'default', marginTop:18 }} onClick={e => handleClick(e, i)}/>
-            {allFields.filter(f => f.pageIndex === i).map(f => {
-              const color = SIGNER_COLORS[f.signerIndex] || SIGNER_COLORS[0]
-              const bg    = SIGNER_BGS[f.signerIndex]    || SIGNER_BGS[0]
-              const ft    = FIELD_TYPES[f.type]
-              const dim   = f.signerIndex !== activeSignerIndex
-              return (
-                <div key={f.id} style={{ position:'absolute', left:f.xCanvas - 42, top:f.yCanvas - 10 + 18, display:'flex', alignItems:'center', gap:3, background:bg, border:`1.5px solid ${color}`, borderRadius:3, padding:'2px 6px', fontSize:10, fontWeight:700, color, whiteSpace:'nowrap', zIndex:10, pointerEvents:'auto', opacity: dim ? 0.4 : 1 }}>
-                  {ft?.label}
-                  <span onClick={e => { e.stopPropagation(); onRemove(f.id) }} style={{ cursor:'pointer', fontSize:12, lineHeight:1, opacity:0.6, marginLeft:1 }}>×</span>
-                </div>
-              )
-            })}
-            {/* Document annotations (highlight / strikethrough) */}
-            {(docAnnotations||[]).filter(a => a.pageIndex === i).map(a => {
-              const ann = ANNOTATION_TYPES[a.type]
-              return (
-                <div key={a.id} style={{
-                  position:'absolute',
-                  left: a.xCanvas, top: a.yCanvas + 18,
-                  width: a.width, height: a.height,
-                  background: ann?.bg,
-                  border: `${a.type === 'checkbox' ? 2 : 1}px solid ${ann?.color}`,
-                  borderRadius: a.type === 'highlight' ? 2 : 0,
-                  zIndex: 9, pointerEvents:'auto', cursor:'default',
-                  display:'flex', alignItems:'center', justifyContent: a.type === 'checkbox' ? 'center' : 'flex-end',
-                }}>
-                  {a.type === 'checkbox'
-                    ? <span onClick={e => { e.stopPropagation(); onRemoveAnnotation(a.id) }} style={{ fontSize:9, cursor:'pointer', color: ann?.color, lineHeight:1, opacity:0.7 }}>×</span>
-                    : <span onClick={e => { e.stopPropagation(); onRemoveAnnotation(a.id) }} style={{ fontSize:10, cursor:'pointer', color: ann?.color, lineHeight:1, padding:'0 2px', opacity:0.8 }}>×</span>
-                  }
-                </div>
-              )
-            })}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-// ── Send for Signature modal — drives SignWell document creation ────────────
-// Flow:
-//   1. Agent fills in signers + picks a PDF here in the CRM
-//   2. We create a SignWell draft document via /api/signwell
-//   3. SignWell's editor opens in a new tab where the agent drops
-//      signature/initial/date fields and clicks Send from SignWell's UI
-//   4. SignWell webhook hits /api/signwell → status flips sent → completed
+// ── Send for Signature modal — drives BoldSign document creation ─────────────
+// Two paths, fewest clicks first:
+//   • Template — pick an org-level BoldSign template, assign signers to its
+//     roles, optionally customize template fields for this send, and send
+//     straight from the CRM. No editor hop.
+//   • Upload — pick/upload a PDF; we create the request and open BoldSign's
+//     prepare page in a new tab where the agent drops fields and clicks Send.
+// Either way the /api/boldsign webhook flips status sent → completed here in
+// near real time.
 function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent, onClose, onSent }) {
   // Primary signer: contact linked directly to the deal
   const contact      = contacts?.find(c => c.id === deal?.contact_id)
@@ -1079,20 +910,13 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const ownerName        = ownerIsDifferent ? `${ownerContact.first_name || ''} ${ownerContact.last_name || ''}`.trim() : ''
   const ownerEmail       = ownerIsDifferent ? (ownerContact.email || '') : ''
 
-  const [subject,    setSubject]   = React.useState(`Please sign: ${deal?.title || 'Document'}`)
-  const [file,       setFile]      = React.useState(null)
-  const [pickedFile, setPickedFile]= React.useState('')
-  const [agentSigns, setAgentSigns]= React.useState(false)
-  const [sending,    setSending]   = React.useState(false)
-  const [dragOver,   setDragOver]  = React.useState(false)
-  const fileRef = React.useRef()
-
-  const [signers, setSigners] = React.useState(() => {
-    // Signer 1: deal contact. If they have no email, fall back to property owner.
+  // Signer 1: deal contact (falling back to property owner if no email);
+  // signer 2: owner when distinct. Shared by both paths as the default cast.
+  const defaultSigners = React.useMemo(() => {
     let s1Name  = defaultName
     let s1Email = defaultEmail
     if (!s1Email && ownerContact?.email) {
-      s1Name  = ownerName
+      s1Name  = ownerName || defaultName
       s1Email = ownerContact.email
     }
     const base = [{ id: 1, name: s1Name, email: s1Email }]
@@ -1100,8 +924,119 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       base.push({ id: 2, name: ownerName, email: ownerEmail })
     }
     return base
-  })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
+  const [mode,    setMode]    = React.useState('template')   // 'template' | 'upload'
+  const [subject, setSubject] = React.useState(`Please sign: ${deal?.title || 'Document'}`)
+  const [sending, setSending] = React.useState(false)
+
+  // Template path
+  const [templates,   setTemplates]   = React.useState(null)   // null = loading
+  const [templateId,  setTemplateId]  = React.useState('')
+  const [tpl,         setTpl]         = React.useState(null)   // { name, roles: [...] }
+  const [tplLoading,  setTplLoading]  = React.useState(false)
+  const [roleSigners, setRoleSigners] = React.useState({})     // roleIndex → { name, email }
+  const [fieldValues, setFieldValues] = React.useState({})     // roleIndex → { fieldId → value }
+  const [showFields,  setShowFields]  = React.useState(false)
+
+  // Upload path
+  const [file,       setFile]       = React.useState(null)
+  const [pickedFile, setPickedFile] = React.useState('')
+  const [agentSigns, setAgentSigns] = React.useState(false)
+  const [dragOver,   setDragOver]   = React.useState(false)
+  const [signers,    setSigners]    = React.useState(defaultSigners)
+  const fileRef = React.useRef()
+
+  React.useEffect(() => {
+    let alive = true
+    listEsignTemplates().then(r => {
+      if (!alive) return
+      if (!r.ok) {
+        setTemplates([])
+        setMode('upload')
+        pushToast(`Could not load BoldSign templates: ${r.error}`, 'error')
+        return
+      }
+      setTemplates(r.templates)
+      if (r.templates.length === 0) setMode('upload')
+    })
+    return () => { alive = false }
+  }, [])
+
+  const pickTemplate = async (id) => {
+    setTemplateId(id)
+    setTpl(null); setRoleSigners({}); setFieldValues({}); setShowFields(false)
+    if (!id) return
+    setTplLoading(true)
+    const r = await getEsignTemplateFields(id)
+    setTplLoading(false)
+    if (!r.ok) { pushToast(`Could not load template fields: ${r.error}`, 'error'); return }
+    setTpl(r)
+    // Pre-assign roles: template defaults win, then deal contact, then owner.
+    const assign = {}
+    r.roles.forEach((role, i) => {
+      const fallback = defaultSigners[i] || { name: '', email: '' }
+      assign[role.roleIndex] = {
+        name:  role.defaultName  || fallback.name,
+        email: role.defaultEmail || fallback.email,
+      }
+    })
+    setRoleSigners(assign)
+  }
+
+  const setRoleSigner = (roleIndex, key, value) =>
+    setRoleSigners(p => ({ ...p, [roleIndex]: { ...p[roleIndex], [key]: value } }))
+
+  const setFieldValue = (roleIndex, fieldId, value) =>
+    setFieldValues(p => ({ ...p, [roleIndex]: { ...(p[roleIndex] || {}), [fieldId]: value } }))
+
+  const insertRow = async (row) => {
+    const { error } = await supabase.from(TABLES.ESIGN_DOCUMENTS).insert([{
+      deal_id:  deal.id,
+      agent_id: activeAgent?.id || null,
+      subject,
+      ...row,
+    }])
+    if (error) pushToast(`Sent, but couldn't record it locally: ${error.message}`, 'error')
+  }
+
+  const sendFromTemplate = async () => {
+    const roles = (tpl?.roles || []).map(role => ({
+      roleIndex: role.roleIndex,
+      name:  (roleSigners[role.roleIndex]?.name  || '').trim(),
+      email: (roleSigners[role.roleIndex]?.email || '').trim(),
+      order: role.signerOrder || 1,
+      existingFields: Object.entries(fieldValues[role.roleIndex] || {})
+        .map(([id, value]) => ({ id, value })),
+    }))
+    if (!roles.length) { pushToast('Pick a template first', 'error'); return }
+    if (roles.some(r => !r.name || !r.email)) { pushToast('All signers need a name and email', 'error'); return }
+
+    setSending(true)
+    const r = await sendEsignFromTemplate({
+      templateId,
+      roles,
+      documentTitle: tpl?.name || deal?.title || 'Document',
+      emailSubject:  subject,
+    })
+    if (!r.ok) { setSending(false); pushToast(`Send failed: ${r.error}`, 'error'); return }
+
+    await insertRow({
+      document_id:   r.documentId,
+      template_id:   templateId,
+      document_name: tpl?.name || 'Template document',
+      signer_name:   roles.map(x => x.name).join(', '),
+      signer_email:  roles.map(x => x.email).join(', '),
+      signers:       roles.map(x => ({ name: x.name, email: x.email })),
+      status:        'sent',
+    })
+    setSending(false)
+    pushToast('Sent for signature — status will update automatically', 'success')
+    onSent()
+  }
+
+  // Upload-path helpers (same flow as before, new backend)
   const addSigner    = () => setSigners(p => [...p, { id: Date.now(), name:'', email:'' }])
   const removeSigner = (id) => setSigners(p => p.filter(s => s.id !== id))
   const updateSigner = (id, k, v) => setSigners(p => p.map(s => s.id===id ? {...s,[k]:v} : s))
@@ -1118,7 +1053,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     const r = new FileReader(); r.onload = e => res(e.target.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(f)
   })
 
-  const openInSignWell = async () => {
+  const sendUpload = async () => {
     const invalid = signers.find(s => !s.name.trim() || !s.email.trim())
     if (invalid) { pushToast('All signers need a name and email', 'error'); return }
     if (!file && !pickedFile) { pushToast('Select or upload a document', 'error'); return }
@@ -1144,129 +1079,233 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       return
     }
 
-    const signerPayload = allSigners.map(s => ({
-      name: s.name, email: s.email, routingOrder: s.routingOrder,
-    }))
-
-    const resp = await fetch('/api/signwell', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action:         'send',
-        draft:          true,                // open in SignWell editor, don't send yet
-        emailSubject:   subject,
-        documentBase64: base64,
-        documentName:   finalDocName,
-        signers:        signerPayload,
-      }),
+    const r = await sendEsignForPrep({
+      signers:        allSigners.map(s => ({ name: s.name, email: s.email, routingOrder: s.routingOrder })),
+      documentBase64: base64,
+      documentName:   finalDocName,
+      emailSubject:   subject,
     })
-    const data = await resp.json()
     setSending(false)
-    if (data.error) { pushToast(data.error, 'error'); return }
-    if (!data.embeddedEditUrl) { pushToast('SignWell did not return an editor URL', 'error'); return }
+    if (!r.ok) { pushToast(`Send failed: ${r.error}`, 'error'); return }
+    if (!r.prepareUrl) { pushToast('BoldSign did not return a prepare URL', 'error'); return }
 
-    await supabase.from('signwell_documents').insert([{
-      deal_id:       deal.id,
-      document_id:   data.documentId || data.envelopeId,
+    await insertRow({
+      document_id:   r.documentId,
+      prepare_url:   r.prepareUrl,
+      document_name: finalDocName,
       signer_name:   allSigners.map(s => s.name).join(', '),
       signer_email:  allSigners.map(s => s.email).join(', '),
-      document_name: finalDocName,
-      subject,
+      signers:       allSigners.map(s => ({ name: s.name, email: s.email })),
       status:        'draft',
-    }])
+    })
 
-    // Pop the SignWell editor — user places fields there and hits Send.
-    window.open(data.embeddedEditUrl, '_blank', 'noopener,noreferrer')
-    pushToast('Opened in SignWell — place fields and click Send there', 'success')
+    // Pop BoldSign's prepare page — agent places fields there and hits Send.
+    window.open(r.prepareUrl, '_blank', 'noopener,noreferrer')
+    pushToast('Opened in BoldSign — place fields and click Send there', 'success')
     onSent()
   }
 
+  const canUseTemplates = templates === null || templates.length > 0
+
   return (
-    <Modal open={true} onClose={onClose} width={520}>
+    <Modal open={true} onClose={onClose} width={560}>
       <div className="modal__head">
         <div>
-          <div className="eyebrow-label">SignWell · Send for Signature</div>
-          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Set Up Signers</h3>
+          <div className="eyebrow-label">BoldSign · Send for Signature</div>
+          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>
+            {mode === 'template' ? 'Send from Template' : 'Set Up Signers'}
+          </h3>
         </div>
         <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
       </div>
       <div className="modal__body">
-        {/* Email subject */}
+        {/* Mode toggle */}
+        {canUseTemplates && (
+          <div style={{ display:'flex', gap:6, marginBottom:16 }}>
+            {[['template','Use a template'],['upload','Upload a PDF']].map(([m, label]) => (
+              <button key={m} onClick={() => setMode(m)}
+                style={{ flex:1, padding:'8px 12px', borderRadius:'var(--radius)', fontSize:13, fontWeight:700, cursor:'pointer',
+                  border:`2px solid ${mode===m?'var(--gw-azure)':'var(--gw-border)'}`,
+                  background:mode===m?'var(--gw-sky)':'#fff',
+                  color:mode===m?'var(--gw-azure)':'var(--gw-mist)' }}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Email subject (both paths) */}
         <div className="form-group">
           <label className="form-label">Email Subject</label>
           <input className="form-control" value={subject} onChange={e=>setSubject(e.target.value)}/>
         </div>
 
-        {/* Signers */}
-        <div className="form-group">
-          <label className="form-label required">Signers <span style={{fontSize:11,fontWeight:400,color:'var(--gw-mist)'}}>— sign in parallel (same step)</span></label>
-          {signers.map((s, i) => (
-            <div key={s.id} style={{ display:'flex', gap:8, alignItems:'center', marginBottom:8 }}>
-              <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[i]||SIGNER_COLORS[0], display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700, flexShrink:0 }}>{i+1}</div>
-              <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={s.name} onChange={e=>updateSigner(s.id,'name',e.target.value)}/>
-              <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={s.email} onChange={e=>updateSigner(s.id,'email',e.target.value)}/>
-              {signers.length > 1 && <button className="btn btn--ghost btn--icon btn--sm" onClick={()=>removeSigner(s.id)}><Icon name="x" size={13}/></button>}
+        {mode === 'template' ? (
+          <>
+            {/* Template picker */}
+            <div className="form-group">
+              <label className="form-label required">Template</label>
+              {templates === null
+                ? <div style={{ fontSize:13, color:'var(--gw-mist)' }}>Loading templates…</div>
+                : (
+                  <select className="form-control" value={templateId} onChange={e => pickTemplate(e.target.value)}>
+                    <option value="">Choose a template…</option>
+                    {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                )}
             </div>
-          ))}
-          <button className="btn btn--secondary btn--sm" onClick={addSigner} style={{marginTop:2}}>+ Add another signer</button>
-        </div>
 
-        {/* Agent signs last */}
-        {activeAgent && (
-          <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:16, background:'var(--gw-bone)' }}>
-            <input type="checkbox" id="agentSigns" checked={agentSigns} onChange={e=>setAgentSigns(e.target.checked)} style={{width:15,height:15,cursor:'pointer'}}/>
-            <label htmlFor="agentSigns" style={{ fontSize:13, cursor:'pointer', flex:1 }}>
-              <strong>I need to sign as well</strong> — {activeAgent.name} signs <em>after</em> the client{signers.length>1?'s':''}
-            </label>
-            {agentSigns && <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[signers.length]||'#6b7280', display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700 }}>{signers.length+1}</div>}
-          </div>
-        )}
+            {tplLoading && <div style={{ fontSize:13, color:'var(--gw-mist)', marginBottom:12 }}>Loading template roles…</div>}
 
-        {/* Document */}
-        <div className="form-group">
-          <label className="form-label required">Document (PDF)</label>
-          {dealFiles.length > 0 && (
-            <div style={{ marginBottom:10 }}>
-              <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:6 }}>Pick from deal documents:</div>
-              {dealFiles.map(f => {
-                const name = f.name.replace(/^\d+-/,'')
-                const picked = pickedFile === f.name
-                return (
-                  <div key={f.name} onClick={()=>{ setPickedFile(picked?'':f.name); if(!picked){setFile(null)} }}
-                    style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', border:`1px solid ${picked?'var(--gw-azure)':'var(--gw-border)'}`, borderRadius:'var(--radius)', marginBottom:4, cursor:'pointer', background:picked?'var(--gw-sky)':'#fff' }}>
-                    <Icon name="file" size={13} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
-                    <span style={{ fontSize:12, flex:1, fontWeight:picked?700:400 }}>{name}</span>
-                    {picked && <Icon name="check" size={13} style={{ color:'var(--gw-azure)' }}/>}
+            {/* Role → signer assignment */}
+            {tpl?.roles?.length > 0 && (
+              <div className="form-group">
+                <label className="form-label required">Signers</label>
+                {tpl.roles.map((role, i) => (
+                  <div key={role.roleIndex} style={{ marginBottom:10 }}>
+                    <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                      <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[i]||SIGNER_COLORS[0], display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700, flexShrink:0 }}
+                        title={role.roleName}>{i+1}</div>
+                      <input className="form-control" style={{ flex:1 }} placeholder={`${role.roleName} — full name`}
+                        value={roleSigners[role.roleIndex]?.name || ''}
+                        onChange={e => setRoleSigner(role.roleIndex, 'name', e.target.value)}/>
+                      <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email"
+                        value={roleSigners[role.roleIndex]?.email || ''}
+                        onChange={e => setRoleSigner(role.roleIndex, 'email', e.target.value)}/>
+                    </div>
+                    <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'2px 0 0 30px' }}>{role.roleName}</div>
                   </div>
-                )
-              })}
-              <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'8px 0 4px' }}>— or upload a different file —</div>
-            </div>
-          )}
-          <div style={{ border:`2px dashed ${dragOver?'var(--gw-azure)':file?'var(--gw-green)':'var(--gw-border)'}`, borderRadius:'var(--radius)', padding:'14px 16px', textAlign:'center', cursor:'pointer', background:dragOver?'var(--gw-sky)':file?'var(--gw-green-light)':'transparent', transition:'all 150ms' }}
-            onClick={()=>fileRef.current.click()}
-            onDragOver={e=>{e.preventDefault();setDragOver(true)}}
-            onDragLeave={()=>setDragOver(false)}
-            onDrop={e=>{e.preventDefault();setDragOver(false);setFile(e.dataTransfer.files[0]);setPickedFile('')}}>
-            <input ref={fileRef} type="file" accept=".pdf" style={{display:'none'}} onChange={e=>{setFile(e.target.files[0]);setPickedFile('')}}/>
-            {file ? <div style={{fontSize:12,fontWeight:600,color:'var(--gw-green)'}}>{file.name}</div>
-              : <><Icon name="upload" size={18} style={{color:'var(--gw-border)',marginBottom:4}}/><div style={{fontSize:12}}>Drop PDF or click to browse</div></>}
-          </div>
-        </div>
+                ))}
+              </div>
+            )}
 
-        {/* What happens next */}
-        <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, color:'var(--gw-mist)', lineHeight:1.5 }}>
-          <strong style={{ color:'var(--gw-ink)' }}>Next:</strong> SignWell's editor will open in a new tab.
-          Drag signature, initial, and date fields onto the document, assign each to a signer, then click <strong>Send</strong> inside SignWell. The status here will update automatically.
-        </div>
+            {/* Per-send field customization */}
+            {tpl?.roles?.some(r => r.fields.length > 0) && (
+              <div className="form-group">
+                <button className="btn btn--secondary btn--sm" onClick={() => setShowFields(v => !v)}>
+                  {showFields ? 'Hide field customization' : `Customize fields for this send (${tpl.roles.reduce((n, r) => n + r.fields.length, 0)})`}
+                </button>
+                {showFields && tpl.roles.map((role, i) => role.fields.length > 0 && (
+                  <div key={role.roleIndex} style={{ marginTop:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)' }}>
+                    <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.05em', color:SIGNER_COLORS[i]||SIGNER_COLORS[0], marginBottom:8 }}>
+                      {role.roleName} fields
+                    </div>
+                    {role.fields.map(f => (
+                      <div key={f.id} style={{ display:'flex', gap:8, alignItems:'center', marginBottom:6 }}>
+                        <span style={{ fontSize:12, width:140, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }} title={f.id}>{f.id}</span>
+                        {f.type === 'checkbox' ? (
+                          <input type="checkbox"
+                            checked={(fieldValues[role.roleIndex]?.[f.id] ?? f.value) === 'true'}
+                            onChange={e => setFieldValue(role.roleIndex, f.id, String(e.target.checked))}
+                            style={{ width:15, height:15, cursor:'pointer' }}/>
+                        ) : (
+                          <input className="form-control" style={{ flex:1 }} placeholder="Leave blank to keep template value"
+                            value={fieldValues[role.roleIndex]?.[f.id] ?? ''}
+                            onChange={e => setFieldValue(role.roleIndex, f.id, e.target.value)}/>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {templateId && (
+              <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, color:'var(--gw-mist)', lineHeight:1.5 }}>
+                <strong style={{ color:'var(--gw-ink)' }}>Next:</strong> The document goes out immediately — fields are already
+                placed on the template. Status updates here automatically as signers view and sign.
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            {/* Signers */}
+            <div className="form-group">
+              <label className="form-label required">Signers <span style={{fontSize:11,fontWeight:400,color:'var(--gw-mist)'}}>— sign in parallel (same step)</span></label>
+              {signers.map((s, i) => (
+                <div key={s.id} style={{ display:'flex', gap:8, alignItems:'center', marginBottom:8 }}>
+                  <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[i]||SIGNER_COLORS[0], display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700, flexShrink:0 }}>{i+1}</div>
+                  <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={s.name} onChange={e=>updateSigner(s.id,'name',e.target.value)}/>
+                  <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={s.email} onChange={e=>updateSigner(s.id,'email',e.target.value)}/>
+                  {signers.length > 1 && <button className="btn btn--ghost btn--icon btn--sm" onClick={()=>removeSigner(s.id)}><Icon name="x" size={13}/></button>}
+                </div>
+              ))}
+              <button className="btn btn--secondary btn--sm" onClick={addSigner} style={{marginTop:2}}>+ Add another signer</button>
+            </div>
+
+            {/* Agent signs last */}
+            {activeAgent && (
+              <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:16, background:'var(--gw-bone)' }}>
+                <input type="checkbox" id="agentSigns" checked={agentSigns} onChange={e=>setAgentSigns(e.target.checked)} style={{width:15,height:15,cursor:'pointer'}}/>
+                <label htmlFor="agentSigns" style={{ fontSize:13, cursor:'pointer', flex:1 }}>
+                  <strong>I need to sign as well</strong> — {activeAgent.name} signs <em>after</em> the client{signers.length>1?'s':''}
+                </label>
+                {agentSigns && <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[signers.length]||'#6b7280', display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700 }}>{signers.length+1}</div>}
+              </div>
+            )}
+
+            {/* Document */}
+            <div className="form-group">
+              <label className="form-label required">Document (PDF)</label>
+              {dealFiles.length > 0 && (
+                <div style={{ marginBottom:10 }}>
+                  <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:6 }}>Pick from deal documents:</div>
+                  {dealFiles.map(f => {
+                    const name = f.name.replace(/^\d+-/,'')
+                    const picked = pickedFile === f.name
+                    return (
+                      <div key={f.name} onClick={()=>{ setPickedFile(picked?'':f.name); if(!picked){setFile(null)} }}
+                        style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', border:`1px solid ${picked?'var(--gw-azure)':'var(--gw-border)'}`, borderRadius:'var(--radius)', marginBottom:4, cursor:'pointer', background:picked?'var(--gw-sky)':'#fff' }}>
+                        <Icon name="file" size={13} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
+                        <span style={{ fontSize:12, flex:1, fontWeight:picked?700:400 }}>{name}</span>
+                        {picked && <Icon name="check" size={13} style={{ color:'var(--gw-azure)' }}/>}
+                      </div>
+                    )
+                  })}
+                  <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'8px 0 4px' }}>— or upload a different file —</div>
+                </div>
+              )}
+              <div style={{ border:`2px dashed ${dragOver?'var(--gw-azure)':file?'var(--gw-green)':'var(--gw-border)'}`, borderRadius:'var(--radius)', padding:'14px 16px', textAlign:'center', cursor:'pointer', background:dragOver?'var(--gw-sky)':file?'var(--gw-green-light)':'transparent', transition:'all 150ms' }}
+                onClick={()=>fileRef.current.click()}
+                onDragOver={e=>{e.preventDefault();setDragOver(true)}}
+                onDragLeave={()=>setDragOver(false)}
+                onDrop={e=>{e.preventDefault();setDragOver(false);setFile(e.dataTransfer.files[0]);setPickedFile('')}}>
+                <input ref={fileRef} type="file" accept=".pdf" style={{display:'none'}} onChange={e=>{setFile(e.target.files[0]);setPickedFile('')}}/>
+                {file ? <div style={{fontSize:12,fontWeight:600,color:'var(--gw-green)'}}>{file.name}</div>
+                  : <><Icon name="upload" size={18} style={{color:'var(--gw-border)',marginBottom:4}}/><div style={{fontSize:12}}>Drop PDF or click to browse</div></>}
+              </div>
+            </div>
+
+            {/* What happens next */}
+            <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, color:'var(--gw-mist)', lineHeight:1.5 }}>
+              <strong style={{ color:'var(--gw-ink)' }}>Next:</strong> BoldSign's prepare page will open in a new tab.
+              Drag signature, initial, and date fields onto the document, assign each to a signer, then click <strong>Send</strong> inside BoldSign. The status here will update automatically.
+            </div>
+          </>
+        )}
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-        <button className="btn btn--primary" onClick={openInSignWell} disabled={sending}>
-          {sending ? 'Uploading…' : 'Open in SignWell to place fields'}
-        </button>
+        {mode === 'template' ? (
+          <button className="btn btn--primary" onClick={sendFromTemplate} disabled={sending || !templateId || !tpl}>
+            {sending ? 'Sending…' : 'Send for Signature'}
+          </button>
+        ) : (
+          <button className="btn btn--primary" onClick={sendUpload} disabled={sending}>
+            {sending ? 'Uploading…' : 'Open in BoldSign to place fields'}
+          </button>
+        )}
       </div>
     </Modal>
   )
+}
+
+// Per-signer status chip colors (signer_status snapshots from the webhook)
+const SIGNER_CHIP = {
+  completed: { bg: 'var(--gw-green-light)', color: 'var(--gw-green)' },
+  declined:  { bg: 'var(--gw-red-light)',   color: 'var(--gw-red)' },
+  delivered: { bg: '#fff3cd',                color: '#856404' },
+  sent:      { bg: 'var(--gw-bone)',         color: 'var(--gw-mist)' },
 }
 
 function SignaturesTab({ deal, contacts, properties, activeAgent }) {
@@ -1276,22 +1315,26 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
   const [sendOpen,    setSendOpen]    = React.useState(false)
   const [dealFiles,   setDealFiles]   = React.useState([])
   const [downloading, setDownloading] = React.useState({})
+  const [reminding,   setReminding]   = React.useState({})
 
   React.useEffect(() => {
     if (!deal?.id) return
     loadEnvelopes()
     loadDealFiles()
 
-    // Realtime subscription — auto-update status when webhook fires
+    // Realtime subscription — auto-update status when the webhook fires
     const channel = supabase.channel(`sig-documents-${deal.id}`)
       .on('postgres_changes', {
-        event: 'UPDATE', schema: 'public', table: 'signwell_documents',
+        event: 'UPDATE', schema: 'public', table: TABLES.ESIGN_DOCUMENTS,
         filter: `deal_id=eq.${deal.id}`,
       }, payload => {
         setEnvelopes(prev => prev.map(e => e.id === payload.new.id ? { ...e, ...payload.new } : e))
         if (payload.new.status === 'completed' && payload.old?.status !== 'completed') {
           loadDealFiles() // signed copy should now be in storage
           pushToast('Document fully signed — signed copy saved to Documents tab', 'success')
+        }
+        if (payload.new.status === 'declined' && payload.old?.status !== 'declined') {
+          pushToast(payload.new.error || 'A signer declined the document', 'error')
         }
       })
       .subscribe()
@@ -1301,7 +1344,7 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
 
   const loadEnvelopes = async () => {
     setLoading(true)
-    const { data, error } = await supabase.from('signwell_documents').select('*').eq('deal_id', deal.id).order('created_at', { ascending: false })
+    const { data, error } = await supabase.from(TABLES.ESIGN_DOCUMENTS).select('*').eq('deal_id', deal.id).order('created_at', { ascending: false })
     if (error?.code === '42P01') { setTableReady(false); setLoading(false); return }
     setEnvelopes(data || [])
     setLoading(false)
@@ -1313,17 +1356,24 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
   }
 
   const refreshStatus = async (env) => {
-    const res = await fetch('/api/signwell', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'status', documentId: env.document_id }),
-    })
-    const data = await res.json()
-    if (data.error) { pushToast(data.error, 'error'); return }
-    const patch = { status: data.status, completed_at: data.completedDateTime || null }
-    await supabase.from('signwell_documents').update(patch).eq('id', env.id)
+    const r = await getEsignStatus(env.document_id)
+    if (!r.ok) { pushToast(r.error, 'error'); return }
+    const patch = {
+      status:        r.status,
+      signer_status: r.signerStatus || [],
+      completed_at:  r.completedDateTime || null,
+    }
+    await supabase.from(TABLES.ESIGN_DOCUMENTS).update(patch).eq('id', env.id)
     setEnvelopes(prev => prev.map(e => e.id === env.id ? { ...e, ...patch } : e))
-    pushToast(`Status: ${data.status}`, 'info')
+    pushToast(`Status: ${r.status}`, 'info')
+  }
+
+  const remind = async (env) => {
+    setReminding(p => ({ ...p, [env.id]: true }))
+    const r = await remindEsignSigners(env.document_id)
+    setReminding(p => ({ ...p, [env.id]: false }))
+    if (!r.ok) { pushToast(r.error, 'error'); return }
+    pushToast(`Reminder sent to ${r.reminded?.join(', ') || 'pending signers'}`, 'success')
   }
 
   const downloadSigned = async (env) => {
@@ -1342,18 +1392,14 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
       }
     }
 
-    // Fall back: download directly from SignWell API
-    const res = await fetch('/api/signwell', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'download', documentId: env.document_id }),
-    })
-    const data = await res.json()
+    // Fall back: download directly from the BoldSign API
+    const r = await downloadEsignPdf(env.document_id)
     setDownloading(p => ({ ...p, [env.id]: false }))
-    if (data.error) { pushToast(data.error, 'error'); return }
+    if (!r.ok) { pushToast(r.error, 'error'); return }
 
     // Trigger browser download
     const link = document.createElement('a')
-    link.href = `data:application/pdf;base64,${data.base64}`
+    link.href = `data:application/pdf;base64,${r.base64}`
     link.download = `signed-${env.document_name || 'document.pdf'}`
     link.click()
   }
@@ -1363,21 +1409,27 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
       <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:16, fontSize:13, lineHeight:1.7 }}>
         <strong>Run this SQL in your Supabase dashboard:</strong>
         <pre style={{ background:'var(--gw-slate)', color:'#e2e8f0', padding:10, borderRadius:6, fontSize:11, marginTop:8, overflowX:'auto' }}>
-{`create table if not exists signwell_documents (
+{`create table if not exists esign_documents (
   id            uuid primary key default gen_random_uuid(),
   deal_id       uuid references deals(id) on delete cascade,
   document_id   text not null,
+  provider      text not null default 'boldsign',
+  template_id   text,
+  prepare_url   text,
   signer_name   text,
   signer_email  text,
   document_name text,
   subject       text,
   status        text default 'sent',
+  signers       jsonb default '[]',
+  signer_status jsonb not null default '[]',
+  error         text,
   sent_at       timestamptz default now(),
   completed_at  timestamptz,
   created_at    timestamptz default now()
 );
-alter table signwell_documents enable row level security;
-create policy "agents_signwell_documents" on signwell_documents
+alter table esign_documents enable row level security;
+create policy "agents_esign_documents" on esign_documents
   for all to authenticated using (true) with check (true);
 
 -- Also run this for agent notifications:
@@ -1420,35 +1472,75 @@ create policy "agent_notifications_policy" on agent_notifications
               const sc        = DS_STATUS[env.status] || DS_STATUS.sent
               const completed = env.status === 'completed'
               const isDraft   = env.status === 'draft'
-              const editUrl   = env.document_id
-                ? `https://www.signwell.com/edit/document/${env.document_id}/`
-                : null
+              const inFlight  = env.status === 'sent' || env.status === 'delivered'
+              const failed    = env.status === 'declined' || env.status === 'expired' || env.status === 'error'
+              // Rows created before the BoldSign migration are display-only
+              // history — their document ids live in SignWell, which we can
+              // no longer call.
+              const legacy    = env.provider === 'signwell'
+              const signerChips = Array.isArray(env.signer_status) ? env.signer_status : []
               return (
                 <div key={env.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:8, background:'#fff', overflow:'hidden' }}>
                   <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px' }}>
                     <Icon name="file" size={18} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
                     <div style={{ flex:1, minWidth:0 }}>
-                      <div style={{ fontSize:13, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{env.document_name || 'Document'}</div>
+                      <div style={{ fontSize:13, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                        {env.document_name || 'Document'}
+                        {legacy && <span style={{ marginLeft:6, fontSize:10, fontWeight:700, color:'var(--gw-mist)', border:'1px solid var(--gw-border)', borderRadius:8, padding:'1px 6px', verticalAlign:'middle' }}>SignWell · legacy</span>}
+                      </div>
                       <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>
                         To: {env.signer_name} · {new Date(env.sent_at || env.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}
                         {completed && env.completed_at && (
                           <span> · Signed {new Date(env.completed_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}</span>
                         )}
                       </div>
+                      {signerChips.length > 0 && (
+                        <div style={{ display:'flex', gap:4, marginTop:5, flexWrap:'wrap' }}>
+                          {signerChips.map((s, i) => {
+                            const cc = SIGNER_CHIP[s.status] || SIGNER_CHIP.sent
+                            return (
+                              <span key={i} style={{ padding:'1px 7px', borderRadius:8, fontSize:10, fontWeight:700, background:cc.bg, color:cc.color }}
+                                title={`${s.email}${s.viewed ? ' · viewed' : ''}`}>
+                                {s.name || s.email} · {s.status === 'delivered' ? 'viewed' : s.status}
+                              </span>
+                            )
+                          })}
+                        </div>
+                      )}
                     </div>
                     <span style={{ padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:700, background:sc.bg, color:sc.color, flexShrink:0, textTransform:'capitalize' }}>{env.status}</span>
-                    <button className="btn btn--ghost btn--icon btn--sm" title="Refresh status" onClick={() => refreshStatus(env)}>
-                      <Icon name="refresh" size={12}/>
-                    </button>
+                    {!legacy && inFlight && (
+                      <button className="btn btn--ghost btn--icon btn--sm" title="Remind pending signers" onClick={() => remind(env)} disabled={reminding[env.id]}>
+                        <Icon name="mail" size={12}/>
+                      </button>
+                    )}
+                    {!legacy && (
+                      <button className="btn btn--ghost btn--icon btn--sm" title="Refresh status" onClick={() => refreshStatus(env)}>
+                        <Icon name="refresh" size={12}/>
+                      </button>
+                    )}
                   </div>
-                  {isDraft && editUrl && (
+                  {isDraft && !legacy && (
                     <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'#fffbeb', display:'flex', alignItems:'center', gap:8 }}>
                       <Icon name="edit" size={13} style={{ color:'#856404', flexShrink:0 }}/>
-                      <span style={{ fontSize:12, color:'#856404', flex:1, fontWeight:600 }}>Draft — open in SignWell to place fields and send</span>
-                      <a className="btn btn--sm" href={editUrl} target="_blank" rel="noopener noreferrer"
-                         style={{ background:'#d97706', color:'#fff', border:'none', fontSize:11 }}>
-                        Continue in SignWell
-                      </a>
+                      <span style={{ fontSize:12, color:'#856404', flex:1, fontWeight:600 }}>Draft — open in BoldSign to place fields and send</span>
+                      {env.prepare_url
+                        ? <a className="btn btn--sm" href={env.prepare_url} target="_blank" rel="noopener noreferrer"
+                             style={{ background:'#d97706', color:'#fff', border:'none', fontSize:11 }}>
+                            Continue in BoldSign
+                          </a>
+                        : <span style={{ fontSize:11, color:'#856404' }}>Prepare link unavailable — send again</span>}
+                    </div>
+                  )}
+                  {failed && (
+                    <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'var(--gw-red-light)', display:'flex', alignItems:'center', gap:8 }}>
+                      <Icon name="alert" size={13} style={{ color:'var(--gw-red)', flexShrink:0 }}/>
+                      <span style={{ fontSize:12, color:'var(--gw-red)', flex:1, fontWeight:600 }}>
+                        {env.error || (env.status === 'expired' ? 'Signature request expired' : env.status === 'declined' ? 'A signer declined the document' : 'Send failed')}
+                      </span>
+                      <button className="btn btn--sm" style={{ background:'var(--gw-red)', color:'#fff', border:'none', fontSize:11 }} onClick={() => setSendOpen(true)}>
+                        Send Again
+                      </button>
                     </div>
                   )}
                   {completed && (

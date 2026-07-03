@@ -41,7 +41,7 @@ export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin })
     if (!dealId || stepsByDeal[dealId]) return
     const [s, e] = await Promise.all([
       supabase.from(TABLES.TRANSACTION_STEPS).select('id, title, completed, if_applicable, doc_action').eq('deal_id', dealId),
-      supabase.from(TABLES.SIGNWELL_DOCUMENTS).select('id, status, document_name').eq('deal_id', dealId),
+      supabase.from(TABLES.ESIGN_DOCUMENTS).select('id, status, document_name').eq('deal_id', dealId),
     ])
     setStepsByDeal(p => ({ ...p, [dealId]: s.data || [] }))
     setEnvByDeal(p => ({ ...p, [dealId]: e.data || [] }))
