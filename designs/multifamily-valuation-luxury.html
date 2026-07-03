@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gateway Real Estate — Private Multifamily Valuation</title>
+  <meta name="description" content="Confidential, institutional-grade multifamily property valuation for sophisticated investors and owners. By Gateway Real Estate Advisors." />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            bg:        '#0C0C0C',
+            gold:      '#C9A961',
+            'gold-dark': '#A68B4B',
+            cream:     '#F4EDE4',
+            'text-light': '#F4EDE4',
+            muted:     '#A8A29E',
+          },
+          fontFamily: {
+            serif: ['"Playfair Display"', 'Georgia', 'serif'],
+            sans:  ['Inter', 'system-ui', 'sans-serif'],
+          },
+          letterSpacing: {
+            luxe: '0.22em',
+          },
+        },
+      },
+    }
+  </script>
+
+  <style>
+    html { scroll-behavior: smooth; }
+    body { background: #0C0C0C; }
+
+    ::selection { background: #C9A961; color: #0C0C0C; }
+
+    /* Refined scrollbar */
+    ::-webkit-scrollbar { width: 10px; }
+    ::-webkit-scrollbar-track { background: #0C0C0C; }
+    ::-webkit-scrollbar-thumb { background: #2a2723; border-radius: 6px; }
+    ::-webkit-scrollbar-thumb:hover { background: #A68B4B; }
+
+    /* Scroll-reveal */
+    .reveal {
+      opacity: 0;
+      transform: translateY(28px);
+      transition: opacity 1s cubic-bezier(.16,1,.3,1), transform 1s cubic-bezier(.16,1,.3,1);
+      transition-delay: var(--reveal-delay, 0ms);
+      will-change: opacity, transform;
+    }
+    .reveal.in { opacity: 1; transform: none; }
+    @media (prefers-reduced-motion: reduce) {
+      .reveal { opacity: 1 !important; transform: none !important; }
+      html { scroll-behavior: auto; }
+    }
+
+    /* Gold hairline divider */
+    .rule-gold {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, #C9A961, transparent);
+    }
+
+    /* Premium primary button — gold with hover depth */
+    .btn-gold {
+      position: relative;
+      background: #C9A961;
+      color: #0C0C0C;
+      letter-spacing: 0.14em;
+      transition: transform .4s cubic-bezier(.16,1,.3,1), box-shadow .4s cubic-bezier(.16,1,.3,1), background-color .3s;
+      overflow: hidden;
+    }
+    .btn-gold::after {
+      content: '';
+      position: absolute; inset: 0;
+      transform: translateX(-120%);
+      background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.35) 50%, transparent 70%);
+      transition: transform .8s cubic-bezier(.16,1,.3,1);
+    }
+    .btn-gold:hover {
+      background: #d9bd7e;
+      transform: translateY(-2px);
+      box-shadow: 0 18px 40px -12px rgba(201,169,97,.55);
+    }
+    .btn-gold:hover::after { transform: translateX(120%); }
+
+    /* Bordered secondary button */
+    .btn-outline {
+      border: 1px solid rgba(201,169,97,.5);
+      color: #F4EDE4;
+      letter-spacing: 0.14em;
+      transition: all .4s cubic-bezier(.16,1,.3,1);
+    }
+    .btn-outline:hover {
+      border-color: #C9A961;
+      background: rgba(201,169,97,.08);
+      transform: translateY(-2px);
+    }
+
+    /* Card lift */
+    .card-lux {
+      background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01));
+      border: 1px solid rgba(201,169,97,.14);
+      transition: transform .5s cubic-bezier(.16,1,.3,1), border-color .5s, box-shadow .5s;
+    }
+    .card-lux:hover {
+      transform: translateY(-6px);
+      border-color: rgba(201,169,97,.4);
+      box-shadow: 0 30px 60px -30px rgba(0,0,0,.9);
+    }
+
+    /* Nav shrink/darken on scroll */
+    #navbar { transition: background-color .5s, backdrop-filter .5s, padding .5s, border-color .5s; }
+    #navbar.scrolled {
+      background: rgba(12,12,12,.82);
+      backdrop-filter: saturate(140%) blur(14px);
+      border-bottom: 1px solid rgba(201,169,97,.16);
+    }
+
+    .nav-link { position: relative; }
+    .nav-link::after {
+      content: ''; position: absolute; left: 0; bottom: -6px;
+      width: 0; height: 1px; background: #C9A961; transition: width .4s cubic-bezier(.16,1,.3,1);
+    }
+    .nav-link:hover::after { width: 100%; }
+
+    .field-lux {
+      background: rgba(255,255,255,.03);
+      border: 1px solid rgba(168,162,158,.24);
+      color: #F4EDE4;
+      transition: border-color .3s, box-shadow .3s, background-color .3s;
+    }
+    .field-lux::placeholder { color: rgba(168,162,158,.6); }
+    .field-lux:focus {
+      outline: none;
+      border-color: #C9A961;
+      background: rgba(201,169,97,.05);
+      box-shadow: 0 0 0 3px rgba(201,169,97,.12);
+    }
+    .field-lux option { background: #0C0C0C; color: #F4EDE4; }
+
+    .kenburns { animation: kb 26s ease-out both; }
+    @keyframes kb { from { transform: scale(1.12); } to { transform: scale(1); } }
+    @media (prefers-reduced-motion: reduce) { .kenburns { animation: none; } }
+  </style>
+</head>
+
+<body class="font-sans text-text-light antialiased overflow-x-hidden">
+
+  <!-- ─── NAVBAR ─────────────────────────────────────────────────────────── -->
+  <nav id="navbar" class="fixed top-0 inset-x-0 z-50 px-6 md:px-12 py-6 border-b border-transparent">
+    <div class="max-w-7xl mx-auto flex items-center justify-between">
+      <a href="#top" class="font-serif text-2xl tracking-[0.3em] text-cream">
+        GATE<span class="text-gold">WAY</span>
+      </a>
+
+      <div class="hidden lg:flex items-center gap-11 text-[12px] uppercase tracking-luxe text-muted">
+        <a href="#process"      class="nav-link hover:text-cream transition-colors">The Process</a>
+        <a href="#advantage"    class="nav-link hover:text-cream transition-colors">Insights</a>
+        <a href="#testimonials" class="nav-link hover:text-cream transition-colors">Testimonials</a>
+        <a href="#request" class="btn-outline px-6 py-3 text-[11px] uppercase">Valuation Request</a>
+      </div>
+
+      <button id="hamburger" class="lg:hidden text-cream" aria-label="Open menu">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+          <line x1="3" y1="7" x2="21" y2="7"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="17" x2="21" y2="17"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Mobile menu -->
+    <div id="mobileMenu" class="lg:hidden hidden mt-6 pb-2 flex-col gap-5 text-sm uppercase tracking-luxe text-muted">
+      <a href="#process"      class="block py-2 hover:text-gold transition-colors">The Process</a>
+      <a href="#advantage"    class="block py-2 hover:text-gold transition-colors">Insights</a>
+      <a href="#testimonials" class="block py-2 hover:text-gold transition-colors">Testimonials</a>
+      <a href="#request"      class="block py-2 text-gold">Valuation Request</a>
+    </div>
+  </nav>
+
+  <!-- ─── HERO ───────────────────────────────────────────────────────────── -->
+  <header id="top" class="relative min-h-screen flex items-center overflow-hidden">
+    <img
+      src="https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?auto=format&fit=crop&w=2000&q=80"
+      alt="Contemporary luxury multifamily residence with glass and warm timber façade photographed at golden hour"
+      class="kenburns absolute inset-0 w-full h-full object-cover"
+    />
+    <div class="absolute inset-0 bg-gradient-to-b from-bg/70 via-bg/55 to-bg"></div>
+    <div class="absolute inset-0 bg-bg/30"></div>
+
+    <div class="relative z-10 max-w-7xl mx-auto px-6 md:px-12 w-full">
+      <div class="max-w-3xl">
+        <p class="reveal text-gold text-[12px] md:text-[13px] uppercase tracking-luxe mb-7">
+          Gateway Real Estate Advisors · Private Client Group
+        </p>
+        <h1 class="reveal font-serif text-4xl md:text-6xl lg:text-7xl leading-[1.08] text-cream" style="--reveal-delay:120ms">
+          Precision Valuation<br class="hidden md:block" /> for Exceptional<br class="hidden md:block" />
+          <span class="italic text-gold">Multifamily Assets</span>
+        </h1>
+        <p class="reveal mt-8 text-base md:text-lg text-muted max-w-xl leading-relaxed font-light" style="--reveal-delay:240ms">
+          Confidential, institutional-grade analysis for sophisticated investors and owners —
+          delivered by senior advisors who close in your submarket.
+        </p>
+        <div class="reveal mt-11 flex flex-col sm:flex-row gap-4" style="--reveal-delay:360ms">
+          <a href="#request" class="btn-gold px-9 py-4 text-[12px] uppercase text-center">Request Private Valuation</a>
+          <a href="#process" class="btn-outline px-9 py-4 text-[12px] uppercase text-center">Our Process</a>
+        </div>
+      </div>
+    </div>
+
+    <!-- scroll cue -->
+    <div class="absolute bottom-8 left-1/2 -translate-x-1/2 z-10 hidden md:flex flex-col items-center gap-3">
+      <span class="text-[10px] uppercase tracking-luxe text-muted">Scroll</span>
+      <span class="w-px h-10 bg-gradient-to-b from-gold to-transparent"></span>
+    </div>
+  </header>
+
+  <!-- ─── TRUST BAR ──────────────────────────────────────────────────────── -->
+  <section class="border-y border-white/5 bg-white/[.015]">
+    <div class="max-w-7xl mx-auto px-6 md:px-12 py-10 grid grid-cols-2 md:grid-cols-4 gap-8 text-center">
+      <div class="reveal">
+        <div class="font-serif text-3xl md:text-4xl text-gold">$2.4B+</div>
+        <div class="mt-2 text-[11px] uppercase tracking-luxe text-muted">Assets Valued</div>
+      </div>
+      <div class="reveal" style="--reveal-delay:100ms">
+        <div class="font-serif text-3xl md:text-4xl text-gold">1,900+</div>
+        <div class="mt-2 text-[11px] uppercase tracking-luxe text-muted">Units Analyzed</div>
+      </div>
+      <div class="reveal" style="--reveal-delay:200ms">
+        <div class="font-serif text-3xl md:text-4xl text-gold">24 hrs</div>
+        <div class="mt-2 text-[11px] uppercase tracking-luxe text-muted">Initial Response</div>
+      </div>
+      <div class="reveal" style="--reveal-delay:300ms">
+        <div class="font-serif text-3xl md:text-4xl text-gold">100%</div>
+        <div class="mt-2 text-[11px] uppercase tracking-luxe text-muted">Confidential</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── THE GATEWAY ADVANTAGE ──────────────────────────────────────────── -->
+  <section id="advantage" class="py-24 md:py-32">
+    <div class="max-w-7xl mx-auto px-6 md:px-12">
+      <div class="text-center max-w-2xl mx-auto">
+        <p class="reveal text-gold text-[12px] uppercase tracking-luxe mb-5">The Gateway Advantage</p>
+        <h2 class="reveal font-serif text-3xl md:text-5xl text-cream leading-tight" style="--reveal-delay:100ms">
+          Discretion, expertise, and an owner's perspective
+        </h2>
+        <div class="reveal rule-gold w-24 mx-auto mt-8" style="--reveal-delay:180ms"></div>
+      </div>
+
+      <div class="mt-16 grid md:grid-cols-3 gap-6">
+        <!-- card 1 -->
+        <div class="reveal card-lux rounded-sm p-9">
+          <div class="text-gold mb-6">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.1">
+              <path d="M12 2l7 4v6c0 5-3.5 8-7 10-3.5-2-7-5-7-10V6z"/>
+            </svg>
+          </div>
+          <h3 class="font-serif text-2xl text-cream mb-3">Absolute Confidentiality</h3>
+          <p class="text-muted font-light leading-relaxed text-[15px]">
+            Your holdings, financials, and intentions never leave our private client group.
+            No listings, no public exposure — ever, without your explicit instruction.
+          </p>
+        </div>
+        <!-- card 2 -->
+        <div class="reveal card-lux rounded-sm p-9" style="--reveal-delay:120ms">
+          <div class="text-gold mb-6">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.1">
+              <path d="M3 3v18h18"/><path d="M7 14l4-5 3 3 5-7"/>
+            </svg>
+          </div>
+          <h3 class="font-serif text-2xl text-cream mb-3">Institutional Rigor</h3>
+          <p class="text-muted font-light leading-relaxed text-[15px]">
+            Cap-rate-driven analysis built from verified closed comparables and live capital-market
+            conditions — not automated estimates or broad-brush averages.
+          </p>
+        </div>
+        <!-- card 3 -->
+        <div class="reveal card-lux rounded-sm p-9" style="--reveal-delay:240ms">
+          <div class="text-gold mb-6">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.1">
+              <path d="M12 2l2.4 6.9H22l-5.8 4.3 2.2 7L12 16l-6.4 4.2 2.2-7L2 8.9h7.6z"/>
+            </svg>
+          </div>
+          <h3 class="font-serif text-2xl text-cream mb-3">Senior Advisors Only</h3>
+          <p class="text-muted font-light leading-relaxed text-[15px]">
+            You work directly with a principal who transacts in your submarket — never a junior
+            analyst or a call center. Counsel, not a quote.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── OUR RIGOROUS PROCESS ───────────────────────────────────────────── -->
+  <section id="process" class="py-24 md:py-32 relative">
+    <div class="absolute inset-0 opacity-[.06]">
+      <img src="https://images.unsplash.com/photo-1460317442991-0ec209397118?auto=format&fit=crop&w=1600&q=80"
+           alt="" aria-hidden="true" class="w-full h-full object-cover" />
+    </div>
+    <div class="relative max-w-7xl mx-auto px-6 md:px-12">
+      <div class="max-w-2xl">
+        <p class="reveal text-gold text-[12px] uppercase tracking-luxe mb-5">Our Method</p>
+        <h2 class="reveal font-serif text-3xl md:text-5xl text-cream leading-tight" style="--reveal-delay:100ms">
+          A rigorous, four-stage valuation
+        </h2>
+        <div class="reveal rule-gold w-24 mt-8" style="--reveal-delay:180ms"></div>
+      </div>
+
+      <div class="mt-16 grid md:grid-cols-2 gap-x-16 gap-y-12">
+        <!-- step 1 -->
+        <div class="reveal flex gap-6">
+          <div class="font-serif text-5xl text-gold/40 leading-none shrink-0 w-16">01</div>
+          <div>
+            <h3 class="font-serif text-2xl text-cream mb-2">Financial Underwriting</h3>
+            <p class="text-muted font-light leading-relaxed text-[15px]">
+              We normalize your T-12 and rent roll, reconstruct in-place NOI, and stress-test
+              income and expense assumptions against market benchmarks.
+            </p>
+          </div>
+        </div>
+        <!-- step 2 -->
+        <div class="reveal flex gap-6" style="--reveal-delay:120ms">
+          <div class="font-serif text-5xl text-gold/40 leading-none shrink-0 w-16">02</div>
+          <div>
+            <h3 class="font-serif text-2xl text-cream mb-2">Market Comparables</h3>
+            <p class="text-muted font-light leading-relaxed text-[15px]">
+              We assemble recent closed sales and active listings in your immediate submarket,
+              adjusted for vintage, unit mix, condition, and location quality.
+            </p>
+          </div>
+        </div>
+        <!-- step 3 -->
+        <div class="reveal flex gap-6" style="--reveal-delay:240ms">
+          <div class="font-serif text-5xl text-gold/40 leading-none shrink-0 w-16">03</div>
+          <div>
+            <h3 class="font-serif text-2xl text-cream mb-2">Cap-Rate &amp; Capital Markets</h3>
+            <p class="text-muted font-light leading-relaxed text-[15px]">
+              We apply current market cap rates and financing conditions — including assumable-debt
+              upside — to triangulate a defensible value range, not a single guess.
+            </p>
+          </div>
+        </div>
+        <!-- step 4 -->
+        <div class="reveal flex gap-6" style="--reveal-delay:360ms">
+          <div class="font-serif text-5xl text-gold/40 leading-none shrink-0 w-16">04</div>
+          <div>
+            <h3 class="font-serif text-2xl text-cream mb-2">Physical &amp; Value-Add Assessment</h3>
+            <p class="text-muted font-light leading-relaxed text-[15px]">
+              We evaluate condition, deferred maintenance, and repositioning potential — RUBS,
+              unit renovations, and operational efficiencies — to quantify latent upside.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── WHY OWNERS CHOOSE GATEWAY ──────────────────────────────────────── -->
+  <section class="py-24 md:py-32">
+    <div class="max-w-7xl mx-auto px-6 md:px-12 grid lg:grid-cols-2 gap-16 items-center">
+      <div class="reveal">
+        <img
+          src="https://images.unsplash.com/photo-1512917774080-9991f1c4c750?auto=format&fit=crop&w=1400&q=80"
+          alt="Elegant modern residential building exterior with warm architectural lighting at dusk"
+          class="rounded-sm w-full object-cover shadow-2xl"
+        />
+      </div>
+      <div>
+        <p class="reveal text-gold text-[12px] uppercase tracking-luxe mb-5">Why Discriminating Owners Choose Gateway</p>
+        <h2 class="reveal font-serif text-3xl md:text-5xl text-cream leading-tight mb-8" style="--reveal-delay:100ms">
+          A relationship measured in decades, not transactions
+        </h2>
+        <ul class="space-y-6">
+          <li class="reveal flex gap-4" style="--reveal-delay:160ms">
+            <span class="text-gold mt-1">—</span>
+            <p class="text-muted font-light leading-relaxed text-[15px]">
+              <span class="text-cream">An opinion of value you can act on.</span>
+              Delivered with the comparables, assumptions, and reasoning behind every figure.
+            </p>
+          </li>
+          <li class="reveal flex gap-4" style="--reveal-delay:240ms">
+            <span class="text-gold mt-1">—</span>
+            <p class="text-muted font-light leading-relaxed text-[15px]">
+              <span class="text-cream">No obligation, no pressure.</span>
+              Many clients hold for years after their first valuation. We're here when you're ready.
+            </p>
+          </li>
+          <li class="reveal flex gap-4" style="--reveal-delay:320ms">
+            <span class="text-gold mt-1">—</span>
+            <p class="text-muted font-light leading-relaxed text-[15px]">
+              <span class="text-cream">Off-market access.</span>
+              When you do transact, our private network of qualified capital opens quietly — before
+              anything reaches the open market.
+            </p>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── TESTIMONIALS ───────────────────────────────────────────────────── -->
+  <section id="testimonials" class="py-24 md:py-32 border-y border-white/5 bg-white/[.015]">
+    <div class="max-w-7xl mx-auto px-6 md:px-12">
+      <div class="text-center max-w-2xl mx-auto">
+        <p class="reveal text-gold text-[12px] uppercase tracking-luxe mb-5">In Their Words</p>
+        <h2 class="reveal font-serif text-3xl md:text-5xl text-cream leading-tight" style="--reveal-delay:100ms">
+          Trusted by principals and institutions
+        </h2>
+        <div class="reveal rule-gold w-24 mx-auto mt-8" style="--reveal-delay:180ms"></div>
+      </div>
+
+      <div class="mt-16 grid md:grid-cols-3 gap-6">
+        <figure class="reveal card-lux rounded-sm p-9">
+          <div class="text-gold text-5xl font-serif leading-none mb-4">“</div>
+          <blockquote class="text-cream/90 font-light leading-relaxed text-[15px] italic">
+            Gateway's valuation was the most rigorous I've seen outside of an institutional
+            appraisal — and considerably faster. They understood our submarket better than we did.
+          </blockquote>
+          <figcaption class="mt-6 pt-6 border-t border-white/10">
+            <div class="text-cream text-sm">D. Whitmore</div>
+            <div class="text-muted text-[11px] uppercase tracking-luxe mt-1">Private Investor · 340 Units</div>
+          </figcaption>
+        </figure>
+
+        <figure class="reveal card-lux rounded-sm p-9" style="--reveal-delay:120ms">
+          <div class="text-gold text-5xl font-serif leading-none mb-4">“</div>
+          <blockquote class="text-cream/90 font-light leading-relaxed text-[15px] italic">
+            Discreet, precise, and genuinely advisory. There was never a sales pitch — only counsel.
+            We've since entrusted them with three subsequent dispositions.
+          </blockquote>
+          <figcaption class="mt-6 pt-6 border-t border-white/10">
+            <div class="text-cream text-sm">M. &amp; L. Castellano</div>
+            <div class="text-muted text-[11px] uppercase tracking-luxe mt-1">Family Office</div>
+          </figcaption>
+        </figure>
+
+        <figure class="reveal card-lux rounded-sm p-9" style="--reveal-delay:240ms">
+          <div class="text-gold text-5xl font-serif leading-none mb-4">“</div>
+          <blockquote class="text-cream/90 font-light leading-relaxed text-[15px] italic">
+            The value-add analysis alone reframed how we thought about the asset. Gateway found
+            upside our own team had overlooked for years.
+          </blockquote>
+          <figcaption class="mt-6 pt-6 border-t border-white/10">
+            <div class="text-cream text-sm">R. Ashford</div>
+            <div class="text-muted text-[11px] uppercase tracking-luxe mt-1">Managing Partner · Regional Fund</div>
+          </figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── REQUEST FORM ───────────────────────────────────────────────────── -->
+  <section id="request" class="py-24 md:py-32">
+    <div class="max-w-3xl mx-auto px-6 md:px-12">
+      <div class="text-center">
+        <p class="reveal text-gold text-[12px] uppercase tracking-luxe mb-5">By Private Appointment</p>
+        <h2 class="reveal font-serif text-3xl md:text-5xl text-cream leading-tight" style="--reveal-delay:100ms">
+          Request your confidential valuation
+        </h2>
+        <p class="reveal mt-6 text-muted font-light leading-relaxed" style="--reveal-delay:180ms">
+          Share a few details and a senior Gateway specialist will personally prepare your
+          analysis. Every submission is held in strict confidence.
+        </p>
+        <div class="reveal rule-gold w-24 mx-auto mt-8" style="--reveal-delay:240ms"></div>
+      </div>
+
+      <form id="valuationForm" class="reveal mt-14 grid md:grid-cols-2 gap-6" style="--reveal-delay:120ms" novalidate>
+        <div class="md:col-span-1">
+          <label class="block text-[11px] uppercase tracking-luxe text-muted mb-3">Full Name</label>
+          <input name="name" type="text" required placeholder="Your name"
+                 class="field-lux w-full px-4 py-3.5 rounded-sm text-sm" />
+        </div>
+        <div class="md:col-span-1">
+          <label class="block text-[11px] uppercase tracking-luxe text-muted mb-3">Email</label>
+          <input name="email" type="email" required placeholder="you@company.com"
+                 class="field-lux w-full px-4 py-3.5 rounded-sm text-sm" />
+        </div>
+        <div class="md:col-span-1">
+          <label class="block text-[11px] uppercase tracking-luxe text-muted mb-3">Phone</label>
+          <input name="phone" type="tel" required placeholder="(555) 555-5555"
+                 class="field-lux w-full px-4 py-3.5 rounded-sm text-sm" />
+        </div>
+        <div class="md:col-span-1">
+          <label class="block text-[11px] uppercase tracking-luxe text-muted mb-3">Number of Units</label>
+          <select name="units" class="field-lux w-full px-4 py-3.5 rounded-sm text-sm">
+            <option>2 – 4 units</option>
+            <option>5 – 9 units</option>
+            <option>10 – 19 units</option>
+            <option>20 – 49 units</option>
+            <option>50 – 99 units</option>
+            <option>100+ units</option>
+          </select>
+        </div>
+        <div class="md:col-span-2">
+          <label class="block text-[11px] uppercase tracking-luxe text-muted mb-3">Property Address</label>
+          <input name="address" type="text" required placeholder="123 Main Street, City, State"
+                 class="field-lux w-full px-4 py-3.5 rounded-sm text-sm" />
+        </div>
+        <div class="md:col-span-2">
+          <label class="block text-[11px] uppercase tracking-luxe text-muted mb-3">
+            In-Place NOI &amp; Additional Detail <span class="normal-case tracking-normal text-muted/60">(optional)</span>
+          </label>
+          <textarea name="detail" rows="3" placeholder="Approximate NOI, occupancy, recent capital improvements, or timeline…"
+                    class="field-lux w-full px-4 py-3.5 rounded-sm text-sm resize-y"></textarea>
+        </div>
+
+        <div class="md:col-span-2 flex items-start gap-3 mt-1">
+          <svg class="text-gold shrink-0 mt-0.5" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+            <rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>
+          </svg>
+          <p class="text-[12px] text-muted font-light leading-relaxed">
+            Your information is held in strict confidence, never sold, and used solely to prepare
+            your private valuation.
+          </p>
+        </div>
+
+        <div class="md:col-span-2 mt-2">
+          <button type="submit" class="btn-gold w-full py-4 text-[12px] uppercase rounded-sm">
+            Request Private Valuation
+          </button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <!-- ─── FOOTER ─────────────────────────────────────────────────────────── -->
+  <footer class="border-t border-white/5 py-14">
+    <div class="max-w-7xl mx-auto px-6 md:px-12 flex flex-col md:flex-row items-center justify-between gap-8">
+      <div class="text-center md:text-left">
+        <div class="font-serif text-2xl tracking-[0.3em] text-cream">GATE<span class="text-gold">WAY</span></div>
+        <p class="text-muted text-[12px] mt-3 max-w-md leading-relaxed font-light">
+          Gateway Real Estate Advisors · Licensed Brokerage. This valuation is an opinion of value,
+          not a formal appraisal.
+        </p>
+      </div>
+      <div class="flex items-center gap-8 text-[11px] uppercase tracking-luxe text-muted">
+        <a href="#process" class="hover:text-gold transition-colors">Process</a>
+        <a href="#testimonials" class="hover:text-gold transition-colors">Testimonials</a>
+        <a href="#request" class="hover:text-gold transition-colors">Request</a>
+      </div>
+    </div>
+    <div class="max-w-7xl mx-auto px-6 md:px-12 mt-10 pt-8 border-t border-white/5 text-center">
+      <p class="text-muted/60 text-[11px] tracking-wide">© <span id="year"></span> Gateway Real Estate Advisors. All rights reserved.</p>
+    </div>
+  </footer>
+
+  <!-- ─── SUCCESS MODAL ──────────────────────────────────────────────────── -->
+  <div id="successModal" class="fixed inset-0 z-[100] hidden items-center justify-center p-6">
+    <div id="modalBackdrop" class="absolute inset-0 bg-bg/85 backdrop-blur-sm"></div>
+    <div id="modalCard" class="relative max-w-md w-full bg-[#141210] border border-gold/25 rounded-sm p-10 text-center shadow-2xl"
+         style="opacity:0; transform: translateY(20px) scale(.97); transition: opacity .6s cubic-bezier(.16,1,.3,1), transform .6s cubic-bezier(.16,1,.3,1);">
+      <div class="mx-auto w-16 h-16 rounded-full border border-gold/40 flex items-center justify-center text-gold mb-6">
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+          <path d="M20 6L9 17l-5-5"/>
+        </svg>
+      </div>
+      <h3 class="font-serif text-2xl text-cream mb-4">Thank you.</h3>
+      <p class="text-muted font-light leading-relaxed">
+        A senior Gateway specialist will contact you personally within 24 hours to begin your
+        confidential valuation.
+      </p>
+      <button id="closeModal" class="btn-outline mt-8 px-8 py-3 text-[11px] uppercase rounded-sm">Close</button>
+    </div>
+  </div>
+
+  <!-- ─── SCRIPTS ────────────────────────────────────────────────────────── -->
+  <script>
+    // Year
+    document.getElementById('year').textContent = new Date().getFullYear();
+
+    // Navbar scroll state
+    const navbar = document.getElementById('navbar');
+    const onScroll = () => navbar.classList.toggle('scrolled', window.scrollY > 40);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+
+    // Mobile menu
+    const hamburger = document.getElementById('hamburger');
+    const mobileMenu = document.getElementById('mobileMenu');
+    hamburger.addEventListener('click', () => {
+      const open = mobileMenu.classList.toggle('hidden') === false;
+      mobileMenu.classList.toggle('flex', open);
+    });
+    mobileMenu.querySelectorAll('a').forEach(a =>
+      a.addEventListener('click', () => { mobileMenu.classList.add('hidden'); mobileMenu.classList.remove('flex'); })
+    );
+
+    // Scroll reveal
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } });
+    }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+    document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+
+    // Form → luxurious modal
+    const form = document.getElementById('valuationForm');
+    const modal = document.getElementById('successModal');
+    const modalCard = document.getElementById('modalCard');
+    const openModal = () => {
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+      requestAnimationFrame(() => { modalCard.style.opacity = '1'; modalCard.style.transform = 'none'; });
+      document.body.style.overflow = 'hidden';
+    };
+    const closeModal = () => {
+      modalCard.style.opacity = '0';
+      modalCard.style.transform = 'translateY(20px) scale(.97)';
+      setTimeout(() => { modal.classList.add('hidden'); modal.classList.remove('flex'); document.body.style.overflow = ''; }, 400);
+    };
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      // Minimal required-field check with elegant focus
+      const missing = [...form.querySelectorAll('[required]')].find(el => !el.value.trim());
+      if (missing) { missing.focus(); missing.style.borderColor = '#C9A961'; return; }
+      openModal();
+      form.reset();
+    });
+    document.getElementById('closeModal').addEventListener('click', closeModal);
+    document.getElementById('modalBackdrop').addEventListener('click', closeModal);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeModal(); });
+  </script>
+</body>
+</html>
