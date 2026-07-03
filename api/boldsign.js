@@ -105,7 +105,19 @@ function mapTemplateRoles(props) {
 export default async function handler(req, res) {
   applyJsonCors(res)
   if (req.method === 'OPTIONS') return res.status(200).end()
-  if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' })
+
+  // GET/HEAD → health check. Lets anyone confirm the endpoint is deployed by
+  // opening this URL in a browser, and keeps webhook-URL verifiers that probe
+  // with GET happy. All real work happens via POST.
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    return res.status(200).json({
+      ok: true,
+      service: 'gateway-crm/boldsign',
+      configured: Boolean(API_KEY),
+      hint: 'This endpoint is live. BoldSign webhook events and CRM actions are accepted via POST.',
+    })
+  }
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
   const body = req.body || {}
 
@@ -309,6 +321,18 @@ export default async function handler(req, res) {
 // verification of X-BoldSign-Signature isn't byte-reliable here; the
 // round-trip gives a stronger guarantee anyway.)
 async function handleWebhook(req, res) {
+  // BoldSign's webhook-registration "Verify" button sends a Verification
+  // event with no document attached. Acknowledge immediately — before any
+  // Supabase dependency — so registration succeeds even on a half-configured
+  // deployment.
+  const probeEvent =
+    req.body?.event?.eventType ||
+    req.body?.eventType        ||
+    ''
+  if (String(probeEvent).toLowerCase() === 'verification') {
+    return res.status(200).json({ received: true, verification: true })
+  }
+
   let supabase
   try { supabase = getServiceClient() }
   catch (e) { return res.status(200).json({ received: true, error: e.message }) }
