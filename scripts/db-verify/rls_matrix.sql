@@ -2,6 +2,10 @@
 -- ── Seed (as superuser) ──────────────────────────────────────────────────────
 insert into agents (id, auth_id, name, initials, role, email, is_admin) values
  ('00000000-0000-0000-0000-00000000000a','10000000-0000-0000-0000-00000000000a','Admin TC','AT','Office Admin','tc@gw.com', true),
+ -- Admin by FLAG only: is_admin = true but the role text has no "admin"
+ -- substring. Guards the app_is_admin() drift that made a flagged admin
+ -- (role "Commercial Associate") fail every RLS check in production.
+ ('00000000-0000-0000-0000-00000000000b','10000000-0000-0000-0000-00000000000b','Owner Flag','OF','Commercial Associate','owner@gw.com', true),
  ('00000000-0000-0000-0000-00000000000d','10000000-0000-0000-0000-00000000000d','Daniel','DG','Commercial Advisor','daniel@gw.com', false),
  ('00000000-0000-0000-0000-00000000000e','10000000-0000-0000-0000-00000000000e','Nic','NM','Commercial Advisor','nic@gw.com', false),
  ('00000000-0000-0000-0000-00000000000f','10000000-0000-0000-0000-00000000000f','Steph','SM','Residential Agent','steph@gw.com', false),
@@ -86,6 +90,18 @@ set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000a';
 select assert_eq('admin deals', (select count(*) from deals), 3);
 select assert_eq('admin commissions', (select count(*) from commissions), 2);
 select assert_eq('admin documents', (select count(*) from documents), 2);
+
+-- As ADMIN-BY-FLAG (is_admin = true, role without "admin"): app_is_admin()
+-- must honor the flag, so this agent also sees the whole firm and can create a
+-- deal owned by ANY agent. This is the production regression (a flagged admin
+-- whose role was "Commercial Associate" was treated as a plain agent).
+set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000b';
+select assert_eq('flag-admin is_admin honored', (select case when app_is_admin() then 1 else 0 end), 1);
+select assert_eq('flag-admin sees all deals', (select count(*) from deals), 3);
+insert into deals (id, title, agent_id, stage)
+  values ('00000000-0000-0000-0000-0000000000d8', 'D8 flag-admin for Steph', '00000000-0000-0000-0000-00000000000f', 'lead');
+select assert_eq('flag-admin insert for any agent accepted',
+  (select count(*) from deals where id='00000000-0000-0000-0000-0000000000d8'), 1);
 
 -- Write-path guards still enforced under RLS
 set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000d';
