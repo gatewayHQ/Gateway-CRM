@@ -1216,6 +1216,43 @@ create policy deals_agent_scope on deals for all to authenticated
     or id in (select app_visible_deal_ids())
   );
 
+-- DEAL OWNER GUARD (migration 0016) — makes the WITH CHECK above livable for
+-- the app's creation flows: a non-admin insert with no owner is defaulted to
+-- the creator, and an owner the policy would reject fails with a plain-English
+-- 42501 instead of the raw "violates row-level security policy" message.
+-- No JWT (service key / cron) or admin → the trigger is a no-op.
+create or replace function app_deal_owner_guard()
+returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  me uuid;
+begin
+  if auth.uid() is null then return new; end if;
+  if app_is_admin() then return new; end if;
+
+  me := app_current_agent_id();
+  if me is null then
+    raise exception 'Your login is not linked to an agent profile yet, so the deal could not be created. Finish setting up your profile, or ask an admin to link your account.'
+      using errcode = '42501';
+  end if;
+
+  if new.agent_id is null then
+    new.agent_id := me;
+  end if;
+
+  if new.agent_id not in (select app_visible_agent_ids('deals')) then
+    raise exception 'Deals can only be created for yourself or a teammate who shares deals with you. Assign the deal to yourself, or ask an admin to create it for another agent.'
+      using errcode = '42501';
+  end if;
+
+  return new;
+end $$;
+
+drop trigger if exists deals_owner_guard on deals;
+create trigger deals_owner_guard
+  before insert on deals
+  for each row execute function app_deal_owner_guard();
+
 -- COMMISSIONS — back office: ADMIN-ONLY (decided 2026-06-12). Each agent's
 -- split/take-home is private even from co-agents on the same deal; agents get
 -- their own slice via /api/my-earnings (service key, bypasses RLS).

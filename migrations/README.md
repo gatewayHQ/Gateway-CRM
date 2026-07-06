@@ -32,6 +32,9 @@ file is safe.
 | 0011 | `0011_rls_deals_commissions.sql` | RLS for deals/commissions/documents/envelopes/steps per the decided visibility model (own + team-shared + co-listed; admin sees all). Its Phase B activates enforcement for 0002's tables too | **Phase A: no. Phase B: yes (activates ALL scoping)** | Last, with testing |
 | 0012 | `0012_deal_stage_tracks.sql` | Widens the `deals.stage` CHECK to the track-aware superset (commercial + residential buyer/seller boards, `src/lib/stages.js`) | No (constraint swap; superset includes every legacy token) | Before/with the Milestone 1 app deploy |
 | 0013 | `0013_back_office.sql` | Back office: `agents.cap_amount`/`cap_anniversary`, and commissions become ADMIN-ONLY at the DB level (agents get their slice via `/api/portal?action=my-earnings`) | **Yes — non-admins lose direct commission reads** | With the Back Office app deploy |
+| 0014 | `0014_docusign_to_signwell.sql` | Replaces `docusign_envelopes` with `signwell_documents`; drops `docusign_field_templates` | **Yes — DocuSign flows replaced by SignWell** | With the SignWell app deploy |
+| 0015 | `0015_transaction_layer.sql` | Transaction management layer: `audit_log`, `document_versions`, `closing_packets`, `agent_nudges`, `deals.review_*` broker-review columns | No (additive) | With the transaction-layer app deploy |
+| 0016 | `0016_deal_owner_guard.sql` | BEFORE INSERT trigger on `deals`: defaults a missing owner to the creator and turns a disallowed owner into a plain-English 42501 error. Fixes the raw "violates row-level security policy" failure on "Start Deal" | **Yes — ownerless non-admin deal inserts now succeed (owned by the creator)** | Anytime after 0011 |
 
 > Note the numeric order vs. recommended run order: **0001 → 0003 → 0004 → 0005 → 0006 → 0007 → 0002 (Phase A) → 0008 → 0009 → 0010 → 0011 (Phase A, then Phase B after verification)**.
 > 0011's Phase B is the only step that changes what data the database returns,

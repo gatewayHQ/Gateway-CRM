@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { fetchVisibleDeals, fetchVisibleCommissions, fetchCoListedDealIds } from '../deals.js'
+import { fetchVisibleDeals, fetchVisibleCommissions, fetchCoListedDealIds, resolveDealOwnerId } from '../deals.js'
 
 // Minimal supabase-shaped mock: routes each from(table) call through `handler`
 // and records the chained filters so assertions can inspect them.
@@ -139,5 +139,41 @@ describe('fetchVisibleCommissions', () => {
     const { data } = await fetchVisibleCommissions(client, { isAdmin: false, dealIds: ids })
     expect(data).toHaveLength(301)
     expect(client.calls.length).toBe(3) // 150 + 150 + 1
+  })
+})
+
+// The client-side mirror of the deals_agent_scope WITH CHECK / deals_owner_guard
+// trigger (migration 0016): who may own a deal this login creates.
+describe('resolveDealOwnerId', () => {
+  const ctx = { authAgentId: 'me', authIsAdmin: false, dealAgentIds: ['me', 'peer'] }
+
+  it('keeps a candidate the database would accept (self or a deal-sharing peer)', () => {
+    expect(resolveDealOwnerId(['me'], ctx)).toBe('me')
+    expect(resolveDealOwnerId(['peer'], ctx)).toBe('peer')
+  })
+
+  it('falls back to the logged-in agent when the candidate is not permitted', () => {
+    // e.g. "Start Deal" on a listing owned by an agent who does not share deals
+    expect(resolveDealOwnerId(['outsider'], ctx)).toBe('me')
+  })
+
+  it('tries candidates in order and picks the first permitted one', () => {
+    expect(resolveDealOwnerId(['outsider', 'peer'], ctx)).toBe('peer')
+  })
+
+  it('defaults an ownerless deal to the creator (the RLS regression)', () => {
+    expect(resolveDealOwnerId([], ctx)).toBe('me')
+    expect(resolveDealOwnerId([null, ''], ctx)).toBe('me')
+  })
+
+  it('admins keep any owner, including unassigned', () => {
+    const admin = { authAgentId: 'me', authIsAdmin: true, dealAgentIds: ['me'] }
+    expect(resolveDealOwnerId(['outsider'], admin)).toBe('outsider')
+    expect(resolveDealOwnerId([], admin)).toBeNull()
+  })
+
+  it('passes the request through when no auth context is wired', () => {
+    expect(resolveDealOwnerId(['anyone'], undefined)).toBe('anyone')
+    expect(resolveDealOwnerId(['anyone'], { authAgentId: null, dealAgentIds: [] })).toBe('anyone')
   })
 })

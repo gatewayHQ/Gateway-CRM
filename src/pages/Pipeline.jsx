@@ -1,6 +1,7 @@
 import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { fetchVisibleDeals } from '../lib/services/deals.js'
+import { fetchVisibleDeals, resolveDealOwnerId } from '../lib/services/deals.js'
+import { mutationErrorMessage } from '../lib/services/db.js'
 import { formatCurrency, formatDate, STAGE_LABELS, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import {
@@ -1568,7 +1569,7 @@ function PortalTab({ deal }) {
   )
 }
 
-export function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave, initialTab = 'details' }) {
+export function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, dealOwnerCtx, onSave, initialTab = 'details' }) {
   const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
@@ -1596,6 +1597,16 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
   const COMM_SUBTYPES = ['multifamily','office','land','retail','industrial','mixed-use']
 
+  // Only offer owners the database will accept from this login: everyone for
+  // admins, self + deal-sharing teammates otherwise. A stored owner outside
+  // that set (e.g. a co-listed deal being edited) stays selectable.
+  const assignableAgents = useMemo(() => {
+    if (!dealOwnerCtx || dealOwnerCtx.authIsAdmin) return agents
+    const allowed = new Set([dealOwnerCtx.authAgentId, ...(dealOwnerCtx.dealAgentIds || [])].filter(Boolean))
+    if (!allowed.size) return agents
+    return agents.filter(a => allowed.has(a.id) || a.id === form.agent_id)
+  }, [agents, dealOwnerCtx, form.agent_id])
+
   const save = async () => {
     const e = {}
     if (!form.title.trim()) e.title = true
@@ -1612,7 +1623,10 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         expected_close_date: form.expected_close_date || null,
         contact_id:          form.contact_id   || null,
         property_id:         form.property_id  || null,
-        agent_id:            form.agent_id     || null,
+        // New deals must carry an owner the deals RLS policy accepts for the
+        // logged-in agent ("Unassigned" becomes the creator for non-admins).
+        // Edits keep the stored owner untouched.
+        agent_id:            deal?.id ? (form.agent_id || null) : resolveDealOwnerId([form.agent_id], dealOwnerCtx),
         notes:               form.notes        || null,
         prop_category:       form.prop_category || null,
         prop_subtype:        form.prop_subtype  || null,
@@ -1624,7 +1638,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       } else {
         ;({ error } = await supabase.from('deals').insert([payload]))
       }
-      if (error) { pushToast(error.message, 'error'); return }
+      if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
       pushToast(deal?.id ? 'Deal updated' : 'Deal added')
       await onSave()
       onClose()
@@ -1713,7 +1727,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
             <div className="form-group"><label className="form-label">Expected Close Date</label><input className="form-control" type="date" value={form.expected_close_date||''} onChange={e=>set('expected_close_date',e.target.value)} /></div>
             <div className="form-group"><label className="form-label">Contact</label><SearchDropdown items={contacts} value={form.contact_id} onSelect={v=>set('contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
-            <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+            <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{assignableAgents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
 
             {/* ── Comp Data ─────────────────────────────────────── */}
             <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
@@ -1945,7 +1959,7 @@ function ListingCard({ property, agent, deals = [], onClick, onDelete, draggable
   )
 }
 
-export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgentIds, go }) {
+export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgentIds, dealOwnerCtx, go }) {
   const [drawer, setDrawer] = useState(false)
   const [editing, setEditing] = useState(null)
   const [defaultStage, setDefaultStage] = useState('lead')
@@ -2127,12 +2141,14 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
         stage: 'lead',
         property_id: property.id,
         title: property.address || 'New Listing Deal',
-        agent_id: property.assigned_agent_id || activeAgent?.id || '',
+        // Prefer the listing's agent, but only when this login may create
+        // deals for them (RLS) — otherwise the creator owns the deal.
+        agent_id: resolveDealOwnerId([property.assigned_agent_id, activeAgent?.id], dealOwnerCtx) || '',
         prop_category: isResidentialPropertyType(property.type) ? 'residential' : 'commercial',
       })
     }
     setDrawer(true)
-  }, [deals, activeAgent])
+  }, [deals, activeAgent, dealOwnerCtx])
 
   // updated_at omitted — handled by DB trigger. We stamp comp_data.stage_since
   // so "days in stage" / rotting is precise going forward (no schema change).
@@ -2489,7 +2505,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
       <DealDrawer open={drawer} onClose={() => setDrawer(false)}
         deal={editing ? editing : { stage: defaultStage }}
-        agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} onSave={reload} />
+        agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} dealOwnerCtx={dealOwnerCtx} onSave={reload} />
       {confirm && <ConfirmDialog message="This will permanently delete this deal." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {confirmProp && <ConfirmDialog message="Remove this listing from the pipeline? Any linked deals are kept but will be unlinked from the property." onConfirm={() => delProperty(confirmProp)} onCancel={() => setConfirmProp(null)} />}
     </div>

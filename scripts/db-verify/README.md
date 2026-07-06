@@ -14,7 +14,10 @@ advisors where one is co-listed on the other's deal via
 enforcement, then asserts the full visibility matrix — including that a
 co-listed agent can read AND edit the shared deal, that data guards reject a
 negative deal value, and that an agent cannot create a deal owned by an
-unrelated agent.
+unrelated agent. It also covers the deal owner guard (migration 0016): an
+ownerless non-admin insert succeeds and lands owned by its creator (the
+"Start Deal" regression), a deal-sharing peer may be named as owner, and an
+admin can still create a genuinely unassigned deal.
 
 ## Run it
 
@@ -26,7 +29,7 @@ createdb crm_verify
 psql -d crm_verify -v ON_ERROR_STOP=1 -f scripts/db-verify/supabase_shim.sql
 psql -d crm_verify -v ON_ERROR_STOP=1 -f src/lib/schema.sql
 psql -d crm_verify -v ON_ERROR_STOP=1 -f scripts/db-verify/rls_matrix.sql
-# expect: NOTICE PASS ... ×16 and "ALL RLS TESTS PASSED"
+# expect: NOTICE PASS ... ×19 and "ALL RLS TESTS PASSED"
 dropdb crm_verify
 ```
 

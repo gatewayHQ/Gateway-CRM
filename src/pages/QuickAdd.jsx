@@ -1,5 +1,7 @@
 import React, { useState } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { resolveDealOwnerId } from '../lib/services/deals.js'
+import { mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Drawer, pushToast } from '../components/UI.jsx'
 import { STAGE_ORDER, STAGE_LABELS } from '../lib/helpers.js'
 
@@ -66,13 +68,22 @@ function QuickContactDrawer({ open, onClose, agents, activeAgent, onSaved }) {
   )
 }
 
-function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
+function QuickDealDrawer({ open, onClose, agents, activeAgent, dealOwnerCtx, onSaved }) {
   const blank = () => ({ title: '', value: '', stage: 'lead', agent_id: activeAgent?.id || '' })
   const [form, setForm] = useState(blank())
   const [saving, setSaving] = useState(false)
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }))
 
   React.useEffect(() => { setForm(blank()) }, [open, activeAgent?.id])
+
+  // Only offer owners the database will accept from this login (everyone for
+  // admins, self + deal-sharing teammates otherwise).
+  const assignableAgents = React.useMemo(() => {
+    if (!dealOwnerCtx || dealOwnerCtx.authIsAdmin) return agents
+    const allowed = new Set([dealOwnerCtx.authAgentId, ...(dealOwnerCtx.dealAgentIds || [])].filter(Boolean))
+    if (!allowed.size) return agents
+    return agents.filter(a => allowed.has(a.id))
+  }, [agents, dealOwnerCtx])
 
   const save = async () => {
     if (!form.title.trim()) { pushToast('Deal title required', 'error'); return }
@@ -82,10 +93,12 @@ function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
       value: form.value ? Number(form.value) : null,
       probability: 25,
       updated_at: new Date().toISOString(),
-      agent_id: form.agent_id || null,
+      // Owner the deals RLS policy accepts for this login ("Unassigned"
+      // becomes the creator for non-admins).
+      agent_id: resolveDealOwnerId([form.agent_id], dealOwnerCtx),
     }])
     setSaving(false)
-    if (error) { pushToast(error.message, 'error'); return }
+    if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
     pushToast(`Deal "${form.title}" added`)
     onSaved(); onClose()
   }
@@ -113,7 +126,7 @@ function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
           <label className="form-label">Assign To</label>
           <select className="form-control" value={form.agent_id} onChange={e => set('agent_id', e.target.value)}>
             <option value="">Unassigned</option>
-            {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            {assignableAgents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
           </select>
         </div>
       </div>
@@ -191,7 +204,7 @@ const OPTIONS = [
   { id: 'contact', label: 'New Contact', icon: 'contacts', bg: '#c9a84c' },
 ]
 
-export default function QuickAdd({ db, setDb, activeAgent }) {
+export default function QuickAdd({ db, setDb, activeAgent, dealOwnerCtx }) {
   const [open, setOpen] = useState(false)
   const [mode, setMode] = useState(null)
 
@@ -226,7 +239,7 @@ export default function QuickAdd({ db, setDb, activeAgent }) {
         onSaved={reload('contacts', 'contacts')} />
 
       <QuickDealDrawer open={mode === 'deal'} onClose={() => setMode(null)}
-        agents={db.agents || []} activeAgent={activeAgent}
+        agents={db.agents || []} activeAgent={activeAgent} dealOwnerCtx={dealOwnerCtx}
         onSaved={reload('deals', 'deals')} />
 
       <QuickTaskDrawer open={mode === 'task'} onClose={() => setMode(null)}

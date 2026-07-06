@@ -55,5 +55,19 @@ export function friendlyDbError(error) {
     return col ? `"${col}" is required.` : 'A required field is missing.'
   }
 
+  // 42501 = insufficient_privilege. Two shapes arrive with this code:
+  //   • the raw PostgREST rejection ("new row violates row-level security
+  //     policy for table ...") — translate it per the visibility model, and
+  //   • a guard trigger that already raised a human-readable message
+  //     (migration 0016's deal owner guard) — return null so the caller's
+  //     `friendlyDbError(error) || error.message` shows it verbatim.
+  if (code === '42501' && /row-level security/i.test(msg)) {
+    const m = msg.match(/table "([^"]+)"/i)
+    if (m && m[1] === 'deals') {
+      return 'This deal could not be saved because of ownership rules: deals can only be created for yourself or a teammate who shares deals with you. Ask an admin if it should belong to someone else.'
+    }
+    return "You don't have permission to save this record — it may belong to another agent. Ask an admin if you need access."
+  }
+
   return null
 }

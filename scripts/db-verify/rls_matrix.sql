@@ -61,7 +61,9 @@ set role authenticated;
 set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000d';
 select assert_eq('daniel deals', (select count(*) from deals), 2);
 select assert_eq('daniel sees D2', (select count(*) from deals where id='00000000-0000-0000-0000-0000000000d2'), 0);
-select assert_eq('daniel commissions', (select count(*) from commissions), 1);
+-- Commissions are ADMIN-ONLY since migration 0013 (agents get their slice via
+-- /api/portal?action=my-earnings on the service key) — a non-admin reads none.
+select assert_eq('daniel commissions (admin-only since 0013)', (select count(*) from commissions), 0);
 select assert_eq('daniel documents', (select count(*) from documents), 1);
 
 -- As NIC: D1 (co-listed) + D2 (Steph team-share); NOT D4
@@ -97,5 +99,33 @@ do $$ begin
   raise exception 'FAIL: cross-agent deal insert was accepted';
 exception when insufficient_privilege or sqlstate '42501' then raise notice 'PASS cross-agent insert rejected';
 end $$;
+
+-- ── Deal owner guard (migration 0016) — the "Start Deal" regression ─────────
+-- A non-admin insert with NO owner must succeed and land owned by the creator
+-- (previously: raw "violates row-level security policy for table deals").
+set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000d';
+insert into deals (id, title, agent_id, stage)
+  values ('00000000-0000-0000-0000-0000000000d5', 'D5 started from a property', null, 'lead');
+select assert_eq('ownerless insert owned by creator',
+  (select count(*) from deals where id='00000000-0000-0000-0000-0000000000d5'
+     and agent_id='00000000-0000-0000-0000-00000000000d'), 1);
+
+-- A non-admin may still create a deal owned by a deal-sharing team peer
+-- (Nic → Steph, same team, share_deals defaults to shared).
+set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000e';
+insert into deals (id, title, agent_id, stage)
+  values ('00000000-0000-0000-0000-0000000000d6', 'D6 Nic for Steph', '00000000-0000-0000-0000-00000000000f', 'lead');
+select assert_eq('peer-owned insert accepted',
+  (select count(*) from deals where id='00000000-0000-0000-0000-0000000000d6'
+     and agent_id='00000000-0000-0000-0000-00000000000f'), 1);
+
+-- Admins keep the ability to create genuinely unassigned deals.
+set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000a';
+insert into deals (id, title, agent_id, stage)
+  values ('00000000-0000-0000-0000-0000000000d7', 'D7 admin unassigned', null, 'lead');
+select assert_eq('admin insert stays unassigned',
+  (select count(*) from deals where id='00000000-0000-0000-0000-0000000000d7'
+     and agent_id is null), 1);
+
 reset role;
 select 'ALL RLS TESTS PASSED' as result;

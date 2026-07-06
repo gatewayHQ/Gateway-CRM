@@ -16,6 +16,27 @@
 // what RLS enforces once migration 0011 Phase B is live.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Who may OWN a deal the current user creates — the client-side mirror of the
+// deals_agent_scope WITH CHECK (and the deals_owner_guard trigger, migration
+// 0016): a non-admin may only create deals owned by themselves or a team peer
+// who shares deals; admins may pick anyone (or leave the deal unassigned).
+//
+// `candidates` are tried in order (e.g. [activeAgent.id, property.assigned_agent_id])
+// and the first the database would accept wins; a non-admin falls back to
+// owning the deal themselves. `ownerCtx` is auth-anchored (App.jsx computes it
+// from the logged-in agent, NOT the switchable "active agent") so the result
+// stays valid even when the user is viewing the app as a teammate.
+export function resolveDealOwnerId(candidates, ownerCtx) {
+  const picks = (candidates || []).filter(id => id != null && id !== '')
+  const { authAgentId = null, authIsAdmin = false, dealAgentIds = [] } = ownerCtx || {}
+  // No auth context wired (legacy call site) — pass the request through.
+  if (!authAgentId && !dealAgentIds.length) return picks[0] || null
+  // Admins: honor the request as-is, including "unassigned" (null).
+  if (authIsAdmin) return picks[0] || null
+  const allowed = new Set([authAgentId, ...dealAgentIds].filter(Boolean))
+  return picks.find(id => allowed.has(id)) || authAgentId || null
+}
+
 // Supabase .in() lists travel in the request URL — chunk them so a large book
 // of business can't overflow it.
 const IN_CHUNK = 150

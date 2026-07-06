@@ -41,6 +41,32 @@ describe('friendlyDbError', () => {
       .toMatch(/first name/i)
   })
 
+  it('translates a raw RLS rejection on deals into the ownership rule', () => {
+    const msg = friendlyDbError({
+      code: '42501',
+      message: 'new row violates row-level security policy for table "deals"',
+    })
+    expect(msg).toMatch(/deals can only be created for yourself or a teammate/i)
+    expect(msg).not.toMatch(/row-level security/i)
+  })
+
+  it('translates a raw RLS rejection on other tables generically', () => {
+    const msg = friendlyDbError({
+      code: '42501',
+      message: 'new row violates row-level security policy for table "contacts"',
+    })
+    expect(msg).toMatch(/permission/i)
+  })
+
+  it('lets a guard trigger\'s own 42501 message through untouched (returns null)', () => {
+    // migration 0016 raises plain-English text with errcode 42501 — callers
+    // fall back to error.message, which is already the friendly string.
+    expect(friendlyDbError({
+      code: '42501',
+      message: 'Deals can only be created for yourself or a teammate who shares deals with you. Assign the deal to yourself, or ask an admin to create it for another agent.',
+    })).toBeNull()
+  })
+
   it('returns null for unrecognized errors so callers can fall back', () => {
     expect(friendlyDbError({ code: '42P01', message: 'relation does not exist' })).toBeNull()
   })

@@ -59,7 +59,7 @@ const drawerLink = (label, onClick) => (
   <button className="btn btn--ghost btn--sm" style={{ fontSize: 11, padding: '2px 8px' }} onClick={onClick}>{label}</button>
 )
 
-export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }) {
+export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, dealOwnerCtx }) {
   const deals      = db.deals      || []
   const agents     = db.agents     || []
   const contacts   = db.contacts   || []
@@ -754,7 +754,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
       </div>
 
       <DealDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} deal={deal} initialTab={drawerTab}
-        agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} onSave={refreshDeal} />
+        agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} dealOwnerCtx={dealOwnerCtx} onSave={refreshDeal} />
     </div>
   )
 }

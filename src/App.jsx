@@ -215,6 +215,10 @@ export default function App() {
   const [route, setRoute] = useState('dashboard')
   const [collapsed, setCollapsed] = useState(false)
   const [activeAgentId, setActiveAgentId] = useState(null)
+  // The agent row actually linked to the Supabase login. activeAgentId can be
+  // repointed client-side ("Switch to" on the Team page), but RLS always acts
+  // as THIS agent — writes that carry an owner must be resolved against it.
+  const [authAgent, setAuthAgent] = useState(null) // { id, isAdmin }
   const [visibleAgentIds, setVisibleAgentIds] = useState([])
   const [dealAgentIds, setDealAgentIds]       = useState([])
   const [compose, setCompose] = useState(null)
@@ -339,6 +343,7 @@ export default function App() {
       // Office admin: prefer the explicit is_admin flag (migration 0005); fall
       // back to the free-text role for agents created before the column existed.
       const isAdminAgent = matched.is_admin === true || (matched.role?.toLowerCase().includes('admin') ?? false)
+      setAuthAgent({ id: matched.id, isAdmin: isAdminAgent })
 
       // ── Compute scoped agent ID lists ──────────────────────────────────────
       // Each team member row carries explicit share_* flags (default true).
@@ -455,6 +460,7 @@ export default function App() {
   const signOut = async () => {
     await supabase.auth.signOut()
     setDb(EMPTY_DB)
+    setAuthAgent(null)
     setNotifications([])
     setNeedsOnboarding(false)
     setLoading(true)
@@ -466,7 +472,11 @@ export default function App() {
   // Office admin: honor the explicit is_admin flag (migration 0005) first, then
   // fall back to the free-text role for profiles created before the column.
   const isAdmin     = activeAgent?.is_admin === true || (activeAgent?.role?.toLowerCase().includes('admin') ?? false)
-  const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin, visibleAgentIds, dealAgentIds }
+  // Everything resolveDealOwnerId (lib/services/deals.js) needs to pick a deal
+  // owner the database will accept — anchored to the LOGGED-IN agent, since RLS
+  // ignores the client-side active-agent switch.
+  const dealOwnerCtx = { authAgentId: authAgent?.id ?? null, authIsAdmin: authAgent?.isAdmin === true, dealAgentIds }
+  const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin, visibleAgentIds, dealAgentIds, dealOwnerCtx }
 
   if (loading) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', flexDirection: 'column', gap: 16 }}>
@@ -483,6 +493,7 @@ export default function App() {
           onComplete={(agent) => {
             setDb(p => ({ ...p, agents: [...p.agents, agent] }))
             setActiveAgentId(agent.id)
+            setAuthAgent({ id: agent.id, isAdmin: agent.is_admin === true || (agent.role?.toLowerCase().includes('admin') ?? false) })
             setNeedsOnboarding(false)
             pushToast(`Welcome, ${agent.name}!`)
           }}
@@ -751,7 +762,7 @@ export default function App() {
         </div>
       )}
 
-      <QuickAdd db={db} setDb={setDb} activeAgent={activeAgent} />
+      <QuickAdd db={db} setDb={setDb} activeAgent={activeAgent} dealOwnerCtx={dealOwnerCtx} />
       <ToastHost />
       <Analytics />
     </div>

@@ -6,6 +6,7 @@ import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown,
 import { fireWebhooks } from '../lib/webhooks.js'
 import { findMatchingBuyers } from '../lib/matching.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
+import { resolveDealOwnerId } from '../lib/services/deals.js'
 import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
 import OptionSelect from '../components/OptionSelect.jsx'
 
@@ -800,7 +801,7 @@ function CompsTab({ property, onUpdateComps }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave, go, setDb }) {
+function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, dealOwnerCtx, onSave, go, setDb }) {
   const blank = { address:'', city:'', state:'', zip:'', county:'', submarket:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{}, listing_expiry_date:'', price_history:[], comps:[] }
   const [form, setForm]             = useState(property || blank)
   const [errors, setErrors]         = useState({})
@@ -837,13 +838,16 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
       title:       form.address,
       property_id: property.id,
       contact_id:  form.linked_contact_id || null,
-      agent_id:    activeAgent?.id || form.assigned_agent_id || null,
+      // Owner must be one the deals RLS policy accepts for the LOGGED-IN agent
+      // — the active agent can be a switched view, and the property may belong
+      // to a teammate who doesn't share deals.
+      agent_id:    resolveDealOwnerId([activeAgent?.id, form.assigned_agent_id], dealOwnerCtx),
       stage:       'lead',
       value:       form.list_price ? Number(form.list_price) : null,
     }
     const { data, error } = await supabase.from('deals').insert([dealPayload]).select().single()
     setStartingDeal(false)
-    if (error) { pushToast(error.message, 'error'); return }
+    if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
     if (setDb) setDb(p => ({ ...p, deals: [data, ...(p.deals || [])] }))
     pushToast('Deal created — opening Pipeline')
     onClose()
@@ -1389,7 +1393,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
 
 // ─── Properties page ──────────────────────────────────────────────────────────
 
-export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgentIds }) {
+export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgentIds, dealOwnerCtx }) {
   const [view, setView]               = useState('grid')
   const [search, setSearch]           = useState('')
   const [filterType, setFilterType]   = useState('')
@@ -1561,7 +1565,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
         </div>
       )}
 
-      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={handleSave} go={go} setDb={setDb} />
+      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} dealOwnerCtx={dealOwnerCtx} onSave={handleSave} go={go} setDb={setDb} />
       {confirm && <ConfirmDialog message="This will permanently delete this property." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {radiusProp && (
         <RadiusMailingModal
