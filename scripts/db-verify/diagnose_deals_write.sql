@@ -2,9 +2,13 @@
 -- Supabase SQL Editor. Run each numbered query and share the output.
 --
 -- Interpreting the results:
---   1. deals policies — you want a row with cmd = ALL (or INSERT) whose
---      with_check is non-empty. If the only rows are SELECT (with_check NULL),
---      the insert path was dropped → EVERY agent fails. (migration 0016 fixes)
+--   1. deals policies — the KEY check for the "Start Deal" failure. If the
+--      using_expr or with_check contains `app_visible_deal_ids()` (a subquery
+--      over deals itself), INSERT ... RETURNING (what "Start Deal" does) is
+--      rejected for EVERY agent even though plain inserts work. After migration
+--      0016 both expressions should read `app_deal_visible(agent_id, id)`.
+--      Also: if the only rows are SELECT (with_check NULL), the insert path was
+--      dropped entirely. (migration 0016 fixes both.)
 --   2. app_is_admin body — must read `is_admin or role ilike '%admin%'`. If it
 --      only checks role, flagged admins with a non-admin role are denied.
 --   3. agent linkage — `linked = false` for an agent means their login is not

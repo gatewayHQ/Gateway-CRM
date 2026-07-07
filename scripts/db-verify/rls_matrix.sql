@@ -143,44 +143,56 @@ select assert_eq('admin insert stays unassigned',
   (select count(*) from deals where id='00000000-0000-0000-0000-0000000000d7'
      and agent_id is null), 1);
 
--- ── "Every agent fails to create a deal" regression ─────────────────────────
--- Reproduce the production-shaped drift where the deals policy lost its
--- INSERT/WITH CHECK arm (left SELECT-only when Phase B landed): reads still
--- work but EVERY insert is denied, admin or not. Then re-assert the canonical
--- policy (exactly what migration 0016 section 1 does) and confirm creation is
--- restored for a normal agent.
-reset role;
-drop policy if exists deals_agent_scope on deals;
-create policy deals_agent_scope on deals for select to authenticated
-  using (id in (select app_visible_deal_ids()));   -- drifted: SELECT only
+-- ── "Start Deal" INSERT ... RETURNING regression (the real production bug) ──
+-- The Properties "Start Deal" button inserts with .select() (INSERT ...
+-- RETURNING) to read the new deal back. Under a self-referential deals policy
+-- (`id in (select app_visible_deal_ids())`) that read-back is rejected for
+-- EVERY agent — the subquery re-scans `deals` and cannot see the row being
+-- inserted. schema.sql now uses direct predicates (app_deal_visible), so
+-- RETURNING must succeed for a normal agent, an admin, and a co-listing peer,
+-- while still rejecting a deal created for an unrelated agent.
 
-set role authenticated;
+-- Normal agent creating their OWN deal, WITH read-back — the exact failing
+-- path. The top-level RETURNING triggers the same RLS read-back check the
+-- Supabase .select() does; under the old self-referential policy it errors
+-- here (ON_ERROR_STOP aborts the run), so reaching the assert_eq means it
+-- succeeded.
+set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000d';
+insert into deals (id, title, agent_id, stage)
+  values ('00000000-0000-0000-0000-0000000000e1','Start Deal self','00000000-0000-0000-0000-00000000000d','lead') returning id;
+select assert_eq('start-deal RETURNING self-owned (normal agent)',
+  (select count(*) from deals where id='00000000-0000-0000-0000-0000000000e1'), 1);
+
+-- Admin creating a deal owned by another agent, WITH read-back
+set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000a';
+insert into deals (id, title, agent_id, stage)
+  values ('00000000-0000-0000-0000-0000000000e2','Start Deal admin','00000000-0000-0000-0000-00000000000f','lead') returning id;
+select assert_eq('start-deal RETURNING (admin, any owner)',
+  (select count(*) from deals where id='00000000-0000-0000-0000-0000000000e2'), 1);
+
+-- Co-listing peer: Nic reads back (via UPDATE ... RETURNING) a deal on which he
+-- is a commission participant. Seed the deal + commission as admin first.
+set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000a';
+insert into deals (id, title, agent_id, stage)
+  values ('00000000-0000-0000-0000-0000000000e3','Colisted for Nic','00000000-0000-0000-0000-00000000000d','lead');
+insert into commissions (deal_id, participants) values
+  ('00000000-0000-0000-0000-0000000000e3',
+   '[{"id":"x","agent_id":"00000000-0000-0000-0000-00000000000e","name":"Nic","allocation_pct":50}]'::jsonb);
+set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000e';
+update deals set stage='offer' where id='00000000-0000-0000-0000-0000000000e3' returning id;
+select assert_eq('colisted peer RETURNING read-back',
+  (select count(*) from deals where id='00000000-0000-0000-0000-0000000000e3' and stage='offer'), 1);
+
+-- A normal agent creating a deal for an unrelated agent, WITH read-back, is
+-- still rejected (the owner guard turns it into a clear 42501).
 set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000d';
 do $$ begin
   insert into deals (title, agent_id, stage)
-    values ('drift self-owned', '00000000-0000-0000-0000-00000000000d', 'lead');
-  raise exception 'FAIL: insert succeeded under SELECT-only drift';
+    values ('sneaky returning', '00000000-0000-0000-0000-000000000010', 'lead') returning id;
+  raise exception 'FAIL: cross-agent RETURNING insert was accepted';
 exception when insufficient_privilege or sqlstate '42501' then
-  raise notice 'PASS drift reproduced: self-owned insert denied for a normal agent';
+  raise notice 'PASS cross-agent RETURNING insert rejected';
 end $$;
-
--- Repair (migration 0016 section 1): restore the FOR ALL policy with WITH CHECK
-reset role;
-drop policy if exists deals_agent_scope on deals;
-create policy deals_agent_scope on deals for all to authenticated
-  using (id in (select app_visible_deal_ids()))
-  with check (
-    app_is_admin()
-    or agent_id in (select app_visible_agent_ids('deals'))
-    or id in (select app_visible_deal_ids())
-  );
-
-set role authenticated;
-set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000d';
-insert into deals (id, title, agent_id, stage)
-  values ('00000000-0000-0000-0000-0000000000d9', 'D9 after repair', '00000000-0000-0000-0000-00000000000d', 'lead');
-select assert_eq('repair restores self-owned insert',
-  (select count(*) from deals where id='00000000-0000-0000-0000-0000000000d9'), 1);
 
 reset role;
 select 'ALL RLS TESTS PASSED' as result;

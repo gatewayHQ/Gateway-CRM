@@ -1204,17 +1204,43 @@ create policy tasks_agent_scope on tasks for all to authenticated
   using      (agent_id = app_current_agent_id())
   with check (agent_id = app_current_agent_id());
 
+-- Direct-predicate visibility for ONE deal row, evaluated from its own
+-- agent_id + id. Semantically equal to `p_deal_id in (app_visible_deal_ids())`
+-- but safe inside INSERT ... RETURNING because it never re-scans `deals` for
+-- the row being inserted (see the deals policy note below).
+create or replace function app_deal_visible(p_agent_id uuid, p_deal_id uuid)
+returns boolean
+language sql stable security definer set search_path = public as $$
+  select app_is_admin()
+      or p_agent_id in (select app_visible_agent_ids('deals'))
+      or exists (
+        select 1 from commissions c
+        cross join lateral jsonb_array_elements(coalesce(c.participants, '[]'::jsonb)) p
+        where c.deal_id = p_deal_id
+          and (p->>'agent_id') ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          and (p->>'agent_id')::uuid = app_current_agent_id()
+      );
+$$;
+grant execute on function app_deal_visible(uuid, uuid) to authenticated;
+
 -- DEALS — own + team-shared + co-listed; admins see all. The with check arm
 -- lets an agent create deals owned by themselves / a sharing peer, and lets a
 -- co-listed participant edit a deal they can already see.
+--
+-- Written as DIRECT predicates on the row's own columns (agent_id, plus a
+-- correlated commissions lookup on deals.id) rather than the self-referential
+-- `id in (select app_visible_deal_ids())`. That earlier form broke INSERT ...
+-- RETURNING (what the Properties "Start Deal" button does via .select()): the
+-- read-back check re-scans `deals` for the row it is mid-inserting, never finds
+-- it, and fails with `new row violates row-level security policy for table
+-- "deals"` — for EVERY agent, admins included. A plain INSERT (the deal-area
+-- forms) was unaffected because it never reads the row back. The direct form is
+-- semantically identical for normal reads (app_visible_deal_ids() is exactly
+-- this union) but evaluates correctly against the new row during RETURNING.
 drop policy if exists deals_agent_scope on deals;
 create policy deals_agent_scope on deals for all to authenticated
-  using (id in (select app_visible_deal_ids()))
-  with check (
-    app_is_admin()
-    or agent_id in (select app_visible_agent_ids('deals'))
-    or id in (select app_visible_deal_ids())
-  );
+  using      (app_deal_visible(agent_id, id))
+  with check (app_deal_visible(agent_id, id));
 
 -- DEAL OWNER GUARD (migration 0016) — makes the WITH CHECK above livable for
 -- the app's creation flows: a non-admin insert with no owner is defaulted to

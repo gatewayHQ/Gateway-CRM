@@ -1,12 +1,31 @@
--- Migration 0016 — Deal owner guard + app_is_admin() drift repair
+-- Migration 0016 — Fix "Start Deal" RLS failure (INSERT ... RETURNING) +
+--                   deal owner guard + app_is_admin() drift repair
 -- ===========================================================================
--- BUG THIS FIXES (2026-07): with 0011 Phase B enforcement live, an agent
--- clicking "Start Deal" on a property could hit the raw Postgres error
+-- BUG THIS FIXES (2026-07): with 0011 Phase B enforcement live, clicking
+-- "Start Deal" on a property card failed for EVERY agent (admins included)
+-- with the raw Postgres error
 --   new row violates row-level security policy for table "deals"
+-- even though creating a deal in the Pipeline / deal area worked fine.
 --
--- ROOT CAUSE (two independent problems, both fixed here):
+-- ROOT CAUSE — the ACTUAL production symptom (problem C below):
 --
--- A. app_is_admin() DRIFT — the primary cause seen in production. Migration
+-- C. SELF-REFERENTIAL deals POLICY breaks INSERT ... RETURNING. The deals
+--    read policy was `using (id in (select app_visible_deal_ids()))`, and
+--    app_visible_deal_ids() is a subquery OVER THE deals TABLE. The Properties
+--    "Start Deal" button inserts with .select() (INSERT ... RETURNING) to read
+--    the new row back; Postgres then checks the new row against that policy,
+--    the subquery re-scans `deals` for a row it is still inserting, never finds
+--    it, and the read-back is rejected as an RLS violation — for every agent,
+--    admins included (the admin branch also only lists EXISTING deal ids). The
+--    deal-area forms (Pipeline drawer, Quick Add) use a plain INSERT with no
+--    read-back, so they were never affected. Section 1 rewrites the policy to
+--    test the row's OWN columns directly (via app_deal_visible(agent_id, id)),
+--    which evaluates correctly on the new row during RETURNING and is
+--    semantically identical to the old form for normal reads.
+--
+-- ROOT CAUSE — two latent problems fixed at the same time:
+--
+-- A. app_is_admin() DRIFT — Migration
 --    0002 defined app_is_admin() as `bool_or(role ilike '%admin%')` (role
 --    TEXT only). 0005 added the explicit agents.is_admin flag and 0011 /
 --    the production milestone-0 script redefined app_is_admin() to
@@ -119,22 +138,38 @@ language sql stable security definer set search_path = public as $$
     and (p->>'agent_id')::uuid = app_current_agent_id();
 $$;
 
+-- Direct-predicate visibility for ONE deal row (its own agent_id + id). This
+-- is what makes INSERT ... RETURNING work: it never re-scans `deals` for the
+-- row being inserted. Semantically equal to `p_deal_id in
+-- (app_visible_deal_ids())` for normal reads.
+create or replace function app_deal_visible(p_agent_id uuid, p_deal_id uuid)
+returns boolean
+language sql stable security definer set search_path = public as $$
+  select app_is_admin()
+      or p_agent_id in (select app_visible_agent_ids('deals'))
+      or exists (
+        select 1 from commissions c
+        cross join lateral jsonb_array_elements(coalesce(c.participants, '[]'::jsonb)) p
+        where c.deal_id = p_deal_id
+          and (p->>'agent_id') ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          and (p->>'agent_id')::uuid = app_current_agent_id()
+      );
+$$;
+
 grant execute on function app_current_agent_id()      to authenticated;
 grant execute on function app_is_admin()              to authenticated;
 grant execute on function app_visible_agent_ids(text) to authenticated;
 grant execute on function app_visible_deal_ids()      to authenticated;
+grant execute on function app_deal_visible(uuid,uuid) to authenticated;
 
--- DEALS policy — own + team-shared + co-listed; admins all. The WITH CHECK arm
--- is what lets an agent CREATE a deal owned by themselves / a sharing peer. If
--- this policy had drifted to SELECT-only, every insert was being denied.
+-- DEALS policy — own + team-shared + co-listed; admins all. Uses direct
+-- predicates (app_deal_visible on the row's own agent_id + id) instead of the
+-- self-referential `id in (select app_visible_deal_ids())`, which broke the
+-- "Start Deal" INSERT ... RETURNING for everyone (see problem C in the header).
 drop policy if exists deals_agent_scope on deals;
 create policy deals_agent_scope on deals for all to authenticated
-  using (id in (select app_visible_deal_ids()))
-  with check (
-    app_is_admin()
-    or agent_id in (select app_visible_agent_ids('deals'))
-    or id in (select app_visible_deal_ids())
-  );
+  using      (app_deal_visible(agent_id, id))
+  with check (app_deal_visible(agent_id, id));
 
 -- ── 2. Deal owner guard ─────────────────────────────────────────────────────
 

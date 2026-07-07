@@ -17,10 +17,15 @@ negative deal value, and that an agent cannot create a deal owned by an
 unrelated agent. It also covers the deal owner guard (migration 0016): an
 ownerless non-admin insert succeeds and lands owned by its creator (the
 "Start Deal" regression), a deal-sharing peer may be named as owner, and an
-admin can still create a genuinely unassigned deal. Finally it guards the
+admin can still create a genuinely unassigned deal. It guards the
 `app_is_admin()` drift that hit production: an agent flagged `is_admin = true`
 whose role text has no "admin" substring must still be treated as an admin by
-every policy (see the flag-admin agent in the seed).
+every policy (see the flag-admin agent in the seed). Finally it covers the
+"Start Deal" `INSERT ... RETURNING` regression: the deals policy must evaluate
+against the new row via direct predicates (`app_deal_visible`) so reading a
+freshly-inserted deal back succeeds for the creator, an admin, and a co-listing
+peer — a self-referential `id in (select app_visible_deal_ids())` policy fails
+that read-back for everyone.
 
 ## Run it
 
@@ -32,7 +37,7 @@ createdb crm_verify
 psql -d crm_verify -v ON_ERROR_STOP=1 -f scripts/db-verify/supabase_shim.sql
 psql -d crm_verify -v ON_ERROR_STOP=1 -f src/lib/schema.sql
 psql -d crm_verify -v ON_ERROR_STOP=1 -f scripts/db-verify/rls_matrix.sql
-# expect: NOTICE PASS ... ×24 and "ALL RLS TESTS PASSED"
+# expect: NOTICE PASS ... ×26 and "ALL RLS TESTS PASSED"
 dropdb crm_verify
 ```
 
