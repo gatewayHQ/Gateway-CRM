@@ -44,9 +44,36 @@
 --          0005 (agents.is_admin). Idempotent; safe to re-run.
 -- ===========================================================================
 
--- ── 1. Repair app_is_admin() so it honors the explicit is_admin flag ────────
--- (Identical to the definition in src/lib/schema.sql / 0011 — restated here so
--- applying THIS migration is sufficient to fix a drifted database.)
+-- ── 1. Repair the whole deal-WRITE path (helpers + policy) ──────────────────
+-- All statements below are IDENTICAL to src/lib/schema.sql / 0011 — restated
+-- here (create-or-replace / drop-if-exists+create) so applying THIS migration
+-- alone brings a drifted database back to the canonical definitions.
+--
+-- Why restate all of it, not just app_is_admin(): the symptom "EVERY agent
+-- (not only flagged admins) fails to create a deal" cannot be explained by the
+-- admin flag alone — a regular agent creating a deal they own themselves
+-- should pass RLS. That points to drift in the deal-write path as a whole: a
+-- deals policy that lost its INSERT/WITH CHECK arm (e.g. left as SELECT-only
+-- when Phase B landed), or a stale helper. Re-asserting the canonical policy
+-- as a PERMISSIVE `for all` policy guarantees a correct insert path exists —
+-- permissive policies OR together, so this restores creation for every
+-- properly-linked agent regardless of what else drifted.
+--
+-- NOTE: this does NOT re-create or drop `allow_all`; it only restores the
+-- scoped definitions. If an account still cannot create a deal after this, its
+-- agents.auth_id is not linked to the login (app_current_agent_id() is null) —
+-- a data fix, not a policy one; the trigger in section 2 surfaces that clearly.
+
+-- The agent row for the current login.
+create or replace function app_current_agent_id()
+returns uuid
+language sql stable security definer set search_path = public as $$
+  select id from agents where auth_id = auth.uid() limit 1;
+$$;
+
+-- Admin check — honors the explicit is_admin flag (0005) with the legacy
+-- role-string fallback. The role-only drift of this function is what made a
+-- flagged admin (role without "admin") fail every policy.
 create or replace function app_is_admin()
 returns boolean
 language sql stable security definer set search_path = public as $$
@@ -54,7 +81,60 @@ language sql stable security definer set search_path = public as $$
   from agents where auth_id = auth.uid();
 $$;
 
-grant execute on function app_is_admin() to authenticated;
+-- Agent ids the current user may act for on a dimension: self + sharing peers.
+create or replace function app_visible_agent_ids(dimension text)
+returns setof uuid
+language sql stable security definer set search_path = public as $$
+  select app_current_agent_id()
+  union
+  select peer.agent_id
+  from team_splits me
+  join team_splits peer
+    on peer.team_id = me.team_id
+   and peer.agent_id <> me.agent_id
+  where me.agent_id = app_current_agent_id()
+    and case dimension
+          when 'contacts'   then peer.share_contacts
+          when 'properties' then peer.share_properties
+          when 'deals'      then peer.share_deals
+          else false
+        end is not false;
+$$;
+
+-- Every deal the current user may see: all (admin), own + team-shared, or
+-- co-listed (a paid participant on the deal's commission).
+create or replace function app_visible_deal_ids()
+returns setof uuid
+language sql stable security definer set search_path = public as $$
+  select d.id from deals d where app_is_admin()
+  union
+  select d.id from deals d
+  where d.agent_id in (select app_visible_agent_ids('deals'))
+  union
+  select c.deal_id
+  from commissions c
+  cross join lateral jsonb_array_elements(coalesce(c.participants, '[]'::jsonb)) p
+  where (p->>'agent_id') is not null
+    and (p->>'agent_id') ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    and (p->>'agent_id')::uuid = app_current_agent_id();
+$$;
+
+grant execute on function app_current_agent_id()      to authenticated;
+grant execute on function app_is_admin()              to authenticated;
+grant execute on function app_visible_agent_ids(text) to authenticated;
+grant execute on function app_visible_deal_ids()      to authenticated;
+
+-- DEALS policy — own + team-shared + co-listed; admins all. The WITH CHECK arm
+-- is what lets an agent CREATE a deal owned by themselves / a sharing peer. If
+-- this policy had drifted to SELECT-only, every insert was being denied.
+drop policy if exists deals_agent_scope on deals;
+create policy deals_agent_scope on deals for all to authenticated
+  using (id in (select app_visible_deal_ids()))
+  with check (
+    app_is_admin()
+    or agent_id in (select app_visible_agent_ids('deals'))
+    or id in (select app_visible_deal_ids())
+  );
 
 -- ── 2. Deal owner guard ─────────────────────────────────────────────────────
 

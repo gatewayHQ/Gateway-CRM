@@ -143,5 +143,44 @@ select assert_eq('admin insert stays unassigned',
   (select count(*) from deals where id='00000000-0000-0000-0000-0000000000d7'
      and agent_id is null), 1);
 
+-- ── "Every agent fails to create a deal" regression ─────────────────────────
+-- Reproduce the production-shaped drift where the deals policy lost its
+-- INSERT/WITH CHECK arm (left SELECT-only when Phase B landed): reads still
+-- work but EVERY insert is denied, admin or not. Then re-assert the canonical
+-- policy (exactly what migration 0016 section 1 does) and confirm creation is
+-- restored for a normal agent.
+reset role;
+drop policy if exists deals_agent_scope on deals;
+create policy deals_agent_scope on deals for select to authenticated
+  using (id in (select app_visible_deal_ids()));   -- drifted: SELECT only
+
+set role authenticated;
+set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000d';
+do $$ begin
+  insert into deals (title, agent_id, stage)
+    values ('drift self-owned', '00000000-0000-0000-0000-00000000000d', 'lead');
+  raise exception 'FAIL: insert succeeded under SELECT-only drift';
+exception when insufficient_privilege or sqlstate '42501' then
+  raise notice 'PASS drift reproduced: self-owned insert denied for a normal agent';
+end $$;
+
+-- Repair (migration 0016 section 1): restore the FOR ALL policy with WITH CHECK
+reset role;
+drop policy if exists deals_agent_scope on deals;
+create policy deals_agent_scope on deals for all to authenticated
+  using (id in (select app_visible_deal_ids()))
+  with check (
+    app_is_admin()
+    or agent_id in (select app_visible_agent_ids('deals'))
+    or id in (select app_visible_deal_ids())
+  );
+
+set role authenticated;
+set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000d';
+insert into deals (id, title, agent_id, stage)
+  values ('00000000-0000-0000-0000-0000000000d9', 'D9 after repair', '00000000-0000-0000-0000-00000000000d', 'lead');
+select assert_eq('repair restores self-owned insert',
+  (select count(*) from deals where id='00000000-0000-0000-0000-0000000000d9'), 1);
+
 reset role;
 select 'ALL RLS TESTS PASSED' as result;

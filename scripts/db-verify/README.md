@@ -32,7 +32,7 @@ createdb crm_verify
 psql -d crm_verify -v ON_ERROR_STOP=1 -f scripts/db-verify/supabase_shim.sql
 psql -d crm_verify -v ON_ERROR_STOP=1 -f src/lib/schema.sql
 psql -d crm_verify -v ON_ERROR_STOP=1 -f scripts/db-verify/rls_matrix.sql
-# expect: NOTICE PASS ... ×22 and "ALL RLS TESTS PASSED"
+# expect: NOTICE PASS ... ×24 and "ALL RLS TESTS PASSED"
 dropdb crm_verify
 ```
 
