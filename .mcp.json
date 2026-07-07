@@ -1,3 +1,12 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "boldsign": {
+      "command": "npx",
+      "args": ["-y", "@boldsign/mcp"],
+      "env": {
+        "BOLDSIGN_API_KEY": "${BOLDSIGN_API_KEY}",
+        "BOLDSIGN_API_REGION": "US"
+      }
+    }
+  }
 }
