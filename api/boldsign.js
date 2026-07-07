@@ -1,0 +1,324 @@
+import { applyJsonCors, requireAgent, errorResponse, getServiceClient } from './_lib/auth.js'
+import closingPacketHandler from './_handlers/closing-packet.js'
+import { PDFDocument } from 'pdf-lib'
+
+// ─── BoldSign REST API client ────────────────────────────────────────────────
+// https://developers.boldsign.com — auth via X-API-KEY header, base /v1.
+// Sandbox vs Live is decided entirely by WHICH api key is configured (there is
+// no per-request test flag like SignWell had); a sandbox key never sends real
+// email or consumes credits.
+const API_BASE = 'https://api.boldsign.com/v1'
+const API_KEY  = process.env.BOLDSIGN_API_KEY
+
+async function boldsign(path, { method = 'GET', form, json, raw = false } = {}) {
+  const headers = { 'X-API-KEY': API_KEY, Accept: 'application/json' }
+  let body
+  if (form) {
+    body = form                       // FormData — fetch sets the multipart boundary itself
+  } else if (json !== undefined) {
+    headers['Content-Type'] = 'application/json'
+    body = JSON.stringify(json)
+  }
+  const r = await fetch(`${API_BASE}${path}`, { method, headers, body })
+  if (raw) return r
+  const text = await r.text()
+  let data = {}
+  try { data = text ? JSON.parse(text) : {} } catch { data = { message: text } }
+  if (!r.ok) {
+    const msg = data?.error
+              || data?.message
+              || (data?.errors && JSON.stringify(data.errors))
+              || `BoldSign API ${r.status}`
+    const err = new Error(msg)
+    err.status = r.status
+    err.data   = data
+    throw err
+  }
+  return data
+}
+
+// ─── Field placement ─────────────────────────────────────────────────────────
+// BoldSign requires at least one form field per signer. We send directly (no
+// embedded editor), so we place the fields programmatically:
+//   • If a signer carries explicit `tabs` (type/page/x/y), we honor them.
+//   • Otherwise we auto-place a Signature + DateSigned near the bottom of the
+//     LAST page, stacking each signer upward so blocks don't overlap.
+// BoldSign bounds use a TOP-LEFT origin in PDF points (72/inch), y increasing
+// downward — so a larger y sits lower on the page. We read the page size with
+// pdf-lib only to learn the last page's dimensions (pdf-lib's own draw origin
+// is bottom-left, but we never draw with it here). These defaults are a
+// sensible starting point; tune the coordinates if a document needs it.
+const FIELD_TYPES = {
+  signature: 'Signature',
+  initials:  'Initial',
+  date:      'DateSigned',
+  checkbox:  'CheckBox',
+  text:      'TextBox',
+}
+
+async function buildSigners(orderedSigners, pdfBuffer) {
+  // Read the PDF once to learn the last page + its dimensions for defaults.
+  let lastPage = 1, pageW = 612, pageH = 792   // US-Letter fallback
+  try {
+    const doc  = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true })
+    lastPage   = doc.getPageCount() || 1
+    const page = doc.getPage(lastPage - 1)
+    pageW = page.getWidth()
+    pageH = page.getHeight()
+  } catch { /* fall back to Letter defaults — send still succeeds */ }
+
+  return orderedSigners.map((s, i) => {
+    let formFields
+    if (Array.isArray(s.tabs) && s.tabs.length) {
+      // Explicit coordinates supplied by the caller.
+      formFields = s.tabs.map((t, j) => ({
+        id:         t.api_id || `f_${i + 1}_${j + 1}`,
+        fieldType:  FIELD_TYPES[t.type] || 'Signature',
+        pageNumber: Number(t.page) || 1,
+        bounds: {
+          x:      Number(t.xPosition) || 0,
+          y:      Number(t.yPosition) || 0,
+          width:  Number(t.width)  || 180,
+          height: Number(t.height) || 35,
+        },
+        isRequired: t.required !== false,
+      }))
+    } else {
+      // Auto-placed signature + date on the last page, one row per signer.
+      const rowY = Math.max(40, pageH - 120 - i * 80)
+      formFields = [
+        { id: `sig_${i + 1}`,  fieldType: 'Signature',  pageNumber: lastPage,
+          bounds: { x: 60,  y: rowY, width: 180, height: 35 }, isRequired: true },
+        { id: `date_${i + 1}`, fieldType: 'DateSigned', pageNumber: lastPage,
+          bounds: { x: Math.min(300, pageW - 150), y: rowY, width: 130, height: 25 }, isRequired: false },
+      ]
+    }
+    return {
+      name:         s.name,
+      emailAddress: s.email,
+      signerType:   'Signer',
+      signerOrder:  Number(s.routingOrder || 1),
+      formFields,
+    }
+  })
+}
+
+// ─── Status normalization ─────────────────────────────────────────────────────
+// BoldSign statuses: None / Sent / InProgress / WaitingForOthers / NeedToSign /
+// Completed / Declined / Revoked / Expired / Viewed. Frontend expects lowercase
+// docusign-style values, so we normalize on every read.
+function normalizeStatus(s) {
+  const v = String(s || '').toLowerCase()
+  if (v === 'completed' || v === 'signed')                 return 'completed'
+  if (v === 'declined')                                    return 'declined'
+  if (v === 'revoked' || v === 'voided' || v === 'canceled' || v === 'cancelled') return 'voided'
+  if (v === 'expired')                                     return 'voided'
+  if (v === 'viewed' || v === 'delivered')                 return 'delivered'
+  if (v === 'sent' || v === 'inprogress' || v === 'waitingforothers' || v === 'needtosign') return 'sent'
+  return v || 'sent'
+}
+
+// BoldSign timestamps come back as Unix epoch seconds. Accept a number (seconds)
+// or an already-formatted date string; return an ISO string or null.
+function toIso(v) {
+  if (v == null) return null
+  if (typeof v === 'number') return new Date(v * 1000).toISOString()
+  const d = new Date(v)
+  return isNaN(d.getTime()) ? null : d.toISOString()
+}
+
+// ─── Handler ──────────────────────────────────────────────────────────────────
+export default async function handler(req, res) {
+  applyJsonCors(res)
+  if (req.method === 'OPTIONS') return res.status(200).end()
+  if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' })
+
+  const body = req.body || {}
+
+  // BoldSign webhook payloads do NOT carry an `action` field. Route those to the
+  // webhook handler, which authenticates by document-id round-trip (the document
+  // must exist in boldsign_documents for the update to happen).
+  if (!body.action) return handleWebhook(req, res)
+
+  // Co-hosted closing-packet handler (lives in api/_handlers/, no extra Vercel
+  // function). Admin auth is enforced inside the handler.
+  if (body.action === 'closing-packet') return closingPacketHandler(req, res)
+
+  if (!API_KEY) {
+    return res.status(500).json({
+      error: 'BoldSign environment variables not configured',
+      missing: { BOLDSIGN_API_KEY: true },
+    })
+  }
+
+  // Every authenticated frontend action — send, status, download, remind —
+  // requires a real session. Without this gate, anyone with the public URL could
+  // send signature requests on the brokerage's BoldSign account.
+  let actor
+  try { actor = await requireAgent(req) } catch (e) { return errorResponse(res, e) }
+
+  if (body.action === 'debug') {
+    return res.json({
+      apiBase:       API_BASE,
+      apiKeyPresent: Boolean(API_KEY),
+      apiKeyPrefix:  API_KEY ? `${API_KEY.slice(0, 6)}…` : null,
+      actor:         { agent: actor.agent.name, isAdmin: actor.isAdmin },
+    })
+  }
+
+  try {
+    if (body.action === 'send') {
+      const { signers, documentBase64, documentName, emailSubject } = body
+      if (!documentBase64) return res.status(400).json({ error: 'documentBase64 required' })
+      if (!signers?.length) return res.status(400).json({ error: 'At least one signer required' })
+
+      const orderedSigners = [...signers].sort((a, b) =>
+        Number(a.routingOrder || 1) - Number(b.routingOrder || 1)
+      )
+      const hasOrder = orderedSigners.some(s => Number(s.routingOrder || 1) !== 1)
+
+      const pdfBuffer     = Buffer.from(documentBase64, 'base64')
+      const signerPayload = await buildSigners(orderedSigners, pdfBuffer)
+
+      // BoldSign send = multipart/form-data: Files (binary) + JSON string fields.
+      const form = new FormData()
+      form.append('Title',              documentName || 'Document')
+      form.append('Message',            emailSubject || 'Please sign this document')
+      form.append('EnableSigningOrder', String(hasOrder))
+      form.append('Signers',            JSON.stringify(signerPayload))
+      form.append('Files', new Blob([pdfBuffer], { type: 'application/pdf' }), documentName || 'document.pdf')
+
+      const data = await boldsign('/document/send', { method: 'POST', form })
+
+      return res.json({
+        envelopeId: data.documentId,   // alias for app compatibility
+        documentId: data.documentId,
+        status:     'sent',
+      })
+    }
+
+    if (body.action === 'status') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+      const data = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+      return res.json({
+        status:            normalizeStatus(data.status),
+        sentDateTime:      toIso(data.createdDate || data.sentDate || null),
+        completedDateTime: toIso(data.completedDate || data.signedDate || null),
+      })
+    }
+
+    if (body.action === 'download') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+      // BoldSign returns the signed PDF bytes directly (not a JSON url).
+      const r = await boldsign(`/document/download?documentId=${encodeURIComponent(id)}`, { raw: true })
+      if (!r.ok) return res.status(400).json({ error: 'Completed PDF not available' })
+      const buffer = await r.arrayBuffer()
+      return res.json({
+        base64:      Buffer.from(buffer).toString('base64'),
+        contentType: 'application/pdf',
+      })
+    }
+
+    if (body.action === 'remind') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+      await boldsign(`/document/remind?documentId=${encodeURIComponent(id)}`, { method: 'POST', json: {} })
+      return res.json({ ok: true })
+    }
+
+    return res.status(400).json({ error: 'Unknown action' })
+  } catch (err) {
+    return res.status(err.status || 500).json({ error: err.message })
+  }
+}
+
+// ─── BoldSign webhook handler ──────────────────────────────────────────────────
+// BoldSign POSTs document lifecycle events (Sent, Viewed, Signed, Completed,
+// Declined, Revoked, Expired) to the registered callback URL as:
+//   { event: { eventType, environment, ... }, data: { documentId, status, ... } }
+//
+// Register webhook (one time), in the BoldSign dashboard → Settings → API →
+// Webhooks, or via API:
+//   curl -X POST https://api.boldsign.com/v1/webhook \
+//     -H "X-API-KEY: $BOLDSIGN_API_KEY" \
+//     -H "Content-Type: application/json" \
+//     -d '{"url":"https://<your-domain>/api/boldsign","events":["Completed","Declined","Sent","Viewed","Revoked","Expired"]}'
+//
+async function handleWebhook(req, res) {
+  let supabase
+  try { supabase = getServiceClient() }
+  catch (e) { return res.status(200).json({ received: true, error: e.message }) }
+
+  try {
+    const body = req.body || {}
+
+    // Defensive extraction — accept the documented { event, data } shape as well
+    // as any flatter variant.
+    const eventName =
+      body?.event?.eventType ||
+      body?.event?.type      ||
+      body?.eventType        ||
+      ''
+
+    const doc =
+      body?.data          ||
+      body?.data?.document ||
+      body?.document       ||
+      body
+
+    const documentId = doc?.documentId || doc?.id || body?.documentId
+    const rawStatus  = doc?.status || eventName
+    if (!documentId) return res.status(200).json({ received: true, note: 'No document id' })
+
+    const status      = normalizeStatus(rawStatus)
+    const completedAt = toIso(doc?.completedDate || doc?.signedDate || null)
+
+    const { data: record } = await supabase
+      .from('boldsign_documents')
+      .select('*, deals(id, agent_id, title)')
+      .eq('document_id', documentId)
+      .maybeSingle()
+
+    if (!record) return res.status(200).json({ received: true, note: 'Document not tracked' })
+
+    const patch = { status }
+    if (completedAt) patch.completed_at = completedAt
+    await supabase.from('boldsign_documents').update(patch).eq('document_id', documentId)
+
+    if (status === 'completed') {
+      // Download signed PDF + stash it in deal-documents storage so agents can
+      // grab it without round-tripping the BoldSign API.
+      try {
+        const r = await boldsign(`/document/download?documentId=${encodeURIComponent(documentId)}`, { raw: true })
+        if (r.ok) {
+          const pdfBuffer   = await r.arrayBuffer()
+          const baseName    = (record.document_name || 'document').replace(/\.pdf$/i, '')
+          const storagePath = `deal-${record.deal_id}/${Date.now()}-signed-${baseName}.pdf`
+          await supabase.storage.from('deal-documents').upload(
+            storagePath, Buffer.from(pdfBuffer), { contentType: 'application/pdf', upsert: false }
+          )
+        }
+      } catch (_) { /* non-fatal — status was already saved */ }
+
+      const deal = record.deals
+      if (deal?.agent_id) {
+        await supabase.from('agent_notifications').insert([{
+          agent_id:    deal.agent_id,
+          deal_id:     record.deal_id,
+          envelope_id: documentId,
+          title:       'Document Signed',
+          message:     `"${record.document_name || 'Document'}" for ${deal.title || 'your deal'} has been fully signed by ${record.signer_name || 'the signer'}. The signed copy has been saved to the deal's Documents tab.`,
+          type:        'document_signed',
+        }])
+      }
+    }
+
+    return res.status(200).json({ received: true, documentId, status })
+  } catch (err) {
+    return res.status(200).json({ received: true, error: err.message })
+  }
+}
+
+// (Closing packet generator moved to api/_handlers/closing-packet.js)

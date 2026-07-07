@@ -26,7 +26,7 @@ export const TABLES = Object.freeze({
   DOCUMENTS:           'documents',
   DOCUMENT_VERSIONS:   'document_versions',
   PROPERTIES:          'properties',
-  SIGNWELL_DOCUMENTS:  'signwell_documents',
+  BOLDSIGN_DOCUMENTS:  'boldsign_documents',
   TASKS:               'tasks',
   TEAMS:               'teams',
   TEAM_SPLITS:         'team_splits',
@@ -45,7 +45,7 @@ export const REVIEW_STATUS = Object.freeze({
 // Document-version "source" values. Mirrors the CHECK constraint.
 export const DOC_SOURCE = Object.freeze({
   UPLOAD:         'upload',
-  SIGNWELL:       'signwell',
+  BOLDSIGN:       'boldsign',
   CLOSING_PACKET: 'closing_packet',
   IMPORT:         'import',
 })

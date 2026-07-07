@@ -1057,13 +1057,13 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
   )
 }
 
-// ── Send for Signature modal — drives SignWell document creation ────────────
+// ── Send for Signature modal — drives BoldSign document creation ────────────
 // Flow:
 //   1. Agent fills in signers + picks a PDF here in the CRM
-//   2. We create a SignWell draft document via /api/signwell
-//   3. SignWell's editor opens in a new tab where the agent drops
-//      signature/initial/date fields and clicks Send from SignWell's UI
-//   4. SignWell webhook hits /api/signwell → status flips sent → completed
+//   2. We POST the PDF + signers to /api/boldsign, which auto-places a
+//      signature + date field per signer and sends immediately via BoldSign
+//   3. BoldSign emails each signer; they sign in their browser
+//   4. BoldSign webhook hits /api/boldsign → status flips sent → completed
 function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent, onClose, onSent }) {
   // Primary signer: contact linked directly to the deal
   const contact      = contacts?.find(c => c.id === deal?.contact_id)
@@ -1118,7 +1118,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     const r = new FileReader(); r.onload = e => res(e.target.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(f)
   })
 
-  const openInSignWell = async () => {
+  const sendForSignature = async () => {
     const invalid = signers.find(s => !s.name.trim() || !s.email.trim())
     if (invalid) { pushToast('All signers need a name and email', 'error'); return }
     if (!file && !pickedFile) { pushToast('Select or upload a document', 'error'); return }
@@ -1148,11 +1148,10 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       name: s.name, email: s.email, routingOrder: s.routingOrder,
     }))
 
-    const resp = await fetch('/api/signwell', {
+    const resp = await fetch('/api/boldsign', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         action:         'send',
-        draft:          true,                // open in SignWell editor, don't send yet
         emailSubject:   subject,
         documentBase64: base64,
         documentName:   finalDocName,
@@ -1162,21 +1161,21 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     const data = await resp.json()
     setSending(false)
     if (data.error) { pushToast(data.error, 'error'); return }
-    if (!data.embeddedEditUrl) { pushToast('SignWell did not return an editor URL', 'error'); return }
+    if (!data.documentId && !data.envelopeId) { pushToast('BoldSign did not return a document id', 'error'); return }
 
-    await supabase.from('signwell_documents').insert([{
+    await supabase.from('boldsign_documents').insert([{
       deal_id:       deal.id,
+      agent_id:      activeAgent?.id || null,
       document_id:   data.documentId || data.envelopeId,
       signer_name:   allSigners.map(s => s.name).join(', '),
       signer_email:  allSigners.map(s => s.email).join(', '),
       document_name: finalDocName,
       subject,
-      status:        'draft',
+      signers:       signerPayload,
+      status:        'sent',
     }])
 
-    // Pop the SignWell editor — user places fields there and hits Send.
-    window.open(data.embeddedEditUrl, '_blank', 'noopener,noreferrer')
-    pushToast('Opened in SignWell — place fields and click Send there', 'success')
+    pushToast('Sent for signature — signers will receive an email from BoldSign', 'success')
     onSent()
   }
 
@@ -1184,7 +1183,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     <Modal open={true} onClose={onClose} width={520}>
       <div className="modal__head">
         <div>
-          <div className="eyebrow-label">SignWell · Send for Signature</div>
+          <div className="eyebrow-label">BoldSign · Send for Signature</div>
           <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Set Up Signers</h3>
         </div>
         <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
@@ -1255,14 +1254,14 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
 
         {/* What happens next */}
         <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, color:'var(--gw-mist)', lineHeight:1.5 }}>
-          <strong style={{ color:'var(--gw-ink)' }}>Next:</strong> SignWell's editor will open in a new tab.
-          Drag signature, initial, and date fields onto the document, assign each to a signer, then click <strong>Send</strong> inside SignWell. The status here will update automatically.
+          <strong style={{ color:'var(--gw-ink)' }}>Next:</strong> the document is sent immediately.
+          A signature and date field are placed for each signer near the end of the document, and BoldSign emails everyone their signing link. The status here updates automatically as they sign.
         </div>
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-        <button className="btn btn--primary" onClick={openInSignWell} disabled={sending}>
-          {sending ? 'Uploading…' : 'Open in SignWell to place fields'}
+        <button className="btn btn--primary" onClick={sendForSignature} disabled={sending}>
+          {sending ? 'Sending…' : 'Send for Signature'}
         </button>
       </div>
     </Modal>
@@ -1285,7 +1284,7 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
     // Realtime subscription — auto-update status when webhook fires
     const channel = supabase.channel(`sig-documents-${deal.id}`)
       .on('postgres_changes', {
-        event: 'UPDATE', schema: 'public', table: 'signwell_documents',
+        event: 'UPDATE', schema: 'public', table: 'boldsign_documents',
         filter: `deal_id=eq.${deal.id}`,
       }, payload => {
         setEnvelopes(prev => prev.map(e => e.id === payload.new.id ? { ...e, ...payload.new } : e))
@@ -1301,7 +1300,7 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
 
   const loadEnvelopes = async () => {
     setLoading(true)
-    const { data, error } = await supabase.from('signwell_documents').select('*').eq('deal_id', deal.id).order('created_at', { ascending: false })
+    const { data, error } = await supabase.from('boldsign_documents').select('*').eq('deal_id', deal.id).order('created_at', { ascending: false })
     if (error?.code === '42P01') { setTableReady(false); setLoading(false); return }
     setEnvelopes(data || [])
     setLoading(false)
@@ -1313,7 +1312,7 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
   }
 
   const refreshStatus = async (env) => {
-    const res = await fetch('/api/signwell', {
+    const res = await fetch('/api/boldsign', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'status', documentId: env.document_id }),
@@ -1321,7 +1320,7 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
     const data = await res.json()
     if (data.error) { pushToast(data.error, 'error'); return }
     const patch = { status: data.status, completed_at: data.completedDateTime || null }
-    await supabase.from('signwell_documents').update(patch).eq('id', env.id)
+    await supabase.from('boldsign_documents').update(patch).eq('id', env.id)
     setEnvelopes(prev => prev.map(e => e.id === env.id ? { ...e, ...patch } : e))
     pushToast(`Status: ${data.status}`, 'info')
   }
@@ -1342,8 +1341,8 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
       }
     }
 
-    // Fall back: download directly from SignWell API
-    const res = await fetch('/api/signwell', {
+    // Fall back: download directly from BoldSign API
+    const res = await fetch('/api/boldsign', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'download', documentId: env.document_id }),
     })
@@ -1363,7 +1362,7 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
       <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:16, fontSize:13, lineHeight:1.7 }}>
         <strong>Run this SQL in your Supabase dashboard:</strong>
         <pre style={{ background:'var(--gw-slate)', color:'#e2e8f0', padding:10, borderRadius:6, fontSize:11, marginTop:8, overflowX:'auto' }}>
-{`create table if not exists signwell_documents (
+{`create table if not exists boldsign_documents (
   id            uuid primary key default gen_random_uuid(),
   deal_id       uuid references deals(id) on delete cascade,
   document_id   text not null,
@@ -1376,8 +1375,8 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
   completed_at  timestamptz,
   created_at    timestamptz default now()
 );
-alter table signwell_documents enable row level security;
-create policy "agents_signwell_documents" on signwell_documents
+alter table boldsign_documents enable row level security;
+create policy "agents_boldsign_documents" on boldsign_documents
   for all to authenticated using (true) with check (true);
 
 -- Also run this for agent notifications:
@@ -1419,10 +1418,6 @@ create policy "agent_notifications_policy" on agent_notifications
           : envelopes.map(env => {
               const sc        = DS_STATUS[env.status] || DS_STATUS.sent
               const completed = env.status === 'completed'
-              const isDraft   = env.status === 'draft'
-              const editUrl   = env.document_id
-                ? `https://www.signwell.com/edit/document/${env.document_id}/`
-                : null
               return (
                 <div key={env.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:8, background:'#fff', overflow:'hidden' }}>
                   <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px' }}>
@@ -1441,16 +1436,6 @@ create policy "agent_notifications_policy" on agent_notifications
                       <Icon name="refresh" size={12}/>
                     </button>
                   </div>
-                  {isDraft && editUrl && (
-                    <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'#fffbeb', display:'flex', alignItems:'center', gap:8 }}>
-                      <Icon name="edit" size={13} style={{ color:'#856404', flexShrink:0 }}/>
-                      <span style={{ fontSize:12, color:'#856404', flex:1, fontWeight:600 }}>Draft — open in SignWell to place fields and send</span>
-                      <a className="btn btn--sm" href={editUrl} target="_blank" rel="noopener noreferrer"
-                         style={{ background:'#d97706', color:'#fff', border:'none', fontSize:11 }}>
-                        Continue in SignWell
-                      </a>
-                    </div>
-                  )}
                   {completed && (
                     <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'var(--gw-green-light)', display:'flex', alignItems:'center', gap:8 }}>
                       <Icon name="check" size={13} style={{ color:'var(--gw-green)', flexShrink:0 }}/>
