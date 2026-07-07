@@ -81,9 +81,9 @@ Listing 3% w/ 20% referral + buyer 2%; Nic keeps 100% of 60%, Daniel 40% @ his s
 
 `agents.is_admin` (explicit flag, back-filled from any role containing "admin").
 On login `App.jsx` loads the firm-wide tables for admins — deals, contacts,
-properties, commissions, activities. Documents and DocuSign envelopes are
-deal-scoped (`eq('deal_id', …)`), so an admin who can open every deal can see
-every document and signature without extra plumbing. Tasks stay personal — a
+properties, commissions, activities. Documents and BoldSign e-signature
+documents are deal-scoped (`eq('deal_id', …)`), so an admin who can open every
+deal can see every document and signature without extra plumbing. Tasks stay personal — a
 to-do list is not oversight data.
 
 ## 4. API design — mailing scope

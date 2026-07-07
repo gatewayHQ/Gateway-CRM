@@ -27,14 +27,14 @@ disaster-recovery fallback.
    │ Vercel Functions /api/* │  service-role key    │  Supabase                │
    │  (≤12, Hobby limit)     │ ───────────────────▶ │  • Postgres (RLS)        │
    │  campaigns, cron,       │                      │  • Auth (JWT)            │
-   │  docusign, email-send,  │   anon key + JWT     │  • Storage (headshots,   │
+   │  boldsign, email-send,  │   anon key + JWT     │  • Storage (headshots,   │
    │  twilio-*, portal, …    │ ◀─── browser ──────▶ │    campaign-images)      │
    │  Cron: sequence(9:00),  │                      │  • Realtime (notifs)     │
    │        reminders(8:00)  │                      └──────────────────────────┘
    └───────────┬─────────────┘
                │  outbound
                ▼
-   Twilio (SMS) · Mailchimp/SMTP (email) · DocuSign (e-sign) · Anthropic (AI)
+   Twilio (SMS) · Mailchimp/SMTP (email) · BoldSign (e-sign) · Anthropic (AI)
 ```
 
 **Trust boundaries**
@@ -172,7 +172,7 @@ Functions. This is DR scope, not day-one.
 | Functions | Vercel function logs + log drain → **Logflare/Datadog** | Per-invocation latency, 5xx rate, cold starts, cron success |
 | Database | Supabase dashboard + `pg_stat_statements` | Slow queries, connection saturation, index hit rate |
 | Uptime | **Better Uptime / Pingdom** on `/` + `/api/cron` health | External availability, TLS expiry, cron heartbeats |
-| Delivery | Twilio / Mailchimp / DocuSign dashboards + webhook logs | Send failures, bounce/opt-out, envelope status |
+| Delivery | Twilio / Mailchimp / BoldSign dashboards + webhook logs | Send failures, bounce/opt-out, document status |
 
 **Recommended alerts (page → Slack/email):**
 - Function 5xx rate > 2% over 5 min.
@@ -198,7 +198,7 @@ numbers. Structured JSON from functions; redact at the edge.
   loads) so a bug leaks nothing.
 
 **Improve reliability**
-- Idempotent webhooks (Twilio/DocuSign): dedupe on provider event id.
+- Idempotent webhooks (Twilio/BoldSign): dedupe on provider event id.
 - Retries with backoff on outbound provider calls; circuit-break a dead
   provider rather than stacking timeouts.
 - Backpressure on AI/email/SMS endpoints (rate-limit per agent/IP).
@@ -234,7 +234,7 @@ numbers. Structured JSON from functions; redact at the edge.
 - **Public (browser) env**: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` only.
   These ship in the bundle — they are *meant* to be public; RLS is the guard.
 - **Server-only secrets** (Vercel env, never `VITE_`-prefixed): service-role
-  key, Twilio, Mailchimp/SMTP, DocuSign, Anthropic. See `.env.example`.
+  key, Twilio, Mailchimp/SMTP, BoldSign, Anthropic. See `.env.example`.
 - Rotate the service-role key on any suspected exposure; it bypasses RLS.
 
 ---
@@ -247,7 +247,7 @@ numbers. Structured JSON from functions; redact at the edge.
       deals/commissions/contacts; confirm anon *can* read `agents`, `mailings`
       and insert `lead_captures` (public pages depend on this).
 - [ ] Set all server secrets in Vercel (service-role, Twilio, Mailchimp,
-      DocuSign, Anthropic); confirm none are `VITE_`-prefixed.
+      BoldSign, Anthropic); confirm none are `VITE_`-prefixed.
 - [ ] Set `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` for Production.
 - [ ] Custom domain + TLS attached; `index.html` is `no-store`, `/assets/*`
       immutable (already in `vercel.json`).
@@ -270,6 +270,6 @@ numbers. Structured JSON from functions; redact at the edge.
 - [ ] `/lp/valuation/:id`, `/lp/multifamily/:id` render correctly on mobile +
       desktop and submit a lead.
 - [ ] `/advisor/:id` renders bio/stats/contact and the email-signature link works.
-- [ ] A test SMS/email/DocuSign send succeeds; webhooks land.
+- [ ] A test SMS/email/BoldSign send succeeds; webhooks land.
 - [ ] Crons report success the next morning.
 ```
