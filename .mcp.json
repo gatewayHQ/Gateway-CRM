@@ -1,11 +1,3 @@
 {
-  "mcpServers": {
-    "signwell": {
-      "command": "npx",
-      "args": ["-y", "@signwell/mcp"],
-      "env": {
-        "SIGNWELL_API_KEY": "${SIGNWELL_API_KEY}"
-      }
-    }
-  }
+  "mcpServers": {}
 }

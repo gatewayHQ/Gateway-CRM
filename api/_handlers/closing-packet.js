@@ -1,9 +1,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Closing packet handler — co-hosted under /api/signwell (Vercel Hobby cap).
+// Closing packet handler — co-hosted under /api/boldsign (Vercel Hobby cap).
 //
-// The packet generator's only relation to SignWell is that it bundles SignWell-
+// The packet generator's only relation to BoldSign is that it bundles BoldSign-
 // signed PDFs alongside other uploaded documents. Keeping it in its own module
-// makes signwell.js focused on the e-sign integration and lets this handler
+// makes boldsign.js focused on the e-sign integration and lets this handler
 // evolve (templating, branding, additional sources) without touching that file.
 // ─────────────────────────────────────────────────────────────────────────────
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib'
@@ -30,7 +30,7 @@ export default async function closingPacketHandler(req, res) {
     if (!deal) return res.status(404).json({ error: 'Deal not found' })
 
     const [{ data: envelopes }, { data: versions }] = await Promise.all([
-      svc.from('signwell_documents')
+      svc.from('boldsign_documents')
         .select('id, document_name, signer_name, completed_at')
         .eq('deal_id', dealId).eq('status', 'completed')
         .order('completed_at', { ascending: true }),

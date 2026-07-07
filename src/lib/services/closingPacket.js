@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Closing packet client — thin wrapper around POST /api/signwell
+// Closing packet client — thin wrapper around POST /api/boldsign
 //   { action: 'closing-packet', deal_id }
 //
 // Centralizes the auth-header dance and the signed-URL fetch so DealPage
@@ -19,7 +19,7 @@ export async function generateClosingPacket(dealId) {
   const { data: { session } } = await supabase.auth.getSession()
   if (!session?.access_token) return { ok: false, error: 'Sign in required' }
 
-  const res = await fetch('/api/signwell', {
+  const res = await fetch('/api/boldsign', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
     body:    JSON.stringify({ action: 'closing-packet', deal_id: dealId }),
