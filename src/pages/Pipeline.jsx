@@ -8,6 +8,7 @@ import {
   focusItems, pipelineTotals,
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
+import { OPERATING_STATES } from '../lib/constants.js'
 import { sendDocument, getDocStatus, downloadSigned as apiDownloadSigned, sendFromTemplate, buildPrefill, normalizeState } from '../lib/services/boldsign.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
@@ -324,9 +325,7 @@ function ChecklistTab({ deal }) {
               if (v && txType && steps.length === 0) loadTemplate(v, txType)
             }}>
             <option value="">State…</option>
-            <option value="IA">Iowa (IA)</option>
-            <option value="SD">South Dakota (SD)</option>
-            <option value="NE">Nebraska (NE)</option>
+            {OPERATING_STATES.map(s => <option key={s.code} value={s.code}>{s.name} ({s.code})</option>)}
             <option value="other">Other</option>
           </select>
           <select className="form-control" style={{ flex: 1, fontSize: 12 }}

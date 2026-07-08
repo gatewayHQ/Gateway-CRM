@@ -7,6 +7,7 @@ import { fireWebhooks } from '../lib/webhooks.js'
 import { findMatchingBuyers } from '../lib/matching.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
 import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
+import { OPERATING_STATES } from '../lib/constants.js'
 import OptionSelect from '../components/OptionSelect.jsx'
 
 // Types where commercial fields apply
@@ -964,7 +965,12 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
         <div className="form-group"><label className="form-label required">Address</label><input className={`form-control${errors.address?' error':''}`} value={form.address} onChange={e=>set('address',e.target.value)} placeholder="123 Main Street" /></div>
         <div className="form-row">
           <div className="form-group"><label className="form-label">City</label><input className="form-control" value={form.city||''} onChange={e=>set('city',e.target.value)} /></div>
-          <div className="form-group"><label className="form-label">State</label><input className="form-control" value={form.state||''} onChange={e=>set('state',e.target.value)} /></div>
+          <div className="form-group"><label className="form-label">State</label>
+            <select className="form-control" value={form.state||''} onChange={e=>set('state',e.target.value)}>
+              <option value="">Select…</option>
+              {OPERATING_STATES.map(s => <option key={s.code} value={s.code}>{s.name} ({s.code})</option>)}
+            </select>
+          </div>
         </div>
         <div className="form-row">
           <div className="form-group"><label className="form-label">ZIP</label><input className="form-control" value={form.zip||''} onChange={e=>set('zip',e.target.value)} /></div>

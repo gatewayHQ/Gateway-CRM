@@ -8,6 +8,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
+import { OPERATING_STATES } from '../../lib/constants.js'
 import {
   createIdentity, syncIdentities, resendIdentity,
   templateEditorUrl,
@@ -206,7 +207,10 @@ function TemplatesPanel({ templates, onChange }) {
           <input className="form-control" placeholder="BoldSign template id" value={tid} onChange={e => setTid(e.target.value)}/>
           <div style={{ display:'flex', gap:8 }}>
             <input className="form-control" style={{ flex:2 }} placeholder="Doc type (e.g. listing_agreement)" value={docType} onChange={e => setDocType(e.target.value)}/>
-            <input className="form-control" style={{ flex:1 }} maxLength={2} placeholder="State (IA)" value={state} onChange={e => setState(e.target.value)}/>
+            <select className="form-control" style={{ flex:1 }} value={state} onChange={e => setState(e.target.value)}>
+              <option value="">Any state</option>
+              {OPERATING_STATES.map(s => <option key={s.code} value={s.code}>{s.code}</option>)}
+            </select>
           </div>
           <input className="form-control" placeholder="Field tokens, comma-separated (e.g. property_address, list_price, seller_name)" value={tokens} onChange={e => setTokens(e.target.value)}/>
           <button className="btn btn--primary btn--sm" onClick={register} disabled={saving} style={{ justifySelf:'start' }}>
