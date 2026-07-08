@@ -348,6 +348,28 @@ export default async function handler(req, res) {
       return res.json({ templates: data.result || data.templates || [] })
     }
 
+    // Read a template's roles + form fields so the app can render one signer
+    // input per role and one value input per fillable field (dynamic send).
+    if (body.action === 'template-details') {
+      const { templateId } = body
+      if (!templateId) return res.status(400).json({ error: 'templateId required' })
+      const data = await boldsign(`/template/properties?templateId=${encodeURIComponent(templateId)}`)
+      const rawRoles  = data.roles || data.signerRoles || data.templateRoles || []
+      const roles = rawRoles.map((r, i) => ({
+        index: Number(r.roleIndex ?? r.index ?? i + 1),
+        name:  r.roleName || r.name || r.signerRole || `Role ${i + 1}`,
+        defaultName:  r.signerName || r.defaultSignerName || '',
+        defaultEmail: r.signerEmail || r.defaultSignerEmail || '',
+      }))
+      const rawFields = data.formFields || data.fields || []
+      const fields = rawFields.map(f => ({
+        id:        f.id || f.fieldId || f.name,
+        type:      f.fieldType || f.type,
+        roleIndex: f.roleIndex != null ? Number(f.roleIndex) : (f.signerIndex != null ? Number(f.signerIndex) : null),
+      })).filter(f => f.id)
+      return res.json({ roles, fields })
+    }
+
     // Returns an embedded BoldSign editor URL (open in an iframe/new tab) where an
     // admin places/moves/removes fields. Pass a templateId to edit an existing
     // template, or a PDF (documentBase64) to build a new one.
@@ -374,7 +396,7 @@ export default async function handler(req, res) {
     // roles: [{ roleIndex, signerName, signerEmail, signerOrder?,
     //           existingFormFields: [{ id, value, isReadOnly }] }]
     if (body.action === 'template-send') {
-      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels } = body
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, roleRemovalIndices } = body
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
@@ -386,6 +408,7 @@ export default async function handler(req, res) {
         title:   documentName || emailSubject || 'Please sign this document',
         message: message || 'Please review and sign.',
         roles,
+        ...(Array.isArray(roleRemovalIndices) && roleRemovalIndices.length ? { roleRemovalIndices } : {}),
         ...(cc ? { cc } : {}),
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),   // BoldSign tags
         ...(onBehalfOf ? { onBehalfOf } : {}),
@@ -412,7 +435,7 @@ export default async function handler(req, res) {
     // the agent can move/add/remove field placements before clicking Send. The
     // document stays a draft until they send; the Sent webhook flips it to 'sent'.
     if (body.action === 'template-embed-url') {
-      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, redirectUrl } = body
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices } = body
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
@@ -425,6 +448,7 @@ export default async function handler(req, res) {
         sendViewOption: 'PreparePage',   // land on the field-placement editor
         showToolbar:    true,
         redirectUrl:    redirectUrl || '',
+        ...(Array.isArray(roleRemovalIndices) && roleRemovalIndices.length ? { roleRemovalIndices } : {}),
         ...(cc ? { cc } : {}),
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),
         ...(onBehalfOf ? { onBehalfOf } : {}),

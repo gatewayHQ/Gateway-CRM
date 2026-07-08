@@ -9,7 +9,7 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { sendDocument, getDocStatus, downloadSigned as apiDownloadSigned, sendFromTemplate, templateEmbedUrl, buildPrefill, normalizeState } from '../lib/services/boldsign.js'
+import { sendDocument, getDocStatus, downloadSigned as apiDownloadSigned, sendFromTemplate, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState } from '../lib/services/boldsign.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
@@ -1481,16 +1481,17 @@ create policy "agent_notifications_policy" on agent_notifications
   )
 }
 
-// ── Send from Template modal — picks a BoldSign template, maps signers to its
-//    roles, prefills CRM fields, and sends via /api/boldsign (template-send).
+// ── Send from Template modal — dynamic. Reads the template's actual roles +
+//    fillable fields from BoldSign, renders a signer input per role and an
+//    editable (CRM-prefilled) input per field, then sends via /api/boldsign.
+const prettyLabel = (id) => String(id || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+
 function SendFromTemplateModal({ deal, contacts, properties, templates, activeAgent, onClose, onSent }) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
 
-  // Show templates for this deal's state (plus any state-agnostic ones). Prefer
-  // the deal's controlled comp_data.state (IA/SD/NE dropdown); fall back to the
-  // property's free-text state, normalized to a 2-letter code. Fall back to the
-  // full list if nothing matches, so a missing state never blocks a send.
+  // Filter templates to the deal's state (comp_data.state preferred, else the
+  // normalized property state); fall back to all if none match.
   const dealState = normalizeState(deal?.comp_data?.state || property?.state || '')
   const matched   = templates.filter(t => !t.state || normalizeState(t.state) === dealState)
   const visible   = (dealState && matched.length) ? matched : templates
@@ -1499,41 +1500,87 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
   const [subject,    setSubject]    = React.useState(`Please sign: ${deal?.title || 'Document'}`)
   const [adjust,     setAdjust]     = React.useState(false)
   const [sending,    setSending]    = React.useState(false)
+  const [details,    setDetails]    = React.useState(null)   // { roles, fields }
+  const [loadingDet, setLoadingDet] = React.useState(false)
+  const [signers,    setSigners]    = React.useState({})     // roleIndex → { name, email }
+  const [values,     setValues]     = React.useState({})     // fieldId → value
 
   const tpl = templates.find(t => t.template_id === templateId)
 
-  // Role 1 = primary client (deal contact); role 2 = listing agent (if present).
-  const [sellerName,  setSellerName]  = React.useState(`${contact?.first_name || ''} ${contact?.last_name || ''}`.trim())
-  const [sellerEmail, setSellerEmail] = React.useState(contact?.email || '')
+  // Load the template's roles + fields whenever the selection changes, and seed
+  // signer/field inputs from the deal.
+  React.useEffect(() => {
+    if (!templateId) { setDetails(null); return }
+    let cancelled = false
+    setLoadingDet(true)
+    templateDetails(templateId)
+      .then(det => {
+        if (cancelled) return
+        const roles  = det.roles?.length ? det.roles : [{ index: 1, name: 'Signer' }]
+        const fields = (det.fields || []).filter(f => isFillableField(f.type))
+        setDetails({ roles, fields })
+
+        // Seed signers: match role name to the deal's people (first match wins).
+        const tokenVals = crmTokenValues({ deal, property, contact })
+        const seededSigners = {}
+        let usedContact = false, usedAgent = false
+        for (const r of roles) {
+          const n = String(r.name).toLowerCase()
+          if (!usedAgent && /agent/.test(n) && activeAgent?.email) {
+            seededSigners[r.index] = { name: activeAgent.name || '', email: activeAgent.email || '' }; usedAgent = true
+          } else if (!usedContact && /(seller|buyer|client|owner)/.test(n) && contact) {
+            seededSigners[r.index] = { name: `${contact.first_name || ''} ${contact.last_name || ''}`.trim(), email: contact.email || '' }; usedContact = true
+          } else {
+            seededSigners[r.index] = { name: r.defaultName || '', email: r.defaultEmail || '' }
+          }
+        }
+        setSigners(seededSigners)
+
+        const seededValues = {}
+        for (const f of fields) seededValues[f.id] = tokenVals[f.id] || ''
+        setValues(seededValues)
+      })
+      .catch(err => { if (!cancelled) { setDetails({ roles: [{ index: 1, name: 'Signer' }], fields: [] }); pushToast(`Couldn't load template fields: ${err.message}`, 'error') } })
+      .finally(() => { if (!cancelled) setLoadingDet(false) })
+    return () => { cancelled = true }
+  }, [templateId])
+
+  const setSigner = (idx, k, v) => setSigners(p => ({ ...p, [idx]: { ...(p[idx] || {}), [k]: v } }))
+  const setValue  = (id, v)     => setValues(p => ({ ...p, [id]: v }))
 
   const submit = async () => {
-    if (!templateId)  { pushToast('Pick a template', 'error'); return }
-    if (!sellerName.trim() || !sellerEmail.trim()) { pushToast('Signer needs a name and email', 'error'); return }
+    if (!templateId) { pushToast('Pick a template', 'error'); return }
+    const roleList = details?.roles || []
+    const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())
+    if (!filled.length) { pushToast('At least one signer needs a name and email', 'error'); return }
     setSending(true)
 
-    const prefill = buildPrefill(tpl?.field_tokens || [], { deal, property, contact })
-    const roles = [{
-      roleIndex: 1, signerName: sellerName, signerEmail: sellerEmail, signerOrder: 1,
-      existingFormFields: prefill,
-    }]
-    if (activeAgent?.email) {
-      roles.push({ roleIndex: 2, signerName: activeAgent.name, signerEmail: activeAgent.email, signerOrder: 2, existingFormFields: prefill })
+    // Attach each filled field value to the role that owns it (or the first
+    // filled role if the field isn't role-scoped). CRM-entered values are locked.
+    const firstIdx = filled[0].index
+    const byRole = {}
+    for (const f of (details.fields || [])) {
+      const v = (values[f.id] || '').trim()
+      if (!v) continue
+      const idx = (f.roleIndex && filled.some(r => r.index === f.roleIndex)) ? f.roleIndex : firstIdx
+      ;(byRole[idx] ||= []).push({ id: f.id, value: v, isReadOnly: true })
     }
+    const roles = filled.map(r => ({
+      roleIndex: r.index, signerName: signers[r.index].name, signerEmail: signers[r.index].email,
+      signerOrder: r.index, existingFormFields: byRole[r.index] || [],
+    }))
+    const roleRemovalIndices = roleList.filter(r => !filled.includes(r)).map(r => r.index)
 
-    // Document name the signer sees / signed-PDF filename — make it deal-specific.
     const docName = [tpl?.name || deal?.title, property?.address].filter(Boolean).join(' — ')
-    // Tags for search/reporting in the BoldSign dashboard.
     const labels  = [tpl?.state, tpl?.doc_type, `deal:${deal.id}`].filter(Boolean)
-    const args    = { templateId, deal_id: deal.id, roles, emailSubject: subject, documentName: docName, labels }
+    const args    = { templateId, deal_id: deal.id, roles, roleRemovalIndices, emailSubject: subject, documentName: docName, labels }
 
     try {
       if (adjust) {
-        // Open BoldSign's prepare page so the agent can move/add/remove fields,
-        // then click Send there. The draft is tracked; the Sent webhook finishes it.
         const { url } = await templateEmbedUrl({ ...args, redirectUrl: window.location.href })
         if (!url) { pushToast('BoldSign did not return an editor URL', 'error'); return }
         window.open(url, '_blank', 'noopener')
-        pushToast('Opened in BoldSign — adjust fields and click Send there', 'success')
+        pushToast('Opened in BoldSign — review fields and click Send there', 'success')
       } else {
         await sendFromTemplate(args)
         pushToast('Sent for signature from template', 'success')
@@ -1546,12 +1593,14 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
     }
   }
 
+  const fields = details?.fields || []
+
   return (
-    <Modal open={true} onClose={onClose} width={480}>
+    <Modal open={true} onClose={onClose} width={520}>
       <div className="modal__head">
         <div>
           <div className="eyebrow-label">BoldSign · Send from Template</div>
-          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Choose a Template</h3>
+          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Send for Signature</h3>
         </div>
         <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
       </div>
@@ -1566,38 +1615,60 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
               Showing templates for {dealState}{matched.length ? '' : ' — none registered for this state yet, showing all'}.
             </div>
           )}
-          {tpl?.field_tokens?.length > 0 && (
-            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
-              Auto-fills from this deal: {tpl.field_tokens.join(', ')}
-            </div>
-          )}
         </div>
+
         <div className="form-group">
           <label className="form-label">Email Subject</label>
           <input className="form-control" value={subject} onChange={e => setSubject(e.target.value)}/>
         </div>
-        <div className="form-group">
-          <label className="form-label required">Signer</label>
-          <div style={{ display:'flex', gap:8 }}>
-            <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={sellerName} onChange={e => setSellerName(e.target.value)}/>
-            <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={sellerEmail} onChange={e => setSellerEmail(e.target.value)}/>
-          </div>
-          {activeAgent?.email && (
-            <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:8 }}>
-              {activeAgent.name} (listing agent) will be added as the second signer.
+
+        {loadingDet && <div style={{ fontSize:13, color:'var(--gw-mist)', padding:'8px 0' }}>Loading template…</div>}
+
+        {!loadingDet && details && (
+          <>
+            {/* One signer input per template role; leave a role blank to omit it. */}
+            <div className="form-group">
+              <label className="form-label required">Signers</label>
+              {details.roles.map((r, i) => (
+                <div key={r.index} style={{ marginBottom:10 }}>
+                  <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:4 }}>
+                    <span style={{ display:'inline-flex', width:18, height:18, borderRadius:'50%', background:SIGNER_COLORS[i]||'#6b7280', color:'#fff', alignItems:'center', justifyContent:'center', fontSize:10, marginRight:6 }}>{r.index}</span>
+                    {r.name}
+                  </div>
+                  <div style={{ display:'flex', gap:8 }}>
+                    <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={signers[r.index]?.name || ''} onChange={e => setSigner(r.index, 'name', e.target.value)}/>
+                    <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={signers[r.index]?.email || ''} onChange={e => setSigner(r.index, 'email', e.target.value)}/>
+                  </div>
+                </div>
+              ))}
+              <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Roles left blank are removed from this send.</div>
             </div>
-          )}
-        </div>
+
+            {/* Editable, CRM-prefilled detail fields the sellers see filled in. */}
+            {fields.length > 0 && (
+              <div className="form-group">
+                <label className="form-label">Document details <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— prefilled from the deal; edit as needed</span></label>
+                {fields.map(f => (
+                  <div key={f.id} style={{ marginBottom:8 }}>
+                    <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2 }}>{prettyLabel(f.id)}</div>
+                    <input className="form-control" value={values[f.id] || ''} onChange={e => setValue(f.id, e.target.value)}/>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
         <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)' }}>
           <input type="checkbox" id="tplAdjust" checked={adjust} onChange={e => setAdjust(e.target.checked)} style={{ width:15, height:15, cursor:'pointer' }}/>
           <label htmlFor="tplAdjust" style={{ fontSize:13, cursor:'pointer', flex:1 }}>
-            <strong>Adjust fields before sending</strong> — opens BoldSign so you can move, add, or remove field placements, then send from there.
+            <strong>Review in BoldSign before sending</strong> — opens BoldSign to move/add/remove or fill fields, then send from there.
           </label>
         </div>
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-        <button className="btn btn--primary" onClick={submit} disabled={sending}>
+        <button className="btn btn--primary" onClick={submit} disabled={sending || loadingDet}>
           {sending ? (adjust ? 'Opening…' : 'Sending…') : (adjust ? 'Open in BoldSign' : 'Send for Signature')}
         </button>
       </div>

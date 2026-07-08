@@ -39,8 +39,14 @@ export const resendIdentity = (email) => call({ action: 'identity-resend', email
 // ── Templates ────────────────────────────────────────────────────────────────
 export const listBoldsignTemplates = ()  => call({ action: 'template-list' })
 export const templateEditorUrl     = (p) => call({ action: 'template-editor-url', ...p })
+export const templateDetails       = (templateId) => call({ action: 'template-details', templateId })
 export const sendFromTemplate      = (p) => call({ action: 'template-send', ...p })
 export const templateEmbedUrl      = (p) => call({ action: 'template-embed-url', ...p })
+
+// Field types whose value an agent can pre-fill from the CRM (vs signer actions
+// like Signature/Initial). Used to decide which template fields become inputs.
+export const FILLABLE_FIELD_TYPES = new Set(['textbox', 'text', 'label', 'dropdown', 'editabledate', 'company', 'name', 'title', 'email'])
+export const isFillableField = (t) => FILLABLE_FIELD_TYPES.has(String(t || '').toLowerCase())
 
 // Normalize a state value to a 2-letter code. Accepts existing codes (IA) or
 // the full names of the states the brokerage operates in. Extend the map if you
@@ -56,10 +62,15 @@ export function normalizeState(s) {
 // ── CRM → template field prefill ─────────────────────────────────────────────
 // Maps our fixed label/id tokens to values pulled from the deal + its property
 // and primary contact. Only tokens the template actually declares get sent.
-export function buildPrefill(fieldTokens = [], { deal, property, contact } = {}) {
+// The canonical token → value map from a deal's context. Field IDs on a
+// template that match one of these keys get auto-filled.
+export function crmTokenValues({ deal, property, contact } = {}) {
   const money = (n) => (n != null && n !== '' ? `$${Number(n).toLocaleString()}` : '')
-  const source = {
+  return {
     property_address:   property?.address || deal?.prop_address || '',
+    property_city:      property?.city || '',
+    property_state:     property?.state || '',
+    property_zip:       property?.zip || '',
     list_price:         money(property?.price ?? deal?.value),
     commission_pct:     deal?.commission_pct != null ? `${deal.commission_pct}%` : '',
     listing_start_date: deal?.comp_data?.listing_start || '',
@@ -68,6 +79,10 @@ export function buildPrefill(fieldTokens = [], { deal, property, contact } = {})
     client_name:        [contact?.first_name, contact?.last_name].filter(Boolean).join(' '),
     close_date:         deal?.expected_close_date || '',
   }
+}
+
+export function buildPrefill(fieldTokens = [], ctx = {}) {
+  const source = crmTokenValues(ctx)
   return (fieldTokens || [])
     .map(id => ({ id, value: source[id] }))
     .filter(f => f.value)                          // skip unknown/empty tokens
