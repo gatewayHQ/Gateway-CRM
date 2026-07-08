@@ -64,10 +64,12 @@ export function normalizeState(s) {
 // and primary contact. Only tokens the template actually declares get sent.
 // The canonical token → value map from a deal's context. Field IDs on a
 // template that match one of these keys get auto-filled.
-export function crmTokenValues({ deal, property, contact } = {}) {
+export function crmTokenValues({ deal, property, contact, agent } = {}) {
   const money = (n) => (n != null && n !== '' ? `$${Number(n).toLocaleString()}` : '')
+  const fullAddr = [property?.address, property?.city, property?.state, property?.zip].filter(Boolean).join(', ')
   return {
     property_address:   property?.address || deal?.prop_address || '',
+    property_full:      fullAddr,
     property_city:      property?.city || '',
     property_state:     property?.state || '',
     property_zip:       property?.zip || '',
@@ -78,6 +80,9 @@ export function crmTokenValues({ deal, property, contact } = {}) {
     seller_name:        [contact?.first_name, contact?.last_name].filter(Boolean).join(' '),
     client_name:        [contact?.first_name, contact?.last_name].filter(Boolean).join(' '),
     close_date:         deal?.expected_close_date || '',
+    agent_name:         agent?.name || '',
+    agent_email:        agent?.email || '',
+    broker_name:        agent?.brokerage || agent?.broker_name || '',
   }
 }
 

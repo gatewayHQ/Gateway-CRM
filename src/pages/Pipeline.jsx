@@ -1521,7 +1521,7 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
         setDetails({ roles, fields })
 
         // Seed signers: match role name to the deal's people (first match wins).
-        const tokenVals = crmTokenValues({ deal, property, contact })
+        const tokenVals = crmTokenValues({ deal, property, contact, agent: activeAgent })
         const seededSigners = {}
         let usedContact = false, usedAgent = false
         for (const r of roles) {
