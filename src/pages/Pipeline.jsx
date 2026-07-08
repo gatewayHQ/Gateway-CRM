@@ -8,6 +8,7 @@ import {
   focusItems, pipelineTotals,
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
+import { sendDocument, getDocStatus, downloadSigned as apiDownloadSigned, sendFromTemplate, buildPrefill } from '../lib/services/boldsign.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
@@ -1148,19 +1149,18 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       name: s.name, email: s.email, routingOrder: s.routingOrder,
     }))
 
-    const resp = await fetch('/api/boldsign', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action:         'send',
+    let data
+    try {
+      data = await sendDocument({
         emailSubject:   subject,
         documentBase64: base64,
         documentName:   finalDocName,
         signers:        signerPayload,
-      }),
-    })
-    const data = await resp.json()
+      })
+    } catch (err) {
+      setSending(false); pushToast(err.message, 'error'); return
+    }
     setSending(false)
-    if (data.error) { pushToast(data.error, 'error'); return }
     if (!data.documentId && !data.envelopeId) { pushToast('BoldSign did not return a document id', 'error'); return }
 
     await supabase.from('boldsign_documents').insert([{
@@ -1273,6 +1273,8 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
   const [sendOpen,    setSendOpen]    = React.useState(false)
+  const [tplOpen,     setTplOpen]     = React.useState(false)
+  const [templates,   setTemplates]   = React.useState([])
   const [dealFiles,   setDealFiles]   = React.useState([])
   const [downloading, setDownloading] = React.useState({})
 
@@ -1280,6 +1282,7 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
     if (!deal?.id) return
     loadEnvelopes()
     loadDealFiles()
+    loadTemplates()
 
     // Realtime subscription — auto-update status when webhook fires
     const channel = supabase.channel(`sig-documents-${deal.id}`)
@@ -1306,19 +1309,20 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
     setLoading(false)
   }
 
+  const loadTemplates = async () => {
+    const { data } = await supabase.from('boldsign_templates').select('*').eq('active', true).order('name')
+    setTemplates(data || [])
+  }
+
   const loadDealFiles = async () => {
     const { data } = await supabase.storage.from(BUCKET).list(`deal-${deal.id}`, { sortBy: { column: 'created_at', order: 'desc' } })
     setDealFiles((data || []).filter(f => f.name !== '.emptyFolderPlaceholder'))
   }
 
   const refreshStatus = async (env) => {
-    const res = await fetch('/api/boldsign', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'status', documentId: env.document_id }),
-    })
-    const data = await res.json()
-    if (data.error) { pushToast(data.error, 'error'); return }
+    let data
+    try { data = await getDocStatus(env.document_id) }
+    catch (err) { pushToast(err.message, 'error'); return }
     const patch = { status: data.status, completed_at: data.completedDateTime || null }
     await supabase.from('boldsign_documents').update(patch).eq('id', env.id)
     setEnvelopes(prev => prev.map(e => e.id === env.id ? { ...e, ...patch } : e))
@@ -1342,13 +1346,10 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
     }
 
     // Fall back: download directly from BoldSign API
-    const res = await fetch('/api/boldsign', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'download', documentId: env.document_id }),
-    })
-    const data = await res.json()
+    let data
+    try { data = await apiDownloadSigned(env.document_id) }
+    catch (err) { setDownloading(p => ({ ...p, [env.id]: false })); pushToast(err.message, 'error'); return }
     setDownloading(p => ({ ...p, [env.id]: false }))
-    if (data.error) { pushToast(data.error, 'error'); return }
 
     // Trigger browser download
     const link = document.createElement('a')
@@ -1406,9 +1407,16 @@ create policy "agent_notifications_policy" on agent_notifications
     <div style={{ padding:16, overflowY:'auto', flex:1 }}>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
         <div style={{ fontSize:13, color:'var(--gw-mist)' }}>{envelopes.length} document{envelopes.length !== 1 ? 's' : ''} sent</div>
-        <button className="btn btn--primary btn--sm" onClick={() => setSendOpen(true)}>
-          <Icon name="send" size={13}/> Send for Signature
-        </button>
+        <div style={{ display:'flex', gap:8 }}>
+          {templates.length > 0 && (
+            <button className="btn btn--secondary btn--sm" onClick={() => setTplOpen(true)}>
+              <Icon name="file" size={13}/> Send from Template
+            </button>
+          )}
+          <button className="btn btn--primary btn--sm" onClick={() => setSendOpen(true)}>
+            <Icon name="send" size={13}/> Send for Signature
+          </button>
+        </div>
       </div>
 
       {loading
@@ -1462,7 +1470,107 @@ create policy "agent_notifications_policy" on agent_notifications
           onSent={() => { setSendOpen(false); loadEnvelopes() }}
         />
       )}
+
+      {tplOpen && (
+        <SendFromTemplateModal
+          deal={deal} contacts={contacts} properties={properties} templates={templates} activeAgent={activeAgent}
+          onClose={() => setTplOpen(false)}
+          onSent={() => { setTplOpen(false); loadEnvelopes() }}
+        />
+      )}
     </div>
+  )
+}
+
+// ── Send from Template modal — picks a BoldSign template, maps signers to its
+//    roles, prefills CRM fields, and sends via /api/boldsign (template-send).
+function SendFromTemplateModal({ deal, contacts, properties, templates, activeAgent, onClose, onSent }) {
+  const contact  = contacts?.find(c => c.id === deal?.contact_id)
+  const property = properties?.find(p => p.id === deal?.property_id)
+
+  const [templateId, setTemplateId] = React.useState(templates[0]?.template_id || '')
+  const [subject,    setSubject]    = React.useState(`Please sign: ${deal?.title || 'Document'}`)
+  const [sending,    setSending]    = React.useState(false)
+
+  const tpl = templates.find(t => t.template_id === templateId)
+
+  // Role 1 = primary client (deal contact); role 2 = listing agent (if present).
+  const [sellerName,  setSellerName]  = React.useState(`${contact?.first_name || ''} ${contact?.last_name || ''}`.trim())
+  const [sellerEmail, setSellerEmail] = React.useState(contact?.email || '')
+
+  const submit = async () => {
+    if (!templateId)  { pushToast('Pick a template', 'error'); return }
+    if (!sellerName.trim() || !sellerEmail.trim()) { pushToast('Signer needs a name and email', 'error'); return }
+    setSending(true)
+
+    const prefill = buildPrefill(tpl?.field_tokens || [], { deal, property, contact })
+    const roles = [{
+      roleIndex: 1, signerName: sellerName, signerEmail: sellerEmail, signerOrder: 1,
+      existingFormFields: prefill,
+    }]
+    if (activeAgent?.email) {
+      roles.push({ roleIndex: 2, signerName: activeAgent.name, signerEmail: activeAgent.email, signerOrder: 2, existingFormFields: prefill })
+    }
+
+    try {
+      await sendFromTemplate({
+        templateId, deal_id: deal.id, roles,
+        emailSubject: subject, documentName: tpl?.name || deal?.title,
+      })
+      pushToast('Sent for signature from template', 'success')
+      onSent()
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return (
+    <Modal open={true} onClose={onClose} width={480}>
+      <div className="modal__head">
+        <div>
+          <div className="eyebrow-label">BoldSign · Send from Template</div>
+          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Choose a Template</h3>
+        </div>
+        <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
+      </div>
+      <div className="modal__body">
+        <div className="form-group">
+          <label className="form-label required">Template</label>
+          <select className="form-control" value={templateId} onChange={e => setTemplateId(e.target.value)}>
+            {templates.map(t => <option key={t.template_id} value={t.template_id}>{t.name}</option>)}
+          </select>
+          {tpl?.field_tokens?.length > 0 && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
+              Auto-fills from this deal: {tpl.field_tokens.join(', ')}
+            </div>
+          )}
+        </div>
+        <div className="form-group">
+          <label className="form-label">Email Subject</label>
+          <input className="form-control" value={subject} onChange={e => setSubject(e.target.value)}/>
+        </div>
+        <div className="form-group">
+          <label className="form-label required">Signer</label>
+          <div style={{ display:'flex', gap:8 }}>
+            <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={sellerName} onChange={e => setSellerName(e.target.value)}/>
+            <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={sellerEmail} onChange={e => setSellerEmail(e.target.value)}/>
+          </div>
+          {activeAgent?.email && (
+            <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:8 }}>
+              {activeAgent.name} (listing agent) will be added as the second signer.
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="modal__foot">
+        <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
+        <button className="btn btn--primary" onClick={submit} disabled={sending}>
+          {sending ? 'Sending…' : 'Send for Signature'}
+        </button>
+      </div>
+    </Modal>
   )
 }
 
