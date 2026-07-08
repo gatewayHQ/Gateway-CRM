@@ -151,10 +151,10 @@ insert into storage.buckets (id, name, public)
 values ('closing-packets', 'closing-packets', false)
 on conflict (id) do nothing;
 
--- ── 8. OPTIONAL cleanup — legacy DocuSign tracking ───────────────────────────
+-- ── 8. Cleanup — drop legacy DocuSign tracking ───────────────────────────────
 -- The live DB carries an old-shape `docusign_envelopes` table (and possibly
--- `docusign_field_templates`). Nothing in the current app reads them. They are
--- harmless if left in place. Uncomment to remove them once you've confirmed you
--- don't need the historical DocuSign envelope ids.
---   drop table if exists docusign_envelopes cascade;
---   drop table if exists docusign_field_templates cascade;
+-- `docusign_field_templates`) from before the SignWell/BoldSign migrations.
+-- Nothing in the current app reads them. `cascade` also drops their RLS
+-- policies. Idempotent — safe to re-run.
+drop table if exists docusign_envelopes cascade;
+drop table if exists docusign_field_templates cascade;

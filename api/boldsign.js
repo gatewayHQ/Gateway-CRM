@@ -127,6 +127,29 @@ function toIso(v) {
   return isNaN(d.getTime()) ? null : d.toISOString()
 }
 
+// Sender-identity approval status → our lowercase enum.
+function normalizeIdentityStatus(s) {
+  const v = String(s || '').toLowerCase()
+  if (v === 'approved' || v === 'active')   return 'approved'
+  if (v === 'declined' || v === 'denied')   return 'declined'
+  return 'pending'
+}
+
+// Resolve the "send as this agent" email. Returns the agent's sender-identity
+// email ONLY if it's approved in BoldSign; otherwise null (send from the
+// account default). Uses the service client so it works regardless of caller RLS.
+async function resolveOnBehalfOf(supabase, agentId) {
+  if (!agentId) return null
+  try {
+    const { data } = await supabase
+      .from('boldsign_sender_identities')
+      .select('email, status')
+      .eq('agent_id', agentId)
+      .maybeSingle()
+    return data && data.status === 'approved' ? data.email : null
+  } catch { return null }
+}
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   applyJsonCors(res)
@@ -180,12 +203,18 @@ export default async function handler(req, res) {
       const pdfBuffer     = Buffer.from(documentBase64, 'base64')
       const signerPayload = await buildSigners(orderedSigners, pdfBuffer)
 
+      // Send AS the acting agent when they have an approved sender identity, so
+      // the client sees the request coming from their agent (not a generic box).
+      let onBehalfOf = null
+      try { onBehalfOf = await resolveOnBehalfOf(getServiceClient(), actor.agent.id) } catch { /* fall back to account default */ }
+
       // BoldSign send = multipart/form-data: Files (binary) + JSON string fields.
       const form = new FormData()
       form.append('Title',              documentName || 'Document')
       form.append('Message',            emailSubject || 'Please sign this document')
       form.append('EnableSigningOrder', String(hasOrder))
       form.append('Signers',            JSON.stringify(signerPayload))
+      if (onBehalfOf) form.append('OnBehalfOf', onBehalfOf)
       form.append('Files', new Blob([pdfBuffer], { type: 'application/pdf' }), documentName || 'document.pdf')
 
       const data = await boldsign('/document/send', { method: 'POST', form })
@@ -226,6 +255,108 @@ export default async function handler(req, res) {
       if (!id) return res.status(400).json({ error: 'documentId required' })
       await boldsign(`/document/remind?documentId=${encodeURIComponent(id)}`, { method: 'POST', json: {} })
       return res.json({ ok: true })
+    }
+
+    // ─── Phase 1: Sender identities (admin only) ──────────────────────────────
+    // Each agent is registered as a sender identity so their signature requests
+    // come from them. BoldSign emails the agent an approval link; we track the
+    // Pending → Approved lifecycle in boldsign_sender_identities.
+    if (body.action === 'identity-create') {
+      if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
+      const { agentId, name, email } = body
+      if (!email) return res.status(400).json({ error: 'email required' })
+      await boldsign('/senderIdentities/create', { method: 'POST', json: { Name: name || email, Email: email } })
+      const svc = getServiceClient()
+      await svc.from('boldsign_sender_identities').upsert({
+        agent_id: agentId || null, email, name: name || null,
+        status: 'pending', updated_at: new Date().toISOString(),
+      }, { onConflict: 'agent_id' })
+      return res.json({ ok: true, email, status: 'pending' })
+    }
+
+    if (body.action === 'identity-sync') {
+      if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
+      const list  = await boldsign('/senderIdentities/list')
+      const items = list.result || list.identities || (Array.isArray(list) ? list : [])
+      const svc   = getServiceClient()
+      for (const it of items) {
+        const email = it.email || it.senderEmail
+        if (!email) continue
+        await svc.from('boldsign_sender_identities')
+          .update({ status: normalizeIdentityStatus(it.status || it.approvalStatus), updated_at: new Date().toISOString() })
+          .eq('email', email)
+      }
+      return res.json({ ok: true, count: items.length })
+    }
+
+    if (body.action === 'identity-resend') {
+      if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
+      if (!body.email) return res.status(400).json({ error: 'email required' })
+      await boldsign('/senderIdentities/resendInvitation', { method: 'POST', json: { email: body.email } })
+      return res.json({ ok: true })
+    }
+
+    // ─── Templates ────────────────────────────────────────────────────────────
+    if (body.action === 'template-list') {
+      const data = await boldsign('/template/list?page=1&pageSize=100')
+      return res.json({ templates: data.result || data.templates || [] })
+    }
+
+    // Returns an embedded BoldSign editor URL (open in an iframe/new tab) where an
+    // admin places/moves/removes fields. Pass a templateId to edit an existing
+    // template, or a PDF (documentBase64) to build a new one.
+    if (body.action === 'template-editor-url') {
+      if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
+      const { templateId, title, documentBase64, documentName, redirectUrl } = body
+      if (templateId) {
+        const data = await boldsign(`/template/getEmbeddedTemplateEditUrl?templateId=${encodeURIComponent(templateId)}`, {
+          method: 'POST', json: { RedirectUrl: redirectUrl || '', ShowToolbar: true, ViewOption: 'PreparePage' },
+        })
+        return res.json({ url: data.editUrl || data.createUrl || data.url, templateId })
+      }
+      if (!documentBase64) return res.status(400).json({ error: 'documentBase64 or templateId required' })
+      const form = new FormData()
+      form.append('Title',       title || 'New Template')
+      form.append('RedirectUrl', redirectUrl || '')
+      form.append('ShowToolbar', 'true')
+      form.append('Files', new Blob([Buffer.from(documentBase64, 'base64')], { type: 'application/pdf' }), documentName || 'template.pdf')
+      const data = await boldsign('/template/createEmbeddedTemplateUrl', { method: 'POST', form })
+      return res.json({ url: data.createUrl, templateId: data.templateId })
+    }
+
+    // Send a document generated from a template, with CRM-prefilled fields.
+    // roles: [{ roleIndex, signerName, signerEmail, signerOrder?,
+    //           existingFormFields: [{ id, value, isReadOnly }] }]
+    if (body.action === 'template-send') {
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName } = body
+      if (!templateId)     return res.status(400).json({ error: 'templateId required' })
+      if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
+
+      const svc        = getServiceClient()
+      const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
+      const payload = {
+        title:   emailSubject || documentName || 'Please sign this document',
+        message: message || 'Please review and sign.',
+        roles,
+        ...(cc ? { cc } : {}),
+        ...(onBehalfOf ? { onBehalfOf } : {}),
+      }
+      const data = await boldsign(`/template/send?templateId=${encodeURIComponent(templateId)}`, { method: 'POST', json: payload })
+
+      if (deal_id) {
+        await svc.from('boldsign_documents').insert([{
+          deal_id,
+          agent_id:      actor.agent.id,
+          document_id:   data.documentId,
+          signer_name:   roles.map(r => r.signerName).filter(Boolean).join(', '),
+          signer_email:  roles.map(r => r.signerEmail).filter(Boolean).join(', '),
+          document_name: documentName || emailSubject || 'Document',
+          subject:       emailSubject || null,
+          signers:       roles,
+          status:        'sent',
+        }])
+      }
+      return res.json({ documentId: data.documentId, envelopeId: data.documentId, status: 'sent' })
     }
 
     return res.status(400).json({ error: 'Unknown action' })

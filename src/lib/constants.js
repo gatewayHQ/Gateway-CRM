@@ -27,6 +27,8 @@ export const TABLES = Object.freeze({
   DOCUMENT_VERSIONS:   'document_versions',
   PROPERTIES:          'properties',
   BOLDSIGN_DOCUMENTS:  'boldsign_documents',
+  BOLDSIGN_SENDER_IDENTITIES: 'boldsign_sender_identities',
+  BOLDSIGN_TEMPLATES:  'boldsign_templates',
   TASKS:               'tasks',
   TEAMS:               'teams',
   TEAM_SPLITS:         'team_splits',
