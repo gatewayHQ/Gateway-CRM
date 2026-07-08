@@ -124,6 +124,7 @@ function TemplatesPanel({ templates, onChange }) {
   const [name,     setName]     = useState('')
   const [tid,      setTid]      = useState('')
   const [docType,  setDocType]  = useState('')
+  const [state,    setState]    = useState('')
   const [tokens,   setTokens]   = useState('')
   const [saving,   setSaving]   = useState(false)
   const [editorBusy, setEditorBusy] = useState(false)
@@ -151,12 +152,13 @@ function TemplatesPanel({ templates, onChange }) {
     const field_tokens = tokens.split(',').map(s => s.trim()).filter(Boolean)
     const { error } = await supabase.from('boldsign_templates').upsert({
       template_id: tid.trim(), name: name.trim(), doc_type: docType.trim() || null,
+      state: state.trim().toUpperCase() || null,
       field_tokens, active: true,
     }, { onConflict: 'template_id' })
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast('Template registered', 'success')
-    setName(''); setTid(''); setDocType(''); setTokens('')
+    setName(''); setTid(''); setDocType(''); setState(''); setTokens('')
     onChange()
   }
 
@@ -178,7 +180,10 @@ function TemplatesPanel({ templates, onChange }) {
           {templates.map((t, i) => (
             <div key={t.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', borderTop: i ? '1px solid var(--gw-border)' : 'none', opacity: t.active ? 1 : 0.5 }}>
               <div style={{ flex:1, minWidth:0 }}>
-                <div style={{ fontSize:13, fontWeight:600 }}>{t.name}</div>
+                <div style={{ fontSize:13, fontWeight:600 }}>
+                  {t.name}
+                  {t.state && <span style={{ marginLeft:8, padding:'1px 6px', borderRadius:8, fontSize:10, fontWeight:700, background:'var(--gw-sky)', color:'var(--gw-azure)' }}>{t.state}</span>}
+                </div>
                 <div style={{ fontSize:11, color:'var(--gw-mist)', fontFamily:'var(--font-mono)' }}>{t.template_id}</div>
                 {t.field_tokens?.length > 0 && <div style={{ fontSize:11, color:'var(--gw-mist)' }}>fills: {t.field_tokens.join(', ')}</div>}
               </div>
@@ -197,9 +202,12 @@ function TemplatesPanel({ templates, onChange }) {
           <input ref={fileRef} type="file" accept=".pdf" style={{ display:'none' }} onChange={e => openEditor(e.target.files[0])}/>
         </div>
         <div style={{ display:'grid', gap:8 }}>
-          <input className="form-control" placeholder="Template name (e.g. Listing Agreement)" value={name} onChange={e => setName(e.target.value)}/>
+          <input className="form-control" placeholder="Template name (e.g. Iowa Listing Agreement)" value={name} onChange={e => setName(e.target.value)}/>
           <input className="form-control" placeholder="BoldSign template id" value={tid} onChange={e => setTid(e.target.value)}/>
-          <input className="form-control" placeholder="Doc type (optional, e.g. listing_agreement)" value={docType} onChange={e => setDocType(e.target.value)}/>
+          <div style={{ display:'flex', gap:8 }}>
+            <input className="form-control" style={{ flex:2 }} placeholder="Doc type (e.g. listing_agreement)" value={docType} onChange={e => setDocType(e.target.value)}/>
+            <input className="form-control" style={{ flex:1 }} maxLength={2} placeholder="State (IA)" value={state} onChange={e => setState(e.target.value)}/>
+          </div>
           <input className="form-control" placeholder="Field tokens, comma-separated (e.g. property_address, list_price, seller_name)" value={tokens} onChange={e => setTokens(e.target.value)}/>
           <button className="btn btn--primary btn--sm" onClick={register} disabled={saving} style={{ justifySelf:'start' }}>
             {saving ? 'Saving…' : 'Register template'}

@@ -1488,7 +1488,13 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
 
-  const [templateId, setTemplateId] = React.useState(templates[0]?.template_id || '')
+  // Show templates for this deal's state (plus any state-agnostic ones). Fall
+  // back to the full list if none match, so a missing state never blocks a send.
+  const dealState = String(property?.state || deal?.comp_data?.state || '').trim().toUpperCase()
+  const matched   = templates.filter(t => !t.state || t.state.toUpperCase() === dealState)
+  const visible   = (dealState && matched.length) ? matched : templates
+
+  const [templateId, setTemplateId] = React.useState(visible[0]?.template_id || '')
   const [subject,    setSubject]    = React.useState(`Please sign: ${deal?.title || 'Document'}`)
   const [sending,    setSending]    = React.useState(false)
 
@@ -1539,8 +1545,13 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
         <div className="form-group">
           <label className="form-label required">Template</label>
           <select className="form-control" value={templateId} onChange={e => setTemplateId(e.target.value)}>
-            {templates.map(t => <option key={t.template_id} value={t.template_id}>{t.name}</option>)}
+            {visible.map(t => <option key={t.template_id} value={t.template_id}>{t.name}{t.state ? ` (${t.state})` : ''}</option>)}
           </select>
+          {dealState && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
+              Showing templates for {dealState}{matched.length ? '' : ' — none registered for this state yet, showing all'}.
+            </div>
+          )}
           {tpl?.field_tokens?.length > 0 && (
             <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
               Auto-fills from this deal: {tpl.field_tokens.join(', ')}

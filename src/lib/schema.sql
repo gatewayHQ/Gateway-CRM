@@ -373,7 +373,8 @@ create table if not exists boldsign_templates (
   id           uuid primary key default uuid_generate_v4(),
   template_id  text not null,
   name         text not null,
-  doc_type     text,
+  doc_type     text,                 -- state-agnostic key: listing_agreement, buyer_rep, disclosure
+  state        text,                 -- 2-letter code (IA/SD/NE); null = applies to any state
   description  text,
   field_tokens jsonb default '[]',
   active       boolean default true,

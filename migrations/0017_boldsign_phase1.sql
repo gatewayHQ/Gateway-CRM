@@ -34,13 +34,17 @@ create table if not exists boldsign_templates (
   template_id  text not null,
   name         text not null,
   doc_type     text,
+  state        text,
   description  text,
   field_tokens jsonb default '[]',
   active       boolean default true,
   created_by   uuid references agents(id) on delete set null,
   created_at   timestamptz default now()
 );
+-- Safety for databases that created the table before `state` existed.
+alter table boldsign_templates add column if not exists state text;
 create unique index if not exists uq_boldsign_template_tid on boldsign_templates(template_id);
+create index if not exists idx_boldsign_templates_state on boldsign_templates(state);
 create index if not exists idx_boldsign_templates_active on boldsign_templates(active) where active;
 
 alter table boldsign_templates enable row level security;
