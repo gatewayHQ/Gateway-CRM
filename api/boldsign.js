@@ -1,6 +1,11 @@
 import { applyJsonCors, requireAgent, errorResponse, getServiceClient } from './_lib/auth.js'
 import closingPacketHandler from './_handlers/closing-packet.js'
 import { PDFDocument } from 'pdf-lib'
+import crypto from 'node:crypto'
+
+// We verify webhook signatures against the RAW request body, so the automatic
+// body parser must be off — we read the stream and parse it ourselves below.
+export const config = { api: { bodyParser: false } }
 
 // ─── BoldSign REST API client ────────────────────────────────────────────────
 // https://developers.boldsign.com — auth via X-API-KEY header, base /v1.
@@ -9,6 +14,38 @@ import { PDFDocument } from 'pdf-lib'
 // email or consumes credits.
 const API_BASE = 'https://api.boldsign.com/v1'
 const API_KEY  = process.env.BOLDSIGN_API_KEY
+const WEBHOOK_SECRET = process.env.BOLDSIGN_WEBHOOK_SECRET
+
+// Read the raw request body as a string (body parser is disabled above).
+async function readRawBody(req) {
+  if (typeof req.body === 'string') return req.body
+  if (Buffer.isBuffer(req.body))    return req.body.toString('utf8')
+  const chunks = []
+  for await (const chunk of req) chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk)
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+// Verify BoldSign's X-BoldSign-Signature header ("t=<unix>, s0=<hmac-sha256-hex>")
+// over `${t}.${rawBody}` using the endpoint's signing secret. Returns:
+//   'ok'         — verified (or no secret configured → verification disabled)
+//   'invalid'    — secret configured but signature/timestamp did not match
+function verifyWebhookSignature(rawBody, header) {
+  if (!WEBHOOK_SECRET) return 'ok'                  // opt-in — unset preserves prior behavior
+  if (!header) return 'invalid'
+  const parts = {}
+  for (const kv of String(header).split(',')) {
+    const [k, v] = kv.split('=').map(s => (s || '').trim())
+    if (k) parts[k] = v
+  }
+  const t = parts.t, sig = parts.s0
+  if (!t || !sig) return 'invalid'
+  // Reject events outside a 5-minute window (replay protection).
+  const now = Math.floor(Date.now() / 1000)
+  if (!Number.isFinite(Number(t)) || Math.abs(now - Number(t)) > 300) return 'invalid'
+  const expected = crypto.createHmac('sha256', WEBHOOK_SECRET).update(`${t}.${rawBody}`).digest('hex')
+  const a = Buffer.from(expected), b = Buffer.from(String(sig))
+  return a.length === b.length && crypto.timingSafeEqual(a, b) ? 'ok' : 'invalid'
+}
 
 async function boldsign(path, { method = 'GET', form, json, raw = false } = {}) {
   const headers = { 'X-API-KEY': API_KEY, Accept: 'application/json' }
@@ -154,13 +191,22 @@ async function resolveOnBehalfOf(supabase, agentId) {
 export default async function handler(req, res) {
   applyJsonCors(res)
   if (req.method === 'OPTIONS') return res.status(200).end()
+  // A GET returns 200 so webhook-endpoint reachability checks pass.
+  if (req.method === 'GET')     return res.status(200).json({ ok: true })
   if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' })
 
-  const body = req.body || {}
+  // Body parser is disabled — read the raw body once, parse it, and expose the
+  // parsed object on req.body so downstream handlers keep working. Keep the raw
+  // string for webhook signature verification.
+  const rawBody = await readRawBody(req)
+  let body = {}
+  try { body = rawBody ? JSON.parse(rawBody) : {} } catch { body = {} }
+  req.body    = body
+  req.rawBody = rawBody
 
   // BoldSign webhook payloads do NOT carry an `action` field. Route those to the
-  // webhook handler, which authenticates by document-id round-trip (the document
-  // must exist in boldsign_documents for the update to happen).
+  // webhook handler, which verifies the signature (when a secret is configured)
+  // and authenticates by document-id round-trip.
   if (!body.action) return handleWebhook(req, res)
 
   // Co-hosted closing-packet handler (lives in api/_handlers/, no extra Vercel
@@ -362,6 +408,47 @@ export default async function handler(req, res) {
       return res.json({ documentId: data.documentId, envelopeId: data.documentId, status: 'sent' })
     }
 
+    // Like template-send, but returns an embedded BoldSign "prepare" URL where
+    // the agent can move/add/remove field placements before clicking Send. The
+    // document stays a draft until they send; the Sent webhook flips it to 'sent'.
+    if (body.action === 'template-embed-url') {
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, redirectUrl } = body
+      if (!templateId)     return res.status(400).json({ error: 'templateId required' })
+      if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
+
+      const svc        = getServiceClient()
+      const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
+      const payload = {
+        title:          documentName || emailSubject || 'Please sign this document',
+        message:        message || 'Please review and sign.',
+        roles,
+        sendViewOption: 'PreparePage',   // land on the field-placement editor
+        showToolbar:    true,
+        redirectUrl:    redirectUrl || '',
+        ...(cc ? { cc } : {}),
+        ...(Array.isArray(labels) && labels.length ? { labels } : {}),
+        ...(onBehalfOf ? { onBehalfOf } : {}),
+      }
+      const data = await boldsign(`/template/createEmbeddedRequestUrl?templateId=${encodeURIComponent(templateId)}`, { method: 'POST', json: payload })
+
+      // A draft document may be created immediately; track it so status updates
+      // land when the agent finishes and BoldSign fires the Sent webhook.
+      if (deal_id && data.documentId) {
+        await svc.from('boldsign_documents').insert([{
+          deal_id,
+          agent_id:      actor.agent.id,
+          document_id:   data.documentId,
+          signer_name:   roles.map(r => r.signerName).filter(Boolean).join(', '),
+          signer_email:  roles.map(r => r.signerEmail).filter(Boolean).join(', '),
+          document_name: documentName || emailSubject || 'Document',
+          subject:       emailSubject || null,
+          signers:       roles,
+          status:        'draft',
+        }])
+      }
+      return res.json({ url: data.sendUrl || data.embeddedSendUrl || data.url || null, documentId: data.documentId || null })
+    }
+
     return res.status(400).json({ error: 'Unknown action' })
   } catch (err) {
     return res.status(err.status || 500).json({ error: err.message })
@@ -373,14 +460,20 @@ export default async function handler(req, res) {
 // Declined, Revoked, Expired) to the registered callback URL as:
 //   { event: { eventType, environment, ... }, data: { documentId, status, ... } }
 //
-// Register webhook (one time), in the BoldSign dashboard → Settings → API →
-// Webhooks, or via API:
-//   curl -X POST https://api.boldsign.com/v1/webhook \
-//     -H "X-API-KEY: $BOLDSIGN_API_KEY" \
-//     -H "Content-Type: application/json" \
-//     -d '{"url":"https://<your-domain>/api/boldsign","events":["Completed","Declined","Sent","Viewed","Revoked","Expired"]}'
+// Register webhook (one time) in the BoldSign dashboard → Settings → API →
+// Webhooks, pointed at https://<your-domain>/api/boldsign. Then "Reveal" the
+// endpoint's signing secret and set BOLDSIGN_WEBHOOK_SECRET so inbound events
+// are HMAC-verified (X-BoldSign-Signature) — unverified events are ignored.
 //
 async function handleWebhook(req, res) {
+  // Reject forged/replayed events when a signing secret is configured. We still
+  // answer 200 so BoldSign doesn't retry-storm a request we're deliberately
+  // ignoring; we simply don't process it.
+  const verdict = verifyWebhookSignature(req.rawBody || '', req.headers['x-boldsign-signature'])
+  if (verdict === 'invalid') {
+    return res.status(200).json({ received: true, ignored: 'signature verification failed' })
+  }
+
   let supabase
   try { supabase = getServiceClient() }
   catch (e) { return res.status(200).json({ received: true, error: e.message }) }

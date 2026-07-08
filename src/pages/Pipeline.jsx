@@ -9,7 +9,7 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { sendDocument, getDocStatus, downloadSigned as apiDownloadSigned, sendFromTemplate, buildPrefill, normalizeState } from '../lib/services/boldsign.js'
+import { sendDocument, getDocStatus, downloadSigned as apiDownloadSigned, sendFromTemplate, templateEmbedUrl, buildPrefill, normalizeState } from '../lib/services/boldsign.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
@@ -1497,6 +1497,7 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
 
   const [templateId, setTemplateId] = React.useState(visible[0]?.template_id || '')
   const [subject,    setSubject]    = React.useState(`Please sign: ${deal?.title || 'Document'}`)
+  const [adjust,     setAdjust]     = React.useState(false)
   const [sending,    setSending]    = React.useState(false)
 
   const tpl = templates.find(t => t.template_id === templateId)
@@ -1523,13 +1524,20 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
     const docName = [tpl?.name || deal?.title, property?.address].filter(Boolean).join(' — ')
     // Tags for search/reporting in the BoldSign dashboard.
     const labels  = [tpl?.state, tpl?.doc_type, `deal:${deal.id}`].filter(Boolean)
+    const args    = { templateId, deal_id: deal.id, roles, emailSubject: subject, documentName: docName, labels }
 
     try {
-      await sendFromTemplate({
-        templateId, deal_id: deal.id, roles,
-        emailSubject: subject, documentName: docName, labels,
-      })
-      pushToast('Sent for signature from template', 'success')
+      if (adjust) {
+        // Open BoldSign's prepare page so the agent can move/add/remove fields,
+        // then click Send there. The draft is tracked; the Sent webhook finishes it.
+        const { url } = await templateEmbedUrl({ ...args, redirectUrl: window.location.href })
+        if (!url) { pushToast('BoldSign did not return an editor URL', 'error'); return }
+        window.open(url, '_blank', 'noopener')
+        pushToast('Opened in BoldSign — adjust fields and click Send there', 'success')
+      } else {
+        await sendFromTemplate(args)
+        pushToast('Sent for signature from template', 'success')
+      }
       onSent()
     } catch (err) {
       pushToast(err.message, 'error')
@@ -1580,11 +1588,17 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
             </div>
           )}
         </div>
+        <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)' }}>
+          <input type="checkbox" id="tplAdjust" checked={adjust} onChange={e => setAdjust(e.target.checked)} style={{ width:15, height:15, cursor:'pointer' }}/>
+          <label htmlFor="tplAdjust" style={{ fontSize:13, cursor:'pointer', flex:1 }}>
+            <strong>Adjust fields before sending</strong> — opens BoldSign so you can move, add, or remove field placements, then send from there.
+          </label>
+        </div>
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
         <button className="btn btn--primary" onClick={submit} disabled={sending}>
-          {sending ? 'Sending…' : 'Send for Signature'}
+          {sending ? (adjust ? 'Opening…' : 'Sending…') : (adjust ? 'Open in BoldSign' : 'Send for Signature')}
         </button>
       </div>
     </Modal>

@@ -40,6 +40,7 @@ export const resendIdentity = (email) => call({ action: 'identity-resend', email
 export const listBoldsignTemplates = ()  => call({ action: 'template-list' })
 export const templateEditorUrl     = (p) => call({ action: 'template-editor-url', ...p })
 export const sendFromTemplate      = (p) => call({ action: 'template-send', ...p })
+export const templateEmbedUrl      = (p) => call({ action: 'template-embed-url', ...p })
 
 // Normalize a state value to a 2-letter code. Accepts existing codes (IA) or
 // the full names of the states the brokerage operates in. Extend the map if you
