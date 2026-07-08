@@ -37,7 +37,8 @@ applied to production and the findings, so the repo's history matches reality.
 | 2026-06-11 | (Phase B block from this README) | Applied by Daniel — per-agent enforcement is LIVE in production |
 | 2026-06-11 | `2026-06-11_milestone1_stage_tracks.sql` | Applied by Daniel — the track-aware stage tokens are accepted by production |
 | 2026-06-12 | `2026-06-12_back_office.sql` | **PENDING** — apply with the Back Office deploy (caps in DB + admin-only commissions; rollback block in the file header). Validated on the replica: `scripts/db-verify/production/backoffice_behavior.sql` |
-| 2026-07-07 | `2026-07-07_esign_transaction_layer.sql` | **PENDING** — apply with the BoldSign deploy. Creates `boldsign_documents`, `audit_log`, `document_versions`, `closing_packets`, `agent_nudges`, the `deals.review_*` columns, and the `closing-packets` bucket (numbered migrations 0014/0015/0016 were never applied to production). Idempotent; depends only on the `app_*` helpers already live from the 2026-06-10 bundle. |
+| 2026-07-07 | `2026-07-07_esign_transaction_layer.sql` | **PENDING** — apply with the BoldSign deploy. Creates `boldsign_documents`, `audit_log`, `document_versions`, `closing_packets`, `agent_nudges`, the `deals.review_*` columns, and the `closing-packets` bucket (numbered migrations 0014/0015/0016 were never applied to production). Idempotent; depends only on the `app_*` helpers already live from the 2026-06-10 bundle. Section 8 now also drops the legacy `docusign_envelopes`/`docusign_field_templates` tables. |
+| 2026-07-08 | `2026-07-08_boldsign_phase1.sql` | **PENDING** — apply with the BoldSign templates deploy. Creates `boldsign_sender_identities` (per-agent send-on-behalf delegation) and `boldsign_templates` (reusable docs + prefill tokens). Idempotent. |
 
 The bundle: creates `documents` (secure from day one), adds the missing
 `docusign_envelopes` columns, adds `activities.deal_id`, adds the deal value /

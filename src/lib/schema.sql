@@ -343,6 +343,53 @@ alter table boldsign_documents enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- BOLDSIGN SENDER IDENTITIES  (one per agent — "send on behalf of" delegation)
+-- Each agent is registered in BoldSign so their signature requests come from
+-- them. Approval is out-of-band (agent clicks an emailed link); we track status.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists boldsign_sender_identities (
+  id          uuid primary key default uuid_generate_v4(),
+  agent_id    uuid references agents(id) on delete cascade not null,
+  email       text not null,
+  name        text,
+  status      text default 'pending' check (status in ('pending','approved','declined')),
+  created_at  timestamptz default now(),
+  updated_at  timestamptz default now()
+);
+create unique index if not exists uq_boldsign_identity_agent on boldsign_sender_identities(agent_id);
+create index if not exists idx_boldsign_identity_email on boldsign_sender_identities(email);
+alter table boldsign_sender_identities enable row level security;
+drop policy if exists boldsign_sender_identities_scope on boldsign_sender_identities;
+create policy boldsign_sender_identities_scope on boldsign_sender_identities for all to authenticated
+  using      (app_is_admin() or agent_id = app_current_agent_id())
+  with check (app_is_admin());
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- BOLDSIGN TEMPLATES  (reusable documents with fields; CRM prefills by field id)
+-- template_id is the BoldSign template id; field_tokens lists the label/id set
+-- the template expects so the app can prefill (e.g. property_address, list_price).
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists boldsign_templates (
+  id           uuid primary key default uuid_generate_v4(),
+  template_id  text not null,
+  name         text not null,
+  doc_type     text,                 -- state-agnostic key: listing_agreement, buyer_rep, disclosure
+  state        text,                 -- 2-letter code (IA/SD/NE); null = applies to any state
+  description  text,
+  field_tokens jsonb default '[]',
+  active       boolean default true,
+  created_by   uuid references agents(id) on delete set null,
+  created_at   timestamptz default now()
+);
+create unique index if not exists uq_boldsign_template_tid on boldsign_templates(template_id);
+create index if not exists idx_boldsign_templates_active on boldsign_templates(active) where active;
+alter table boldsign_templates enable row level security;
+drop policy if exists boldsign_templates_scope on boldsign_templates;
+create policy boldsign_templates_scope on boldsign_templates for all to authenticated
+  using      (true)
+  with check (app_is_admin());
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- TRANSACTION STEPS  (closing checklists per deal)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists transaction_steps (

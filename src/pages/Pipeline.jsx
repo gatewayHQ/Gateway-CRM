@@ -8,6 +8,8 @@ import {
   focusItems, pipelineTotals,
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
+import { OPERATING_STATES } from '../lib/constants.js'
+import { sendDocument, getDocStatus, downloadSigned as apiDownloadSigned, sendFromTemplate, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState } from '../lib/services/boldsign.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
@@ -323,9 +325,7 @@ function ChecklistTab({ deal }) {
               if (v && txType && steps.length === 0) loadTemplate(v, txType)
             }}>
             <option value="">State…</option>
-            <option value="IA">Iowa (IA)</option>
-            <option value="SD">South Dakota (SD)</option>
-            <option value="NE">Nebraska (NE)</option>
+            {OPERATING_STATES.map(s => <option key={s.code} value={s.code}>{s.name} ({s.code})</option>)}
             <option value="other">Other</option>
           </select>
           <select className="form-control" style={{ flex: 1, fontSize: 12 }}
@@ -1148,19 +1148,18 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       name: s.name, email: s.email, routingOrder: s.routingOrder,
     }))
 
-    const resp = await fetch('/api/boldsign', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action:         'send',
+    let data
+    try {
+      data = await sendDocument({
         emailSubject:   subject,
         documentBase64: base64,
         documentName:   finalDocName,
         signers:        signerPayload,
-      }),
-    })
-    const data = await resp.json()
+      })
+    } catch (err) {
+      setSending(false); pushToast(err.message, 'error'); return
+    }
     setSending(false)
-    if (data.error) { pushToast(data.error, 'error'); return }
     if (!data.documentId && !data.envelopeId) { pushToast('BoldSign did not return a document id', 'error'); return }
 
     await supabase.from('boldsign_documents').insert([{
@@ -1273,6 +1272,8 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
   const [sendOpen,    setSendOpen]    = React.useState(false)
+  const [tplOpen,     setTplOpen]     = React.useState(false)
+  const [templates,   setTemplates]   = React.useState([])
   const [dealFiles,   setDealFiles]   = React.useState([])
   const [downloading, setDownloading] = React.useState({})
 
@@ -1280,6 +1281,7 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
     if (!deal?.id) return
     loadEnvelopes()
     loadDealFiles()
+    loadTemplates()
 
     // Realtime subscription — auto-update status when webhook fires
     const channel = supabase.channel(`sig-documents-${deal.id}`)
@@ -1306,19 +1308,20 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
     setLoading(false)
   }
 
+  const loadTemplates = async () => {
+    const { data } = await supabase.from('boldsign_templates').select('*').eq('active', true).order('name')
+    setTemplates(data || [])
+  }
+
   const loadDealFiles = async () => {
     const { data } = await supabase.storage.from(BUCKET).list(`deal-${deal.id}`, { sortBy: { column: 'created_at', order: 'desc' } })
     setDealFiles((data || []).filter(f => f.name !== '.emptyFolderPlaceholder'))
   }
 
   const refreshStatus = async (env) => {
-    const res = await fetch('/api/boldsign', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'status', documentId: env.document_id }),
-    })
-    const data = await res.json()
-    if (data.error) { pushToast(data.error, 'error'); return }
+    let data
+    try { data = await getDocStatus(env.document_id) }
+    catch (err) { pushToast(err.message, 'error'); return }
     const patch = { status: data.status, completed_at: data.completedDateTime || null }
     await supabase.from('boldsign_documents').update(patch).eq('id', env.id)
     setEnvelopes(prev => prev.map(e => e.id === env.id ? { ...e, ...patch } : e))
@@ -1342,13 +1345,10 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
     }
 
     // Fall back: download directly from BoldSign API
-    const res = await fetch('/api/boldsign', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'download', documentId: env.document_id }),
-    })
-    const data = await res.json()
+    let data
+    try { data = await apiDownloadSigned(env.document_id) }
+    catch (err) { setDownloading(p => ({ ...p, [env.id]: false })); pushToast(err.message, 'error'); return }
     setDownloading(p => ({ ...p, [env.id]: false }))
-    if (data.error) { pushToast(data.error, 'error'); return }
 
     // Trigger browser download
     const link = document.createElement('a')
@@ -1406,9 +1406,16 @@ create policy "agent_notifications_policy" on agent_notifications
     <div style={{ padding:16, overflowY:'auto', flex:1 }}>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
         <div style={{ fontSize:13, color:'var(--gw-mist)' }}>{envelopes.length} document{envelopes.length !== 1 ? 's' : ''} sent</div>
-        <button className="btn btn--primary btn--sm" onClick={() => setSendOpen(true)}>
-          <Icon name="send" size={13}/> Send for Signature
-        </button>
+        <div style={{ display:'flex', gap:8 }}>
+          {templates.length > 0 && (
+            <button className="btn btn--secondary btn--sm" onClick={() => setTplOpen(true)}>
+              <Icon name="file" size={13}/> Send from Template
+            </button>
+          )}
+          <button className="btn btn--primary btn--sm" onClick={() => setSendOpen(true)}>
+            <Icon name="send" size={13}/> Send for Signature
+          </button>
+        </div>
       </div>
 
       {loading
@@ -1462,7 +1469,210 @@ create policy "agent_notifications_policy" on agent_notifications
           onSent={() => { setSendOpen(false); loadEnvelopes() }}
         />
       )}
+
+      {tplOpen && (
+        <SendFromTemplateModal
+          deal={deal} contacts={contacts} properties={properties} templates={templates} activeAgent={activeAgent}
+          onClose={() => setTplOpen(false)}
+          onSent={() => { setTplOpen(false); loadEnvelopes() }}
+        />
+      )}
     </div>
+  )
+}
+
+// ── Send from Template modal — dynamic. Reads the template's actual roles +
+//    fillable fields from BoldSign, renders a signer input per role and an
+//    editable (CRM-prefilled) input per field, then sends via /api/boldsign.
+const prettyLabel = (id) => String(id || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+
+function SendFromTemplateModal({ deal, contacts, properties, templates, activeAgent, onClose, onSent }) {
+  const contact  = contacts?.find(c => c.id === deal?.contact_id)
+  const property = properties?.find(p => p.id === deal?.property_id)
+
+  // Filter templates to the deal's state (comp_data.state preferred, else the
+  // normalized property state); fall back to all if none match.
+  const dealState = normalizeState(deal?.comp_data?.state || property?.state || '')
+  const matched   = templates.filter(t => !t.state || normalizeState(t.state) === dealState)
+  const visible   = (dealState && matched.length) ? matched : templates
+
+  const [templateId, setTemplateId] = React.useState(visible[0]?.template_id || '')
+  const [subject,    setSubject]    = React.useState(`Please sign: ${deal?.title || 'Document'}`)
+  const [adjust,     setAdjust]     = React.useState(false)
+  const [sending,    setSending]    = React.useState(false)
+  const [details,    setDetails]    = React.useState(null)   // { roles, fields }
+  const [loadingDet, setLoadingDet] = React.useState(false)
+  const [signers,    setSigners]    = React.useState({})     // roleIndex → { name, email }
+  const [values,     setValues]     = React.useState({})     // fieldId → value
+
+  const tpl = templates.find(t => t.template_id === templateId)
+
+  // Load the template's roles + fields whenever the selection changes, and seed
+  // signer/field inputs from the deal.
+  React.useEffect(() => {
+    if (!templateId) { setDetails(null); return }
+    let cancelled = false
+    setLoadingDet(true)
+    templateDetails(templateId)
+      .then(det => {
+        if (cancelled) return
+        const roles  = det.roles?.length ? det.roles : [{ index: 1, name: 'Signer' }]
+        const fields = (det.fields || []).filter(f => isFillableField(f.type))
+        setDetails({ roles, fields })
+
+        // Seed signers: match role name to the deal's people (first match wins).
+        const tokenVals = crmTokenValues({ deal, property, contact, agent: activeAgent })
+        const seededSigners = {}
+        let usedContact = false, usedAgent = false
+        for (const r of roles) {
+          const n = String(r.name).toLowerCase()
+          if (!usedAgent && /agent/.test(n) && activeAgent?.email) {
+            seededSigners[r.index] = { name: activeAgent.name || '', email: activeAgent.email || '' }; usedAgent = true
+          } else if (!usedContact && /(seller|buyer|client|owner)/.test(n) && contact) {
+            seededSigners[r.index] = { name: `${contact.first_name || ''} ${contact.last_name || ''}`.trim(), email: contact.email || '' }; usedContact = true
+          } else {
+            seededSigners[r.index] = { name: r.defaultName || '', email: r.defaultEmail || '' }
+          }
+        }
+        setSigners(seededSigners)
+
+        const seededValues = {}
+        for (const f of fields) seededValues[f.id] = tokenVals[f.id] || ''
+        setValues(seededValues)
+      })
+      .catch(err => { if (!cancelled) { setDetails({ roles: [{ index: 1, name: 'Signer' }], fields: [] }); pushToast(`Couldn't load template fields: ${err.message}`, 'error') } })
+      .finally(() => { if (!cancelled) setLoadingDet(false) })
+    return () => { cancelled = true }
+  }, [templateId])
+
+  const setSigner = (idx, k, v) => setSigners(p => ({ ...p, [idx]: { ...(p[idx] || {}), [k]: v } }))
+  const setValue  = (id, v)     => setValues(p => ({ ...p, [id]: v }))
+
+  const submit = async () => {
+    if (!templateId) { pushToast('Pick a template', 'error'); return }
+    const roleList = details?.roles || []
+    const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())
+    if (!filled.length) { pushToast('At least one signer needs a name and email', 'error'); return }
+    setSending(true)
+
+    // Attach each filled field value to the role that owns it (or the first
+    // filled role if the field isn't role-scoped). CRM-entered values are locked.
+    const firstIdx = filled[0].index
+    const byRole = {}
+    for (const f of (details.fields || [])) {
+      const v = (values[f.id] || '').trim()
+      if (!v) continue
+      const idx = (f.roleIndex && filled.some(r => r.index === f.roleIndex)) ? f.roleIndex : firstIdx
+      ;(byRole[idx] ||= []).push({ id: f.id, value: v, isReadOnly: true })
+    }
+    const roles = filled.map(r => ({
+      roleIndex: r.index, signerName: signers[r.index].name, signerEmail: signers[r.index].email,
+      signerOrder: r.index, existingFormFields: byRole[r.index] || [],
+    }))
+    const roleRemovalIndices = roleList.filter(r => !filled.includes(r)).map(r => r.index)
+
+    const docName = [tpl?.name || deal?.title, property?.address].filter(Boolean).join(' — ')
+    const labels  = [tpl?.state, tpl?.doc_type, `deal:${deal.id}`].filter(Boolean)
+    const args    = { templateId, deal_id: deal.id, roles, roleRemovalIndices, emailSubject: subject, documentName: docName, labels }
+
+    try {
+      if (adjust) {
+        const { url } = await templateEmbedUrl({ ...args, redirectUrl: window.location.href })
+        if (!url) { pushToast('BoldSign did not return an editor URL', 'error'); return }
+        window.open(url, '_blank', 'noopener')
+        pushToast('Opened in BoldSign — review fields and click Send there', 'success')
+      } else {
+        await sendFromTemplate(args)
+        pushToast('Sent for signature from template', 'success')
+      }
+      onSent()
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const fields = details?.fields || []
+
+  return (
+    <Modal open={true} onClose={onClose} width={520}>
+      <div className="modal__head">
+        <div>
+          <div className="eyebrow-label">BoldSign · Send from Template</div>
+          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Send for Signature</h3>
+        </div>
+        <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
+      </div>
+      <div className="modal__body">
+        <div className="form-group">
+          <label className="form-label required">Template</label>
+          <select className="form-control" value={templateId} onChange={e => setTemplateId(e.target.value)}>
+            {visible.map(t => <option key={t.template_id} value={t.template_id}>{t.name}{t.state ? ` (${t.state})` : ''}</option>)}
+          </select>
+          {dealState && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
+              Showing templates for {dealState}{matched.length ? '' : ' — none registered for this state yet, showing all'}.
+            </div>
+          )}
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Email Subject</label>
+          <input className="form-control" value={subject} onChange={e => setSubject(e.target.value)}/>
+        </div>
+
+        {loadingDet && <div style={{ fontSize:13, color:'var(--gw-mist)', padding:'8px 0' }}>Loading template…</div>}
+
+        {!loadingDet && details && (
+          <>
+            {/* One signer input per template role; leave a role blank to omit it. */}
+            <div className="form-group">
+              <label className="form-label required">Signers</label>
+              {details.roles.map((r, i) => (
+                <div key={r.index} style={{ marginBottom:10 }}>
+                  <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:4 }}>
+                    <span style={{ display:'inline-flex', width:18, height:18, borderRadius:'50%', background:SIGNER_COLORS[i]||'#6b7280', color:'#fff', alignItems:'center', justifyContent:'center', fontSize:10, marginRight:6 }}>{r.index}</span>
+                    {r.name}
+                  </div>
+                  <div style={{ display:'flex', gap:8 }}>
+                    <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={signers[r.index]?.name || ''} onChange={e => setSigner(r.index, 'name', e.target.value)}/>
+                    <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={signers[r.index]?.email || ''} onChange={e => setSigner(r.index, 'email', e.target.value)}/>
+                  </div>
+                </div>
+              ))}
+              <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Roles left blank are removed from this send.</div>
+            </div>
+
+            {/* Editable, CRM-prefilled detail fields the sellers see filled in. */}
+            {fields.length > 0 && (
+              <div className="form-group">
+                <label className="form-label">Document details <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— prefilled from the deal; edit as needed</span></label>
+                {fields.map(f => (
+                  <div key={f.id} style={{ marginBottom:8 }}>
+                    <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2 }}>{prettyLabel(f.id)}</div>
+                    <input className="form-control" value={values[f.id] || ''} onChange={e => setValue(f.id, e.target.value)}/>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)' }}>
+          <input type="checkbox" id="tplAdjust" checked={adjust} onChange={e => setAdjust(e.target.checked)} style={{ width:15, height:15, cursor:'pointer' }}/>
+          <label htmlFor="tplAdjust" style={{ fontSize:13, cursor:'pointer', flex:1 }}>
+            <strong>Review in BoldSign before sending</strong> — opens BoldSign to move/add/remove or fill fields, then send from there.
+          </label>
+        </div>
+      </div>
+      <div className="modal__foot">
+        <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
+        <button className="btn btn--primary" onClick={submit} disabled={sending || loadingDet}>
+          {sending ? (adjust ? 'Opening…' : 'Sending…') : (adjust ? 'Open in BoldSign' : 'Send for Signature')}
+        </button>
+      </div>
+    </Modal>
   )
 }
 

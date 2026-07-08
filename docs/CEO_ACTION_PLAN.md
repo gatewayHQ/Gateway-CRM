@@ -33,7 +33,7 @@ This document outlines:
 | Email Sending | Live | Via Resend |
 | SMS Messaging | Live | Via Twilio |
 | AI Email Drafting | Live | Via Claude AI |
-| E-Signature | Live | Via DocuSign |
+| E-Signature | Live | Via BoldSign |
 | Mail Campaigns + QR Tracking | Live | Custom-built |
 | Social Media Posting | Live | Via Buffer |
 | Mailchimp Sync | Live | Per-agent API keys |
@@ -49,7 +49,7 @@ This document outlines:
 | Tighten data access policies (per-agent isolation) | Engineering | 2 days | Free |
 | Verify sending domain in Resend (DNS records) | Operations | 30 min | Free |
 | Register Twilio A2P 10DLC for business SMS | Operations | 1 – 2 weeks (carrier review) | $4/month |
-| Move DocuSign from sandbox to production | Operations | 1 hour | Included in plan |
+| Move BoldSign from sandbox to production | Operations | 1 hour | Included in plan |
 | Set up uptime monitoring | Engineering | 15 min | Free |
 | Upgrade Vercel to Pro plan (enables automation) | CEO/Finance | 5 min | $20/month |
 | Upgrade Supabase to Pro plan (backups + PITR) | CEO/Finance | 5 min | $25/month |
@@ -72,7 +72,7 @@ This document outlines:
 
 - [ ] Verify sending domain in Resend (SPF, DKIM, DMARC records)
 - [ ] Submit A2P 10DLC registration for Twilio (carrier compliance)
-- [ ] Move DocuSign integration from demo to production environment
+- [ ] Move BoldSign integration from demo to production environment
 - [ ] Set spend alerts on Anthropic ($100/mo), Twilio (configurable), Resend
 - [ ] Set up UptimeRobot health check (free) pinging every 5 minutes
 
@@ -103,12 +103,12 @@ The following must be performed by the brokerage every month to keep the platfor
 | Task | Frequency | Time | Owner |
 |---|---|---|---|
 | Review uptime report and incident log | 1st of month | 15 min | Ops Manager |
-| Review API spend (Claude, Resend, Twilio, DocuSign) | 1st of month | 20 min | Ops Manager |
+| Review API spend (Claude, Resend, Twilio, BoldSign) | 1st of month | 20 min | Ops Manager |
 | Verify database backups completed successfully | 1st of month | 10 min | Ops Manager |
 | Review email deliverability stats (Resend dashboard) | Weekly | 10 min | Marketing |
 | Review SMS opt-outs and update suppression list | Weekly | 15 min | Marketing |
 | Audit user accounts (remove departed agents) | Monthly | 20 min | HR/Admin |
-| Review pending DocuSign envelopes older than 30 days | Monthly | 30 min | Transactions |
+| Review pending BoldSign documents older than 30 days | Monthly | 30 min | Transactions |
 | Export & archive prior month's activity logs | Monthly | 15 min | Compliance |
 
 ### Engineering — Monthly Tasks
@@ -145,7 +145,7 @@ The following must be performed by the brokerage every month to keep the platfor
 | Resend | Pro | $20 |
 | Twilio | A2P 10DLC fee | ~$4 |
 | Twilio | SMS usage | ~$10 – $50 |
-| DocuSign | eSignature Standard | ~$25 |
+| BoldSign | eSignature Standard | ~$25 |
 | Anthropic Claude API | Usage-based | ~$20 – $100 |
 | **Required Total** | | **~$120 – $245/mo** |
 
@@ -183,7 +183,7 @@ These are the highest-leverage features the brokerage can add to differentiate G
 - **Estimated business impact:** Recover 20 – 30% of cold leads that would otherwise go stale
 
 **3. Web Push Notifications**
-- Instant browser alerts when a QR code is scanned, lead form is submitted, or DocuSign envelope is signed
+- Instant browser alerts when a QR code is scanned, lead form is submitted, or BoldSign document is signed
 - **Estimated business impact:** Cut lead response time from hours to seconds
 
 ### Tier 2 — Differentiators (2 – 4 weeks each)

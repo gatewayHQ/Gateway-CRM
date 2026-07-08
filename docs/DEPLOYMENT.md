@@ -29,7 +29,7 @@
                 │ Supabase          │                       │       │ Third-party APIs   │
                 │  - Postgres       │◄──────service key─────┘       │ Resend (email)     │
                 │  - Auth           │                               │ Twilio (SMS)       │
-                │  - Storage        │                               │ DocuSign           │
+                │  - Storage        │                               │ BoldSign           │
                 │  - RLS policies   │                               │ Bitly  (QR codes)  │
                 └───────────────────┘                               │ Anthropic (AI)     │
                                                                     └────────────────────┘
@@ -46,7 +46,7 @@
 | Object storage | Supabase Storage | OM docs, attachments |
 | Email | Resend | Transactional + campaign blasts |
 | SMS / Voice | Twilio | Outbound SMS, webhooks |
-| E-signature | DocuSign | Listing agreements |
+| E-signature | BoldSign | Listing agreements |
 | AI | Anthropic Claude | Lead scoring, OM generation |
 
 ### Regions
@@ -178,15 +178,15 @@ does not consume a function slot) — Sentry's wrapper reads stdout/stderr.
   working through partial migrations.
 - **Suppression list** — global DNC enforcement before every send.
 - **Frequency caps** — per-campaign send limits prevent runaway outreach.
-- **Idempotent webhook routing** — `/api/docusign` handles both action calls
-  and DocuSign Connect webhooks based on payload shape.
+- **Idempotent webhook routing** — `/api/boldsign` handles both action calls
+  and BoldSign webhooks based on payload shape.
 - **Optimistic UI** — pushToast() pattern; failures roll back cleanly.
 
 ### Recommended next steps
 
 - **Database backups**: Supabase Pro auto-snapshots daily. On Free tier, run a
   weekly `pg_dump` via GitHub Actions to S3 / R2.
-- **Circuit breaker** for third-party APIs (Resend, Twilio, DocuSign) — return
+- **Circuit breaker** for third-party APIs (Resend, Twilio, BoldSign) — return
   cached fallback when 5xx rate > 50 % over 5 min.
 - **Rate limiting** on `/api/email-send` and `/api/twilio-send` via Upstash
   Redis (10 req/min/agent) to cap blast-radius of credential theft.
@@ -264,7 +264,7 @@ All secrets live in Vercel **Project → Settings → Environment Variables**:
 | `RESEND_FROM` | All | Verified sender domain |
 | `TWILIO_ACCOUNT_SID` | All | SMS |
 | `TWILIO_AUTH_TOKEN` | All | SMS |
-| `DOCUSIGN_*` | All | E-signature |
+| `BOLDSIGN_API_KEY` | All | E-signature |
 | `BITLY_ACCESS_TOKEN` | All | QR code generation |
 | `ANTHROPIC_API_KEY` | All | AI features |
 | `GATEWAY_CRON_SECRET` | All | Authenticates internal scheduled jobs |

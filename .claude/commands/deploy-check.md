@@ -28,7 +28,7 @@ Read every file in `api/`. For each serverless function:
 - Does it handle CORS (`Access-Control-Allow-Origin`, OPTIONS preflight)?
 - Does it validate required inputs before using them?
 - Does it return a proper error response (not just throw) if an env var is missing?
-- Is there a try/catch around external API calls (DocuSign, etc.)?
+- Is there a try/catch around external API calls (BoldSign, etc.)?
 
 Fix any that are missing basic error handling.
 

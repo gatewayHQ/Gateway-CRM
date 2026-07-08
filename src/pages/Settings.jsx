@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, pushToast } from '../components/UI.jsx'
+import BoldSignAdmin from './settings/BoldSignAdmin.jsx'
 
 const TRACKING_SCRIPT = `<!-- Gateway CRM — Lead Tracker -->
 <script>
@@ -453,6 +454,8 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
           </div>
         )}
       </div>
+
+      {activeAgent?.is_admin && <BoldSignAdmin agents={db.agents || []} />}
 
       <div className="settings-section">
         <div className="settings-section__title">About</div>

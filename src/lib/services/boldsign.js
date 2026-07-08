@@ -1,0 +1,95 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// BoldSign client service — the single place the browser talks to /api/boldsign.
+//
+// Every call carries the Supabase access token as a Bearer header; the API's
+// requireAgent()/requireAdmin() reject requests without it. Centralizing here
+// fixes the class of bug where a caller forgot the token and got a 401.
+// ─────────────────────────────────────────────────────────────────────────────
+import { supabase } from '../supabase.js'
+
+async function authHeaders() {
+  const { data: { session } } = await supabase.auth.getSession()
+  return {
+    'Content-Type': 'application/json',
+    ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+  }
+}
+
+async function call(payload) {
+  const res  = await fetch('/api/boldsign', {
+    method: 'POST', headers: await authHeaders(), body: JSON.stringify(payload),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`)
+  return data
+}
+
+// ── Documents (ad-hoc send flow) ─────────────────────────────────────────────
+export const sendDocument   = (p)          => call({ action: 'send', ...p })
+export const getDocStatus   = (documentId) => call({ action: 'status',   documentId })
+export const downloadSigned = (documentId) => call({ action: 'download', documentId })
+export const remindDocument = (documentId) => call({ action: 'remind',   documentId })
+export const debugBoldsign  = ()           => call({ action: 'debug' })
+
+// ── Sender identities (admin) ────────────────────────────────────────────────
+export const createIdentity = (agentId, name, email) => call({ action: 'identity-create', agentId, name, email })
+export const syncIdentities = ()      => call({ action: 'identity-sync' })
+export const resendIdentity = (email) => call({ action: 'identity-resend', email })
+
+// ── Templates ────────────────────────────────────────────────────────────────
+export const listBoldsignTemplates = ()  => call({ action: 'template-list' })
+export const templateEditorUrl     = (p) => call({ action: 'template-editor-url', ...p })
+export const templateDetails       = (templateId) => call({ action: 'template-details', templateId })
+export const sendFromTemplate      = (p) => call({ action: 'template-send', ...p })
+export const templateEmbedUrl      = (p) => call({ action: 'template-embed-url', ...p })
+
+// Field types whose value an agent can pre-fill from the CRM (vs signer actions
+// like Signature/Initial). Used to decide which template fields become inputs.
+export const FILLABLE_FIELD_TYPES = new Set(['textbox', 'text', 'label', 'dropdown', 'editabledate', 'company', 'name', 'title', 'email'])
+export const isFillableField = (t) => FILLABLE_FIELD_TYPES.has(String(t || '').toLowerCase())
+
+// Normalize a state value to a 2-letter code. Accepts existing codes (IA) or
+// the full names of the states the brokerage operates in. Extend the map if you
+// add states.
+const STATE_CODES = { iowa: 'IA', 'south dakota': 'SD', nebraska: 'NE' }
+export function normalizeState(s) {
+  const v = String(s || '').trim()
+  if (!v) return ''
+  if (v.length === 2) return v.toUpperCase()
+  return STATE_CODES[v.toLowerCase()] || v.toUpperCase()
+}
+
+// ── CRM → template field prefill ─────────────────────────────────────────────
+// Maps our fixed label/id tokens to values pulled from the deal + its property
+// and primary contact. Only tokens the template actually declares get sent.
+// The canonical token → value map from a deal's context. Field IDs on a
+// template that match one of these keys get auto-filled.
+export function crmTokenValues({ deal, property, contact, agent } = {}) {
+  const money = (n) => (n != null && n !== '' ? `$${Number(n).toLocaleString()}` : '')
+  const fullAddr = [property?.address, property?.city, property?.state, property?.zip].filter(Boolean).join(', ')
+  return {
+    property_address:   property?.address || deal?.prop_address || '',
+    property_full:      fullAddr,
+    property_city:      property?.city || '',
+    property_state:     property?.state || '',
+    property_zip:       property?.zip || '',
+    list_price:         money(property?.price ?? deal?.value),
+    commission_pct:     deal?.commission_pct != null ? `${deal.commission_pct}%` : '',
+    listing_start_date: deal?.comp_data?.listing_start || '',
+    listing_end_date:   deal?.comp_data?.listing_end || deal?.expected_close_date || '',
+    seller_name:        [contact?.first_name, contact?.last_name].filter(Boolean).join(' '),
+    client_name:        [contact?.first_name, contact?.last_name].filter(Boolean).join(' '),
+    close_date:         deal?.expected_close_date || '',
+    agent_name:         agent?.name || '',
+    agent_email:        agent?.email || '',
+    broker_name:        agent?.brokerage || agent?.broker_name || '',
+  }
+}
+
+export function buildPrefill(fieldTokens = [], ctx = {}) {
+  const source = crmTokenValues(ctx)
+  return (fieldTokens || [])
+    .map(id => ({ id, value: source[id] }))
+    .filter(f => f.value)                          // skip unknown/empty tokens
+    .map(f => ({ ...f, isReadOnly: true }))        // CRM-owned values are locked
+}

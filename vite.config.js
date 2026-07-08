@@ -14,8 +14,6 @@ export default defineConfig({
           'vendor-supabase':  ['@supabase/supabase-js'],
           // Anthropic SDK — only pages using AI generation need this
           'vendor-anthropic': ['@anthropic-ai/sdk'],
-          // pptxgenjs — large, only loaded when user opens OM Generator
-          'vendor-pptx':      ['pptxgenjs'],
         },
       },
     },

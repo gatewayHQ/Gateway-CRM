@@ -11,7 +11,7 @@ The argument should describe the feature in plain English, e.g.:
 Parse the argument to determine:
 1. Which page(s) are affected (`Contacts`, `Properties`, `Pipeline`, `Tasks`, `Templates`, `ColdCalls`)
 2. Whether it requires a new Supabase table, new columns on an existing table, or purely frontend state
-3. Whether it touches the DocuSign integration, email templates, or reporting
+3. Whether it touches the BoldSign integration, email templates, or reporting
 
 ## Step 2 — Read existing code
 

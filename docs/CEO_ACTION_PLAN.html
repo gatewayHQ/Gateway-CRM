@@ -163,7 +163,7 @@
   <tr><td>Email Sending</td><td>Live</td><td>Via Resend</td></tr>
   <tr><td>SMS Messaging</td><td>Live</td><td>Via Twilio</td></tr>
   <tr><td>AI Email Drafting</td><td>Live</td><td>Via Claude AI</td></tr>
-  <tr><td>E-Signature</td><td>Live</td><td>Via DocuSign</td></tr>
+  <tr><td>E-Signature</td><td>Live</td><td>Via BoldSign</td></tr>
   <tr><td>Mail Campaigns + QR Tracking</td><td>Live</td><td>Custom-built</td></tr>
   <tr><td>Social Media Posting</td><td>Live</td><td>Via Buffer</td></tr>
   <tr><td>Mailchimp Sync</td><td>Live</td><td>Per-agent API keys</td></tr>
@@ -179,7 +179,7 @@
   <tr><td>Tighten data access policies (per-agent isolation)</td><td>Engineering</td><td>2 days</td><td>Free</td></tr>
   <tr><td>Verify sending domain in Resend</td><td>Operations</td><td>30 min</td><td>Free</td></tr>
   <tr><td>Register Twilio A2P 10DLC for business SMS</td><td>Operations</td><td>1 – 2 weeks</td><td>$4/mo</td></tr>
-  <tr><td>Move DocuSign from sandbox to production</td><td>Operations</td><td>1 hour</td><td>Included</td></tr>
+  <tr><td>Move BoldSign from sandbox to production</td><td>Operations</td><td>1 hour</td><td>Included</td></tr>
   <tr><td>Set up uptime monitoring</td><td>Engineering</td><td>15 min</td><td>Free</td></tr>
   <tr><td>Upgrade Vercel to Pro plan</td><td>CEO/Finance</td><td>5 min</td><td>$20/mo</td></tr>
   <tr><td>Upgrade Supabase to Pro plan</td><td>CEO/Finance</td><td>5 min</td><td>$25/mo</td></tr>
@@ -204,7 +204,7 @@
 <ul class="checklist">
   <li>Verify sending domain in Resend (SPF, DKIM, DMARC records)</li>
   <li>Submit A2P 10DLC registration for Twilio</li>
-  <li>Move DocuSign integration from demo to production</li>
+  <li>Move BoldSign integration from demo to production</li>
   <li>Set spend alerts on Anthropic, Twilio, Resend</li>
   <li>Set up UptimeRobot health check pinging every 5 minutes</li>
 </ul>
@@ -236,12 +236,12 @@
 <table>
   <tr><th>Task</th><th>Frequency</th><th>Time</th><th>Owner</th></tr>
   <tr><td>Review uptime report and incident log</td><td>1st of month</td><td>15 min</td><td>Ops Manager</td></tr>
-  <tr><td>Review API spend (Claude, Resend, Twilio, DocuSign)</td><td>1st of month</td><td>20 min</td><td>Ops Manager</td></tr>
+  <tr><td>Review API spend (Claude, Resend, Twilio, BoldSign)</td><td>1st of month</td><td>20 min</td><td>Ops Manager</td></tr>
   <tr><td>Verify database backups completed successfully</td><td>1st of month</td><td>10 min</td><td>Ops Manager</td></tr>
   <tr><td>Review email deliverability stats</td><td>Weekly</td><td>10 min</td><td>Marketing</td></tr>
   <tr><td>Review SMS opt-outs &amp; update suppression list</td><td>Weekly</td><td>15 min</td><td>Marketing</td></tr>
   <tr><td>Audit user accounts (remove departed agents)</td><td>Monthly</td><td>20 min</td><td>HR/Admin</td></tr>
-  <tr><td>Review pending DocuSign envelopes >30 days</td><td>Monthly</td><td>30 min</td><td>Transactions</td></tr>
+  <tr><td>Review pending BoldSign documents >30 days</td><td>Monthly</td><td>30 min</td><td>Transactions</td></tr>
   <tr><td>Export &amp; archive prior month's activity logs</td><td>Monthly</td><td>15 min</td><td>Compliance</td></tr>
 </table>
 
@@ -278,7 +278,7 @@
   <tr><td>Resend</td><td>Pro</td><td>$20</td></tr>
   <tr><td>Twilio</td><td>A2P 10DLC fee</td><td>~$4</td></tr>
   <tr><td>Twilio</td><td>SMS usage</td><td>~$10 – $50</td></tr>
-  <tr><td>DocuSign</td><td>eSignature Standard</td><td>~$25</td></tr>
+  <tr><td>BoldSign</td><td>eSignature Standard</td><td>~$25</td></tr>
   <tr><td>Anthropic Claude API</td><td>Usage-based</td><td>~$20 – $100</td></tr>
   <tr><th>Required Total</th><th></th><th>~$120 – $245/mo</th></tr>
 </table>
@@ -318,7 +318,7 @@
 
 <div class="tier-card">
   <h4>3. Web Push Notifications</h4>
-  <p>Instant browser alerts when a QR code is scanned, lead form is submitted, or DocuSign envelope is signed.</p>
+  <p>Instant browser alerts when a QR code is scanned, lead form is submitted, or BoldSign document is signed.</p>
   <p class="impact">Estimated business impact: Cut lead response time from hours to seconds</p>
 </div>
 
