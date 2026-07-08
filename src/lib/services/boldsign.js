@@ -41,6 +41,17 @@ export const listBoldsignTemplates = ()  => call({ action: 'template-list' })
 export const templateEditorUrl     = (p) => call({ action: 'template-editor-url', ...p })
 export const sendFromTemplate      = (p) => call({ action: 'template-send', ...p })
 
+// Normalize a state value to a 2-letter code. Accepts existing codes (IA) or
+// the full names of the states the brokerage operates in. Extend the map if you
+// add states.
+const STATE_CODES = { iowa: 'IA', 'south dakota': 'SD', nebraska: 'NE' }
+export function normalizeState(s) {
+  const v = String(s || '').trim()
+  if (!v) return ''
+  if (v.length === 2) return v.toUpperCase()
+  return STATE_CODES[v.toLowerCase()] || v.toUpperCase()
+}
+
 // ── CRM → template field prefill ─────────────────────────────────────────────
 // Maps our fixed label/id tokens to values pulled from the deal + its property
 // and primary contact. Only tokens the template actually declares get sent.

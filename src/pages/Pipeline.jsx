@@ -8,7 +8,7 @@ import {
   focusItems, pipelineTotals,
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
-import { sendDocument, getDocStatus, downloadSigned as apiDownloadSigned, sendFromTemplate, buildPrefill } from '../lib/services/boldsign.js'
+import { sendDocument, getDocStatus, downloadSigned as apiDownloadSigned, sendFromTemplate, buildPrefill, normalizeState } from '../lib/services/boldsign.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
@@ -1488,10 +1488,12 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
 
-  // Show templates for this deal's state (plus any state-agnostic ones). Fall
-  // back to the full list if none match, so a missing state never blocks a send.
-  const dealState = String(property?.state || deal?.comp_data?.state || '').trim().toUpperCase()
-  const matched   = templates.filter(t => !t.state || t.state.toUpperCase() === dealState)
+  // Show templates for this deal's state (plus any state-agnostic ones). Prefer
+  // the deal's controlled comp_data.state (IA/SD/NE dropdown); fall back to the
+  // property's free-text state, normalized to a 2-letter code. Fall back to the
+  // full list if nothing matches, so a missing state never blocks a send.
+  const dealState = normalizeState(deal?.comp_data?.state || property?.state || '')
+  const matched   = templates.filter(t => !t.state || normalizeState(t.state) === dealState)
   const visible   = (dealState && matched.length) ? matched : templates
 
   const [templateId, setTemplateId] = React.useState(visible[0]?.template_id || '')
