@@ -1519,10 +1519,15 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
       roles.push({ roleIndex: 2, signerName: activeAgent.name, signerEmail: activeAgent.email, signerOrder: 2, existingFormFields: prefill })
     }
 
+    // Document name the signer sees / signed-PDF filename — make it deal-specific.
+    const docName = [tpl?.name || deal?.title, property?.address].filter(Boolean).join(' — ')
+    // Tags for search/reporting in the BoldSign dashboard.
+    const labels  = [tpl?.state, tpl?.doc_type, `deal:${deal.id}`].filter(Boolean)
+
     try {
       await sendFromTemplate({
         templateId, deal_id: deal.id, roles,
-        emailSubject: subject, documentName: tpl?.name || deal?.title,
+        emailSubject: subject, documentName: docName, labels,
       })
       pushToast('Sent for signature from template', 'success')
       onSent()

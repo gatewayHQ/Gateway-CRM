@@ -328,17 +328,20 @@ export default async function handler(req, res) {
     // roles: [{ roleIndex, signerName, signerEmail, signerOrder?,
     //           existingFormFields: [{ id, value, isReadOnly }] }]
     if (body.action === 'template-send') {
-      const { templateId, deal_id, roles, emailSubject, message, cc, documentName } = body
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels } = body
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
       const svc        = getServiceClient()
       const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
       const payload = {
-        title:   emailSubject || documentName || 'Please sign this document',
+        // `title` is the sent-document name the signer sees (and the signed PDF
+        // filename). Prefer the caller's documentName so it's deal-specific.
+        title:   documentName || emailSubject || 'Please sign this document',
         message: message || 'Please review and sign.',
         roles,
         ...(cc ? { cc } : {}),
+        ...(Array.isArray(labels) && labels.length ? { labels } : {}),   // BoldSign tags
         ...(onBehalfOf ? { onBehalfOf } : {}),
       }
       const data = await boldsign(`/template/send?templateId=${encodeURIComponent(templateId)}`, { method: 'POST', json: payload })
