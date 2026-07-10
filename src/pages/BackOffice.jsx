@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, pushToast } from '../components/UI.jsx'
-import { formatCurrency, formatDate } from '../lib/helpers.js'
+import { formatCurrency, formatCurrencyExact, formatDate } from '../lib/helpers.js'
 import { agentSliceForDeal, capWindowStart } from '../lib/commission.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -11,7 +11,8 @@ import { agentSliceForDeal, capWindowStart } from '../lib/commission.js'
 // engine as My Earnings and the tracker, so every surface agrees to the cent.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const fmt = (n) => formatCurrency(Math.round((n + Number.EPSILON) * 100) / 100)
+const fmt  = (n) => formatCurrency(Math.round((n + Number.EPSILON) * 100) / 100)       // entered figures (volume, cap amounts)
+const fmtC = (n) => formatCurrencyExact(Math.round((n + Number.EPSILON) * 100) / 100)  // commission money — exact cents, never rounded to dollars
 
 // Reporting periods: quarters + years, newest first
 function buildPeriods(now = new Date()) {
@@ -84,7 +85,7 @@ export function BrokerageReport({ db }) {
     const lines = [head.join(',')]
     for (const r of report.rows) {
       const capStatus = r.agent.no_brokerage_split ? 'Pre-paid'
-        : r.agent.cap_amount > 0 ? `${Math.round(r.capYearPaid)} / ${r.agent.cap_amount}` : 'No cap set'
+        : r.agent.cap_amount > 0 ? `${r.capYearPaid.toFixed(2)} / ${r.agent.cap_amount}` : 'No cap set'
       lines.push([`"${r.agent.name}"`, r.dealsCount, r.volume, r.gci.toFixed(2), r.take.toFixed(2), r.capPaid.toFixed(2), r.fees.toFixed(2), `"${capStatus}"`].join(','))
     }
     const t = report.totals
@@ -110,11 +111,11 @@ export function BrokerageReport({ db }) {
         <div className="stat-card"><div className="stat-card__value">{report.totals.dealsCount}</div><div className="stat-card__label">Closed Deals</div></div>
         <div className="stat-card"><div className="stat-card__value">{fmt(report.totals.volume)}</div><div className="stat-card__label">Sales Volume</div></div>
         <div className="stat-card" style={{ borderLeft: '3px solid var(--gw-azure)' }}>
-          <div className="stat-card__value" style={{ color: 'var(--gw-azure)' }}>{fmt(report.totals.capPaid + report.totals.fees)}</div>
+          <div className="stat-card__value" style={{ color: 'var(--gw-azure)' }}>{fmtC(report.totals.capPaid + report.totals.fees)}</div>
           <div className="stat-card__label">Brokerage Revenue (splits + fees)</div>
         </div>
         <div className="stat-card" style={{ borderLeft: '3px solid var(--gw-green)' }}>
-          <div className="stat-card__value" style={{ color: 'var(--gw-green)' }}>{fmt(report.totals.take)}</div>
+          <div className="stat-card__value" style={{ color: 'var(--gw-green)' }}>{fmtC(report.totals.take)}</div>
           <div className="stat-card__label">Agent Earnings Paid</div>
         </div>
       </div>
@@ -141,10 +142,10 @@ export function BrokerageReport({ db }) {
                   </td>
                   <td style={{ padding: '9px 12px' }}>{r.dealsCount}</td>
                   <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{fmt(r.volume)}</td>
-                  <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{fmt(r.gci)}</td>
-                  <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', fontWeight: 700, color: 'var(--gw-green)' }}>{fmt(r.take)}</td>
-                  <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{fmt(r.capPaid)}</td>
-                  <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{fmt(r.fees)}</td>
+                  <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{fmtC(r.gci)}</td>
+                  <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', fontWeight: 700, color: 'var(--gw-green)' }}>{fmtC(r.take)}</td>
+                  <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{fmtC(r.capPaid)}</td>
+                  <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{fmtC(r.fees)}</td>
                   <td style={{ padding: '9px 12px', minWidth: 180 }}>
                     {r.agent.no_brokerage_split ? (
                       <Badge variant="active">Cap pre-paid</Badge>
@@ -153,7 +154,7 @@ export function BrokerageReport({ db }) {
                     ) : (
                       <div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--gw-mist)', marginBottom: 3 }}>
-                          <span>{fmt(r.capYearPaid)} / {fmt(r.agent.cap_amount)}</span><span>{capPct}%</span>
+                          <span>{fmtC(r.capYearPaid)} / {fmt(r.agent.cap_amount)}</span><span>{capPct}%</span>
                         </div>
                         <div style={{ height: 6, background: 'var(--gw-border)', borderRadius: 3, overflow: 'hidden' }}>
                           <div style={{ width: `${capPct}%`, height: '100%', background: capPct >= 100 ? 'var(--gw-green)' : 'var(--gw-azure)' }} />

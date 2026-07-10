@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
-import { formatCurrency, formatDate, formatPhone, STAGE_LABELS } from '../lib/helpers.js'
+import { formatCurrency, formatCurrencyExact, formatDate, formatPhone, STAGE_LABELS } from '../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
 import { DealDrawer } from './Pipeline.jsx'
@@ -504,12 +504,12 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
             </div>
             {isAdmin && breakdown && (deal.value > 0) && (
               <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8, display: 'flex', gap: 16, fontSize: 12 }}>
-                <span>Gross comm: <strong>{formatCurrency(breakdown.gross_total)}</strong></span>
+                <span>Gross comm: <strong>{formatCurrencyExact(breakdown.gross_total)}</strong></span>
               </div>
             )}
             {!isAdmin && myTake > 0 && (
               <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8, fontSize: 12, color: 'var(--gw-green)' }}>
-                Your take: <strong>{formatCurrency(myTake)}</strong>
+                Your take: <strong>{formatCurrencyExact(myTake)}</strong>
                 <span style={{ color: 'var(--gw-mist)' }}> · your slice only — splits are managed by the office</span>
               </div>
             )}

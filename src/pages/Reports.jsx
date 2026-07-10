@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react'
-import { formatCurrency, formatDate } from '../lib/helpers.js'
+import { formatCurrency, formatCurrencyExact, formatDate } from '../lib/helpers.js'
 import { CONTACT_SOURCES as SOURCES } from '../lib/enums.js'
 import { daysInStage, isRotting, daysBetween } from '../lib/pipeline.js'
 import { isOpenStage } from '../lib/stages.js'
@@ -359,7 +359,7 @@ export default function ReportsPage({ db, go }) {
                     </td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.closedValue > 0 ? formatCurrency(s.closedValue) : '—'}</td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600, color: 'var(--gw-green)' }}>
-                      {s.agentEarnings > 0 ? formatCurrency(s.agentEarnings) : '—'}
+                      {s.agentEarnings > 0 ? formatCurrencyExact(s.agentEarnings) : '—'}
                     </td>
                   </tr>
                 ))}

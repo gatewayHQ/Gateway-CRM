@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Avatar, Badge, Drawer, EmptyState, pushToast } from '../components/UI.jsx'
-import { formatCurrency } from '../lib/helpers.js'
+import { formatCurrency, formatCurrencyExact } from '../lib/helpers.js'
 import { fetchVisibleDeals, fetchVisibleCommissions } from '../lib/services/deals.js'
 import MyEarnings from './MyEarnings.jsx'
 import { BrokerageReport, CapsEditor } from './BackOffice.jsx'
@@ -231,15 +231,15 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
                   </div>
                 </div>
                 <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
-                  Gross {formatCurrency(rs.gross || 0)}
-                  {rs.referral > 0 && <> · referral ({formatCurrency(rs.referral)}) → net {formatCurrency(rs.net || 0)}</>}
+                  Gross {formatCurrencyExact(rs.gross || 0)}
+                  {rs.referral > 0 && <> · referral ({formatCurrencyExact(rs.referral)}) → net {formatCurrencyExact(rs.net || 0)}</>}
                 </div>
               </div>
             )
           })}
           <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, fontWeight:700, padding:'4px 2px' }}>
             <span style={{ color:'var(--gw-mist)' }}>Net commission to split</span>
-            <span>{formatCurrency(result.net_total)}</span>
+            <span>{formatCurrencyExact(result.net_total)}</span>
           </div>
         </div>
 
@@ -261,7 +261,7 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
             </div>
             <div style={{ flex:1, fontSize:11, color:'var(--gw-mist)', alignSelf:'flex-end', paddingBottom:8 }}>
               Flat brokerage fee, charged on top of the split. Split evenly:
-              <strong> {formatCurrency((Number(form.transaction_fee)||0) / Math.max(1, form.participants.length))} </strong>
+              <strong> {formatCurrencyExact((Number(form.transaction_fee)||0) / Math.max(1, form.participants.length))} </strong>
               per agent.
             </div>
           </div>
@@ -313,7 +313,7 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
                   <span style={{ color:'var(--gw-mist)' }}>
                     {p.role === 'primary' ? 'Take-home' : 'Co-agent take-home'}
                   </span>
-                  <span style={{ fontWeight:700, color:'var(--gw-green)' }}>{formatCurrency(rp.agent_take || 0)}</span>
+                  <span style={{ fontWeight:700, color:'var(--gw-green)' }}>{formatCurrencyExact(rp.agent_take || 0)}</span>
                 </div>
               </div>
             )
@@ -329,7 +329,7 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
           <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'12px 14px', marginBottom:16, fontSize:12 }}>
             <div style={{ fontWeight:700, marginBottom:8, fontSize:11, textTransform:'uppercase', letterSpacing:'0.06em', color:'var(--gw-mist)' }}>Commission Breakdown</div>
             {[
-              { label:'Sale Price', val: sp, color:'var(--gw-ink)' },
+              { label:'Sale Price', val: sp, color:'var(--gw-ink)', whole:true },
               ...result.sides.flatMap(s => [
                 { label:`${form.twoSided ? s.label + ' — ' : ''}Gross (${s.rate_pct}%)`, val: s.gross, color:'var(--gw-ink)' },
                 s.referral > 0 && { label:`  Referral (${s.referral_pct}%)`, val:-s.referral, color:'var(--gw-red)' },
@@ -344,7 +344,7 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
             ].filter(Boolean).map((row, i) => (
               <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'3px 0', borderTop: row.bold || row.rule ? '1px solid var(--gw-border)' : 'none', marginTop: row.bold||row.rule ? 6 : 0, paddingTop: row.bold||row.rule ? 8 : 3, fontWeight: row.bold ? 700 : 400 }}>
                 <span style={{ color:'var(--gw-mist)', whiteSpace:'pre' }}>{row.label}</span>
-                <span style={{ color: row.color, fontWeight: row.bold ? 700 : 500 }}>{row.val < 0 ? `(${formatCurrency(Math.abs(row.val))})` : formatCurrency(row.val)}</span>
+                <span style={{ color: row.color, fontWeight: row.bold ? 700 : 500 }}>{row.val < 0 ? `(${formatCurrencyExact(Math.abs(row.val))})` : (row.whole ? formatCurrency(row.val) : formatCurrencyExact(row.val))}</span>
               </div>
             ))}
           </div>
@@ -515,7 +515,7 @@ function MonthlyBarChart({ deals, calcFn }) {
                   }}
                   onMouseLeave={() => setTooltip(null)}
                   role="img"
-                  aria-label={`${m.label}: Agent $${m.agentTotal.toFixed(0)}, Brokerage $${m.brokerTotal.toFixed(0)}, ${m.count} deal${m.count !== 1 ? 's' : ''}`}
+                  aria-label={`${m.label}: Agent $${m.agentTotal.toFixed(2)}, Brokerage $${m.brokerTotal.toFixed(2)}, ${m.count} deal${m.count !== 1 ? 's' : ''}`}
                 >
                   {/* Brokerage segment (bottom) */}
                   {brokerH > 0 && (
@@ -600,11 +600,11 @@ function MonthlyBarChart({ deals, calcFn }) {
               <div style={{ fontWeight: 700, marginBottom: 4 }}>{tooltip.label}</div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--gw-green)', flexShrink: 0 }} />
-                Agent: <strong>{formatCurrency(tooltip.agentTotal)}</strong>
+                Agent: <strong>{formatCurrencyExact(tooltip.agentTotal)}</strong>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--gw-azure)', flexShrink: 0 }} />
-                House: <strong>{formatCurrency(tooltip.brokerTotal)}</strong>
+                House: <strong>{formatCurrencyExact(tooltip.brokerTotal)}</strong>
               </div>
               <div style={{ color: 'rgba(255,255,255,0.6)', marginTop: 3, fontSize: 11 }}>
                 {tooltip.count} closed deal{tooltip.count !== 1 ? 's' : ''}
@@ -644,15 +644,15 @@ function CategoryBreakdown({ closedDeals, calcFn }) {
       <div style={{ marginBottom: 6 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--gw-mist)', marginBottom: 3 }}>
           <span>Agent earnings</span>
-          <span style={{ fontWeight: 700, color }}>{formatCurrency(totals.agent)}</span>
+          <span style={{ fontWeight: 700, color }}>{formatCurrencyExact(totals.agent)}</span>
         </div>
         <div style={{ height: 6, background: 'var(--gw-border)', borderRadius: 3, overflow: 'hidden' }}>
           <div style={{ width: `${Math.round(totals.agent / maxAgent * 100)}%`, height: '100%', background: color, borderRadius: 3, transition: 'width 400ms ease' }} />
         </div>
       </div>
       <div style={{ display: 'flex', gap: 16, fontSize: 11, color: 'var(--gw-mist)' }}>
-        <span>Gross: <strong style={{ color: 'var(--gw-ink)' }}>{formatCurrency(totals.gross)}</strong></span>
-        <span>House: <strong style={{ color: 'var(--gw-ink)' }}>{formatCurrency(totals.broker)}</strong></span>
+        <span>Gross: <strong style={{ color: 'var(--gw-ink)' }}>{formatCurrencyExact(totals.gross)}</strong></span>
+        <span>House: <strong style={{ color: 'var(--gw-ink)' }}>{formatCurrencyExact(totals.broker)}</strong></span>
       </div>
     </div>
   )
@@ -871,15 +871,15 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
           <div className="stat-card__label">Closed Deals</div>
         </div>
         <div className="stat-card">
-          <div className="stat-card__value">{formatCurrency(brokerageTotals.gross)}</div>
+          <div className="stat-card__value">{formatCurrencyExact(brokerageTotals.gross)}</div>
           <div className="stat-card__label">Total Gross Comm</div>
         </div>
         <div className="stat-card" style={{ borderLeft:'3px solid var(--gw-green)' }}>
-          <div className="stat-card__value" style={{ color:'var(--gw-green)' }}>{formatCurrency(brokerageTotals.agent)}</div>
+          <div className="stat-card__value" style={{ color:'var(--gw-green)' }}>{formatCurrencyExact(brokerageTotals.agent)}</div>
           <div className="stat-card__label">Total Agent Earnings</div>
         </div>
         <div className="stat-card" style={{ borderLeft:'3px solid var(--gw-azure)' }}>
-          <div className="stat-card__value" style={{ color:'var(--gw-azure)' }}>{formatCurrency(brokerageTotals.broker)}</div>
+          <div className="stat-card__value" style={{ color:'var(--gw-azure)' }}>{formatCurrencyExact(brokerageTotals.broker)}</div>
           <div className="stat-card__label">Brokerage / House</div>
         </div>
       </div>
@@ -894,7 +894,7 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
         <div className="stat-card" style={{ borderTop:'3px solid var(--gw-green)' }}>
           <div style={{ fontSize:10, fontWeight:700, color:'var(--gw-green)', textTransform:'uppercase', letterSpacing:'0.07em', marginBottom:4 }}>🏠 Residential</div>
           <div className="stat-card__value" style={{ color:'var(--gw-green)' }}>
-            {formatCurrency(closedRes.reduce((s,d)=>s+calc(d).agentAmt,0))}
+            {formatCurrencyExact(closedRes.reduce((s,d)=>s+calc(d).agentAmt,0))}
           </div>
           <div className="stat-card__label">Agent Earnings</div>
         </div>
@@ -906,7 +906,7 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
         <div className="stat-card" style={{ borderTop:'3px solid var(--gw-azure)' }}>
           <div style={{ fontSize:10, fontWeight:700, color:'var(--gw-azure)', textTransform:'uppercase', letterSpacing:'0.07em', marginBottom:4 }}>🏢 Commercial</div>
           <div className="stat-card__value" style={{ color:'var(--gw-azure)' }}>
-            {formatCurrency(closedComm.reduce((s,d)=>s+calc(d).agentAmt,0))}
+            {formatCurrencyExact(closedComm.reduce((s,d)=>s+calc(d).agentAmt,0))}
           </div>
           <div className="stat-card__label">Agent Earnings</div>
         </div>
@@ -921,7 +921,7 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
               <div>
                 <div style={{ fontWeight:700, fontSize:14 }}>{activeAgent.name}'s Cap Tracker</div>
                 <div style={{ fontSize:12, color:'var(--gw-mist)' }}>
-                  {thisYear} YTD · Broker fees paid: <strong>{formatCurrency(ytdBrokerFees)}</strong> of <strong>{formatCurrency(capAmt)}</strong> cap
+                  {thisYear} YTD · Broker fees paid: <strong>{formatCurrencyExact(ytdBrokerFees)}</strong> of <strong>{formatCurrency(capAmt)}</strong> cap
                 </div>
               </div>
             </div>
@@ -938,7 +938,7 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
           </div>
           <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, color:'var(--gw-mist)', marginBottom:14 }}>
             <span>{capPct}% to cap</span>
-            <span>Agent kept YTD: <strong style={{ color:'var(--gw-green)' }}>{formatCurrency(ytdAgentEarned)}</strong></span>
+            <span>Agent kept YTD: <strong style={{ color:'var(--gw-green)' }}>{formatCurrencyExact(ytdAgentEarned)}</strong></span>
           </div>
 
           {/* Cap slider */}
@@ -964,7 +964,7 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
         <div className="card" style={{ marginBottom:20, padding:0, overflow:'hidden' }}>
           <div style={{ padding:'12px 18px', borderBottom:'1px solid var(--gw-border)', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
             <div style={{ fontWeight:600, fontSize:13 }}>Team Earnings (Closed)</div>
-            <div style={{ fontSize:12, color:'var(--gw-green)', fontWeight:700 }}>Total: {formatCurrency(teamTotal)}</div>
+            <div style={{ fontSize:12, color:'var(--gw-green)', fontWeight:700 }}>Total: {formatCurrencyExact(teamTotal)}</div>
           </div>
           {agentBreakdown.map(a => (
             <div key={a.id} style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 18px', borderBottom:'1px solid var(--gw-border)' }}>
@@ -974,8 +974,8 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
                 <div style={{ fontSize:11, color:'var(--gw-mist)' }}>{a.deals} closed deal{a.deals!==1?'s':''}</div>
               </div>
               <div style={{ textAlign:'right' }}>
-                <div style={{ fontWeight:700, color:'var(--gw-green)', fontSize:13 }}>{formatCurrency(a.agent)}</div>
-                <div style={{ fontSize:11, color:'var(--gw-mist)' }}>House: {formatCurrency(a.broker)}</div>
+                <div style={{ fontWeight:700, color:'var(--gw-green)', fontSize:13 }}>{formatCurrencyExact(a.agent)}</div>
+                <div style={{ fontSize:11, color:'var(--gw-mist)' }}>House: {formatCurrencyExact(a.broker)}</div>
               </div>
               <div style={{ width:80 }}>
                 <div style={{ height:4, background:'var(--gw-border)', borderRadius:2, overflow:'hidden' }}>
@@ -1059,10 +1059,10 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
                       <td><Badge variant={deal.stage==='under-contract'?'active':deal.stage}>{deal.stage.replace('-',' ')}</Badge></td>
                       <td style={{ textAlign:'right', fontWeight:600 }}>{sp>0?formatCurrency(sp):'—'}</td>
                       <td style={{ textAlign:'right', color:'var(--gw-mist)', fontSize:12 }}>{gross_pct}%</td>
-                      <td style={{ textAlign:'right' }}>{sp>0?formatCurrency(gross):'—'}</td>
+                      <td style={{ textAlign:'right' }}>{sp>0?formatCurrencyExact(gross):'—'}</td>
                       <td style={{ textAlign:'right', color:'var(--gw-mist)', fontSize:12 }}>{agent_pct}%</td>
-                      <td style={{ textAlign:'right', fontWeight:600, color:'var(--gw-green)' }}>{sp>0?formatCurrency(agentAmt):'—'}</td>
-                      <td style={{ textAlign:'right', color:'var(--gw-azure)' }}>{sp>0?formatCurrency(brokerAmt):'—'}</td>
+                      <td style={{ textAlign:'right', fontWeight:600, color:'var(--gw-green)' }}>{sp>0?formatCurrencyExact(agentAmt):'—'}</td>
+                      <td style={{ textAlign:'right', color:'var(--gw-azure)' }}>{sp>0?formatCurrencyExact(brokerAmt):'—'}</td>
                       <td>
                         <button className="btn btn--ghost btn--icon btn--sm" onClick={()=>{setSelectedDeal(deal);setDrawer(true)}} title="Edit splits">
                           <Icon name="edit" size={13} />
@@ -1077,10 +1077,10 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
                   <td colSpan={4} style={{ padding:'10px 12px', fontSize:12, fontWeight:700, color:'var(--gw-mist)' }}>TOTALS — {filtered.length} deals</td>
                   <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700 }}>{formatCurrency(totals.sp)}</td>
                   <td></td>
-                  <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700 }}>{formatCurrency(totals.gross)}</td>
+                  <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700 }}>{formatCurrencyExact(totals.gross)}</td>
                   <td></td>
-                  <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700, color:'var(--gw-green)' }}>{formatCurrency(totals.agent)}</td>
-                  <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700, color:'var(--gw-azure)' }}>{formatCurrency(totals.broker)}</td>
+                  <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700, color:'var(--gw-green)' }}>{formatCurrencyExact(totals.agent)}</td>
+                  <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700, color:'var(--gw-azure)' }}>{formatCurrencyExact(totals.broker)}</td>
                   <td></td>
                 </tr>
               </tfoot>
