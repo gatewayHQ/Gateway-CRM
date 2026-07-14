@@ -5,7 +5,7 @@ import { formatCurrency, formatDate, STAGE_LABELS, getKeyDateUrgency, getNearest
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import {
   weightedValue, daysInStage, isRotting, dealActivityState, nextKeyDate,
-  focusItems, pipelineTotals,
+  focusItems, pipelineTotals, isBuyerLead,
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
@@ -2189,6 +2189,11 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     return activeAgent?.specialty === 'commercial' ? 'list' : 'board'
   })
   const pickView = (v) => { setDealView(v); localStorage.setItem(viewKey, v) }
+  // Hide "buyer leads" (no property + title == contact name) to declutter the
+  // board — remembered per agent, default off so nothing vanishes unexpectedly.
+  const hideKey = `gw_hide_buyer_leads_${activeAgent?.id || 'default'}`
+  const [hideBuyerLeads, setHideBuyerLeads] = useState(() => localStorage.getItem(hideKey) === '1')
+  const toggleHideBuyerLeads = () => setHideBuyerLeads(v => { const n = !v; localStorage.setItem(hideKey, n ? '1' : '0'); return n })
   const [sortBy, setSortBy] = useState({ col: 'updated', dir: 'desc' })
   const [confirm, setConfirm] = useState(null)
   const [confirmProp, setConfirmProp] = useState(null)
@@ -2221,10 +2226,22 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     return deals.filter(d => d.agent_id === agentFilter)
   }, [deals, isAdmin, agentFilter])
 
+  // Buyer-lead segmentation: count them, and drop them from the board when the
+  // "Hide buyer leads" toggle is on. A buyer lead = no linked property AND the
+  // title is just the contact's name (see lib/pipeline.js isBuyerLead).
+  const buyerLeadCount = useMemo(
+    () => visibleDeals.filter(d => isBuyerLead(d, contactMap[d.contact_id])).length,
+    [visibleDeals, contactMap]
+  )
+  const displayedDeals = useMemo(
+    () => hideBuyerLeads ? visibleDeals.filter(d => !isBuyerLead(d, contactMap[d.contact_id])) : visibleDeals,
+    [visibleDeals, hideBuyerLeads, contactMap]
+  )
+
   // One unified pipeline — every deal on the same board (no res/comm split).
   const resolvedTrack = UNIFIED
   const track = TRACKS[UNIFIED]
-  const trackDeals = visibleDeals
+  const trackDeals = displayedDeals
 
   // Single-pass O(n) grouping into the active track's columns. Foreign stage
   // tokens (legacy data) land in the nearest column via boardStageFor — the
@@ -2287,7 +2304,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const toggleSort = (col) => setSortBy(s => s.col === col ? { col, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: col === 'title' ? 'asc' : 'desc' })
 
   // ── Focus view: cross-track "needs attention today" ───────────────────────
-  const focus = useMemo(() => focusItems(visibleDeals, tasks, new Date()), [visibleDeals, tasks])
+  const focus = useMemo(() => focusItems(displayedDeals, tasks, new Date()), [displayedDeals, tasks])
   const focusCount = focus.length
 
   // Listings board — filter by agent if needed, group by property status
@@ -2463,6 +2480,21 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
               ))}
             </div>
           )}
+          {pipelineTab === 'deals' && buyerLeadCount > 0 && (
+            <button
+              onClick={toggleHideBuyerLeads}
+              title={hideBuyerLeads ? `Showing all deals — click to hide ${buyerLeadCount} buyer lead${buyerLeadCount !== 1 ? 's' : ''} (name-only, no property)` : `Hide ${buyerLeadCount} buyer lead${buyerLeadCount !== 1 ? 's' : ''} (name-only, no property)`}
+              style={{
+                display:'flex', alignItems:'center', gap:6, padding:'6px 12px', cursor:'pointer',
+                borderRadius:'var(--radius)', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600,
+                border:'1px solid var(--gw-border)', transition:'all 150ms ease',
+                background: hideBuyerLeads ? 'var(--gw-slate)' : '#fff',
+                color: hideBuyerLeads ? '#fff' : 'var(--gw-mist)',
+              }}>
+              <Icon name={hideBuyerLeads ? 'eye' : 'contacts'} size={13} />
+              {hideBuyerLeads ? `${buyerLeadCount} buyer lead${buyerLeadCount !== 1 ? 's' : ''} hidden` : 'Hide buyer leads'}
+            </button>
+          )}
           {isAdmin && (
             <select
               value={agentFilter}
@@ -2505,6 +2537,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                   {stageGroups[stage].map(deal => {
                     const contact    = contactMap[deal.contact_id]
                     const agent      = agentMap[deal.agent_id]
+                    const buyerLead  = isBuyerLead(deal, contact)
                     const dealProp   = deal.property_id ? propertyMap[deal.property_id] : null
                     const coAgIds    = dealProp?.details?.co_agent_ids || []
                     const allAgents  = [deal.agent_id, ...coAgIds].filter(Boolean)
@@ -2538,6 +2571,12 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                             style={{ width:8, height:8, borderRadius:'50%', flexShrink:0, marginTop:4,
                               background: act.color, boxShadow: act.state === 'none' ? 'inset 0 0 0 1px var(--gw-border)' : undefined }} />
                           <div className="deal-card__title" style={{ flex:1 }}>{deal.title}</div>
+                          {buyerLead && (
+                            <span title="Buyer lead — no property attached and titled as a person. Toggle “Hide buyer leads” to declutter."
+                              style={{ flexShrink:0, fontSize:9, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.04em',
+                                color:'var(--gw-mist)', background:'var(--gw-bone)', border:'1px solid var(--gw-border)',
+                                borderRadius:6, padding:'1px 5px', marginTop:2 }}>Buyer</span>
+                          )}
                         </div>
                         {isAdmin && agent && (
                           <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:2 }}>

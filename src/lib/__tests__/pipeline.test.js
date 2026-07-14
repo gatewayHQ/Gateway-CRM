@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   weightedValue, daysInStage, stageSince, isRotting, rotThreshold,
   dealActivityState, nextKeyDate, focusItems, pipelineTotals, daysBetween,
+  isBuyerLead,
 } from '../pipeline.js'
 
 const daysAgo = (n) => new Date(Date.now() - n * 86_400_000).toISOString()
@@ -125,5 +126,27 @@ describe('daysBetween', () => {
   it('is calendar-day based and sign-aware', () => {
     expect(daysBetween(daysAhead(3), NOW)).toBe(3)
     expect(daysBetween(daysAgo(2), NOW)).toBe(-2)
+  })
+})
+
+describe('isBuyerLead', () => {
+  const contact = { id: 'c1', first_name: 'Sky', last_name: 'Olson' }
+
+  it('flags a no-property deal whose title is exactly the contact name', () => {
+    expect(isBuyerLead({ title: 'Sky Olson', contact_id: 'c1' }, contact)).toBe(true)
+    expect(isBuyerLead({ title: '  sky olson ', contact_id: 'c1' }, contact)).toBe(true) // case/space-insensitive
+  })
+
+  it('does NOT flag a deal with a linked property', () => {
+    expect(isBuyerLead({ title: 'Sky Olson', property_id: 'p1' }, contact)).toBe(false)
+  })
+
+  it('does NOT flag an address-titled deal (title != contact name)', () => {
+    expect(isBuyerLead({ title: '123 Main Street', contact_id: 'c1' }, contact)).toBe(false)
+  })
+
+  it('does NOT flag when there is no contact or no name', () => {
+    expect(isBuyerLead({ title: 'Sky Olson' }, null)).toBe(false)
+    expect(isBuyerLead({ title: '' }, { first_name: '', last_name: '' })).toBe(false)
   })
 })

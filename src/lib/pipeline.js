@@ -121,6 +121,19 @@ export function focusItems(deals = [], tasks = [], now = new Date()) {
   )
 }
 
+// A "buyer lead" is a deal that was created as just a person — no property
+// attached AND the title is simply the linked contact's name (e.g. "Sky Olson").
+// These are house-hunting prospects that clog the transaction pipeline; the
+// board offers a per-agent toggle to hide them. Deliberately NARROW: a deal with
+// a linked property, or an address-titled deal like "123 Main Street" (title
+// doesn't equal the contact's name), is NOT a buyer lead and always shows.
+export function isBuyerLead(deal, contact) {
+  if (!deal || deal.property_id) return false
+  if (!contact) return false
+  const name = `${contact.first_name || ''} ${contact.last_name || ''}`.trim().toLowerCase()
+  return name.length > 0 && (deal.title || '').trim().toLowerCase() === name
+}
+
 // Board/summary rollup: count, raw $, and weighted $ for a set of deals.
 export function pipelineTotals(deals = []) {
   return deals.reduce((acc, d) => {
