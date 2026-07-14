@@ -14,15 +14,16 @@
 // database refuses.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Default Title-case label, matching the historical
-// `s.charAt(0).toUpperCase() + s.slice(1)` rendering used across the forms.
-export const titleCase = (s) => s.charAt(0).toUpperCase() + s.slice(1)
+// Default Title-Case label: every word capitalized ('sign call' → 'Sign Call',
+// 'friends & family' → 'Friends & Family'). Single-word values render exactly
+// as the historical charAt(0)-uppercase form did.
+export const titleCase = (s) => s.replace(/(^|\s)\S/g, (c) => c.toUpperCase())
 
 // ── Contacts ─────────────────────────────────────────────────────────────────
 // Mirror of contacts.{type,status,source} CHECK constraints in schema.sql.
 export const CONTACT_TYPES    = ['buyer', 'seller', 'landlord', 'tenant', 'investor']
 export const CONTACT_STATUSES = ['lead', 'opportunity', 'active', 'pending', 'cold', 'closed']
-export const CONTACT_SOURCES  = ['referral', 'website', 'open house', 'social', 'cold call', 'team', 'paid service', 'other']
+export const CONTACT_SOURCES  = ['referral', 'friends & family', 'website', 'open house', 'social', 'cold call', 'sign call', 'team', 'paid service', 'other']
 
 // ── Properties ───────────────────────────────────────────────────────────────
 // Property type is presented grouped (Residential vs Commercial) and a couple of

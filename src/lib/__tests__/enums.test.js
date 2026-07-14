@@ -23,6 +23,11 @@ describe('enum lists', () => {
     expect(CONTACT_SOURCES).toContain('paid service')
   })
 
+  it('includes the 2026-07 additions (requested by Daniel)', () => {
+    expect(CONTACT_SOURCES).toContain('sign call')
+    expect(CONTACT_SOURCES).toContain('friends & family')
+  })
+
   it('builds PROPERTY_TYPES from the grouped lists plus the generic bucket', () => {
     expect(PROPERTY_TYPES).toEqual([...RESIDENTIAL_PROPERTY_TYPES, ...COMMERCIAL_PROPERTY_TYPES, 'commercial'])
   })
@@ -42,9 +47,11 @@ describe('enum lists', () => {
 })
 
 describe('titleCase', () => {
-  it('capitalizes the first letter, matching the historical form rendering', () => {
+  it('capitalizes every word', () => {
     expect(titleCase('opportunity')).toBe('Opportunity')
-    expect(titleCase('cold call')).toBe('Cold call')
-    expect(titleCase('paid service')).toBe('Paid service')
+    expect(titleCase('cold call')).toBe('Cold Call')
+    expect(titleCase('paid service')).toBe('Paid Service')
+    expect(titleCase('sign call')).toBe('Sign Call')
+    expect(titleCase('friends & family')).toBe('Friends & Family')
   })
 })

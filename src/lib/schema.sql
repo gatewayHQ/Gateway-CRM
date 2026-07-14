@@ -42,7 +42,7 @@ create table if not exists contacts (
   phone             text,
   type              text check (type in ('buyer','seller','landlord','tenant','investor')) default 'buyer',
   status            text check (status in ('active','cold','closed','lead','opportunity','pending')) default 'active',
-  source            text check (source in ('referral','website','open house','social','cold call','team','paid service','other')) default 'other',
+  source            text check (source in ('referral','friends & family','website','open house','social','cold call','sign call','team','paid service','other')) default 'other',
   assigned_agent_id uuid references agents(id) on delete set null,
   notes             text,
   tags              text[],
@@ -132,6 +132,40 @@ create table if not exists deals (
 );
 create unique index if not exists deals_portal_token_idx
   on deals(portal_token) where portal_token is not null;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- ADDITIONAL CONTACTS  (multi-contact deals & properties — husband/wife,
+-- co-buyers, co-owners). deals.contact_id / properties.linked_contact_id stay
+-- the PRIMARY contact; these junction rows hold the extra ones.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists deal_contacts (
+  id         uuid primary key default uuid_generate_v4(),
+  deal_id    uuid not null references deals(id)    on delete cascade,
+  contact_id uuid not null references contacts(id) on delete cascade,
+  created_at timestamptz default now(),
+  unique (deal_id, contact_id)
+);
+create index if not exists idx_deal_contacts_deal    on deal_contacts(deal_id);
+create index if not exists idx_deal_contacts_contact on deal_contacts(contact_id);
+alter table deal_contacts enable row level security;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+create table if not exists property_contacts (
+  id          uuid primary key default uuid_generate_v4(),
+  property_id uuid not null references properties(id) on delete cascade,
+  contact_id  uuid not null references contacts(id)   on delete cascade,
+  created_at  timestamptz default now(),
+  unique (property_id, contact_id)
+);
+create index if not exists idx_property_contacts_property on property_contacts(property_id);
+create index if not exists idx_property_contacts_contact  on property_contacts(contact_id);
+-- properties themselves are allow_all (see RLS section) — the link rows match.
+alter table property_contacts enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='property_contacts' and policyname='allow_all') then
+    create policy "allow_all" on property_contacts for all to authenticated using (true) with check (true);
+  end if;
+end $$;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- TASKS
@@ -1303,6 +1337,12 @@ create policy boldsign_documents_deal_scope on boldsign_documents for all to aut
 -- TRANSACTION STEPS — follow the deal.
 drop policy if exists transaction_steps_deal_scope on transaction_steps;
 create policy transaction_steps_deal_scope on transaction_steps for all to authenticated
+  using      (deal_id in (select app_visible_deal_ids()))
+  with check (deal_id in (select app_visible_deal_ids()));
+
+-- DEAL CONTACTS — follow the deal.
+drop policy if exists deal_contacts_deal_scope on deal_contacts;
+create policy deal_contacts_deal_scope on deal_contacts for all to authenticated
   using      (deal_id in (select app_visible_deal_ids()))
   with check (deal_id in (select app_visible_deal_ids()));
 

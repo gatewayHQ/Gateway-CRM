@@ -5,7 +5,8 @@ import { formatCurrency } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
 import { findMatchingBuyers } from '../lib/matching.js'
-import { mutationErrorMessage } from '../lib/services/db.js'
+import { mutationErrorMessage, replaceLinkedContacts } from '../lib/services/db.js'
+import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
 import OptionSelect from '../components/OptionSelect.jsx'
@@ -801,7 +802,7 @@ function CompsTab({ property, onUpdateComps }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave, go, setDb }) {
+function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave, go, setDb, propertyContacts = [] }) {
   const blank = { address:'', city:'', state:'', zip:'', county:'', submarket:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{}, listing_expiry_date:'', price_history:[], comps:[] }
   const [form, setForm]             = useState(property || blank)
   const [errors, setErrors]         = useState({})
@@ -809,11 +810,16 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
   const [startingDeal, setStartingDeal] = useState(false)
   const [tab, setTab]               = useState('details')
   const [tempId] = useState(() => property?.id || crypto.randomUUID())
+  // Additional contacts (beyond linked_contact_id) — persisted as
+  // property_contacts link rows, kept out of `form` (whose spread becomes the
+  // properties payload) so they never hit the properties table.
+  const [extraContactIds, setExtraContactIds] = useState([])
 
   React.useEffect(() => {
     setForm(property
       ? { ...blank, ...property, details: property.details || {}, price_history: property.price_history || [], comps: property.comps || [], listing_expiry_date: property.listing_expiry_date ? property.listing_expiry_date.slice(0,10) : '' }
       : { ...blank, assigned_agent_id: activeAgent?.id || '' })
+    setExtraContactIds(property?.id ? propertyContacts.filter(r => r.property_id === property.id).map(r => r.contact_id) : [])
     setErrors({})
     setTab('details')
   }, [property, open, activeAgent?.id])
@@ -846,6 +852,14 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
     setStartingDeal(false)
     if (error) { pushToast(error.message, 'error'); return }
     if (setDb) setDb(p => ({ ...p, deals: [data, ...(p.deals || [])] }))
+    // Carry the property's additional contacts onto the new deal
+    const links = extraContactIds.filter(id => id !== (form.linked_contact_id || null))
+    if (data?.id && links.length) {
+      const linkRes = await replaceLinkedContacts(supabase, 'deal_contacts', 'deal_id', data.id, links)
+      if (!linkRes.error && setDb) {
+        setDb(p => ({ ...p, dealContacts: [...(p.dealContacts || []), ...linkRes.rows] }))
+      }
+    }
     pushToast('Deal created — opening Pipeline')
     onClose()
     if (go) go('pipeline')
@@ -909,6 +923,21 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
           await supabase.from('properties').update({ lat: parseFloat(geoData[0].lat), lng: parseFloat(geoData[0].lon) }).eq('id', savedId)
         }
       } catch { /* geocoding failure is non-fatal */ }
+    }
+
+    // Additional contacts → property_contacts link rows (primary stays on
+    // linked_contact_id). Skipped when there's nothing to write or clear, so
+    // installs that haven't run migration 0018 yet never see an error from the
+    // missing table.
+    const links = extraContactIds.filter(id => id !== (form.linked_contact_id || null))
+    const hadLinks = property?.id ? propertyContacts.some(r => r.property_id === property.id) : false
+    if (savedId && (links.length || hadLinks)) {
+      const linkRes = await replaceLinkedContacts(supabase, 'property_contacts', 'property_id', savedId, links)
+      if (linkRes.error) {
+        pushToast('Property saved, but the additional contacts could not be saved.', 'error')
+      } else if (setDb) {
+        setDb(p => ({ ...p, propertyContacts: [...(p.propertyContacts || []).filter(r => r.property_id !== savedId), ...linkRes.rows] }))
+      }
     }
 
     if (!property?.id) fireWebhooks('property.added', { id: savedId, address: form.address, city: form.city, type: form.type, status: form.status })
@@ -1045,6 +1074,10 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
 
         {/* Always-present fields */}
         <div className="form-group"><label className="form-label">Linked Contact</label><SearchDropdown items={contacts} value={form.linked_contact_id} onSelect={v=>set('linked_contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
+        <div className="form-group">
+          <label className="form-label">Additional Contacts</label>
+          <ContactMultiSelect contacts={contacts} selectedIds={extraContactIds} onChange={setExtraContactIds} excludeId={form.linked_contact_id || null} placeholder="Add spouse / co-owner…" />
+        </div>
         <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.assigned_agent_id||''} onChange={e=>set('assigned_agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
         {/* Co-Agents */}
         {agents.filter(a => a.id !== form.assigned_agent_id).length > 0 && (
@@ -1446,6 +1479,8 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
 
   const del = async (id) => {
     await supabase.from('properties').delete().eq('id', id)
+    // property_contacts rows cascade in the DB — mirror that in local state
+    setDb(p => ({ ...p, propertyContacts: (p.propertyContacts || []).filter(r => r.property_id !== id) }))
     pushToast('Property deleted', 'info')
     setConfirm(null); reload()
   }
@@ -1567,7 +1602,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
         </div>
       )}
 
-      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={handleSave} go={go} setDb={setDb} />
+      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={handleSave} go={go} setDb={setDb} propertyContacts={db.propertyContacts || []} />
       {confirm && <ConfirmDialog message="This will permanently delete this property." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {radiusProp && (
         <RadiusMailingModal

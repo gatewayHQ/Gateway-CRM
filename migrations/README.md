@@ -36,6 +36,7 @@ file is safe.
 | 0015 | `0015_transaction_layer.sql` | Transaction-management layer: `transaction_steps`, deal `review_status`, `closing_packets` + the `closing-packets` storage bucket | No (additive) | With the transaction-layer app deploy |
 | 0016 | `0016_signwell_to_boldsign.sql` | Renames `signwell_documents` → `boldsign_documents` (data preserved), renames its indexes/policy, and allows `document_versions.source = 'boldsign'` | No (rename + additive constraint) | With the BoldSign app deploy |
 | 0017 | `0017_boldsign_phase1.sql` | BoldSign Phase 1: adds `boldsign_sender_identities` (per-agent send-on-behalf) and `boldsign_templates` (reusable docs + prefill field tokens) | No (additive tables) | With the BoldSign templates deploy |
+| 0018 | `0018_multi_contacts_and_sources.sql` | Adds `'sign call'` / `'friends & family'` to the `contacts.source` CHECK, and the `deal_contacts` / `property_contacts` junction tables (multiple contacts per deal/property — the existing single-contact columns stay as the primary contact) | No (constraint widening + additive tables) | Before/with the multi-contact app deploy |
 
 > Note the numeric order vs. recommended run order: **0001 → 0003 → 0004 → 0005 → 0006 → 0007 → 0002 (Phase A) → 0008 → 0009 → 0010 → 0011 (Phase A, then Phase B after verification)**.
 > 0011's Phase B is the only step that changes what data the database returns,

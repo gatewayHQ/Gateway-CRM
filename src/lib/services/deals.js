@@ -16,6 +16,8 @@
 // what RLS enforces once migration 0011 Phase B is live.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { isUnderContractStage } from '../stages.js'
+
 // Supabase .in() lists travel in the request URL — chunk them so a large book
 // of business can't overflow it.
 const IN_CHUNK = 150
@@ -82,4 +84,22 @@ export async function fetchVisibleCommissions(client, { isAdmin, dealIds }) {
   if (isAdmin) return client.from('commissions').select('*')
   if (!dealIds?.length) return { data: [], error: null }
   return selectInChunks(client, 'commissions', 'deal_id', dealIds)
+}
+
+// When a deal enters an under-contract stage, its linked property goes
+// 'pending' on the Properties board automatically (decided 2026-07, Daniel).
+// Single implementation shared by every stage-change path: board drag
+// (Pipeline.moveStage), the deal-page stage rail, and the deal drawer's Stage
+// field. The .neq guard makes it idempotent, and callers treat a failure as
+// non-fatal — the stage change itself has already succeeded.
+export async function syncPropertyStatusForStage(client, deal, newStage) {
+  if (!deal?.property_id || !isUnderContractStage(newStage)) return { updated: false }
+  const { data, error } = await client
+    .from('properties')
+    .update({ status: 'pending' })
+    .eq('id', deal.property_id)
+    .neq('status', 'pending')
+    .select('id')
+  if (error || !data?.length) return { updated: false, error: error || null }
+  return { updated: true, propertyId: deal.property_id, status: 'pending' }
 }

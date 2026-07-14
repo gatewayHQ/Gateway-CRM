@@ -40,3 +40,19 @@ export function mutationErrorMessage(error, status, fallback = 'Something went w
   }
   return friendlyDbError(error) || error?.message || fallback
 }
+
+// Replace the additional-contact link rows for one deal/property (tables
+// deal_contacts / property_contacts, migration 0018). The link set is small and
+// fully derived from the form's selection, so delete-then-insert is simpler and
+// safer than diffing. Returns the fresh rows so callers can patch local state.
+export async function replaceLinkedContacts(client, table, fkColumn, ownerId, contactIds = []) {
+  const { error: delError } = await client.from(table).delete().eq(fkColumn, ownerId)
+  if (delError) return { rows: [], error: delError }
+  const unique = [...new Set(contactIds.filter(Boolean))]
+  if (!unique.length) return { rows: [], error: null }
+  const { data, error } = await client
+    .from(table)
+    .insert(unique.map(contact_id => ({ [fkColumn]: ownerId, contact_id })))
+    .select()
+  return { rows: data || [], error }
+}

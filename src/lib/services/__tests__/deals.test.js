@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { fetchVisibleDeals, fetchVisibleCommissions, fetchCoListedDealIds } from '../deals.js'
+import { fetchVisibleDeals, fetchVisibleCommissions, fetchCoListedDealIds, syncPropertyStatusForStage } from '../deals.js'
 
 // Minimal supabase-shaped mock: routes each from(table) call through `handler`
 // and records the chained filters so assertions can inspect them.
@@ -12,8 +12,11 @@ function mockClient(handler) {
       calls.push(call)
       const chain = {
         select() { return chain },
+        update(values) { call.filters.push(['update', values]); return chain },
         order(column, opts) { call.filters.push(['order', column, opts]); return chain },
         in(column, values) { call.filters.push(['in', column, values]); return chain },
+        eq(column, value) { call.filters.push(['eq', column, value]); return chain },
+        neq(column, value) { call.filters.push(['neq', column, value]); return chain },
         contains(column, value) { call.filters.push(['contains', column, value]); return chain },
         then(resolve, reject) { return Promise.resolve(handler(call)).then(resolve, reject) },
       }
@@ -139,5 +142,47 @@ describe('fetchVisibleCommissions', () => {
     const { data } = await fetchVisibleCommissions(client, { isAdmin: false, dealIds: ids })
     expect(data).toHaveLength(301)
     expect(client.calls.length).toBe(3) // 150 + 150 + 1
+  })
+})
+
+describe('syncPropertyStatusForStage', () => {
+  const linkedDeal = { id: 'd1', property_id: 'p1' }
+
+  it.each(['under-contract', 'psa', 'due-diligence'])(
+    'marks the linked property pending when the deal enters %s', async (stage) => {
+      const client = mockClient(() => ({ data: [{ id: 'p1' }], error: null }))
+      const res = await syncPropertyStatusForStage(client, linkedDeal, stage)
+      expect(res).toEqual({ updated: true, propertyId: 'p1', status: 'pending' })
+      expect(client.calls[0].table).toBe('properties')
+      expect(client.calls[0].filters).toContainEqual(['update', { status: 'pending' }])
+      expect(client.calls[0].filters).toContainEqual(['eq', 'id', 'p1'])
+      // idempotence guard: rows already pending are excluded from the update
+      expect(client.calls[0].filters).toContainEqual(['neq', 'status', 'pending'])
+    })
+
+  it('does nothing for stages that are not under contract', async () => {
+    const client = mockClient(() => { throw new Error('should not query') })
+    for (const stage of ['lead', 'offer', 'closed', 'lost', 'active']) {
+      expect(await syncPropertyStatusForStage(client, linkedDeal, stage)).toEqual({ updated: false })
+    }
+  })
+
+  it('does nothing when the deal has no linked property', async () => {
+    const client = mockClient(() => { throw new Error('should not query') })
+    expect(await syncPropertyStatusForStage(client, { id: 'd1' }, 'under-contract')).toEqual({ updated: false })
+    expect(await syncPropertyStatusForStage(client, null, 'under-contract')).toEqual({ updated: false })
+  })
+
+  it('reports updated:false when the property was already pending', async () => {
+    const client = mockClient(() => ({ data: [], error: null }))
+    const res = await syncPropertyStatusForStage(client, linkedDeal, 'under-contract')
+    expect(res.updated).toBe(false)
+  })
+
+  it('surfaces the error without throwing when the update fails', async () => {
+    const client = mockClient(() => ({ data: null, error: { message: 'boom' } }))
+    const res = await syncPropertyStatusForStage(client, linkedDeal, 'under-contract')
+    expect(res.updated).toBe(false)
+    expect(res.error).toBeTruthy()
   })
 })

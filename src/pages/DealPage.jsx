@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
+import { syncPropertyStatusForStage } from '../lib/services/deals.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatCurrency, formatDate, formatPhone, STAGE_LABELS } from '../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
@@ -165,6 +166,12 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     () => (db.activities || []).filter(a => a.deal_id === dealId),
     [db.activities, dealId]
   )
+  // Additional contacts on the deal (deal_contacts link rows, migration 0018)
+  const extraContacts = useMemo(
+    () => (db.dealContacts || []).filter(r => r.deal_id === dealId)
+      .map(r => contacts.find(c => c.id === r.contact_id)).filter(Boolean),
+    [db.dealContacts, contacts, dealId]
+  )
   const dealTasks = useMemo(
     () => (db.tasks || []).filter(t => t.deal_id === dealId && !t.completed)
       .sort((a, b) => new Date(a.due_date || '2999') - new Date(b.due_date || '2999')),
@@ -202,6 +209,12 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     setFetched(f => f && f.id === deal.id ? { ...f, stage: newStage, comp_data } : f)
     pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
     audit.stageChange(deal, fromStage, newStage, activeAgent?.id)
+    // Under contract → the linked property (Properties tab) goes Pending
+    const sync = await syncPropertyStatusForStage(supabase, deal, newStage)
+    if (sync.updated) {
+      setDb(p => ({ ...p, properties: (p.properties || []).map(pr => pr.id === sync.propertyId ? { ...pr, status: sync.status } : pr) }))
+      pushToast('Linked property marked Pending', 'info')
+    }
     const auto = STAGE_AUTO_TASKS[newStage]
     if (!auto) return
     const due = new Date(); due.setDate(due.getDate() + auto.daysOut); due.setHours(9, 0, 0, 0)
@@ -489,6 +502,18 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
             ) : (
               <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>No contact linked.</div>
             )}
+            {extraContacts.map(c => (
+              <div key={c.id}>
+                <div style={{ fontWeight: 600, fontSize: 13 }}>
+                  {c.first_name} {c.last_name}
+                  <span style={{ fontSize: 10, color: 'var(--gw-mist)', fontWeight: 500, marginLeft: 6 }}>additional</span>
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--gw-mist)', display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 2 }}>
+                  {c.phone && <a href={`tel:${c.phone}`} style={{ color: 'inherit' }}>{formatPhone(c.phone)}</a>}
+                  {c.email && <a href={`mailto:${c.email}`} style={{ color: 'inherit' }}>{c.email}</a>}
+                </div>
+              </div>
+            ))}
             <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8 }}>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>Agents on deal</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -754,7 +779,8 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
       </div>
 
       <DealDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} deal={deal} initialTab={drawerTab}
-        agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} onSave={refreshDeal} />
+        agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent}
+        onSave={refreshDeal} setDb={setDb} dealContacts={db.dealContacts || []} />
     </div>
   )
 }

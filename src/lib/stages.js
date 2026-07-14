@@ -120,6 +120,14 @@ export function boardStageFor(deal, trackId) {
 // dashboards, and the "open deals" pickers.
 export const isOpenStage = (stage) => stage !== 'closed' && stage !== 'lost'
 
+// Stages that mean the deal's property is under contract. Both residential
+// tracks use the literal 'under-contract' token; on the commercial track a
+// signed PSA (and the DD period that follows it) is the equivalent state.
+// Drives the automatic property-status sync: entering one of these marks the
+// linked property 'pending' (see syncPropertyStatusForStage in services/deals.js).
+export const UNDER_CONTRACT_STAGES = ['under-contract', 'psa', 'due-diligence']
+export const isUnderContractStage = (stage) => UNDER_CONTRACT_STAGES.includes(stage)
+
 // Auto-task fired when a deal ENTERS a stage (board drag or deal-page rail).
 // One rule per stage; daysOut sets the due date.
 export const STAGE_AUTO_TASKS = {

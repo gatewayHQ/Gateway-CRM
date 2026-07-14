@@ -118,6 +118,7 @@ const EMPTY_DB = {
   contacts: [], properties: [], deals: [], tasks: [],
   agents: [], templates: [], commissions: [], commissionsReady: true,
   activities: [], activitiesReady: true,
+  dealContacts: [], propertyContacts: [],
 }
 
 const nameFromEmail = (email = '') => {
@@ -362,7 +363,7 @@ export default function App() {
       // office. Tasks stay personal even for admins — a to-do list isn't oversight
       // data and the admin's own tasks are all that's useful to them.
       // Regular agents receive only rows scoped to their computed lists above.
-      const [contacts, properties, deals, tasks, templates, activitiesRes] = await Promise.all([
+      const [contacts, properties, deals, tasks, templates, activitiesRes, dealContactsRes, propertyContactsRes] = await Promise.all([
         isAdminAgent
           ? supabase.from('contacts').select('*').order('created_at', { ascending: false })
           : supabase.from('contacts').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
@@ -375,6 +376,12 @@ export default function App() {
         supabase.from('tasks').select('*').eq('agent_id', matched.id).order('due_date', { ascending: true }),
         supabase.from('templates').select('*').order('created_at', { ascending: false }),
         supabase.from('activities').select('*').order('created_at', { ascending: false }),
+        // Additional-contact links (husband & wife etc. — migration 0018).
+        // deal_contacts is RLS-scoped to visible deals; property_contacts is
+        // open like properties. If the migration hasn't run yet the selects
+        // error and the app degrades to the single-contact behavior.
+        supabase.from('deal_contacts').select('*'),
+        supabase.from('property_contacts').select('*'),
       ])
       // Commissions are back-office data: only admins load raw rows. Agents
       // get their own slice via /api/portal?action=my-earnings (the database
@@ -394,6 +401,8 @@ export default function App() {
         commissionsReady: !commissionsRes.error,
         activities:       activitiesRes.data || [],
         activitiesReady:  !activitiesRes.error,
+        dealContacts:     dealContactsRes.data     || [],
+        propertyContacts: propertyContactsRes.data || [],
       }
       setDb(dbPayload)
 

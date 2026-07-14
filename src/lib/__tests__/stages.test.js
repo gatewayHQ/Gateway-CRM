@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   TRACKS, TRACK_ORDER, STAGE_LABELS, ALL_DEAL_STAGES,
   trackForDeal, boardStageFor, isOpenStage,
+  UNDER_CONTRACT_STAGES, isUnderContractStage,
 } from '../stages.js'
 
 describe('track definitions', () => {
@@ -26,6 +27,24 @@ describe('track definitions', () => {
     expect(s.indexOf('om-marketing')).toBeLessThan(s.indexOf('listing-agreement'))
     expect(s.indexOf('loi')).toBeLessThan(s.indexOf('psa'))
     expect(s.indexOf('psa')).toBeLessThan(s.indexOf('due-diligence'))
+  })
+})
+
+describe('under-contract stages (property status sync)', () => {
+  it('are all storable tokens', () => {
+    for (const s of UNDER_CONTRACT_STAGES) expect(ALL_DEAL_STAGES).toContain(s)
+  })
+
+  it('cover both residential tracks and the commercial PSA/DD equivalents', () => {
+    expect(isUnderContractStage('under-contract')).toBe(true)
+    expect(isUnderContractStage('psa')).toBe(true)
+    expect(isUnderContractStage('due-diligence')).toBe(true)
+  })
+
+  it('exclude pre-contract and terminal stages', () => {
+    for (const s of ['lead', 'qualified', 'showing', 'offer', 'loi', 'active', 'closed', 'lost']) {
+      expect(isUnderContractStage(s), s).toBe(false)
+    }
   })
 })
 

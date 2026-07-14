@@ -1,6 +1,6 @@
 import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { fetchVisibleDeals } from '../lib/services/deals.js'
+import { fetchVisibleDeals, syncPropertyStatusForStage } from '../lib/services/deals.js'
 import { formatCurrency, formatDate, STAGE_LABELS, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import {
@@ -11,6 +11,8 @@ import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
 import { sendDocument, getDocStatus, downloadSigned as apiDownloadSigned, sendFromTemplate, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState } from '../lib/services/boldsign.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
+import { replaceLinkedContacts } from '../lib/services/db.js'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
   'Title Search Ordered',
@@ -1763,15 +1765,19 @@ function PortalTab({ deal }) {
   )
 }
 
-export function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave, initialTab = 'details' }) {
+export function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave, setDb, dealContacts = [], initialTab = 'details' }) {
   const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
   const [tab, setTab]       = useState(initialTab)
+  // Additional contacts (beyond the primary contact_id) — persisted as
+  // deal_contacts link rows, kept out of `form` so they never hit the deals table.
+  const [extraContactIds, setExtraContactIds] = useState([])
 
   React.useEffect(() => {
     setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {} } : blank)
+    setExtraContactIds(deal?.id ? dealContacts.filter(r => r.deal_id === deal.id).map(r => r.contact_id) : [])
     setErrors({})
     setTab(deal?.id ? initialTab : 'details')
   }, [deal, open, initialTab])
@@ -1813,13 +1819,38 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         prop_subtype:        form.prop_subtype  || null,
         comp_data:           form.comp_data     || null,
       }
-      let error
+      let error, saved
       if (deal?.id) {
         ;({ error } = await supabase.from('deals').update(payload).eq('id', deal.id))
+        saved = { ...payload, id: deal.id }
       } else {
-        ;({ error } = await supabase.from('deals').insert([payload]))
+        ;({ data: saved, error } = await supabase.from('deals').insert([payload]).select().single())
       }
       if (error) { pushToast(error.message, 'error'); return }
+
+      // Additional contacts → deal_contacts link rows (primary stays on contact_id).
+      // Skipped when there's nothing to write or clear, so installs that haven't
+      // run migration 0018 yet never see an error from the missing table.
+      const links = extraContactIds.filter(id => id !== payload.contact_id)
+      const hadLinks = deal?.id ? dealContacts.some(r => r.deal_id === deal.id) : false
+      if (saved?.id && (links.length || hadLinks)) {
+        const linkRes = await replaceLinkedContacts(supabase, 'deal_contacts', 'deal_id', saved.id, links)
+        if (linkRes.error) {
+          pushToast('Deal saved, but the additional contacts could not be saved.', 'error')
+        } else if (setDb) {
+          setDb(p => ({ ...p, dealContacts: [...(p.dealContacts || []).filter(r => r.deal_id !== saved.id), ...linkRes.rows] }))
+        }
+      }
+
+      // Stage set/changed to an under-contract stage → linked property goes Pending
+      if (saved?.property_id && (!deal?.id || deal.stage !== payload.stage)) {
+        const sync = await syncPropertyStatusForStage(supabase, saved, payload.stage)
+        if (sync.updated) {
+          if (setDb) setDb(p => ({ ...p, properties: (p.properties || []).map(pr => pr.id === sync.propertyId ? { ...pr, status: sync.status } : pr) }))
+          pushToast('Linked property marked Pending', 'info')
+        }
+      }
+
       pushToast(deal?.id ? 'Deal updated' : 'Deal added')
       await onSave()
       onClose()
@@ -1907,6 +1938,10 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
             </div>
             <div className="form-group"><label className="form-label">Expected Close Date</label><input className="form-control" type="date" value={form.expected_close_date||''} onChange={e=>set('expected_close_date',e.target.value)} /></div>
             <div className="form-group"><label className="form-label">Contact</label><SearchDropdown items={contacts} value={form.contact_id} onSelect={v=>set('contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
+            <div className="form-group">
+              <label className="form-label">Additional Contacts</label>
+              <ContactMultiSelect contacts={contacts} selectedIds={extraContactIds} onChange={setExtraContactIds} excludeId={form.contact_id || null} placeholder="Add spouse / co-buyer…" />
+            </div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
             <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
 
@@ -2173,6 +2208,12 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const contactMap  = useMemo(() => Object.fromEntries(contacts.map(c => [c.id, c])),   [contacts])
   const agentMap    = useMemo(() => Object.fromEntries(agents.map(a => [a.id, a])),     [agents])
   const propertyMap = useMemo(() => Object.fromEntries(properties.map(p => [p.id, p])), [properties])
+  // Additional contacts per deal (deal_contacts link rows) — shown as "+N" on cards
+  const dealContactCounts = useMemo(() => {
+    const m = {}
+    for (const r of (db.dealContacts || [])) m[r.deal_id] = (m[r.deal_id] || 0) + 1
+    return m
+  }, [db.dealContacts])
 
   // Filter deals for admin view (by agent) or show all
   const visibleDeals = useMemo(() => {
@@ -2286,6 +2327,8 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     await supabase.from('tasks').update({ deal_id: null }).eq('deal_id', id)
     const { error } = await supabase.from('deals').delete().eq('id', id)
     if (error) { pushToast(error.message, 'error'); setConfirm(null); return }
+    // deal_contacts rows cascade in the DB — mirror that in local state
+    setDb(p => ({ ...p, dealContacts: (p.dealContacts || []).filter(r => r.deal_id !== id) }))
     pushToast('Deal deleted', 'info')
     setConfirm(null); reload()
   }, [reload])
@@ -2304,7 +2347,11 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     // deals.property_id is ON DELETE SET NULL — linked deals are kept, just unlinked.
     const { error } = await supabase.from('properties').delete().eq('id', id)
     if (error) { pushToast(error.message, 'error'); setConfirmProp(null); return }
-    setDb(p => ({ ...p, properties: (p.properties || []).filter(pr => pr.id !== id) }))
+    setDb(p => ({
+      ...p,
+      properties: (p.properties || []).filter(pr => pr.id !== id),
+      propertyContacts: (p.propertyContacts || []).filter(r => r.property_id !== id),
+    }))
     pushToast('Listing removed', 'info'); setConfirmProp(null)
   }, [setDb])
 
@@ -2337,6 +2384,13 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     await supabase.from('deals').update({ stage: newStage, comp_data }).eq('id', dealId)
     setDb(p => ({ ...p, deals: p.deals.map(d => d.id === dealId ? { ...d, stage: newStage, comp_data } : d) }))
     pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
+
+    // Under contract → the linked property (Properties tab) goes Pending
+    const sync = await syncPropertyStatusForStage(supabase, deal, newStage)
+    if (sync.updated) {
+      setDb(p => ({ ...p, properties: (p.properties || []).map(pr => pr.id === sync.propertyId ? { ...pr, status: sync.status } : pr) }))
+      pushToast('Linked property marked Pending', 'info')
+    }
 
     const auto = AUTO_TASKS[newStage]
     if (!auto) return
@@ -2491,7 +2545,14 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                             <span style={{ fontSize:10, color:'var(--gw-mist)' }}>{agent.name}</span>
                           </div>
                         )}
-                        {contact && <div className="deal-card__contact">{contact.first_name} {contact.last_name}</div>}
+                        {contact && (
+                          <div className="deal-card__contact">
+                            {contact.first_name} {contact.last_name}
+                            {dealContactCounts[deal.id] > 0 && (
+                              <span style={{ color:'var(--gw-mist)' }} title={`${dealContactCounts[deal.id]} additional contact${dealContactCounts[deal.id] !== 1 ? 's' : ''}`}> +{dealContactCounts[deal.id]}</span>
+                            )}
+                          </div>
+                        )}
                         {deal.value > 0 && (
                           <div className="deal-card__value">
                             {formatCurrency(deal.value)}
@@ -2684,7 +2745,8 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
       <DealDrawer open={drawer} onClose={() => setDrawer(false)}
         deal={editing ? editing : { stage: defaultStage }}
-        agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} onSave={reload} />
+        agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent}
+        onSave={reload} setDb={setDb} dealContacts={db.dealContacts || []} />
       {confirm && <ConfirmDialog message="This will permanently delete this deal." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {confirmProp && <ConfirmDialog message="Remove this listing from the pipeline? Any linked deals are kept but will be unlinked from the property." onConfirm={() => delProperty(confirmProp)} onCancel={() => setConfirmProp(null)} />}
     </div>
