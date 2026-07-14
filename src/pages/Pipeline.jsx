@@ -1059,6 +1059,18 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
   )
 }
 
+// Additional contacts linked to a deal (spouses / co-buyers) resolved to full
+// contact rows, in link-row order. The primary contact (deal.contact_id) is
+// excluded — the signer flows already seed the primary separately, and these
+// are layered on after it.
+function dealExtraContacts(deal, contacts = [], dealContacts = []) {
+  if (!deal?.id) return []
+  return (dealContacts || [])
+    .filter(r => r.deal_id === deal.id && r.contact_id !== deal.contact_id)
+    .map(r => contacts.find(c => c.id === r.contact_id))
+    .filter(Boolean)
+}
+
 // ── Send for Signature modal — drives BoldSign document creation ────────────
 // Flow:
 //   1. Agent fills in signers + picks a PDF here in the CRM
@@ -1066,7 +1078,7 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
 //      signature + date field per signer and sends immediately via BoldSign
 //   3. BoldSign emails each signer; they sign in their browser
 //   4. BoldSign webhook hits /api/boldsign → status flips sent → completed
-function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent, onClose, onSent }) {
+function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent, dealContacts = [], onClose, onSent }) {
   // Primary signer: contact linked directly to the deal
   const contact      = contacts?.find(c => c.id === deal?.contact_id)
   const defaultName  = `${contact?.first_name || ''} ${contact?.last_name || ''}`.trim()
@@ -1089,6 +1101,13 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const [dragOver,   setDragOver]  = React.useState(false)
   const fileRef = React.useRef()
 
+  // Additional contacts on the deal (spouses / co-buyers) — seeded as their own
+  // signer rows below, pre-filled with name + email just like the primary.
+  const extraContacts = React.useMemo(
+    () => dealExtraContacts(deal, contacts, dealContacts),
+    [deal, contacts, dealContacts]
+  )
+
   const [signers, setSigners] = React.useState(() => {
     // Signer 1: deal contact. If they have no email, fall back to property owner.
     let s1Name  = defaultName
@@ -1100,6 +1119,18 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     const base = [{ id: 1, name: s1Name, email: s1Email }]
     if (ownerIsDifferent && ownerEmail && ownerEmail !== s1Email) {
       base.push({ id: 2, name: ownerName, email: ownerEmail })
+    }
+    // Layer additional contacts in as further signers, deduped by email and
+    // skipping anyone already represented above (primary / owner).
+    const seenEmails = new Set(base.map(s => (s.email || '').toLowerCase()).filter(Boolean))
+    for (const c of extraContacts) {
+      if (ownerContact && c.id === ownerContact.id) continue
+      const name  = `${c.first_name || ''} ${c.last_name || ''}`.trim()
+      const email = c.email || ''
+      if (!name && !email) continue
+      if (email && seenEmails.has(email.toLowerCase())) continue
+      if (email) seenEmails.add(email.toLowerCase())
+      base.push({ id: c.id, name, email })
     }
     return base
   })
@@ -1269,7 +1300,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   )
 }
 
-function SignaturesTab({ deal, contacts, properties, activeAgent }) {
+function SignaturesTab({ deal, contacts, properties, activeAgent, dealContacts = [] }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
@@ -1467,6 +1498,7 @@ create policy "agent_notifications_policy" on agent_notifications
       {sendOpen && (
         <SendSignatureModal
           deal={deal} contacts={contacts} properties={properties} dealFiles={dealFiles} activeAgent={activeAgent}
+          dealContacts={dealContacts}
           onClose={() => setSendOpen(false)}
           onSent={() => { setSendOpen(false); loadEnvelopes() }}
         />
@@ -1475,6 +1507,7 @@ create policy "agent_notifications_policy" on agent_notifications
       {tplOpen && (
         <SendFromTemplateModal
           deal={deal} contacts={contacts} properties={properties} templates={templates} activeAgent={activeAgent}
+          dealContacts={dealContacts}
           onClose={() => setTplOpen(false)}
           onSent={() => { setTplOpen(false); loadEnvelopes() }}
         />
@@ -1488,9 +1521,14 @@ create policy "agent_notifications_policy" on agent_notifications
 //    editable (CRM-prefilled) input per field, then sends via /api/boldsign.
 const prettyLabel = (id) => String(id || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 
-function SendFromTemplateModal({ deal, contacts, properties, templates, activeAgent, onClose, onSent }) {
+function SendFromTemplateModal({ deal, contacts, properties, templates, activeAgent, dealContacts = [], onClose, onSent }) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
+  // Additional contacts (spouses / co-buyers) seeded into extra client roles.
+  const extraContacts = React.useMemo(
+    () => dealExtraContacts(deal, contacts, dealContacts),
+    [deal, contacts, dealContacts]
+  )
 
   // Filter templates to the deal's state (comp_data.state preferred, else the
   // normalized property state); fall back to all if none match.
@@ -1522,16 +1560,22 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
         const fields = (det.fields || []).filter(f => isFillableField(f.type))
         setDetails({ roles, fields })
 
-        // Seed signers: match role name to the deal's people (first match wins).
+        // Seed signers: match role name to the deal's people. Client roles are
+        // filled in order from [primary contact, ...additional contacts], so a
+        // template with two buyer/signer roles gets the primary and the spouse.
         const tokenVals = crmTokenValues({ deal, property, contact, agent: activeAgent })
+        const clientPeople = []
+        if (contact) clientPeople.push({ name: `${contact.first_name || ''} ${contact.last_name || ''}`.trim(), email: contact.email || '' })
+        for (const c of extraContacts) clientPeople.push({ name: `${c.first_name || ''} ${c.last_name || ''}`.trim(), email: c.email || '' })
+
         const seededSigners = {}
-        let usedContact = false, usedAgent = false
+        let clientIdx = 0, usedAgent = false
         for (const r of roles) {
           const n = String(r.name).toLowerCase()
           if (!usedAgent && /agent/.test(n) && activeAgent?.email) {
             seededSigners[r.index] = { name: activeAgent.name || '', email: activeAgent.email || '' }; usedAgent = true
-          } else if (!usedContact && /(seller|buyer|client|owner)/.test(n) && contact) {
-            seededSigners[r.index] = { name: `${contact.first_name || ''} ${contact.last_name || ''}`.trim(), email: contact.email || '' }; usedContact = true
+          } else if (/(seller|buyer|client|owner|spouse|co-?buyer|purchaser)/.test(n) && clientIdx < clientPeople.length) {
+            seededSigners[r.index] = clientPeople[clientIdx]; clientIdx++
           } else {
             seededSigners[r.index] = { name: r.defaultName || '', email: r.defaultEmail || '' }
           }
@@ -2071,7 +2115,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
-        <SignaturesTab deal={deal} contacts={contacts} properties={properties} activeAgent={activeAgent} />
+        <SignaturesTab deal={deal} contacts={contacts} properties={properties} activeAgent={activeAgent} dealContacts={dealContacts} />
       )}
 
       {/* Client Portal tab */}
