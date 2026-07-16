@@ -140,6 +140,25 @@ async function buildSigners(orderedSigners, pdfBuffer) {
   })
 }
 
+// BoldSign's multipart /document/send binds ONE signer per repeated `Signers`
+// field, each value a single JSON object — NOT one field holding a JSON array
+// (that yields {"Signers":["Value is invalid"]}). Append them the right way.
+function appendSigners(form, signerPayload) {
+  for (const s of signerPayload) form.append('Signers', JSON.stringify(s))
+}
+
+// Validate signers before hitting the API — the other common source of
+// "Signers: Value is invalid" is an empty or malformed email/name.
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
+function validateSigners(signers) {
+  if (!Array.isArray(signers) || !signers.length) return 'At least one signer is required'
+  for (const s of signers) {
+    if (!s?.name || !String(s.name).trim())            return 'Every signer needs a name'
+    if (!s?.email || !EMAIL_RE.test(String(s.email).trim())) return `"${s?.name || 'Signer'}" needs a valid email address`
+  }
+  return null
+}
+
 // ─── Status normalization ─────────────────────────────────────────────────────
 // BoldSign statuses: None / Sent / InProgress / WaitingForOthers / NeedToSign /
 // Completed / Declined / Revoked / Expired / Viewed. Frontend expects lowercase
@@ -239,7 +258,8 @@ export default async function handler(req, res) {
     if (body.action === 'send') {
       const { signers, documentBase64, documentName, emailSubject } = body
       if (!documentBase64) return res.status(400).json({ error: 'documentBase64 required' })
-      if (!signers?.length) return res.status(400).json({ error: 'At least one signer required' })
+      const invalid = validateSigners(signers)
+      if (invalid) return res.status(400).json({ error: invalid })
 
       const orderedSigners = [...signers].sort((a, b) =>
         Number(a.routingOrder || 1) - Number(b.routingOrder || 1)
@@ -254,12 +274,13 @@ export default async function handler(req, res) {
       let onBehalfOf = null
       try { onBehalfOf = await resolveOnBehalfOf(getServiceClient(), actor.agent.id) } catch { /* fall back to account default */ }
 
-      // BoldSign send = multipart/form-data: Files (binary) + JSON string fields.
+      // BoldSign send = multipart/form-data: Files (binary) + one repeated
+      // `Signers` field per signer (JSON object each).
       const form = new FormData()
       form.append('Title',              documentName || 'Document')
       form.append('Message',            emailSubject || 'Please sign this document')
       form.append('EnableSigningOrder', String(hasOrder))
-      form.append('Signers',            JSON.stringify(signerPayload))
+      appendSigners(form, signerPayload)
       if (onBehalfOf) form.append('OnBehalfOf', onBehalfOf)
       form.append('Files', new Blob([pdfBuffer], { type: 'application/pdf' }), documentName || 'document.pdf')
 
@@ -277,7 +298,8 @@ export default async function handler(req, res) {
     if (body.action === 'document-embed-url') {
       const { signers, documentBase64, documentName, emailSubject, redirectUrl } = body
       if (!documentBase64) return res.status(400).json({ error: 'documentBase64 required' })
-      if (!signers?.length) return res.status(400).json({ error: 'At least one signer required' })
+      const invalidEmbed = validateSigners(signers)
+      if (invalidEmbed) return res.status(400).json({ error: invalidEmbed })
 
       const orderedSigners = [...signers].sort((a, b) => Number(a.routingOrder || 1) - Number(b.routingOrder || 1))
       const hasOrder      = orderedSigners.some(s => Number(s.routingOrder || 1) !== 1)
@@ -290,7 +312,7 @@ export default async function handler(req, res) {
       form.append('Title',              documentName || 'Document')
       form.append('Message',            emailSubject || 'Please sign this document')
       form.append('EnableSigningOrder', String(hasOrder))
-      form.append('Signers',            JSON.stringify(signerPayload))
+      appendSigners(form, signerPayload)
       form.append('SendViewOption',     'PreparePage')
       form.append('ShowToolbar',        'true')
       if (redirectUrl) form.append('RedirectUrl', redirectUrl)
