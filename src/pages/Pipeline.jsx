@@ -9,7 +9,7 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
@@ -1385,6 +1385,19 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
     link.click()
   }
 
+  const downloadAuditTrail = async (env) => {
+    const key = `audit-${env.id}`
+    setDownloading(p => ({ ...p, [key]: true }))
+    let data
+    try { data = await apiDownloadAudit(env.document_id) }
+    catch (err) { setDownloading(p => ({ ...p, [key]: false })); pushToast(err.message, 'error'); return }
+    setDownloading(p => ({ ...p, [key]: false }))
+    const link = document.createElement('a')
+    link.href = `data:application/pdf;base64,${data.base64}`
+    link.download = `audit-${(env.document_name || 'document').replace(/\.pdf$/i, '')}.pdf`
+    link.click()
+  }
+
   if (!tableReady) return (
     <div style={{ padding:20 }}>
       <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:16, fontSize:13, lineHeight:1.7 }}>
@@ -1482,6 +1495,15 @@ create policy "agent_notifications_policy" on agent_notifications
                         disabled={downloading[env.id]}
                       >
                         {downloading[env.id] ? 'Downloading…' : 'Download Signed PDF'}
+                      </button>
+                      <button
+                        className="btn btn--sm btn--secondary"
+                        style={{ fontSize:11 }}
+                        onClick={() => downloadAuditTrail(env)}
+                        disabled={downloading[`audit-${env.id}`]}
+                        title="Compliance audit trail — who signed, when, IP, and a tamper hash"
+                      >
+                        {downloading[`audit-${env.id}`] ? 'Fetching…' : 'Audit Trail'}
                       </button>
                     </div>
                   )}

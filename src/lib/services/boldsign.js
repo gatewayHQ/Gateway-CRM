@@ -30,6 +30,7 @@ export const documentEmbedUrl = (p)          => call({ action: 'document-embed-u
 export const signLink         = (p)          => call({ action: 'sign-link', ...p })
 export const getDocStatus   = (documentId) => call({ action: 'status',   documentId })
 export const downloadSigned = (documentId) => call({ action: 'download', documentId })
+export const downloadAudit  = (documentId) => call({ action: 'audit-download', documentId })
 export const remindDocument = (documentId) => call({ action: 'remind',   documentId })
 export const debugBoldsign  = ()           => call({ action: 'debug' })
 

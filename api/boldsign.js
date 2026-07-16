@@ -47,31 +47,87 @@ function verifyWebhookSignature(rawBody, header) {
   return a.length === b.length && crypto.timingSafeEqual(a, b) ? 'ok' : 'invalid'
 }
 
-async function boldsign(path, { method = 'GET', form, json, raw = false } = {}) {
-  const headers = { 'X-API-KEY': API_KEY, Accept: 'application/json' }
-  let body
-  if (form) {
-    body = form                       // FormData — fetch sets the multipart boundary itself
-  } else if (json !== undefined) {
-    headers['Content-Type'] = 'application/json'
-    body = JSON.stringify(json)
+// Transient statuses worth retrying (rate limit + server/gateway errors).
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504])
+const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+// Exponential backoff with jitter; honor Retry-After (seconds) when present.
+export function backoffMs(attempt, retryAfterSec) {
+  if (retryAfterSec > 0) return Math.min(retryAfterSec * 1000, 20000)
+  return 400 * (2 ** attempt) + Math.floor(Math.random() * 250)   // 400/800/1600ms (+jitter)
+}
+
+// Central BoldSign client with idempotency + retry/backoff.
+//   • idempotencyKey → sent as the `Idempotency-Key` header. Auto-generated for
+//     write methods so an in-flight retry can't double-create if BoldSign honors
+//     it. Retries reuse the SAME key (constant across the loop).
+//   • Retries: network errors, 429, and 5xx. Writes are only retried because the
+//     idempotency key makes them safe; GETs are always safe to retry.
+export async function boldsign(path, { method = 'GET', form, json, raw = false, idempotencyKey, maxRetries = 3 } = {}) {
+  const isWrite = method !== 'GET'
+  const idem    = idempotencyKey || (isWrite ? crypto.randomUUID() : null)
+
+  for (let attempt = 0; ; attempt++) {
+    const headers = { 'X-API-KEY': API_KEY, Accept: 'application/json' }
+    if (idem) headers['Idempotency-Key'] = idem
+    let body
+    if (form) {
+      body = form                       // FormData — fetch sets the multipart boundary itself
+    } else if (json !== undefined) {
+      headers['Content-Type'] = 'application/json'
+      body = JSON.stringify(json)
+    }
+
+    let r
+    try {
+      r = await fetch(`${API_BASE}${path}`, { method, headers, body })
+    } catch (netErr) {
+      if (attempt < maxRetries) {
+        const delay = backoffMs(attempt)
+        console.warn(`[boldsign] network error on ${method} ${path} — retry ${attempt + 1}/${maxRetries} in ${delay}ms: ${netErr.message}`)
+        await sleep(delay); continue
+      }
+      throw netErr
+    }
+
+    // Retry transient HTTP failures (bounded).
+    if (!r.ok && RETRYABLE_STATUS.has(r.status) && attempt < maxRetries) {
+      const delay = backoffMs(attempt, Number(r.headers.get('retry-after')) || 0)
+      console.warn(`[boldsign] ${r.status} on ${method} ${path} — retry ${attempt + 1}/${maxRetries} in ${delay}ms`)
+      await sleep(delay); continue
+    }
+
+    if (raw) return r
+
+    const text = await r.text()
+    let data = {}
+    try { data = text ? JSON.parse(text) : {} } catch { data = { message: text } }
+    if (!r.ok) {
+      const msg = data?.error
+                || data?.message
+                || (data?.errors && JSON.stringify(data.errors))
+                || `BoldSign API ${r.status}`
+      const err = new Error(msg)
+      err.status = r.status
+      err.data   = data
+      throw err
+    }
+    return data
   }
-  const r = await fetch(`${API_BASE}${path}`, { method, headers, body })
-  if (raw) return r
-  const text = await r.text()
-  let data = {}
-  try { data = text ? JSON.parse(text) : {} } catch { data = { message: text } }
-  if (!r.ok) {
-    const msg = data?.error
-              || data?.message
-              || (data?.errors && JSON.stringify(data.errors))
-              || `BoldSign API ${r.status}`
-    const err = new Error(msg)
-    err.status = r.status
-    err.data   = data
-    throw err
-  }
-  return data
+}
+
+// Pull a BoldSign PDF (signed document or audit trail) and archive it into the
+// deal-documents bucket. Best-effort — returns the storage path or null.
+async function archiveBoldsignPdf(supabase, { path, dealId, filename }) {
+  try {
+    const r = await boldsign(path, { raw: true })
+    if (!r.ok) return null
+    const buf = await r.arrayBuffer()
+    const storagePath = `deal-${dealId}/${Date.now()}-${filename}`
+    const { error } = await supabase.storage.from('deal-documents').upload(
+      storagePath, Buffer.from(buf), { contentType: 'application/pdf', upsert: false }
+    )
+    return error ? null : storagePath
+  } catch { return null }
 }
 
 // ─── Field placement ─────────────────────────────────────────────────────────
@@ -360,6 +416,16 @@ export default async function handler(req, res) {
       })
     }
 
+    if (body.action === 'audit-download') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+      // Compliance audit trail (who/when/IP/hash). Ready once the doc completes.
+      const r = await boldsign(`/document/downloadAuditLog?documentId=${encodeURIComponent(id)}`, { raw: true })
+      if (!r.ok) return res.status(400).json({ error: 'Audit trail not available yet' })
+      const buffer = await r.arrayBuffer()
+      return res.json({ base64: Buffer.from(buffer).toString('base64'), contentType: 'application/pdf' })
+    }
+
     if (body.action === 'remind') {
       const id = body.envelopeId || body.documentId
       if (!id) return res.status(400).json({ error: 'documentId required' })
@@ -603,19 +669,24 @@ async function handleWebhook(req, res) {
     await supabase.from('boldsign_documents').update(patch).eq('document_id', documentId)
 
     if (status === 'completed') {
-      // Download signed PDF + stash it in deal-documents storage so agents can
-      // grab it without round-tripping the BoldSign API.
-      try {
-        const r = await boldsign(`/document/download?documentId=${encodeURIComponent(documentId)}`, { raw: true })
-        if (r.ok) {
-          const pdfBuffer   = await r.arrayBuffer()
-          const baseName    = (record.document_name || 'document').replace(/\.pdf$/i, '')
-          const storagePath = `deal-${record.deal_id}/${Date.now()}-signed-${baseName}.pdf`
-          await supabase.storage.from('deal-documents').upload(
-            storagePath, Buffer.from(pdfBuffer), { contentType: 'application/pdf', upsert: false }
-          )
-        }
-      } catch (_) { /* non-fatal — status was already saved */ }
+      // Archive the signed PDF AND the compliance audit trail into deal-documents
+      // so agents have both without round-tripping BoldSign. Both are best-effort;
+      // the audit trail can lag the signed PDF, so if it isn't ready the agent can
+      // fetch it on demand (action: 'audit-download').
+      const baseName = (record.document_name || 'document').replace(/\.pdf$/i, '')
+      await archiveBoldsignPdf(supabase, {
+        path: `/document/download?documentId=${encodeURIComponent(documentId)}`,
+        dealId: record.deal_id, filename: `signed-${baseName}.pdf`,
+      })
+      const auditPath = await archiveBoldsignPdf(supabase, {
+        path: `/document/downloadAuditLog?documentId=${encodeURIComponent(documentId)}`,
+        dealId: record.deal_id, filename: `audit-${baseName}.pdf`,
+      })
+      // Record whether the audit trail is on file so the UI can offer a manual
+      // fetch if it wasn't ready at webhook time.
+      await supabase.from('boldsign_documents')
+        .update({ audit_trail_saved: Boolean(auditPath) })
+        .eq('document_id', documentId)
 
       const deal = record.deals
       if (deal?.agent_id) {
