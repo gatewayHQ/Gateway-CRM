@@ -37,6 +37,9 @@ export default async function handler(req, res) {
   // GET /api/portal?action=my-earnings — the signed-in agent's own commission
   // slices, computed server-side. See handleMyEarnings below.
   if (req.query?.action === 'my-earnings') return handleMyEarnings(req, res)
+  // GET /api/portal?token=<>&action=sign-link&documentId=<>&signerEmail=<>
+  // Mints a BoldSign embedded-signing URL for a client signing in the portal.
+  if (req.query?.action === 'sign-link') return handlePortalSignLink(req, res)
 
   const token = (req.query?.token || '').trim()
   if (!/^[0-9a-f-]{36}$/i.test(token)) {
@@ -100,6 +103,21 @@ export default async function handler(req, res) {
         .map(({ name, url }) => ({ name, url }))
     }
 
+    // 4b. Pending signature documents for this deal (client can sign in-portal).
+    const { data: sigAll } = await supabase
+      .from('boldsign_documents')
+      .select('document_id, document_name, status, signer_email')
+      .eq('deal_id', deal.id)
+      .order('created_at', { ascending: false })
+    const signatureDocs = (sigAll || [])
+      .filter(d => !['completed', 'voided'].includes(d.status))
+      .map(d => ({
+        documentId: d.document_id,
+        name:       (d.document_name || 'Document').replace(/\.pdf$/i, ''),
+        status:     d.status,
+        signers:    String(d.signer_email || '').split(',').map(s => s.trim()).filter(Boolean),
+      }))
+
     const steps = stepsRes.data || []
     const doneCount = steps.filter(s => s.completed).length
 
@@ -130,9 +148,52 @@ export default async function handler(req, res) {
       },
       keyDates,
       documents,
+      signatureDocs,
     })
   } catch (err) {
     return res.status(500).json({ error: 'Something went wrong loading this portal.' })
+  }
+}
+
+// ─── Embedded signing from the portal ─────────────────────────────────────────
+// Validates the portal token → deal, confirms the document belongs to that deal
+// and the email is one of its signers, then mints a BoldSign embedded-sign URL.
+async function handlePortalSignLink(req, res) {
+  const token       = (req.query?.token || '').trim()
+  const documentId  = (req.query?.documentId || '').trim()
+  const signerEmail = (req.query?.signerEmail || '').trim().toLowerCase()
+  if (!/^[0-9a-f-]{36}$/i.test(token)) return res.status(400).json({ error: 'Invalid portal link' })
+  if (!documentId || !signerEmail)     return res.status(400).json({ error: 'documentId and signerEmail required' })
+
+  const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
+  const serviceKey   = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
+  const API_KEY      = process.env.BOLDSIGN_API_KEY
+  if (!serviceKey) return res.status(500).json({ error: 'Server misconfigured: set SUPABASE_SERVICE_KEY' })
+  if (!API_KEY)    return res.status(500).json({ error: 'BoldSign not configured' })
+
+  const supabase = createClient(SUPABASE_URL, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } })
+  try {
+    const { data: deal } = await supabase.from('deals').select('id')
+      .eq('portal_token', token).eq('portal_enabled', true).maybeSingle()
+    if (!deal) return res.status(404).json({ error: 'This portal link is no longer active.' })
+
+    const { data: doc } = await supabase.from('boldsign_documents')
+      .select('document_id, signer_email, status').eq('document_id', documentId).eq('deal_id', deal.id).maybeSingle()
+    if (!doc) return res.status(404).json({ error: 'Document not found for this portal.' })
+    if (['completed', 'voided'].includes(doc.status)) return res.status(400).json({ error: 'This document is already finalized.' })
+
+    const emails = String(doc.signer_email || '').toLowerCase().split(',').map(s => s.trim())
+    if (!emails.includes(signerEmail)) return res.status(403).json({ error: 'That email is not a signer on this document.' })
+
+    const qs = new URLSearchParams({ documentId, signerEmail })
+    const r  = await fetch(`https://api.boldsign.com/v1/document/getEmbeddedSignLink?${qs.toString()}`, {
+      headers: { 'X-API-KEY': API_KEY, Accept: 'application/json' },
+    })
+    const data = await r.json().catch(() => ({}))
+    if (!r.ok) return res.status(r.status).json({ error: data?.error || data?.message || 'Could not create sign link' })
+    return res.status(200).json({ url: data.signLink || data.embeddedSigningLink || data.url || null })
+  } catch (err) {
+    return res.status(500).json({ error: 'Could not start signing.' })
   }
 }
 

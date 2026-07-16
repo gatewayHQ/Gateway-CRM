@@ -272,6 +272,48 @@ export default async function handler(req, res) {
       })
     }
 
+    // Ad-hoc embedded send: upload a PDF and get a BoldSign prepare/send URL to
+    // render in an iframe (agent adjusts fields + clicks Send inside BoldSign).
+    if (body.action === 'document-embed-url') {
+      const { signers, documentBase64, documentName, emailSubject, redirectUrl } = body
+      if (!documentBase64) return res.status(400).json({ error: 'documentBase64 required' })
+      if (!signers?.length) return res.status(400).json({ error: 'At least one signer required' })
+
+      const orderedSigners = [...signers].sort((a, b) => Number(a.routingOrder || 1) - Number(b.routingOrder || 1))
+      const hasOrder      = orderedSigners.some(s => Number(s.routingOrder || 1) !== 1)
+      const pdfBuffer     = Buffer.from(documentBase64, 'base64')
+      const signerPayload = await buildSigners(orderedSigners, pdfBuffer)
+      let onBehalfOf = null
+      try { onBehalfOf = await resolveOnBehalfOf(getServiceClient(), actor.agent.id) } catch { /* default sender */ }
+
+      const form = new FormData()
+      form.append('Title',              documentName || 'Document')
+      form.append('Message',            emailSubject || 'Please sign this document')
+      form.append('EnableSigningOrder', String(hasOrder))
+      form.append('Signers',            JSON.stringify(signerPayload))
+      form.append('SendViewOption',     'PreparePage')
+      form.append('ShowToolbar',        'true')
+      if (redirectUrl) form.append('RedirectUrl', redirectUrl)
+      if (onBehalfOf)  form.append('OnBehalfOf', onBehalfOf)
+      form.append('Files', new Blob([pdfBuffer], { type: 'application/pdf' }), documentName || 'document.pdf')
+
+      const data = await boldsign('/document/createEmbeddedRequestUrl', { method: 'POST', form })
+      return res.json({ url: data.sendUrl || data.embeddedSendUrl || data.url || null, documentId: data.documentId || null })
+    }
+
+    // Embedded SIGNING: a URL to load in an iframe so a signer completes the
+    // document inside our app instead of via the BoldSign email link.
+    if (body.action === 'sign-link') {
+      const id          = body.envelopeId || body.documentId
+      const signerEmail = body.signerEmail
+      if (!id)          return res.status(400).json({ error: 'documentId required' })
+      if (!signerEmail) return res.status(400).json({ error: 'signerEmail required' })
+      const qs = new URLSearchParams({ documentId: id, signerEmail })
+      if (body.redirectUrl) qs.set('redirectUrl', body.redirectUrl)
+      const data = await boldsign(`/document/getEmbeddedSignLink?${qs.toString()}`)
+      return res.json({ url: data.signLink || data.embeddedSigningLink || data.url || null })
+    }
+
     if (body.action === 'status') {
       const id = body.envelopeId || body.documentId
       if (!id) return res.status(400).json({ error: 'documentId required' })
