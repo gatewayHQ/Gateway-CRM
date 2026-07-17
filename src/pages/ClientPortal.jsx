@@ -53,9 +53,37 @@ function Card({ title, children, style }) {
   )
 }
 
+// A pending document the client can sign in-portal. Picks the signer email when
+// there's more than one signer on the document.
+function SignRow({ doc, last, onSign }) {
+  const [email, setEmail] = useState(doc.signers?.[0] || '')
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: last ? 'none' : `1px solid ${C.bone}` }}>
+      <div style={{ width: 34, height: 34, borderRadius: 7, background: C.sky, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: 16 }}>✍️</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>{doc.name}</div>
+        {doc.signers?.length > 1
+          ? <select value={email} onChange={e => setEmail(e.target.value)} style={{ fontSize: 11, color: C.mist, marginTop: 3, border: `1px solid ${C.border}`, borderRadius: 6, padding: '2px 4px' }}>
+              {doc.signers.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          : <div style={{ fontSize: 11, color: C.mist, marginTop: 2 }}>{email}</div>}
+      </div>
+      <button onClick={() => onSign(doc, email)} disabled={!email}
+        style={{ fontSize: 13, fontWeight: 600, color: '#fff', background: email ? C.green : C.mist, padding: '8px 14px', borderRadius: 8, border: 'none', cursor: email ? 'pointer' : 'default' }}>
+        Sign
+      </button>
+    </div>
+  )
+}
+
 export default function ClientPortal({ token }) {
-  const [data, setData]   = useState(null)
-  const [error, setError] = useState(null)
+  const [data, setData]     = useState(null)
+  const [error, setError]   = useState(null)
+  const [signing, setSigning] = useState(null)   // { url } — embedded signing overlay
+  const [signErr, setSignErr] = useState('')
+
+  const reload = () => fetch(`/api/portal?token=${encodeURIComponent(token)}`)
+    .then(async r => { const j = await r.json().catch(() => ({})); if (r.ok) setData(j) })
 
   useEffect(() => {
     let alive = true
@@ -70,10 +98,33 @@ export default function ClientPortal({ token }) {
     return () => { alive = false }
   }, [token])
 
+  // Close the signing overlay + refresh when BoldSign reports completion.
+  useEffect(() => {
+    function onMsg(e) {
+      if (e.origin !== 'https://app.boldsign.com') return
+      const t = String((e.data && (e.data.type || e.data.event || e.data.status)) || e.data || '').toLowerCase()
+      const done = (t.includes('sign') && (t.includes('complete') || t.includes('success'))) || t.includes('documentsigned')
+      if (done) { setSigning(null); reload() }
+    }
+    window.addEventListener('message', onMsg)
+    return () => window.removeEventListener('message', onMsg)
+  }, [token])
+
+  const startSign = async (doc, email) => {
+    setSignErr('')
+    try {
+      const r = await fetch(`/api/portal?token=${encodeURIComponent(token)}&action=sign-link&documentId=${encodeURIComponent(doc.documentId)}&signerEmail=${encodeURIComponent(email)}`)
+      const j = await r.json().catch(() => ({}))
+      if (!r.ok || !j.url) { setSignErr(j.error || 'Could not start signing.'); return }
+      setSigning({ url: j.url })
+    } catch { setSignErr('Could not connect. Please try again.') }
+  }
+
   if (error) return <ErrorView message={error} />
   if (!data) return <Loader />
 
   const { checklist, keyDates, documents, agent } = data
+  const signatureDocs = Array.isArray(data.signatureDocs) ? data.signatureDocs : []
   const upcoming = [...keyDates]
     .map(d => ({ ...d, days: daysUntil(d.date) }))
     .sort((a, b) => new Date(a.date) - new Date(b.date))
@@ -170,6 +221,16 @@ export default function ClientPortal({ token }) {
           </Card>
         )}
 
+        {/* Documents awaiting signature */}
+        {signatureDocs.length > 0 && (
+          <Card title="Documents to Sign">
+            {signatureDocs.map((doc, i) => (
+              <SignRow key={doc.documentId} doc={doc} last={i === signatureDocs.length - 1} onSign={startSign} />
+            ))}
+            {signErr && <div style={{ color: C.red, fontSize: 12, marginTop: 10 }}>{signErr}</div>}
+          </Card>
+        )}
+
         {/* Documents */}
         {documents.length > 0 && (
           <Card title="Shared Documents">
@@ -205,10 +266,21 @@ export default function ClientPortal({ token }) {
         )}
 
         <div style={{ textAlign: 'center', fontSize: 11, color: C.mist, marginTop: 8 }}>
-          This is a private, read-only view of your transaction.<br />
+          This is a private view of your transaction.<br />
           Powered by Gateway Real Estate Advisors
         </div>
       </div>
+
+      {/* Embedded signing overlay */}
+      {signing && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(20,30,60,0.65)', zIndex: 1000, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: C.slate, color: '#fff' }}>
+            <span style={{ fontWeight: 700 }}>Sign your document</span>
+            <button onClick={() => setSigning(null)} aria-label="Close" style={{ background: 'transparent', color: '#fff', border: 'none', fontSize: 22, cursor: 'pointer', lineHeight: 1 }}>×</button>
+          </div>
+          <iframe title="Sign document" src={signing.url} style={{ flex: 1, width: '100%', border: 'none' }} allow="camera; microphone; geolocation" />
+        </div>
+      )}
     </div>
   )
 }

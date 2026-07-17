@@ -9,7 +9,8 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { sendDocument, getDocStatus, downloadSigned as apiDownloadSigned, sendFromTemplate, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState } from '../lib/services/boldsign.js'
+import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
@@ -1085,6 +1086,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const [agentSigns, setAgentSigns]= React.useState(false)
   const [sending,    setSending]   = React.useState(false)
   const [dragOver,   setDragOver]  = React.useState(false)
+  const [embedUrl,   setEmbedUrl]  = React.useState(null)   // BoldSign prepare/send iframe URL
   const fileRef = React.useRef()
 
   const [signers, setSigners] = React.useState(() => {
@@ -1150,32 +1152,58 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
 
     let data
     try {
-      data = await sendDocument({
+      // Open BoldSign's embedded prepare/send UI (auto-placed fields + signers
+      // passed through); the agent reviews field placement and sends in-frame.
+      data = await documentEmbedUrl({
         emailSubject:   subject,
         documentBase64: base64,
         documentName:   finalDocName,
         signers:        signerPayload,
+        redirectUrl:    window.location.href,
       })
     } catch (err) {
       setSending(false); pushToast(err.message, 'error'); return
     }
     setSending(false)
-    if (!data.documentId && !data.envelopeId) { pushToast('BoldSign did not return a document id', 'error'); return }
+    if (!data.url) { pushToast('BoldSign did not return a send URL', 'error'); return }
 
-    await supabase.from('boldsign_documents').insert([{
-      deal_id:       deal.id,
-      agent_id:      activeAgent?.id || null,
-      document_id:   data.documentId || data.envelopeId,
-      signer_name:   allSigners.map(s => s.name).join(', '),
-      signer_email:  allSigners.map(s => s.email).join(', '),
-      document_name: finalDocName,
-      subject,
-      signers:       signerPayload,
-      status:        'sent',
-    }])
+    // Track the draft so status updates land when the agent sends + it's signed.
+    if (data.documentId) {
+      await supabase.from('boldsign_documents').insert([{
+        deal_id:       deal.id,
+        agent_id:      activeAgent?.id || null,
+        document_id:   data.documentId,
+        signer_name:   allSigners.map(s => s.name).join(', '),
+        signer_email:  allSigners.map(s => s.email).join(', '),
+        document_name: finalDocName,
+        subject,
+        signers:       signerPayload,
+        status:        'draft',
+      }])
+    }
+    setEmbedUrl(data.url)
+  }
 
-    pushToast('Sent for signature — signers will receive an email from BoldSign', 'success')
-    onSent()
+  // Step 2 — BoldSign's embedded prepare/send UI in-frame.
+  if (embedUrl) {
+    return (
+      <Modal open={true} onClose={onClose} width={900}>
+        <div className="modal__head">
+          <div>
+            <div className="eyebrow-label">BoldSign · Review &amp; Send</div>
+            <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Place fields &amp; send</h3>
+          </div>
+          <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
+        </div>
+        <div className="modal__body" style={{ padding: 0 }}>
+          <BoldSignFrame
+            url={embedUrl}
+            onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
+            onError={() => pushToast('Send was cancelled in BoldSign', 'info')}
+          />
+        </div>
+      </Modal>
+    )
   }
 
   return (
@@ -1253,14 +1281,14 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
 
         {/* What happens next */}
         <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, color:'var(--gw-mist)', lineHeight:1.5 }}>
-          <strong style={{ color:'var(--gw-ink)' }}>Next:</strong> the document is sent immediately.
-          A signature and date field are placed for each signer near the end of the document, and BoldSign emails everyone their signing link. The status here updates automatically as they sign.
+          <strong style={{ color:'var(--gw-ink)' }}>Next:</strong> BoldSign opens here in the app.
+          A signature and date field are pre-placed for each signer — review/adjust field placement, then click Send inside BoldSign. The status here updates automatically as they sign.
         </div>
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
         <button className="btn btn--primary" onClick={sendForSignature} disabled={sending}>
-          {sending ? 'Sending…' : 'Send for Signature'}
+          {sending ? 'Opening…' : 'Continue in BoldSign'}
         </button>
       </div>
     </Modal>
@@ -1354,6 +1382,19 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
     const link = document.createElement('a')
     link.href = `data:application/pdf;base64,${data.base64}`
     link.download = `signed-${env.document_name || 'document.pdf'}`
+    link.click()
+  }
+
+  const downloadAuditTrail = async (env) => {
+    const key = `audit-${env.id}`
+    setDownloading(p => ({ ...p, [key]: true }))
+    let data
+    try { data = await apiDownloadAudit(env.document_id) }
+    catch (err) { setDownloading(p => ({ ...p, [key]: false })); pushToast(err.message, 'error'); return }
+    setDownloading(p => ({ ...p, [key]: false }))
+    const link = document.createElement('a')
+    link.href = `data:application/pdf;base64,${data.base64}`
+    link.download = `audit-${(env.document_name || 'document').replace(/\.pdf$/i, '')}.pdf`
     link.click()
   }
 
@@ -1455,6 +1496,15 @@ create policy "agent_notifications_policy" on agent_notifications
                       >
                         {downloading[env.id] ? 'Downloading…' : 'Download Signed PDF'}
                       </button>
+                      <button
+                        className="btn btn--sm btn--secondary"
+                        style={{ fontSize:11 }}
+                        onClick={() => downloadAuditTrail(env)}
+                        disabled={downloading[`audit-${env.id}`]}
+                        title="Compliance audit trail — who signed, when, IP, and a tamper hash"
+                      >
+                        {downloading[`audit-${env.id}`] ? 'Fetching…' : 'Audit Trail'}
+                      </button>
                     </div>
                   )}
                 </div>
@@ -1498,7 +1548,7 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
 
   const [templateId, setTemplateId] = React.useState(visible[0]?.template_id || '')
   const [subject,    setSubject]    = React.useState(`Please sign: ${deal?.title || 'Document'}`)
-  const [adjust,     setAdjust]     = React.useState(false)
+  const [embedUrl,   setEmbedUrl]   = React.useState(null)   // BoldSign prepare/send iframe URL
   const [sending,    setSending]    = React.useState(false)
   const [details,    setDetails]    = React.useState(null)   // { roles, fields }
   const [loadingDet, setLoadingDet] = React.useState(false)
@@ -1576,16 +1626,11 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
     const args    = { templateId, deal_id: deal.id, roles, roleRemovalIndices, emailSubject: subject, documentName: docName, labels }
 
     try {
-      if (adjust) {
-        const { url } = await templateEmbedUrl({ ...args, redirectUrl: window.location.href })
-        if (!url) { pushToast('BoldSign did not return an editor URL', 'error'); return }
-        window.open(url, '_blank', 'noopener')
-        pushToast('Opened in BoldSign — review fields and click Send there', 'success')
-      } else {
-        await sendFromTemplate(args)
-        pushToast('Sent for signature from template', 'success')
-      }
-      onSent()
+      // Open BoldSign's embedded prepare/send UI in-frame with the signers +
+      // prefilled values passed through; the agent reviews and sends there.
+      const { url } = await templateEmbedUrl({ ...args, redirectUrl: window.location.href })
+      if (!url) { pushToast('BoldSign did not return a send URL', 'error'); return }
+      setEmbedUrl(url)
     } catch (err) {
       pushToast(err.message, 'error')
     } finally {
@@ -1594,6 +1639,28 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
   }
 
   const fields = details?.fields || []
+
+  // Step 2 — BoldSign's embedded prepare/send UI (replaces our own send popup).
+  if (embedUrl) {
+    return (
+      <Modal open={true} onClose={onClose} width={900}>
+        <div className="modal__head">
+          <div>
+            <div className="eyebrow-label">BoldSign · Review &amp; Send</div>
+            <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Place fields &amp; send</h3>
+          </div>
+          <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
+        </div>
+        <div className="modal__body" style={{ padding: 0 }}>
+          <BoldSignFrame
+            url={embedUrl}
+            onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
+            onError={() => pushToast('Send was cancelled in BoldSign', 'info')}
+          />
+        </div>
+      </Modal>
+    )
+  }
 
   return (
     <Modal open={true} onClose={onClose} width={520}>
@@ -1659,17 +1726,14 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
           </>
         )}
 
-        <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)' }}>
-          <input type="checkbox" id="tplAdjust" checked={adjust} onChange={e => setAdjust(e.target.checked)} style={{ width:15, height:15, cursor:'pointer' }}/>
-          <label htmlFor="tplAdjust" style={{ fontSize:13, cursor:'pointer', flex:1 }}>
-            <strong>Review in BoldSign before sending</strong> — opens BoldSign to move/add/remove or fill fields, then send from there.
-          </label>
+        <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px' }}>
+          Next: BoldSign opens here in the app with these signers &amp; details filled in — review field placement and click Send.
         </div>
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
         <button className="btn btn--primary" onClick={submit} disabled={sending || loadingDet}>
-          {sending ? (adjust ? 'Opening…' : 'Sending…') : (adjust ? 'Open in BoldSign' : 'Send for Signature')}
+          {sending ? 'Opening…' : 'Continue in BoldSign'}
         </button>
       </div>
     </Modal>

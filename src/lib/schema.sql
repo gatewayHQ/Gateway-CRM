@@ -333,10 +333,11 @@ create table if not exists boldsign_documents (
   signer_name   text,
   signer_email  text,
   document_name text,
-  signers       jsonb default '[]',
-  sent_at       timestamptz default now(),
-  completed_at  timestamptz,
-  created_at    timestamptz default now()
+  signers           jsonb default '[]',
+  sent_at           timestamptz default now(),
+  completed_at      timestamptz,
+  audit_trail_saved boolean default false,
+  created_at        timestamptz default now()
 );
 
 alter table boldsign_documents enable row level security;

@@ -25,9 +25,12 @@ async function call(payload) {
 }
 
 // ── Documents (ad-hoc send flow) ─────────────────────────────────────────────
-export const sendDocument   = (p)          => call({ action: 'send', ...p })
+export const sendDocument     = (p)          => call({ action: 'send', ...p })
+export const documentEmbedUrl = (p)          => call({ action: 'document-embed-url', ...p })
+export const signLink         = (p)          => call({ action: 'sign-link', ...p })
 export const getDocStatus   = (documentId) => call({ action: 'status',   documentId })
 export const downloadSigned = (documentId) => call({ action: 'download', documentId })
+export const downloadAudit  = (documentId) => call({ action: 'audit-download', documentId })
 export const remindDocument = (documentId) => call({ action: 'remind',   documentId })
 export const debugBoldsign  = ()           => call({ action: 'debug' })
 
