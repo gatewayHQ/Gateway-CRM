@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs } from '../boldsign.js'
+import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement } from '../boldsign.js'
 
 const okResp  = (body = '{}') => ({ ok: true,  status: 200, text: () => Promise.resolve(body), headers: { get: () => null } })
 const errResp = (status)      => ({ ok: false, status,      text: () => Promise.resolve('{"message":"boom"}'), headers: { get: () => null } })
@@ -53,5 +53,40 @@ describe('boldsign() retry + idempotency', () => {
   it('throws with status after exhausting retries', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(errResp(500))))
     await expect(boldsign('/x', { method: 'GET', maxRetries: 1 })).rejects.toMatchObject({ status: 500 })
+  })
+})
+
+describe('buildSignerPayload — retired coordinate auto-placement', () => {
+  it('never invents formFields when no tabs are given', () => {
+    const [entry] = buildSignerPayload([{ name: 'Jane', email: 'jane@x.com', routingOrder: 1 }])
+    expect(entry).toEqual({ name: 'Jane', emailAddress: 'jane@x.com', signerType: 'Signer', signerOrder: 1 })
+    expect(entry.formFields).toBeUndefined()
+  })
+
+  it('honors explicit caller-supplied tabs verbatim (not guessed)', () => {
+    const [entry] = buildSignerPayload([{
+      name: 'Jane', email: 'jane@x.com', routingOrder: 1,
+      tabs: [{ type: 'signature', page: 2, xPosition: 100, yPosition: 200, width: 150, height: 40, required: true }],
+    }])
+    expect(entry.formFields).toEqual([{
+      id: 'f_1_1', fieldType: 'Signature', pageNumber: 2,
+      bounds: { x: 100, y: 200, width: 150, height: 40 }, isRequired: true,
+    }])
+  })
+})
+
+describe('requiresExplicitFieldPlacement', () => {
+  it('allows useTextTags with no per-signer fields', () => {
+    expect(requiresExplicitFieldPlacement([{ name: 'A', email: 'a@x.com' }], true)).toBeNull()
+  })
+  it('allows explicit tabs on every signer', () => {
+    expect(requiresExplicitFieldPlacement([{ name: 'A', email: 'a@x.com', tabs: [{ type: 'signature' }] }], false)).toBeNull()
+  })
+  it('rejects when neither useTextTags nor tabs are provided', () => {
+    expect(requiresExplicitFieldPlacement([{ name: 'A', email: 'a@x.com' }], false)).toMatch(/retired/)
+  })
+  it('rejects when only SOME signers have tabs', () => {
+    const signers = [{ name: 'A', email: 'a@x.com', tabs: [{ type: 'signature' }] }, { name: 'B', email: 'b@x.com' }]
+    expect(requiresExplicitFieldPlacement(signers, false)).toMatch(/retired/)
   })
 })

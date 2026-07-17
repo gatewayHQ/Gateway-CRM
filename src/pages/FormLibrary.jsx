@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, pushToast, EmptyState, Modal } from '../components/UI.jsx'
+import { OPERATING_STATES } from '../lib/constants.js'
+import { templateEditorUrl } from '../lib/services/boldsign.js'
 
 const TRANSACTION_TYPES = [
   { value: 'buyer',   label: 'Buyer Contract' },
@@ -11,6 +13,13 @@ const TRANSACTION_TYPES = [
 
 const BUCKET = 'form-packets'
 
+const fileToBase64 = f => new Promise((res, rej) => {
+  const r = new FileReader()
+  r.onload = e => res(e.target.result.split(',')[1])
+  r.onerror = rej
+  r.readAsDataURL(f)
+})
+
 function formatBytes(b) {
   if (!b) return ''
   if (b < 1024) return `${b} B`
@@ -20,13 +29,39 @@ function formatBytes(b) {
 
 function UploadModal({ packet, onClose, onSaved }) {
   const isNew = !packet?.id
-  const blank = { state: '', transaction_type: 'buyer', name: '', description: '' }
-  const [form, setForm]   = useState(packet ? { ...blank, ...packet } : blank)
+  const blank = {
+    state: '', transaction_type: 'buyer', name: '', description: '',
+    boldsign_template_id: '', doc_type: '', field_tokens: [], active: true,
+  }
+  const [form, setForm]   = useState(packet ? { ...blank, ...packet, field_tokens: packet.field_tokens || [] } : blank)
+  const [tokensText, setTokensText] = useState((packet?.field_tokens || []).join(', '))
   const [file, setFile]   = useState(null)
   const [saving, setSaving] = useState(false)
+  const [editorBusy, setEditorBusy] = useState(false)
+  const [useTextTags, setUseTextTags] = useState(false)
   const fileRef = useRef()
+  const tagFileRef = useRef()
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }))
+
+  // Build a BoldSign template from the packet's PDF (or a freshly chosen one)
+  // and open the embedded editor to place/confirm fields.
+  const buildInBoldSign = async (fileForTemplate) => {
+    if (!fileForTemplate) { pushToast('Choose a PDF first', 'error'); return }
+    setEditorBusy(true)
+    try {
+      const documentBase64 = await fileToBase64(fileForTemplate)
+      const { url, templateId } = await templateEditorUrl({
+        title: form.name.trim() || fileForTemplate.name.replace(/\.pdf$/i, ''),
+        documentBase64, documentName: fileForTemplate.name,
+        redirectUrl: window.location.href,
+        useTextTags,
+      })
+      if (templateId) set('boldsign_template_id', templateId)
+      if (url) window.open(url, '_blank', 'noopener')
+      pushToast('Opened BoldSign editor — place fields, then save this packet', 'success')
+    } catch (e) { pushToast(e.message, 'error') } finally { setEditorBusy(false) }
+  }
 
   const save = async () => {
     if (!form.state.trim()) { pushToast('State is required', 'error'); return }
@@ -41,12 +76,17 @@ function UploadModal({ packet, onClose, onSaved }) {
         if (upErr) { pushToast(upErr.message, 'error'); setSaving(false); return }
         storage_path = path
       }
+      const field_tokens = tokensText.split(',').map(s => s.trim()).filter(Boolean)
       const payload = {
         state: form.state.trim().toUpperCase(),
         transaction_type: form.transaction_type,
         name: form.name.trim(),
         description: form.description || null,
         storage_path,
+        boldsign_template_id: form.boldsign_template_id.trim() || null,
+        doc_type: form.doc_type.trim() || null,
+        field_tokens,
+        active: form.active,
       }
       let error
       if (packet?.id) {
@@ -100,6 +140,50 @@ function UploadModal({ packet, onClose, onSaved }) {
           {packet?.storage_path && !file && (
             <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Current file on file — leave blank to keep it.</div>
           )}
+        </div>
+
+        {/* ── E-signature (BoldSign) ──────────────────────────────────────── */}
+        <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 14 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>
+            E-Signature {form.boldsign_template_id && <span style={{ marginLeft: 6, padding: '1px 6px', borderRadius: 8, fontSize: 10, fontWeight: 700, background: 'var(--gw-green-light)', color: 'var(--gw-green)' }}>Sendable</span>}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginBottom: 10 }}>
+            Link this packet to a BoldSign template to make it sendable from a deal's Signatures tab.
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button type="button" className="btn btn--secondary btn--sm" onClick={() => tagFileRef.current?.click()} disabled={editorBusy}>
+              <Icon name="upload" size={13}/> {editorBusy ? 'Opening…' : 'Build in BoldSign'}
+            </button>
+            <input ref={tagFileRef} type="file" accept=".pdf" style={{ display: 'none' }} onChange={e => buildInBoldSign(e.target.files[0])}/>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--gw-mist)', cursor: 'pointer' }}>
+              <input type="checkbox" checked={useTextTags} onChange={e => setUseTextTags(e.target.checked)} style={{ width: 13, height: 13 }}/>
+              PDF has text tags
+            </label>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">BoldSign Template ID</label>
+            <input className="form-control" value={form.boldsign_template_id} onChange={e => set('boldsign_template_id', e.target.value)} placeholder="Pasted automatically after Build in BoldSign" />
+          </div>
+          <div className="form-row">
+            <div className="form-group">
+              <label className="form-label">Doc Type</label>
+              <input className="form-control" value={form.doc_type} onChange={e => set('doc_type', e.target.value)} placeholder="listing_agreement" />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Active</label>
+              <select className="form-control" value={form.active ? '1' : '0'} onChange={e => set('active', e.target.value === '1')}>
+                <option value="1">Yes — sendable</option>
+                <option value="0">No — hidden from send picker</option>
+              </select>
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Field Tokens</label>
+            <input className="form-control" value={tokensText} onChange={e => setTokensText(e.target.value)} placeholder="property_address, list_price, seller_name" />
+            <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Comma-separated field IDs the CRM should prefill from the deal.</div>
+          </div>
         </div>
       </div>
       <div style={{ padding: '12px 24px 20px', borderTop: '1px solid var(--gw-border)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
@@ -161,17 +245,23 @@ export default function FormLibraryPage({ isAdmin }) {
         <div style={{ fontWeight: 700, marginBottom: 8 }}>Setup required</div>
         <div style={{ fontSize: 13, color: 'var(--gw-mist)', marginBottom: 16 }}>Run this SQL in Supabase, then create a <code>form-packets</code> storage bucket (private).</div>
         <pre style={{ fontSize: 11, background: '#f1f3f5', padding: 14, borderRadius: 6, overflowX: 'auto' }}>{`create table if not exists form_packets (
-  id               uuid primary key default uuid_generate_v4(),
-  state            text not null,
-  transaction_type text not null check (transaction_type in ('buyer','seller','lease','general')),
-  name             text not null,
-  description      text,
-  storage_path     text,
-  created_at       timestamptz default now()
+  id                   uuid primary key default uuid_generate_v4(),
+  state                text not null,
+  transaction_type     text not null check (transaction_type in ('buyer','seller','lease','general')),
+  name                 text not null,
+  description          text,
+  storage_path         text,
+  boldsign_template_id text,
+  doc_type             text,
+  field_tokens         jsonb default '[]',
+  active               boolean default true,
+  created_at           timestamptz default now()
 );
 alter table form_packets enable row level security;
 create policy "form_packets_all" on form_packets
-  for all to authenticated using (true) with check (true);`}</pre>
+  for all to authenticated using (true) with check (true);
+create unique index if not exists uq_form_packets_boldsign_tid
+  on form_packets(boldsign_template_id) where boldsign_template_id is not null;`}</pre>
         <button className="btn btn--secondary btn--sm" style={{ marginTop: 8 }} onClick={() => { setTableReady(true); load() }}>
           <Icon name="refresh" size={12} /> Retry
         </button>
@@ -230,7 +320,14 @@ create policy "form_packets_all" on form_packets
                   <span style={{ fontWeight: 800, fontSize: 12, color: '#fff' }}>{packet.state}</span>
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--gw-ink)' }}>{packet.name}</div>
+                  <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--gw-ink)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {packet.name}
+                    {packet.boldsign_template_id && (
+                      <span style={{ padding: '1px 7px', borderRadius: 8, fontSize: 10, fontWeight: 700, background: packet.active ? 'var(--gw-green-light)' : 'var(--gw-bone)', color: packet.active ? 'var(--gw-green)' : 'var(--gw-mist)' }}>
+                        {packet.active ? 'Sendable' : 'Sendable (disabled)'}
+                      </span>
+                    )}
+                  </div>
                   <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 2 }}>
                     {typeLabel}
                     {packet.description && <span> · {packet.description}</span>}

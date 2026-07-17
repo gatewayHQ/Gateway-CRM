@@ -1108,20 +1108,32 @@ create policy auth_read     on lead_captures for select to authenticated using (
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- FORM PACKETS (BoldTrail-style document library)
+--
+-- Form Library is the CRM's document catalog. An entry that carries a
+-- boldsign_template_id is "e-sign ready" — sendable from a deal's Signatures
+-- tab. BoldSign remains the source of truth for the template's fields/roles;
+-- doc_type + field_tokens here are just the CRM-side pointer + prefill map
+-- (mirrors the retired boldsign_templates registry, now folded in here).
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists form_packets (
-  id               uuid primary key default uuid_generate_v4(),
-  state            text not null,
-  transaction_type text not null check (transaction_type in ('buyer','seller','lease','general')),
-  name             text not null,
-  description      text,
-  storage_path     text,
-  created_at       timestamptz default now()
+  id                   uuid primary key default uuid_generate_v4(),
+  state                text not null,
+  transaction_type     text not null check (transaction_type in ('buyer','seller','lease','general')),
+  name                 text not null,
+  description          text,
+  storage_path         text,
+  boldsign_template_id text,
+  doc_type             text,
+  field_tokens         jsonb default '[]',
+  active               boolean default true,
+  created_at           timestamptz default now()
 );
 alter table form_packets enable row level security;
 drop policy if exists "form_packets_all" on form_packets;
 create policy "form_packets_all" on form_packets
   for all to authenticated using (true) with check (true);
+create unique index if not exists uq_form_packets_boldsign_tid
+  on form_packets(boldsign_template_id) where boldsign_template_id is not null;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- DEADLINE REMINDERS (cron-sent, dedup log)
