@@ -1,5 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement } from '../boldsign.js'
+import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf } from '../boldsign.js'
+
+// Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
+// resolves { data } from `rows` keyed by `${col}=${val}`.
+function fakeSupabase(rows) {
+  return {
+    from: () => {
+      let lastEq = null
+      const chain = {
+        select: () => chain,
+        eq: (col, val) => { lastEq = `${col}=${val}`; return chain },
+        maybeSingle: () => Promise.resolve({ data: rows[lastEq] || null }),
+      }
+      return chain
+    },
+  }
+}
 
 const okResp  = (body = '{}') => ({ ok: true,  status: 200, text: () => Promise.resolve(body), headers: { get: () => null } })
 const errResp = (status)      => ({ ok: false, status,      text: () => Promise.resolve('{"message":"boom"}'), headers: { get: () => null } })
@@ -88,5 +104,62 @@ describe('requiresExplicitFieldPlacement', () => {
   it('rejects when only SOME signers have tabs', () => {
     const signers = [{ name: 'A', email: 'a@x.com', tabs: [{ type: 'signature' }] }, { name: 'B', email: 'b@x.com' }]
     expect(requiresExplicitFieldPlacement(signers, false)).toMatch(/retired/)
+  })
+})
+
+describe('normalizeTemplateRoles — fixes "Roles cannot be null or empty"', () => {
+  it('defaults to a Seller/Listing-Agent pair when no roles are given', () => {
+    expect(normalizeTemplateRoles(undefined)).toEqual([
+      { name: 'Seller', index: 1 },
+      { name: 'Listing Agent', index: 2 },
+    ])
+  })
+  it('defaults for an empty array too', () => {
+    expect(normalizeTemplateRoles([])).toHaveLength(2)
+  })
+  it('honors caller-supplied role names and assigns 1-based indices', () => {
+    expect(normalizeTemplateRoles([{ name: 'Buyer' }, { name: "Buyer's Agent" }])).toEqual([
+      { name: 'Buyer', index: 1 },
+      { name: "Buyer's Agent", index: 2 },
+    ])
+  })
+  it('trims names and falls back to a generic label for a blank one', () => {
+    expect(normalizeTemplateRoles([{ name: '  Seller  ' }, { name: '' }])).toEqual([
+      { name: 'Seller', index: 1 },
+      { name: 'Signer 2', index: 2 },
+    ])
+  })
+  it('honors an explicit index override', () => {
+    expect(normalizeTemplateRoles([{ name: 'Witness', index: 5 }])).toEqual([{ name: 'Witness', index: 5 }])
+  })
+})
+
+describe('resolveOnBehalfOf — agent identity with org-default fallback', () => {
+  it("prefers the agent's own approved identity", async () => {
+    const svc = fakeSupabase({ 'agent_id=a1': { email: 'agent@x.com', status: 'approved' } })
+    expect(await resolveOnBehalfOf(svc, 'a1')).toBe('agent@x.com')
+  })
+
+  it("falls back to the org default when the agent's identity isn't approved", async () => {
+    const svc = fakeSupabase({
+      'agent_id=a1': { email: 'agent@x.com', status: 'pending' },
+      'is_default=true': { email: 'default@x.com', status: 'approved' },
+    })
+    expect(await resolveOnBehalfOf(svc, 'a1')).toBe('default@x.com')
+  })
+
+  it('falls back to the org default when the agent has no identity at all', async () => {
+    const svc = fakeSupabase({ 'is_default=true': { email: 'default@x.com', status: 'approved' } })
+    expect(await resolveOnBehalfOf(svc, 'a1')).toBe('default@x.com')
+  })
+
+  it('returns null when neither the agent nor a default identity is approved', async () => {
+    const svc = fakeSupabase({ 'is_default=true': { email: 'default@x.com', status: 'pending' } })
+    expect(await resolveOnBehalfOf(svc, 'a1')).toBeNull()
+  })
+
+  it('returns null with no agentId and no default set', async () => {
+    const svc = fakeSupabase({})
+    expect(await resolveOnBehalfOf(svc, null)).toBeNull()
   })
 })

@@ -354,11 +354,15 @@ create table if not exists boldsign_sender_identities (
   email       text not null,
   name        text,
   status      text default 'pending' check (status in ('pending','approved','declined')),
+  is_default  boolean default false,
   created_at  timestamptz default now(),
   updated_at  timestamptz default now()
 );
 create unique index if not exists uq_boldsign_identity_agent on boldsign_sender_identities(agent_id);
 create index if not exists idx_boldsign_identity_email on boldsign_sender_identities(email);
+-- Only one org-wide default sender identity (fallback OnBehalfOf) at a time.
+create unique index if not exists uq_boldsign_identity_default
+  on boldsign_sender_identities(is_default) where is_default;
 alter table boldsign_sender_identities enable row level security;
 drop policy if exists boldsign_sender_identities_scope on boldsign_sender_identities;
 create policy boldsign_sender_identities_scope on boldsign_sender_identities for all to authenticated

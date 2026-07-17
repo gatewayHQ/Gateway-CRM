@@ -39,8 +39,16 @@ function UploadModal({ packet, onClose, onSaved }) {
   const [saving, setSaving] = useState(false)
   const [editorBusy, setEditorBusy] = useState(false)
   const [useTextTags, setUseTextTags] = useState(false)
+  // Signer roles the template needs (BoldSign requires at least one at create
+  // time — see buildInBoldSign). Default matches our convention: role 1 =
+  // client, role 2 = agent.
+  const [roles, setRoles] = useState([{ name: 'Seller' }, { name: 'Listing Agent' }])
   const fileRef = useRef()
   const tagFileRef = useRef()
+
+  const setRoleName = (i, name) => setRoles(p => p.map((r, j) => j === i ? { name } : r))
+  const addRole      = () => setRoles(p => [...p, { name: `Signer ${p.length + 1}` }])
+  const removeRole    = (i) => setRoles(p => p.length > 1 ? p.filter((_, j) => j !== i) : p)
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }))
 
@@ -51,11 +59,13 @@ function UploadModal({ packet, onClose, onSaved }) {
     setEditorBusy(true)
     try {
       const documentBase64 = await fileToBase64(fileForTemplate)
+      const templateTitle  = form.name.trim() || fileForTemplate.name.replace(/\.pdf$/i, '')
       const { url, templateId } = await templateEditorUrl({
-        title: form.name.trim() || fileForTemplate.name.replace(/\.pdf$/i, ''),
+        title: templateTitle, documentTitle: templateTitle,
         documentBase64, documentName: fileForTemplate.name,
         redirectUrl: window.location.href,
         useTextTags,
+        roles: roles.map(r => r.name.trim()).filter(Boolean).map(name => ({ name })),
       })
       if (templateId) set('boldsign_template_id', templateId)
       if (url) window.open(url, '_blank', 'noopener')
@@ -151,9 +161,25 @@ function UploadModal({ packet, onClose, onSaved }) {
             Link this packet to a BoldSign template to make it sendable from a deal's Signatures tab.
           </div>
 
+          {!form.boldsign_template_id && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginBottom: 4 }}>Signer roles (BoldSign requires at least one)</div>
+              {roles.map((r, i) => (
+                <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
+                  <div style={{ width: 18, height: 18, borderRadius: '50%', background: 'var(--gw-azure)', color: '#fff', fontSize: 10, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 4 }}>{i + 1}</div>
+                  <input className="form-control" style={{ flex: 1 }} value={r.name} onChange={e => setRoleName(i, e.target.value)} placeholder={`Role ${i + 1} name`}/>
+                  {roles.length > 1 && (
+                    <button type="button" className="btn btn--ghost btn--sm btn--icon" onClick={() => removeRole(i)}><Icon name="x" size={12}/></button>
+                  )}
+                </div>
+              ))}
+              <button type="button" className="btn btn--ghost btn--sm" onClick={addRole}>+ Add role</button>
+            </div>
+          )}
+
           <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <button type="button" className="btn btn--secondary btn--sm" onClick={() => tagFileRef.current?.click()} disabled={editorBusy}>
-              <Icon name="upload" size={13}/> {editorBusy ? 'Opening…' : 'Build in BoldSign'}
+              <Icon name="upload" size={13}/> {editorBusy ? 'Opening…' : form.boldsign_template_id ? 'Rebuild in BoldSign' : 'Build in BoldSign'}
             </button>
             <input ref={tagFileRef} type="file" accept=".pdf" style={{ display: 'none' }} onChange={e => buildInBoldSign(e.target.files[0])}/>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--gw-mist)', cursor: 'pointer' }}>
@@ -184,6 +210,21 @@ function UploadModal({ packet, onClose, onSaved }) {
             <input className="form-control" value={tokensText} onChange={e => setTokensText(e.target.value)} placeholder="property_address, list_price, seller_name" />
             <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Comma-separated field IDs the CRM should prefill from the deal.</div>
           </div>
+
+          <details style={{ fontSize: 11, color: 'var(--gw-mist)' }}>
+            <summary style={{ cursor: 'pointer', fontWeight: 600, marginBottom: 6 }}>Text tag syntax reference</summary>
+            <div style={{ lineHeight: 1.7, marginTop: 6 }}>
+              Type these directly into the source document (white text so they're invisible when signed) —
+              BoldSign auto-places the field on upload when "PDF has text tags" is checked. Format:{' '}
+              <code>{'{{fieldType|signerIndex|required|label|fieldId}}'}</code>
+              <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+                <li><code>{'{{Signature|1|true|Sign|seller_signature}}'}</code> — signature, role 1, required</li>
+                <li><code>{'{{Initial|1|true|Initials|seller_initials}}'}</code> — initials</li>
+                <li><code>{'{{DateSigned|1|true}}'}</code> — auto-filled signing date</li>
+                <li><code>{'{{Textbox|1|false|Address|property_address}}'}</code> — use a CRM token as the field ID to auto-prefill</li>
+              </ul>
+            </div>
+          </details>
         </div>
       </div>
       <div style={{ padding: '12px 24px 20px', borderTop: '1px solid var(--gw-border)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>

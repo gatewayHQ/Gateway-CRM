@@ -115,7 +115,7 @@ export async function boldsign(path, { method = 'GET', form, json, raw = false, 
 }
 
 // Pull a BoldSign PDF (signed document or audit trail) and archive it into the
-// deal-documents bucket. Best-effort — returns the storage path or null.
+// deal-documents bucket. Best-effort — returns { storagePath, size } or null.
 async function archiveBoldsignPdf(supabase, { path, dealId, filename }) {
   try {
     const r = await boldsign(path, { raw: true })
@@ -125,8 +125,36 @@ async function archiveBoldsignPdf(supabase, { path, dealId, filename }) {
     const { error } = await supabase.storage.from('deal-documents').upload(
       storagePath, Buffer.from(buf), { contentType: 'application/pdf', upsert: false }
     )
-    return error ? null : storagePath
+    return error ? null : { storagePath, size: buf.byteLength }
   } catch { return null }
+}
+
+// Record an archived BoldSign PDF in document_versions so it carries real CRM
+// metadata (signer, completion date) instead of being just a bare storage
+// object — mirrors what uploadDealDocument() does for manual uploads. Numbers
+// the version per (deal_id, document_name) the same way that service does.
+// Best-effort — never throws.
+async function recordDocumentVersion(supabase, { dealId, documentName, storagePath, size, pinnedAs, note }) {
+  try {
+    const { data: existing } = await supabase
+      .from('document_versions')
+      .select('version_num')
+      .eq('deal_id', dealId)
+      .eq('document_name', documentName)
+      .order('version_num', { ascending: false })
+      .limit(1)
+    const nextVersion = (existing?.[0]?.version_num || 0) + 1
+    if (pinnedAs) {
+      await supabase.from('document_versions')
+        .update({ pinned_as: null })
+        .eq('deal_id', dealId).eq('document_name', documentName).eq('pinned_as', pinnedAs)
+    }
+    await supabase.from('document_versions').insert([{
+      deal_id: dealId, document_name: documentName, storage_path: storagePath,
+      size, mime_type: 'application/pdf', version_num: nextVersion,
+      pinned_as: pinnedAs || null, source: 'boldsign', note: note || null,
+    }])
+  } catch { /* best-effort — the storage upload already succeeded */ }
 }
 
 // ─── Field placement ─────────────────────────────────────────────────────────
@@ -193,6 +221,16 @@ export function requiresExplicitFieldPlacement(signers, useTextTags) {
   return null
 }
 
+// BoldSign requires a non-empty Roles array when creating an embedded template
+// — omitting it returns {"Roles":["Roles cannot be null or empty."]}. Default
+// to a Seller/Listing-Agent pair matching our template convention (role 1 =
+// client, role 2 = agent) if the caller doesn't specify roles; always produces
+// a 1-based index per role.
+export function normalizeTemplateRoles(roles) {
+  const base = (Array.isArray(roles) && roles.length) ? roles : [{ name: 'Seller' }, { name: 'Listing Agent' }]
+  return base.map((r, i) => ({ name: (r?.name || `Signer ${i + 1}`).trim(), index: Number(r?.index) || i + 1 }))
+}
+
 // BoldSign's multipart /document/send binds ONE signer per repeated `Signers`
 // field, each value a single JSON object — NOT one field holding a JSON array
 // (that yields {"Signers":["Value is invalid"]}). Append them the right way.
@@ -244,18 +282,28 @@ function normalizeIdentityStatus(s) {
   return 'pending'
 }
 
-// Resolve the "send as this agent" email. Returns the agent's sender-identity
-// email ONLY if it's approved in BoldSign; otherwise null (send from the
-// account default). Uses the service client so it works regardless of caller RLS.
-async function resolveOnBehalfOf(supabase, agentId) {
-  if (!agentId) return null
+// Resolve the "send as this agent" email. Prefers the acting agent's OWN
+// approved sender identity; falls back to the org's default identity (if one
+// is set and approved) so admin/system sends still go out under a real,
+// recognizable sender rather than the raw API account. Returns null (BoldSign
+// account default) if neither is available. Uses the service client so it
+// works regardless of caller RLS.
+export async function resolveOnBehalfOf(supabase, agentId) {
   try {
-    const { data } = await supabase
+    if (agentId) {
+      const { data } = await supabase
+        .from('boldsign_sender_identities')
+        .select('email, status')
+        .eq('agent_id', agentId)
+        .maybeSingle()
+      if (data?.status === 'approved') return data.email
+    }
+    const { data: fallback } = await supabase
       .from('boldsign_sender_identities')
       .select('email, status')
-      .eq('agent_id', agentId)
+      .eq('is_default', true)
       .maybeSingle()
-    return data && data.status === 'approved' ? data.email : null
+    return fallback?.status === 'approved' ? fallback.email : null
   } catch { return null }
 }
 
@@ -443,6 +491,41 @@ export default async function handler(req, res) {
       return res.json({ ok: true })
     }
 
+    // Delete a draft/unsigned/expired document to keep the Signatures tab tidy.
+    // Deliberately refuses to delete a 'completed' record — that's the signed
+    // legal record and shouldn't be casually removable from the CRM. BoldSign
+    // requires a document be completed/revoked/declined before DELETE, so an
+    // in-progress (draft/sent) document is revoked first.
+    if (body.action === 'document-delete') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+      const svc = getServiceClient()
+      const { data: record } = await svc.from('boldsign_documents')
+        .select('id, deal_id, agent_id, status, document_name').eq('document_id', id).maybeSingle()
+      if (!record) return res.status(404).json({ error: 'Document not found' })
+      if (record.status === 'completed') {
+        return res.status(400).json({ error: 'Completed documents are the signed record and cannot be deleted here.' })
+      }
+      if (!actor.isAdmin && record.agent_id !== actor.agent.id) {
+        return res.status(403).json({ error: 'Only the sender or an admin can delete this document' })
+      }
+
+      if (!['revoked', 'voided', 'declined'].includes(record.status)) {
+        try { await boldsign(`/document/revoke?documentId=${encodeURIComponent(id)}`, { method: 'POST', json: { message: 'Removed from Gateway CRM' } }) }
+        catch (e) { if (e.status !== 400) throw e }   // 400 here typically means "already not in progress" — fine
+      }
+      try { await boldsign(`/document/delete?documentId=${encodeURIComponent(id)}&deletePermanently=false`, { method: 'DELETE' }) }
+      catch (e) { if (e.status !== 404) throw e }
+
+      await svc.from('audit_log').insert([{
+        table_name: 'boldsign_documents', record_id: record.id, deal_id: record.deal_id, actor_id: actor.agent.id,
+        action: 'delete', old_values: { document_name: record.document_name, status: record.status },
+        summary: `Removed unsigned document "${record.document_name || 'Document'}"`,
+      }])
+      await svc.from('boldsign_documents').delete().eq('id', record.id)
+      return res.json({ ok: true })
+    }
+
     // ─── Phase 1: Sender identities (admin only) ──────────────────────────────
     // Each agent is registered as a sender identity so their signature requests
     // come from them. BoldSign emails the agent an approval link; we track the
@@ -458,6 +541,57 @@ export default async function handler(req, res) {
         status: 'pending', updated_at: new Date().toISOString(),
       }, { onConflict: 'agent_id' })
       return res.json({ ok: true, email, status: 'pending' })
+    }
+
+    // Full identity record from BoldSign — used to refresh a single row (e.g.
+    // after the admin edits it) without a full list sync.
+    if (body.action === 'identity-details') {
+      if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
+      if (!body.email) return res.status(400).json({ error: 'email required' })
+      const data = await boldsign(`/senderIdentities/properties?email=${encodeURIComponent(body.email)}`)
+      return res.json({
+        email:  data.email,
+        name:   data.name,
+        status: normalizeIdentityStatus(data.status || data.approvalStatus),
+      })
+    }
+
+    if (body.action === 'identity-update') {
+      if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
+      const { email, name } = body
+      if (!email) return res.status(400).json({ error: 'email required' })
+      if (!name || !name.trim()) return res.status(400).json({ error: 'name required' })
+      await boldsign(`/senderIdentities/update?email=${encodeURIComponent(email)}`, {
+        method: 'POST', json: { Name: name.trim() },
+      })
+      await getServiceClient().from('boldsign_sender_identities')
+        .update({ name: name.trim(), updated_at: new Date().toISOString() })
+        .eq('email', email)
+      return res.json({ ok: true })
+    }
+
+    if (body.action === 'identity-delete') {
+      if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
+      if (!body.email) return res.status(400).json({ error: 'email required' })
+      // Best-effort against BoldSign — proceed with the local delete even if it's
+      // already gone there (e.g. removed directly in the BoldSign dashboard).
+      try { await boldsign(`/senderIdentities/delete?email=${encodeURIComponent(body.email)}`, { method: 'DELETE' }) }
+      catch (e) { if (e.status !== 404) throw e }
+      await getServiceClient().from('boldsign_sender_identities').delete().eq('email', body.email)
+      return res.json({ ok: true })
+    }
+
+    // Org-wide fallback sender for sends where the acting agent has no
+    // approved identity of their own (e.g. admin/system-triggered sends).
+    // Only one identity may be default at a time.
+    if (body.action === 'identity-set-default') {
+      if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
+      if (!body.email) return res.status(400).json({ error: 'email required' })
+      const svc = getServiceClient()
+      await svc.from('boldsign_sender_identities').update({ is_default: false }).eq('is_default', true)
+      const { error } = await svc.from('boldsign_sender_identities').update({ is_default: true }).eq('email', body.email)
+      if (error) return res.status(400).json({ error: error.message })
+      return res.json({ ok: true })
     }
 
     if (body.action === 'identity-sync') {
@@ -515,7 +649,7 @@ export default async function handler(req, res) {
     // template, or a PDF (documentBase64) to build a new one.
     if (body.action === 'template-editor-url') {
       if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
-      const { templateId, title, documentBase64, documentName, redirectUrl, useTextTags, textTagDefinitions } = body
+      const { templateId, title, documentTitle, documentBase64, documentName, redirectUrl, useTextTags, textTagDefinitions, roles } = body
       if (templateId) {
         const data = await boldsign(`/template/getEmbeddedTemplateEditUrl?templateId=${encodeURIComponent(templateId)}`, {
           method: 'POST', json: { RedirectUrl: redirectUrl || '', ShowToolbar: true, ViewOption: 'PreparePage' },
@@ -523,10 +657,19 @@ export default async function handler(req, res) {
         return res.json({ url: data.editUrl || data.createUrl || data.url, templateId })
       }
       if (!documentBase64) return res.status(400).json({ error: 'documentBase64 or templateId required' })
+
+      const roleList = normalizeTemplateRoles(roles)
+      const templateTitle = (title || 'New Template').trim()
+
       const form = new FormData()
-      form.append('Title',       title || 'New Template')
-      form.append('RedirectUrl', redirectUrl || '')
-      form.append('ShowToolbar', 'true')
+      form.append('Title',         templateTitle)
+      form.append('DocumentTitle', (documentTitle || templateTitle).trim())
+      form.append('RedirectUrl',   redirectUrl || '')
+      form.append('ShowToolbar',   'true')
+      roleList.forEach((r, i) => {
+        form.append(`Roles[${i}][name]`,  r.name)
+        form.append(`Roles[${i}][index]`, String(r.index))
+      })
       // Reproducible template prep: if the PDF has {{fieldType|signerIndex|...}}
       // text tags baked in, BoldSign auto-places the fields on create — the
       // embedded editor then opens for review/adjustment rather than blank prep.
@@ -536,7 +679,7 @@ export default async function handler(req, res) {
       }
       form.append('Files', new Blob([Buffer.from(documentBase64, 'base64')], { type: 'application/pdf' }), documentName || 'template.pdf')
       const data = await boldsign('/template/createEmbeddedTemplateUrl', { method: 'POST', form })
-      return res.json({ url: data.createUrl, templateId: data.templateId })
+      return res.json({ url: data.createUrl, templateId: data.templateId, roles: roleList })
     }
 
     // Send a document generated from a template, with CRM-prefilled fields.
@@ -687,22 +830,43 @@ async function handleWebhook(req, res) {
 
     if (status === 'completed') {
       // Archive the signed PDF AND the compliance audit trail into deal-documents
-      // so agents have both without round-tripping BoldSign. Both are best-effort;
-      // the audit trail can lag the signed PDF, so if it isn't ready the agent can
-      // fetch it on demand (action: 'audit-download').
-      const baseName = (record.document_name || 'document').replace(/\.pdf$/i, '')
-      await archiveBoldsignPdf(supabase, {
+      // — no manual download + re-upload step. Both are best-effort; the audit
+      // trail can lag the signed PDF, so if it isn't ready the agent can fetch
+      // it on demand (action: 'audit-download'). Each is also recorded as a
+      // document_versions row (source='boldsign') so it carries real metadata
+      // (signer, completion date) instead of being a bare storage object, and
+      // shows up like any other deal document.
+      const baseName   = (record.document_name || 'document').replace(/\.pdf$/i, '')
+      const signerNote = `Signed by ${record.signer_name || 'signer'} on ${(completedAt || new Date().toISOString()).slice(0, 10)}`
+
+      const signed = await archiveBoldsignPdf(supabase, {
         path: `/document/download?documentId=${encodeURIComponent(documentId)}`,
         dealId: record.deal_id, filename: `signed-${baseName}.pdf`,
       })
-      const auditPath = await archiveBoldsignPdf(supabase, {
+      if (signed) {
+        await recordDocumentVersion(supabase, {
+          dealId: record.deal_id, documentName: `signed-${baseName}.pdf`,
+          storagePath: signed.storagePath, size: signed.size,
+          pinnedAs: 'signed', note: signerNote,
+        })
+      }
+
+      const audit = await archiveBoldsignPdf(supabase, {
         path: `/document/downloadAuditLog?documentId=${encodeURIComponent(documentId)}`,
         dealId: record.deal_id, filename: `audit-${baseName}.pdf`,
       })
+      if (audit) {
+        await recordDocumentVersion(supabase, {
+          dealId: record.deal_id, documentName: `audit-${baseName}.pdf`,
+          storagePath: audit.storagePath, size: audit.size,
+          note: `Compliance audit trail — ${signerNote}`,
+        })
+      }
+
       // Record whether the audit trail is on file so the UI can offer a manual
       // fetch if it wasn't ready at webhook time.
       await supabase.from('boldsign_documents')
-        .update({ audit_trail_saved: Boolean(auditPath) })
+        .update({ audit_trail_saved: Boolean(audit) })
         .eq('document_id', documentId)
 
       const deal = record.deals

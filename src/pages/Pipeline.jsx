@@ -9,7 +9,7 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
@@ -1317,6 +1317,8 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
   const [templates,   setTemplates]   = React.useState([])
   const [dealFiles,   setDealFiles]   = React.useState([])
   const [downloading, setDownloading] = React.useState({})
+  const [deleting,    setDeleting]    = React.useState({})
+  const [statusFilter, setStatusFilter] = React.useState('active')   // active | drafts | completed | all
 
   React.useEffect(() => {
     if (!deal?.id) return
@@ -1420,6 +1422,30 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
     link.click()
   }
 
+  // Remove a draft/unsigned/expired document to keep this tab tidy. The API
+  // refuses to delete a completed record (that's the signed legal record), so
+  // this action is only ever offered for non-completed statuses (see render).
+  const deleteEnvelope = async (env) => {
+    if (!window.confirm(`Remove "${env.document_name || 'this document'}"? This cannot be undone.`)) return
+    setDeleting(p => ({ ...p, [env.id]: true }))
+    try {
+      await apiDeleteDocument(env.document_id)
+      setEnvelopes(prev => prev.filter(e => e.id !== env.id))
+      pushToast('Document removed', 'info')
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setDeleting(p => ({ ...p, [env.id]: false }))
+    }
+  }
+
+  const visibleEnvelopes = envelopes.filter(env => {
+    if (statusFilter === 'all')       return true
+    if (statusFilter === 'completed') return env.status === 'completed'
+    if (statusFilter === 'drafts')    return env.status === 'draft'
+    return !['completed'].includes(env.status)   // 'active' = everything still in flight
+  })
+
   if (!tableReady) return (
     <div style={{ padding:20 }}>
       <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:16, fontSize:13, lineHeight:1.7 }}>
@@ -1467,8 +1493,16 @@ create policy "agent_notifications_policy" on agent_notifications
 
   return (
     <div style={{ padding:16, overflowY:'auto', flex:1 }}>
-      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
-        <div style={{ fontSize:13, color:'var(--gw-mist)' }}>{envelopes.length} document{envelopes.length !== 1 ? 's' : ''} sent</div>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16, flexWrap:'wrap', gap:8 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+          <div style={{ fontSize:13, color:'var(--gw-mist)' }}>{visibleEnvelopes.length} of {envelopes.length} document{envelopes.length !== 1 ? 's' : ''}</div>
+          <select className="form-control" style={{ fontSize:12, padding:'3px 8px', width:'auto' }} value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+            <option value="active">Active (hide completed)</option>
+            <option value="drafts">Drafts only</option>
+            <option value="completed">Completed only</option>
+            <option value="all">All</option>
+          </select>
+        </div>
         <div style={{ display:'flex', gap:8 }}>
           {templates.length > 0 && (
             <button className="btn btn--secondary btn--sm" onClick={() => setTplOpen(true)}>
@@ -1483,9 +1517,11 @@ create policy "agent_notifications_policy" on agent_notifications
 
       {loading
         ? <div style={{ fontSize:13, color:'var(--gw-mist)' }}>Loading…</div>
-        : envelopes.length === 0
-          ? <div style={{ textAlign:'center', color:'var(--gw-mist)', fontSize:13, padding:'32px 0' }}>No documents sent yet.<br/>Click "Send for Signature" to get started.</div>
-          : envelopes.map(env => {
+        : visibleEnvelopes.length === 0
+          ? <div style={{ textAlign:'center', color:'var(--gw-mist)', fontSize:13, padding:'32px 0' }}>
+              {envelopes.length === 0 ? <>No documents sent yet.<br/>Click "Send for Signature" to get started.</> : 'No documents match this filter.'}
+            </div>
+          : visibleEnvelopes.map(env => {
               const sc        = DS_STATUS[env.status] || DS_STATUS.sent
               const completed = env.status === 'completed'
               return (
@@ -1505,6 +1541,11 @@ create policy "agent_notifications_policy" on agent_notifications
                     <button className="btn btn--ghost btn--icon btn--sm" title="Refresh status" onClick={() => refreshStatus(env)}>
                       <Icon name="refresh" size={12}/>
                     </button>
+                    {!completed && (
+                      <button className="btn btn--ghost btn--icon btn--sm" title="Remove document" onClick={() => deleteEnvelope(env)} disabled={deleting[env.id]}>
+                        <Icon name="trash" size={12}/>
+                      </button>
+                    )}
                   </div>
                   {completed && (
                     <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'var(--gw-green-light)', display:'flex', alignItems:'center', gap:8 }}>
