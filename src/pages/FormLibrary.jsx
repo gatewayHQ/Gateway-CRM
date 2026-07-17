@@ -152,7 +152,7 @@ function UploadModal({ packet, onClose, onSaved }) {
       </div>
 
       {editorUrl ? (
-        <div className="modal__body" style={{ padding: 0 }}>
+        <div className="modal__body" style={{ padding: 0, maxHeight: 'calc(90vh - 80px)', overflowY: 'auto' }}>
           <div style={{ padding: '10px 24px', fontSize: 12, color: 'var(--gw-mist)', borderBottom: '1px solid var(--gw-border)' }}>
             Place fields, then click <strong>Finish</strong> in BoldSign — the template saves back to this packet automatically.
           </div>
@@ -160,7 +160,7 @@ function UploadModal({ packet, onClose, onSaved }) {
         </div>
       ) : (
       <>
-      <div className="modal__body" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div className="modal__body" style={{ display: 'flex', flexDirection: 'column', gap: 14, maxHeight: 'calc(90vh - 140px)', overflowY: 'auto' }}>
         <div className="form-row">
           <div className="form-group">
             <label className="form-label required">State</label>
@@ -257,9 +257,14 @@ function UploadModal({ packet, onClose, onSaved }) {
             </div>
           </div>
           <div className="form-group">
-            <label className="form-label">Field Tokens</label>
+            <label className="form-label">Field Tokens <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}>(optional — reference only)</span></label>
             <input className="form-control" value={tokensText} onChange={e => setTokensText(e.target.value)} placeholder="property_address, list_price, seller_name" />
-            <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Comma-separated field IDs the CRM should prefill from the deal.</div>
+            <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>
+              You don't need to list fields here for prefill. At send time the CRM reads the template's own
+              fields from BoldSign and auto-fills any whose <strong>field ID matches a CRM token</strong> (e.g.
+              name a signature-block's neighboring text field <code>property_address</code>). This box is just a
+              note to yourself of which tokens the template uses.
+            </div>
           </div>
 
           <details style={{ fontSize: 11, color: 'var(--gw-mist)' }}>
