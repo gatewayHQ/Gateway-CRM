@@ -13,6 +13,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { apiGet, apiPost } from '../lib/apiClient.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { Icon, Modal, pushToast, EmptyState, ConfirmDialog } from '../components/UI.jsx'
 
@@ -228,16 +229,14 @@ function autoMapColumns(headers) {
 // ─── API helper ───────────────────────────────────────────────────────────────
 
 async function api(action, payload = {}, method = 'POST') {
+  // Routed through the authed client so the caller's Supabase session token
+  // reaches the (now auth-gated) /api/campaigns endpoint.
   if (method === 'GET') {
     const qs = new URLSearchParams({ action, ...payload }).toString()
-    const r = await fetch(`/api/campaigns?${qs}`)
+    const r = await apiGet(`/api/campaigns?${qs}`)
     return r.json()
   }
-  const r = await fetch('/api/campaigns', {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, ...payload }),
-  })
+  const r = await apiPost('/api/campaigns', { action, ...payload })
   return r.json()
 }
 
@@ -605,14 +604,10 @@ function CollageBuilder({ cfg, setCfg, variant = 'multifamily' }) {
     if (!aiInput.trim()) return pushToast('Describe the property or campaign first', 'error')
     setAiLoading(true)
     try {
-      const r = await fetch('/api/claude', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          max_tokens: 600,
-          system: `You are an elite real estate marketing copywriter. Write landing page copy for a ${variant === 'valuation' ? 'home valuation' : 'multifamily property valuation'} capture page. Return ONLY a raw JSON object — no markdown, no code fences. Keys: headline (max 90 chars), subheadline (max 260 chars), highlights (array of 3 objects each with "label" and "value"), cta_text (max 30 chars).`,
-          messages: [{ role:'user', content:`Write ${tone === 'punchy' ? 'punchy, bold, and urgent' : tone === 'conversational' ? 'warm, conversational, and approachable' : 'professional, authoritative, and credible'} copy:\n\n${aiInput}` }],
-        }),
+      const r = await apiPost('/api/claude', {
+        max_tokens: 600,
+        system: `You are an elite real estate marketing copywriter. Write landing page copy for a ${variant === 'valuation' ? 'home valuation' : 'multifamily property valuation'} capture page. Return ONLY a raw JSON object — no markdown, no code fences. Keys: headline (max 90 chars), subheadline (max 260 chars), highlights (array of 3 objects each with "label" and "value"), cta_text (max 30 chars).`,
+        messages: [{ role:'user', content:`Write ${tone === 'punchy' ? 'punchy, bold, and urgent' : tone === 'conversational' ? 'warm, conversational, and approachable' : 'professional, authoritative, and credible'} copy:\n\n${aiInput}` }],
       })
       const data = await r.json()
       if (data.error) { pushToast(data.error, 'error'); return }

@@ -1,14 +1,23 @@
+import { requireAgent } from './_lib/auth.js'
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+
+  // Require a verified agent — otherwise this is an open, uncapped LLM proxy
+  // billed to the brokerage's Anthropic key.
+  try { await requireAgent(req) }
+  catch (e) { return res.status(e.status || 401).json({ error: e.message || 'Sign in required' }) }
 
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY is not configured in Vercel environment variables. Add it under Settings → Environment Variables.' })
 
-  const { system, messages, max_tokens = 1024 } = req.body
+  const { system, messages } = req.body
+  // Clamp caller-supplied token budget to bound per-request cost.
+  const max_tokens = Math.min(Math.max(Number(req.body?.max_tokens) || 1024, 1), 4096)
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'messages array is required' })
   }
