@@ -38,6 +38,7 @@ file is safe.
 | 0017 | `0017_boldsign_phase1.sql` | BoldSign Phase 1: adds `boldsign_sender_identities` (per-agent send-on-behalf) and `boldsign_templates` (reusable docs + prefill field tokens) | No (additive tables) | With the BoldSign templates deploy |
 | 0018 | `0018_boldsign_audit_trail.sql` | Adds `boldsign_documents.audit_trail_saved` — tracks whether the compliance audit trail PDF was archived on completion | No (additive column) | With the audit-trail deploy |
 | 0019 | `0019_form_library_boldsign_unification.sql` | Folds the `boldsign_templates` registry into Form Library: adds `boldsign_template_id` / `doc_type` / `field_tokens` / `active` to `form_packets`, and backfills existing registered templates. `boldsign_templates` is superseded, not dropped | Data migration (backfill) — see file for the null-state skip rule | With the Form Library unification deploy |
+| 0020 | `0020_boldsign_identity_default.sql` | Adds `boldsign_sender_identities.is_default` (org-wide OnBehalfOf fallback) with a partial unique index enforcing at most one default | No (additive column) | With the sender-identity management deploy |
 
 > Note the numeric order vs. recommended run order: **0001 → 0003 → 0004 → 0005 → 0006 → 0007 → 0002 (Phase A) → 0008 → 0009 → 0010 → 0011 (Phase A, then Phase B after verification)**.
 > 0011's Phase B is the only step that changes what data the database returns,

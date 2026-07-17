@@ -12,7 +12,10 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
-import { createIdentity, syncIdentities, resendIdentity } from '../../lib/services/boldsign.js'
+import {
+  createIdentity, syncIdentities, resendIdentity,
+  updateIdentity, deleteIdentity, setDefaultIdentity,
+} from '../../lib/services/boldsign.js'
 
 const STATUS_STYLE = {
   approved: { bg: 'var(--gw-green-light)', color: 'var(--gw-green)' },
@@ -23,7 +26,9 @@ const STATUS_STYLE = {
 
 export default function BoldSignAdmin({ agents = [], go }) {
   const [identities, setIdentities] = useState([])
-  const [busy,       setBusy]        = useState('')
+  const [busy,       setBusy]       = useState('')
+  const [editingId,  setEditingId]  = useState(null)   // identity.id currently being renamed
+  const [editName,   setEditName]   = useState('')
 
   const load = async () => {
     const { data: ids } = await supabase.from('boldsign_sender_identities').select('*')
@@ -55,6 +60,38 @@ export default function BoldSignAdmin({ agents = [], go }) {
     catch (e) { pushToast(e.message, 'error') } finally { setBusy('') }
   }
 
+  const startEdit = (identity) => { setEditingId(identity.id); setEditName(identity.name || '') }
+
+  const saveEdit = async (identity) => {
+    if (!editName.trim()) { pushToast('Name is required', 'error'); return }
+    setBusy(identity.email)
+    try {
+      await updateIdentity(identity.email, editName.trim())
+      pushToast('Sender identity updated', 'success')
+      setEditingId(null)
+      await load()
+    } catch (e) { pushToast(e.message, 'error') } finally { setBusy('') }
+  }
+
+  const remove = async (identity) => {
+    if (!window.confirm(`Remove the sender identity for ${identity.name || identity.email}? Future sends for this agent will use the BoldSign account default.`)) return
+    setBusy(identity.email)
+    try {
+      await deleteIdentity(identity.email)
+      pushToast('Sender identity removed', 'info')
+      await load()
+    } catch (e) { pushToast(e.message, 'error') } finally { setBusy('') }
+  }
+
+  const makeDefault = async (identity) => {
+    setBusy(`default-${identity.email}`)
+    try {
+      await setDefaultIdentity(identity.email)
+      pushToast(`${identity.name || identity.email} is now the default sender`, 'success')
+      await load()
+    } catch (e) { pushToast(e.message, 'error') } finally { setBusy('') }
+  }
+
   return (
     <>
       {/* ── Sender identities ─────────────────────────────────────────────── */}
@@ -64,7 +101,8 @@ export default function BoldSignAdmin({ agents = [], go }) {
             <div className="settings-section__title">BoldSign — Sender Identities</div>
             <div className="settings-section__sub">
               Register each agent so signature requests are sent from them. The agent must click the
-              approval link BoldSign emails before their sends go out under their name.
+              approval link BoldSign emails before their sends go out under their name. The <strong>default</strong> identity
+              is used as a fallback when the sending agent has none of their own (e.g. admin-triggered sends).
             </div>
           </div>
           <button className="btn btn--secondary btn--sm" onClick={sync} disabled={busy==='sync'}>
@@ -75,13 +113,25 @@ export default function BoldSignAdmin({ agents = [], go }) {
           {agents.length === 0
             ? <div style={{ padding:14, fontSize:13, color:'var(--gw-mist)' }}>No agents yet.</div>
             : agents.map((a, i) => {
-                const id = idByAgent[a.id]
-                const status = id?.status || 'none'
+                const identity = idByAgent[a.id]
+                const status = identity?.status || 'none'
                 const st = STATUS_STYLE[status] || STATUS_STYLE.none
+                const editing = identity && editingId === identity.id
                 return (
                   <div key={a.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', borderTop: i ? '1px solid var(--gw-border)' : 'none' }}>
                     <div style={{ flex:1, minWidth:0 }}>
-                      <div style={{ fontSize:13, fontWeight:600 }}>{a.name}</div>
+                      {editing ? (
+                        <div style={{ display:'flex', gap:6 }}>
+                          <input className="form-control" style={{ fontSize:13, padding:'3px 6px' }} value={editName} onChange={e=>setEditName(e.target.value)} autoFocus/>
+                          <button className="btn btn--primary btn--sm" onClick={() => saveEdit(identity)} disabled={busy===identity.email}>Save</button>
+                          <button className="btn btn--ghost btn--sm" onClick={() => setEditingId(null)}>Cancel</button>
+                        </div>
+                      ) : (
+                        <div style={{ fontSize:13, fontWeight:600, display:'flex', alignItems:'center', gap:6 }}>
+                          {identity?.name || a.name}
+                          {identity?.is_default && <span title="Default sender" style={{ color:'var(--gw-amber)', fontSize:11 }}>★ Default</span>}
+                        </div>
+                      )}
                       <div style={{ fontSize:11, color:'var(--gw-mist)' }}>{a.email || 'no email'}</div>
                     </div>
                     <span style={{ padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:700, background:st.bg, color:st.color, textTransform:'capitalize' }}>
@@ -96,6 +146,21 @@ export default function BoldSignAdmin({ agents = [], go }) {
                       <button className="btn btn--secondary btn--sm" onClick={() => resend(a.email)} disabled={busy===a.email}>
                         {busy===a.email ? 'Resending…' : 'Resend'}
                       </button>
+                    )}
+                    {status === 'approved' && !identity.is_default && (
+                      <button className="btn btn--ghost btn--sm" onClick={() => makeDefault(identity)} disabled={busy===`default-${identity.email}`} title="Set as org default sender">
+                        Make default
+                      </button>
+                    )}
+                    {identity && !editing && (
+                      <>
+                        <button className="btn btn--ghost btn--sm btn--icon" title="Rename" onClick={() => startEdit(identity)}>
+                          <Icon name="edit" size={12}/>
+                        </button>
+                        <button className="btn btn--ghost btn--sm btn--icon" title="Remove" onClick={() => remove(identity)} disabled={busy===identity.email}>
+                          <Icon name="trash" size={12}/>
+                        </button>
+                      </>
                     )}
                   </div>
                 )
