@@ -114,3 +114,36 @@ export function buildPrefill(fieldTokens = [], ctx = {}) {
     .filter(f => f.value)                          // skip unknown/empty tokens
     .map(f => ({ ...f, isReadOnly: true }))        // CRM-owned values are locked
 }
+
+// Role names that should be filled with the deal's client(s) rather than the
+// agent. Broad on purpose so generic template roles ("Signer 1") still seed.
+const CLIENT_ROLE_RE = /(seller|buyer|client|owner|purchaser|grantor|grantee|landlord|tenant|lessor|lessee|borrower|customer|signer)/
+
+// Pre-fill a template's signer rows from the deal's people:
+//   • a role mentioning "agent" → the acting agent (first such role only)
+//   • client-type roles → the deal's linked contact, then that contact's
+//     spouse for a second client role (co-buyers / husband & wife)
+//   • anything else keeps the template's own placeholder (r.defaultName/Email)
+// Returns { [roleIndex]: { name, email } }. Pure — the agent can still edit any
+// field before sending. Requires the deal to have a linked contact; with none,
+// client roles fall back to the template placeholder (usually blank).
+export function seedSignersFromDeal({ roles = [], contact = null, activeAgent = null } = {}) {
+  const contactName = contact ? `${contact.first_name || ''} ${contact.last_name || ''}`.trim() : ''
+  const people = []
+  if (contactName || contact?.email) people.push({ name: contactName, email: contact?.email || '' })
+  if (contact?.spouse_name)          people.push({ name: contact.spouse_name, email: '' }) // spouse email isn't stored
+  const out = {}
+  let usedAgent = false, personIdx = 0
+  for (const r of roles) {
+    const n = String(r?.name || '').toLowerCase()
+    if (!usedAgent && /agent/.test(n) && activeAgent?.email) {
+      out[r.index] = { name: activeAgent.name || '', email: activeAgent.email || '' }
+      usedAgent = true
+    } else if (CLIENT_ROLE_RE.test(n) && personIdx < people.length) {
+      out[r.index] = { ...people[personIdx++] }
+    } else {
+      out[r.index] = { name: r?.defaultName || '', email: r?.defaultEmail || '' }
+    }
+  }
+  return out
+}
