@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js'
 import { Icon, pushToast, EmptyState, Modal } from '../components/UI.jsx'
 import { OPERATING_STATES } from '../lib/constants.js'
 import { templateEditorUrl } from '../lib/services/boldsign.js'
+import BoldSignFrame from '../components/BoldSignFrame.jsx'
 
 const TRANSACTION_TYPES = [
   { value: 'buyer',   label: 'Buyer Contract' },
@@ -38,6 +39,7 @@ function UploadModal({ packet, onClose, onSaved }) {
   const [file, setFile]   = useState(null)
   const [saving, setSaving] = useState(false)
   const [editorBusy, setEditorBusy] = useState(false)
+  const [editorUrl, setEditorUrl] = useState(null)   // set while the embedded BoldSign editor is open in-modal
   const [useTextTags, setUseTextTags] = useState(false)
   // Signer roles the template needs (BoldSign requires at least one at create
   // time — see buildInBoldSign). Default matches our convention: role 1 =
@@ -52,12 +54,24 @@ function UploadModal({ packet, onClose, onSaved }) {
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }))
 
-  // Build a BoldSign template from the packet's PDF (or a freshly chosen one)
-  // and open the embedded editor to place/confirm fields.
+  // Open BoldSign's editor in-app (iframe, not a new tab) so completion fires a
+  // trustworthy postMessage event — see handleEditorDone. Rebuilding an existing
+  // template reopens ITS edit URL (no new PDF); building fresh requires a PDF
+  // and creates a brand-new BoldSign template.
   const buildInBoldSign = async (fileForTemplate) => {
-    if (!fileForTemplate) { pushToast('Choose a PDF first', 'error'); return }
+    if (!form.state.trim()) { pushToast('State is required before building a template', 'error'); return }
+    if (!form.name.trim())  { pushToast('Packet name is required before building a template', 'error'); return }
+    const rebuilding = !!form.boldsign_template_id
+    if (!rebuilding && !fileForTemplate) { pushToast('Choose a PDF first', 'error'); return }
     setEditorBusy(true)
     try {
+      if (rebuilding) {
+        const { url } = await templateEditorUrl({ templateId: form.boldsign_template_id, redirectUrl: window.location.href })
+        if (!url) { pushToast('BoldSign did not return an editor URL', 'error'); return }
+        setEditorUrl(url)
+        return
+      }
+      setFile(fileForTemplate)   // same PDF backs both the BoldSign template and the Form Library storage copy
       const documentBase64 = await fileToBase64(fileForTemplate)
       const templateTitle  = form.name.trim() || fileForTemplate.name.replace(/\.pdf$/i, '')
       const { url, templateId } = await templateEditorUrl({
@@ -67,10 +81,23 @@ function UploadModal({ packet, onClose, onSaved }) {
         useTextTags,
         roles: roles.map(r => r.name.trim()).filter(Boolean).map(name => ({ name })),
       })
+      if (!url) { pushToast('BoldSign did not return an editor URL', 'error'); return }
       if (templateId) set('boldsign_template_id', templateId)
-      if (url) window.open(url, '_blank', 'noopener')
-      pushToast('Opened BoldSign editor — place fields, then save this packet', 'success')
+      setEditorUrl(url)
     } catch (e) { pushToast(e.message, 'error') } finally { setEditorBusy(false) }
+  }
+
+  // BoldSign posts a completion event from the embedded editor — save the
+  // packet (with its new boldsign_template_id) back to Form Library right
+  // away instead of relying on the admin to remember a separate Save click.
+  const handleEditorDone = async () => {
+    setEditorUrl(null)
+    pushToast('Template saved in BoldSign — saving to Form Library…', 'success')
+    await save()
+  }
+  const handleEditorError = () => {
+    setEditorUrl(null)
+    pushToast('BoldSign editor closed without finishing — no changes were saved', 'info')
   }
 
   const save = async () => {
@@ -113,8 +140,27 @@ function UploadModal({ packet, onClose, onSaved }) {
   }
 
   return (
-    <Modal open onClose={onClose} title={isNew ? 'Add Form Packet' : 'Edit Form Packet'} width={480}>
-      <div style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <Modal open onClose={editorUrl ? handleEditorError : onClose} width={editorUrl ? 900 : 480}>
+      <div className="modal__head">
+        <div>
+          <div className="eyebrow-label">Form Library</div>
+          <h3 style={{ margin: 0, fontFamily: 'var(--font-display)', fontSize: 20 }}>
+            {editorUrl ? 'Build in BoldSign' : isNew ? 'Add Form Packet' : 'Edit Form Packet'}
+          </h3>
+        </div>
+        <button className="drawer__close" onClick={editorUrl ? handleEditorError : onClose}><Icon name="x" size={18} /></button>
+      </div>
+
+      {editorUrl ? (
+        <div className="modal__body" style={{ padding: 0 }}>
+          <div style={{ padding: '10px 24px', fontSize: 12, color: 'var(--gw-mist)', borderBottom: '1px solid var(--gw-border)' }}>
+            Place fields, then click <strong>Finish</strong> in BoldSign — the template saves back to this packet automatically.
+          </div>
+          <BoldSignFrame url={editorUrl} onDone={handleEditorDone} onError={handleEditorError} />
+        </div>
+      ) : (
+      <>
+      <div className="modal__body" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <div className="form-row">
           <div className="form-group">
             <label className="form-label required">State</label>
@@ -178,7 +224,12 @@ function UploadModal({ packet, onClose, onSaved }) {
           )}
 
           <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <button type="button" className="btn btn--secondary btn--sm" onClick={() => tagFileRef.current?.click()} disabled={editorBusy}>
+            <button
+              type="button"
+              className="btn btn--secondary btn--sm"
+              onClick={() => form.boldsign_template_id ? buildInBoldSign() : tagFileRef.current?.click()}
+              disabled={editorBusy}
+            >
               <Icon name="upload" size={13}/> {editorBusy ? 'Opening…' : form.boldsign_template_id ? 'Rebuild in BoldSign' : 'Build in BoldSign'}
             </button>
             <input ref={tagFileRef} type="file" accept=".pdf" style={{ display: 'none' }} onChange={e => buildInBoldSign(e.target.files[0])}/>
@@ -227,10 +278,12 @@ function UploadModal({ packet, onClose, onSaved }) {
           </details>
         </div>
       </div>
-      <div style={{ padding: '12px 24px 20px', borderTop: '1px solid var(--gw-border)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+      <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
         <button className="btn btn--primary" onClick={save} disabled={saving}>{saving ? 'Saving…' : isNew ? 'Add Packet' : 'Save Changes'}</button>
       </div>
+      </>
+      )}
     </Modal>
   )
 }
