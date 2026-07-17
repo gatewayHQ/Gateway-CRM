@@ -2,17 +2,17 @@
 // BoldSign admin panel (Settings → admin only)
 //   • Sender identities — register each agent so their signature requests come
 //     from them; track the Pending → Approved lifecycle; resend/sync.
-//   • Templates — register the reusable BoldSign templates the deal Signatures
-//     tab sends from, and open BoldSign's editor to build/adjust one.
+//
+// Template management lives in Form Library (src/pages/FormLibrary.jsx) —
+// Form Library is the CRM's single catalog for both plain downloadable forms
+// and e-signature templates (an entry with a BoldSign template id attached is
+// sendable). This used to be a separate `boldsign_templates` registry; folding
+// it into Form Library means admins manage all documents in one place.
 // ─────────────────────────────────────────────────────────────────────────────
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
-import { OPERATING_STATES } from '../../lib/constants.js'
-import {
-  createIdentity, syncIdentities, resendIdentity,
-  templateEditorUrl,
-} from '../../lib/services/boldsign.js'
+import { createIdentity, syncIdentities, resendIdentity } from '../../lib/services/boldsign.js'
 
 const STATUS_STYLE = {
   approved: { bg: 'var(--gw-green-light)', color: 'var(--gw-green)' },
@@ -21,25 +21,13 @@ const STATUS_STYLE = {
   none:     { bg: 'var(--gw-bone)',        color: 'var(--gw-mist)' },
 }
 
-const fileToBase64 = f => new Promise((res, rej) => {
-  const r = new FileReader()
-  r.onload = e => res(e.target.result.split(',')[1])
-  r.onerror = rej
-  r.readAsDataURL(f)
-})
-
-export default function BoldSignAdmin({ agents = [] }) {
+export default function BoldSignAdmin({ agents = [], go }) {
   const [identities, setIdentities] = useState([])
-  const [templates,  setTemplates]  = useState([])
   const [busy,       setBusy]        = useState('')
 
   const load = async () => {
-    const [{ data: ids }, { data: tpls }] = await Promise.all([
-      supabase.from('boldsign_sender_identities').select('*'),
-      supabase.from('boldsign_templates').select('*').order('created_at', { ascending: false }),
-    ])
+    const { data: ids } = await supabase.from('boldsign_sender_identities').select('*')
     setIdentities(ids || [])
-    setTemplates(tpls || [])
   }
   useEffect(() => { load() }, [])
 
@@ -115,109 +103,17 @@ export default function BoldSignAdmin({ agents = [] }) {
         </div>
       </div>
 
-      {/* ── Templates ─────────────────────────────────────────────────────── */}
-      <TemplatesPanel templates={templates} onChange={load} />
+      {/* ── Templates pointer ────────────────────────────────────────────── */}
+      <div className="settings-section">
+        <div className="settings-section__title">BoldSign — Templates</div>
+        <div className="settings-section__sub">
+          Templates now live in <strong>Form Library</strong> — register a template's BoldSign id there
+          (or build one from a PDF) and it becomes sendable from a deal's Signatures tab.
+        </div>
+        <button className="btn btn--secondary btn--sm" onClick={() => go?.('form-library')}>
+          <Icon name="document" size={13}/> Open Form Library
+        </button>
+      </div>
     </>
-  )
-}
-
-function TemplatesPanel({ templates, onChange }) {
-  const [name,     setName]     = useState('')
-  const [tid,      setTid]      = useState('')
-  const [docType,  setDocType]  = useState('')
-  const [state,    setState]    = useState('')
-  const [tokens,   setTokens]   = useState('')
-  const [saving,   setSaving]   = useState(false)
-  const [editorBusy, setEditorBusy] = useState(false)
-  const fileRef = useRef()
-
-  const openEditor = async (file) => {
-    if (!file) return
-    setEditorBusy(true)
-    try {
-      const documentBase64 = await fileToBase64(file)
-      const { url, templateId } = await templateEditorUrl({
-        title: file.name.replace(/\.pdf$/i, ''),
-        documentBase64, documentName: file.name,
-        redirectUrl: window.location.href,
-      })
-      if (templateId) setTid(templateId)
-      if (url) window.open(url, '_blank', 'noopener')
-      pushToast('Opened BoldSign editor — place fields, then register the template id below', 'success')
-    } catch (e) { pushToast(e.message, 'error') } finally { setEditorBusy(false) }
-  }
-
-  const register = async () => {
-    if (!name.trim() || !tid.trim()) { pushToast('Name and template id are required', 'error'); return }
-    setSaving(true)
-    const field_tokens = tokens.split(',').map(s => s.trim()).filter(Boolean)
-    const { error } = await supabase.from('boldsign_templates').upsert({
-      template_id: tid.trim(), name: name.trim(), doc_type: docType.trim() || null,
-      state: state.trim().toUpperCase() || null,
-      field_tokens, active: true,
-    }, { onConflict: 'template_id' })
-    setSaving(false)
-    if (error) { pushToast(error.message, 'error'); return }
-    pushToast('Template registered', 'success')
-    setName(''); setTid(''); setDocType(''); setState(''); setTokens('')
-    onChange()
-  }
-
-  const toggleActive = async (t) => {
-    await supabase.from('boldsign_templates').update({ active: !t.active }).eq('id', t.id)
-    onChange()
-  }
-
-  return (
-    <div className="settings-section">
-      <div className="settings-section__title">BoldSign — Templates</div>
-      <div className="settings-section__sub">
-        Reusable documents the deal Signatures tab can send with CRM data pre-filled. Build one in
-        BoldSign's editor, then register its template id and the field tokens it fills.
-      </div>
-
-      {templates.length > 0 && (
-        <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden', marginBottom:16 }}>
-          {templates.map((t, i) => (
-            <div key={t.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', borderTop: i ? '1px solid var(--gw-border)' : 'none', opacity: t.active ? 1 : 0.5 }}>
-              <div style={{ flex:1, minWidth:0 }}>
-                <div style={{ fontSize:13, fontWeight:600 }}>
-                  {t.name}
-                  {t.state && <span style={{ marginLeft:8, padding:'1px 6px', borderRadius:8, fontSize:10, fontWeight:700, background:'var(--gw-sky)', color:'var(--gw-azure)' }}>{t.state}</span>}
-                </div>
-                <div style={{ fontSize:11, color:'var(--gw-mist)', fontFamily:'var(--font-mono)' }}>{t.template_id}</div>
-                {t.field_tokens?.length > 0 && <div style={{ fontSize:11, color:'var(--gw-mist)' }}>fills: {t.field_tokens.join(', ')}</div>}
-              </div>
-              <button className="btn btn--ghost btn--sm" onClick={() => toggleActive(t)}>{t.active ? 'Disable' : 'Enable'}</button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:14 }}>
-        <div style={{ fontSize:12, fontWeight:700, marginBottom:10 }}>Register a template</div>
-        <div style={{ display:'flex', gap:8, marginBottom:8, flexWrap:'wrap' }}>
-          <button className="btn btn--secondary btn--sm" onClick={() => fileRef.current?.click()} disabled={editorBusy}>
-            <Icon name="upload" size={13}/> {editorBusy ? 'Opening…' : 'Build new in BoldSign (upload PDF)'}
-          </button>
-          <input ref={fileRef} type="file" accept=".pdf" style={{ display:'none' }} onChange={e => openEditor(e.target.files[0])}/>
-        </div>
-        <div style={{ display:'grid', gap:8 }}>
-          <input className="form-control" placeholder="Template name (e.g. Iowa Listing Agreement)" value={name} onChange={e => setName(e.target.value)}/>
-          <input className="form-control" placeholder="BoldSign template id" value={tid} onChange={e => setTid(e.target.value)}/>
-          <div style={{ display:'flex', gap:8 }}>
-            <input className="form-control" style={{ flex:2 }} placeholder="Doc type (e.g. listing_agreement)" value={docType} onChange={e => setDocType(e.target.value)}/>
-            <select className="form-control" style={{ flex:1 }} value={state} onChange={e => setState(e.target.value)}>
-              <option value="">Any state</option>
-              {OPERATING_STATES.map(s => <option key={s.code} value={s.code}>{s.code}</option>)}
-            </select>
-          </div>
-          <input className="form-control" placeholder="Field tokens, comma-separated (e.g. property_address, list_price, seller_name)" value={tokens} onChange={e => setTokens(e.target.value)}/>
-          <button className="btn btn--primary btn--sm" onClick={register} disabled={saving} style={{ justifySelf:'start' }}>
-            {saving ? 'Saving…' : 'Register template'}
-          </button>
-        </div>
-      </div>
-    </div>
   )
 }

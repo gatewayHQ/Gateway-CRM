@@ -1087,6 +1087,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const [sending,    setSending]   = React.useState(false)
   const [dragOver,   setDragOver]  = React.useState(false)
   const [embedUrl,   setEmbedUrl]  = React.useState(null)   // BoldSign prepare/send iframe URL
+  const [useTextTags, setUseTextTags] = React.useState(false)   // PDF already has {{...}} text tags baked in
   const fileRef = React.useRef()
 
   const [signers, setSigners] = React.useState(() => {
@@ -1152,14 +1153,17 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
 
     let data
     try {
-      // Open BoldSign's embedded prepare/send UI (auto-placed fields + signers
-      // passed through); the agent reviews field placement and sends in-frame.
+      // Open BoldSign's embedded prepare/send UI. If the PDF has text tags
+      // baked in, BoldSign auto-places fields from them; otherwise the agent
+      // places fields visually in the PreparePage before sending — we no
+      // longer guess coordinates here.
       data = await documentEmbedUrl({
         emailSubject:   subject,
         documentBase64: base64,
         documentName:   finalDocName,
         signers:        signerPayload,
         redirectUrl:    window.location.href,
+        useTextTags,
       })
     } catch (err) {
       setSending(false); pushToast(err.message, 'error'); return
@@ -1279,10 +1283,19 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
           </div>
         </div>
 
+        <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:16, background:'var(--gw-bone)' }}>
+          <input type="checkbox" id="useTextTags" checked={useTextTags} onChange={e=>setUseTextTags(e.target.checked)} style={{width:15,height:15,cursor:'pointer'}}/>
+          <label htmlFor="useTextTags" style={{ fontSize:13, cursor:'pointer', flex:1 }}>
+            <strong>This PDF has BoldSign text tags</strong> — fields will be placed automatically from <code>{'{{...}}'}</code> tags in the document.
+          </label>
+        </div>
+
         {/* What happens next */}
         <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, color:'var(--gw-mist)', lineHeight:1.5 }}>
           <strong style={{ color:'var(--gw-ink)' }}>Next:</strong> BoldSign opens here in the app.
-          A signature and date field are pre-placed for each signer — review/adjust field placement, then click Send inside BoldSign. The status here updates automatically as they sign.
+          {useTextTags
+            ? ' Fields are placed from the document’s text tags — review, then click Send inside BoldSign.'
+            : ' Place signature and date fields for each signer, then click Send inside BoldSign.'} The status here updates automatically as they sign.
         </div>
       </div>
       <div className="modal__foot">
@@ -1337,7 +1350,16 @@ function SignaturesTab({ deal, contacts, properties, activeAgent }) {
   }
 
   const loadTemplates = async () => {
-    const { data } = await supabase.from('boldsign_templates').select('*').eq('active', true).order('name')
+    // Form Library is the e-sign template catalog — an entry is sendable once
+    // it carries a boldsign_template_id. Alias to `template_id` so the rest of
+    // this component (written against the old boldsign_templates shape) needs
+    // no other changes.
+    const { data } = await supabase
+      .from('form_packets')
+      .select('template_id:boldsign_template_id, name, state, doc_type, field_tokens, active')
+      .not('boldsign_template_id', 'is', null)
+      .eq('active', true)
+      .order('name')
     setTemplates(data || [])
   }
 

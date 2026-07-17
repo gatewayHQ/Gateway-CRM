@@ -54,7 +54,7 @@ alter table lead_captures enable row level security;
 create policy "Public insert" on lead_captures for insert with check (true);
 create policy "Auth read" on lead_captures for select using (auth.role() = 'authenticated');`
 
-export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnabled, activeAgentId, hideableNav }) {
+export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnabled, activeAgentId, hideableNav, go }) {
   const [companyName, setCompanyName] = useState('Gateway Real Estate Advisors')
   const [clearing, setClearing] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
@@ -455,7 +455,7 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
         )}
       </div>
 
-      {activeAgent?.is_admin && <BoldSignAdmin agents={db.agents || []} />}
+      {activeAgent?.is_admin && <BoldSignAdmin agents={db.agents || []} go={go} />}
 
       <div className="settings-section">
         <div className="settings-section__title">About</div>

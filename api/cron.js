@@ -1,12 +1,15 @@
 /**
  * Gateway CRM — Unified Cron Runner
  *
- * GET /api/cron?task=reminders   — daily deadline reminders (email + SMS)
- * GET /api/cron?task=sequence    — drip-sequence step runner (email)
+ * GET /api/cron?task=reminders      — daily deadline reminders (email + SMS)
+ * GET /api/cron?task=sequence       — drip-sequence step runner (email)
+ * GET /api/cron?task=nudges         — transaction-layer agent nudges
+ * GET /api/cron?task=boldsign-sync  — nightly Form Library ↔ BoldSign template drift sync
  *
- * Two scheduled tasks share one serverless function (Vercel Hobby caps total
- * functions at 12). Each is dispatched by the `task` query param and called by
- * Vercel Cron on its own schedule (see vercel.json).
+ * These scheduled tasks share one serverless function (Vercel Hobby caps total
+ * functions at 12 — this repo is already at that cap). Each is dispatched by
+ * the `task` query param and called by Vercel Cron on its own schedule (see
+ * vercel.json).
  *
  * Auth: GATEWAY_CRON_SECRET via `x-gateway-secret` header or `?secret=` query.
  *       Requests without the secret are rejected unless the env var is unset.
@@ -19,6 +22,8 @@
  */
 
 import { createClient } from '@supabase/supabase-js'
+import { boldsign } from './boldsign.js'
+import { OPERATING_STATES } from '../src/lib/constants.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
@@ -377,8 +382,10 @@ export default async function handler(req, res) {
     result = await runSequences(supabase)
   } else if (task === 'nudges') {
     result = await runNudges(supabase)
+  } else if (task === 'boldsign-sync' || task === 'boldsign-template-sync') {
+    result = await runBoldsignTemplateSync(supabase)
   } else {
-    return res.status(400).json({ error: `Unknown task "${task}" — use ?task=reminders, ?task=sequence, or ?task=nudges` })
+    return res.status(400).json({ error: `Unknown task "${task}" — use ?task=reminders, ?task=sequence, ?task=nudges, or ?task=boldsign-sync` })
   }
 
   return res.status(result.status).json(result.body)
@@ -560,4 +567,78 @@ async function runNudges(supabase) {
   }
 
   return { status: 200, body: { ok: true, date: today.toISOString().slice(0, 10), ...out } }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task: BoldSign template drift sync (nightly)
+//
+// Form Library (form_packets) is the CRM's template catalog; boldsign_template_id
+// links an entry to the live BoldSign template. Templates are authored in
+// BoldSign (or the embedded editor) — this job only reconciles CRM state with
+// what actually exists there. It never overwrites an admin-set name/state/
+// tokens on an existing entry, and never auto-activates a new draft:
+//   • DEACTIVATE any linked entry whose template no longer exists in BoldSign
+//   • DRAFT-REGISTER (inactive) any BoldSign template not yet in the catalog,
+//     ONLY when its title confidently maps to one of our operating states —
+//     ambiguous titles are reported, never guessed, since state is
+//     compliance-relevant and form_packets.state is not-null.
+// ─────────────────────────────────────────────────────────────────────────────
+export function detectStateFromTitle(title) {
+  const t = String(title || '')
+  const lower = t.toLowerCase()
+  for (const { code, name } of OPERATING_STATES) {
+    if (lower.includes(name.toLowerCase()) || new RegExp(`\\b${code}\\b`).test(t)) return code
+  }
+  return null
+}
+
+async function runBoldsignTemplateSync(supabase) {
+  if (!process.env.BOLDSIGN_API_KEY) {
+    return { status: 200, body: { ok: false, skipped: 'BOLDSIGN_API_KEY not set' } }
+  }
+
+  let liveTemplates = []
+  try {
+    const data = await boldsign('/template/list?page=1&pageSize=100')
+    liveTemplates = data.result || data.templates || []
+  } catch (e) {
+    return { status: 200, body: { ok: false, error: `BoldSign template list failed: ${e.message}` } }
+  }
+  const liveIds = new Set(liveTemplates.map(t => t.templateId || t.id).filter(Boolean))
+
+  const { data: catalog } = await supabase
+    .from('form_packets')
+    .select('id, boldsign_template_id, active')
+    .not('boldsign_template_id', 'is', null)
+
+  let deactivated = 0
+  for (const row of (catalog || [])) {
+    if (row.active && !liveIds.has(row.boldsign_template_id)) {
+      await supabase.from('form_packets').update({ active: false }).eq('id', row.id)
+      deactivated++
+    }
+  }
+
+  const knownIds = new Set((catalog || []).map(r => r.boldsign_template_id))
+  let drafted = 0
+  const unmatched = []
+  for (const t of liveTemplates) {
+    const tid = t.templateId || t.id
+    if (!tid || knownIds.has(tid)) continue
+    const title = t.title || t.name || 'Untitled BoldSign template'
+    const state = detectStateFromTitle(title)
+    if (!state) { unmatched.push({ templateId: tid, title }); continue }
+    await supabase.from('form_packets').insert([{
+      state,
+      transaction_type: /buyer/i.test(title) ? 'buyer' : /lease/i.test(title) ? 'lease' : 'seller',
+      name: title,
+      description: 'Auto-discovered from BoldSign — review and activate in Form Library.',
+      boldsign_template_id: tid,
+      field_tokens: [],
+      active: false,
+    }])
+    drafted++
+  }
+
+  return { status: 200, body: { ok: true, live: liveTemplates.length, deactivated, drafted, unmatched } }
 }

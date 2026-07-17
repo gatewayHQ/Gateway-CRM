@@ -1,6 +1,5 @@
 import { applyJsonCors, requireAgent, errorResponse, getServiceClient } from './_lib/auth.js'
 import closingPacketHandler from './_handlers/closing-packet.js'
-import { PDFDocument } from 'pdf-lib'
 import crypto from 'node:crypto'
 
 // We verify webhook signatures against the RAW request body, so the automatic
@@ -131,16 +130,20 @@ async function archiveBoldsignPdf(supabase, { path, dealId, filename }) {
 }
 
 // ─── Field placement ─────────────────────────────────────────────────────────
-// BoldSign requires at least one form field per signer. We send directly (no
-// embedded editor), so we place the fields programmatically:
-//   • If a signer carries explicit `tabs` (type/page/x/y), we honor them.
-//   • Otherwise we auto-place a Signature + DateSigned near the bottom of the
-//     LAST page, stacking each signer upward so blocks don't overlap.
-// BoldSign bounds use a TOP-LEFT origin in PDF points (72/inch), y increasing
-// downward — so a larger y sits lower on the page. We read the page size with
-// pdf-lib only to learn the last page's dimensions (pdf-lib's own draw origin
-// is bottom-left, but we never draw with it here). These defaults are a
-// sensible starting point; tune the coordinates if a document needs it.
+// RETIRED: pixel/point coordinate auto-placement. It guessed field position from
+// page dimensions read via pdf-lib, but BoldSign's `bounds` unit/origin couldn't
+// be confirmed from the (WAF-blocked) docs — the guess was frequently off, and
+// every real fix required manual coordinate tuning per document. That whole
+// class of bug is gone now. Fields come from one of three places instead:
+//   1. useTextTags: true — the PDF has `{{fieldType|signerIndex|required|label|
+//      fieldId}}` text tags baked in; BoldSign scans and places fields itself.
+//      See docs/boldsign-integration.md and text-tags/introduction.
+//   2. signer.tabs — explicit, CALLER-supplied coordinates (not guessed). Kept
+//      for integrations that already know exact placement.
+//   3. Neither — for the embedded (PreparePage) send flow, the agent places
+//      fields visually inside BoldSign. For the non-interactive `send` action
+//      (no prepare step), this is rejected by requiresExplicitFieldPlacement()
+//      below rather than silently guessing.
 const FIELD_TYPES = {
   signature: 'Signature',
   initials:  'Initial',
@@ -149,22 +152,18 @@ const FIELD_TYPES = {
   text:      'TextBox',
 }
 
-async function buildSigners(orderedSigners, pdfBuffer) {
-  // Read the PDF once to learn the last page + its dimensions for defaults.
-  let lastPage = 1, pageW = 612, pageH = 792   // US-Letter fallback
-  try {
-    const doc  = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true })
-    lastPage   = doc.getPageCount() || 1
-    const page = doc.getPage(lastPage - 1)
-    pageW = page.getWidth()
-    pageH = page.getHeight()
-  } catch { /* fall back to Letter defaults — send still succeeds */ }
-
+// Build the BoldSign `Signers` entries. No coordinate guessing — only honors
+// explicit signer.tabs if given; otherwise ships with no formFields.
+export function buildSignerPayload(orderedSigners) {
   return orderedSigners.map((s, i) => {
-    let formFields
+    const entry = {
+      name:         s.name,
+      emailAddress: s.email,
+      signerType:   'Signer',
+      signerOrder:  Number(s.routingOrder || 1),
+    }
     if (Array.isArray(s.tabs) && s.tabs.length) {
-      // Explicit coordinates supplied by the caller.
-      formFields = s.tabs.map((t, j) => ({
+      entry.formFields = s.tabs.map((t, j) => ({
         id:         t.api_id || `f_${i + 1}_${j + 1}`,
         fieldType:  FIELD_TYPES[t.type] || 'Signature',
         pageNumber: Number(t.page) || 1,
@@ -176,24 +175,22 @@ async function buildSigners(orderedSigners, pdfBuffer) {
         },
         isRequired: t.required !== false,
       }))
-    } else {
-      // Auto-placed signature + date on the last page, one row per signer.
-      const rowY = Math.max(40, pageH - 120 - i * 80)
-      formFields = [
-        { id: `sig_${i + 1}`,  fieldType: 'Signature',  pageNumber: lastPage,
-          bounds: { x: 60,  y: rowY, width: 180, height: 35 }, isRequired: true },
-        { id: `date_${i + 1}`, fieldType: 'DateSigned', pageNumber: lastPage,
-          bounds: { x: Math.min(300, pageW - 150), y: rowY, width: 130, height: 25 }, isRequired: false },
-      ]
     }
-    return {
-      name:         s.name,
-      emailAddress: s.email,
-      signerType:   'Signer',
-      signerOrder:  Number(s.routingOrder || 1),
-      formFields,
-    }
+    return entry
   })
+}
+
+// The non-interactive `send` action has no prepare step for the agent to place
+// fields in, so it MUST get fields from text tags or explicit tabs — silently
+// guessing coordinates is exactly the bug we retired. Returns an error string
+// or null.
+export function requiresExplicitFieldPlacement(signers, useTextTags) {
+  if (useTextTags) return null
+  const missing = (signers || []).find(s => !Array.isArray(s.tabs) || !s.tabs.length)
+  if (missing) {
+    return 'No field placement provided. Pass useTextTags: true (if the PDF has BoldSign text tags baked in) or tabs coordinates per signer — automatic placement was retired. For an interactive flow, use document-embed-url instead, where fields can be placed visually in BoldSign.'
+  }
+  return null
 }
 
 // BoldSign's multipart /document/send binds ONE signer per repeated `Signers`
@@ -312,10 +309,13 @@ export default async function handler(req, res) {
 
   try {
     if (body.action === 'send') {
-      const { signers, documentBase64, documentName, emailSubject } = body
+      const { signers, documentBase64, documentName, emailSubject, useTextTags, textTagDefinitions } = body
       if (!documentBase64) return res.status(400).json({ error: 'documentBase64 required' })
       const invalid = validateSigners(signers)
       if (invalid) return res.status(400).json({ error: invalid })
+      // No prepare step here — fields must come from text tags or explicit tabs.
+      const placementError = requiresExplicitFieldPlacement(signers, useTextTags)
+      if (placementError) return res.status(400).json({ error: placementError })
 
       const orderedSigners = [...signers].sort((a, b) =>
         Number(a.routingOrder || 1) - Number(b.routingOrder || 1)
@@ -323,7 +323,7 @@ export default async function handler(req, res) {
       const hasOrder = orderedSigners.some(s => Number(s.routingOrder || 1) !== 1)
 
       const pdfBuffer     = Buffer.from(documentBase64, 'base64')
-      const signerPayload = await buildSigners(orderedSigners, pdfBuffer)
+      const signerPayload = buildSignerPayload(orderedSigners)
 
       // Send AS the acting agent when they have an approved sender identity, so
       // the client sees the request coming from their agent (not a generic box).
@@ -337,6 +337,10 @@ export default async function handler(req, res) {
       form.append('Message',            emailSubject || 'Please sign this document')
       form.append('EnableSigningOrder', String(hasOrder))
       appendSigners(form, signerPayload)
+      if (useTextTags) {
+        form.append('UseTextTags', 'true')
+        if (textTagDefinitions) form.append('TextTagDefinitions', JSON.stringify(textTagDefinitions))
+      }
       if (onBehalfOf) form.append('OnBehalfOf', onBehalfOf)
       form.append('Files', new Blob([pdfBuffer], { type: 'application/pdf' }), documentName || 'document.pdf')
 
@@ -350,9 +354,11 @@ export default async function handler(req, res) {
     }
 
     // Ad-hoc embedded send: upload a PDF and get a BoldSign prepare/send URL to
-    // render in an iframe (agent adjusts fields + clicks Send inside BoldSign).
+    // render in an iframe. If useTextTags is set, BoldSign auto-places fields
+    // from the PDF's {{...}} tags; otherwise the agent places fields visually
+    // in the PreparePage — no coordinates are guessed here either way.
     if (body.action === 'document-embed-url') {
-      const { signers, documentBase64, documentName, emailSubject, redirectUrl } = body
+      const { signers, documentBase64, documentName, emailSubject, redirectUrl, useTextTags, textTagDefinitions } = body
       if (!documentBase64) return res.status(400).json({ error: 'documentBase64 required' })
       const invalidEmbed = validateSigners(signers)
       if (invalidEmbed) return res.status(400).json({ error: invalidEmbed })
@@ -360,7 +366,7 @@ export default async function handler(req, res) {
       const orderedSigners = [...signers].sort((a, b) => Number(a.routingOrder || 1) - Number(b.routingOrder || 1))
       const hasOrder      = orderedSigners.some(s => Number(s.routingOrder || 1) !== 1)
       const pdfBuffer     = Buffer.from(documentBase64, 'base64')
-      const signerPayload = await buildSigners(orderedSigners, pdfBuffer)
+      const signerPayload = buildSignerPayload(orderedSigners)
       let onBehalfOf = null
       try { onBehalfOf = await resolveOnBehalfOf(getServiceClient(), actor.agent.id) } catch { /* default sender */ }
 
@@ -371,6 +377,10 @@ export default async function handler(req, res) {
       appendSigners(form, signerPayload)
       form.append('SendViewOption',     'PreparePage')
       form.append('ShowToolbar',        'true')
+      if (useTextTags) {
+        form.append('UseTextTags', 'true')
+        if (textTagDefinitions) form.append('TextTagDefinitions', JSON.stringify(textTagDefinitions))
+      }
       if (redirectUrl) form.append('RedirectUrl', redirectUrl)
       if (onBehalfOf)  form.append('OnBehalfOf', onBehalfOf)
       form.append('Files', new Blob([pdfBuffer], { type: 'application/pdf' }), documentName || 'document.pdf')
@@ -505,7 +515,7 @@ export default async function handler(req, res) {
     // template, or a PDF (documentBase64) to build a new one.
     if (body.action === 'template-editor-url') {
       if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
-      const { templateId, title, documentBase64, documentName, redirectUrl } = body
+      const { templateId, title, documentBase64, documentName, redirectUrl, useTextTags, textTagDefinitions } = body
       if (templateId) {
         const data = await boldsign(`/template/getEmbeddedTemplateEditUrl?templateId=${encodeURIComponent(templateId)}`, {
           method: 'POST', json: { RedirectUrl: redirectUrl || '', ShowToolbar: true, ViewOption: 'PreparePage' },
@@ -517,6 +527,13 @@ export default async function handler(req, res) {
       form.append('Title',       title || 'New Template')
       form.append('RedirectUrl', redirectUrl || '')
       form.append('ShowToolbar', 'true')
+      // Reproducible template prep: if the PDF has {{fieldType|signerIndex|...}}
+      // text tags baked in, BoldSign auto-places the fields on create — the
+      // embedded editor then opens for review/adjustment rather than blank prep.
+      if (useTextTags) {
+        form.append('UseTextTags', 'true')
+        if (textTagDefinitions) form.append('TextTagDefinitions', JSON.stringify(textTagDefinitions))
+      }
       form.append('Files', new Blob([Buffer.from(documentBase64, 'base64')], { type: 'application/pdf' }), documentName || 'template.pdf')
       const data = await boldsign('/template/createEmbeddedTemplateUrl', { method: 'POST', form })
       return res.json({ url: data.createUrl, templateId: data.templateId })

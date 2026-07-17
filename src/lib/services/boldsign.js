@@ -46,6 +46,19 @@ export const templateDetails       = (templateId) => call({ action: 'template-de
 export const sendFromTemplate      = (p) => call({ action: 'template-send', ...p })
 export const templateEmbedUrl      = (p) => call({ action: 'template-embed-url', ...p })
 
+// ── Text tags ─────────────────────────────────────────────────────────────────
+// BoldSign auto-places a field when it finds `{{fieldType|signerIndex|required|
+// label|fieldId}}` in the document text. Setting fieldId to a CRM token (see
+// crmTokenValues below) unifies template prep with prefill — the same string
+// both places the field and tells the CRM what to fill. See
+// docs/boldsign-integration.md and developers.boldsign.com/text-tags.
+export const TEXT_TAG_FIELD_TYPES = Object.freeze([
+  'Signature', 'Initial', 'DateSigned', 'Textbox', 'CheckBox', 'RadioButton', 'Dropdown', 'Label',
+])
+export function buildTextTag({ fieldType, signerIndex = 1, required = false, label = '', fieldId = '' }) {
+  return `{{${fieldType}|${signerIndex}|${required ? 'true' : 'false'}|${label}|${fieldId}}}`
+}
+
 // Field types whose value an agent can pre-fill from the CRM (vs signer actions
 // like Signature/Initial). Used to decide which template fields become inputs.
 export const FILLABLE_FIELD_TYPES = new Set(['textbox', 'text', 'label', 'dropdown', 'editabledate', 'company', 'name', 'title', 'email'])

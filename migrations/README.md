@@ -36,6 +36,8 @@ file is safe.
 | 0015 | `0015_transaction_layer.sql` | Transaction-management layer: `transaction_steps`, deal `review_status`, `closing_packets` + the `closing-packets` storage bucket | No (additive) | With the transaction-layer app deploy |
 | 0016 | `0016_signwell_to_boldsign.sql` | Renames `signwell_documents` → `boldsign_documents` (data preserved), renames its indexes/policy, and allows `document_versions.source = 'boldsign'` | No (rename + additive constraint) | With the BoldSign app deploy |
 | 0017 | `0017_boldsign_phase1.sql` | BoldSign Phase 1: adds `boldsign_sender_identities` (per-agent send-on-behalf) and `boldsign_templates` (reusable docs + prefill field tokens) | No (additive tables) | With the BoldSign templates deploy |
+| 0018 | `0018_boldsign_audit_trail.sql` | Adds `boldsign_documents.audit_trail_saved` — tracks whether the compliance audit trail PDF was archived on completion | No (additive column) | With the audit-trail deploy |
+| 0019 | `0019_form_library_boldsign_unification.sql` | Folds the `boldsign_templates` registry into Form Library: adds `boldsign_template_id` / `doc_type` / `field_tokens` / `active` to `form_packets`, and backfills existing registered templates. `boldsign_templates` is superseded, not dropped | Data migration (backfill) — see file for the null-state skip rule | With the Form Library unification deploy |
 
 > Note the numeric order vs. recommended run order: **0001 → 0003 → 0004 → 0005 → 0006 → 0007 → 0002 (Phase A) → 0008 → 0009 → 0010 → 0011 (Phase A, then Phase B after verification)**.
 > 0011's Phase B is the only step that changes what data the database returns,
