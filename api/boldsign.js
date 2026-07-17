@@ -649,14 +649,22 @@ export default async function handler(req, res) {
     // template, or a PDF (documentBase64) to build a new one.
     if (body.action === 'template-editor-url') {
       if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
-      const { templateId, title, documentTitle, documentBase64, documentName, redirectUrl, useTextTags, textTagDefinitions, roles } = body
+      const { templateId, title, documentTitle, documentBase64, documentName, documents, redirectUrl, useTextTags, textTagDefinitions, roles } = body
       if (templateId) {
         const data = await boldsign(`/template/getEmbeddedTemplateEditUrl?templateId=${encodeURIComponent(templateId)}`, {
           method: 'POST', json: { RedirectUrl: redirectUrl || '', ShowToolbar: true, ViewOption: 'PreparePage' },
         })
         return res.json({ url: data.editUrl || data.createUrl || data.url, templateId })
       }
-      if (!documentBase64) return res.status(400).json({ error: 'documentBase64 or templateId required' })
+
+      // A "package" template can hold several source PDFs (e.g. a listing
+      // agreement + disclosures). BoldSign combines every `Files` entry into the
+      // one template document, in order. Accept a `documents` array, falling
+      // back to the single documentBase64 for older callers.
+      const fileList = Array.isArray(documents) && documents.length
+        ? documents
+        : (documentBase64 ? [{ base64: documentBase64, name: documentName }] : [])
+      if (!fileList.length) return res.status(400).json({ error: 'documents (or documentBase64) or templateId required' })
 
       const roleList = normalizeTemplateRoles(roles)
       const templateTitle = (title || 'New Template').trim()
@@ -677,7 +685,12 @@ export default async function handler(req, res) {
         form.append('UseTextTags', 'true')
         if (textTagDefinitions) form.append('TextTagDefinitions', JSON.stringify(textTagDefinitions))
       }
-      form.append('Files', new Blob([Buffer.from(documentBase64, 'base64')], { type: 'application/pdf' }), documentName || 'template.pdf')
+      // One repeated `Files` field per source PDF — BoldSign merges them into the
+      // single template document in the order appended.
+      fileList.forEach((d, i) => {
+        if (!d?.base64) return
+        form.append('Files', new Blob([Buffer.from(d.base64, 'base64')], { type: 'application/pdf' }), d.name || `document-${i + 1}.pdf`)
+      })
       const data = await boldsign('/template/createEmbeddedTemplateUrl', { method: 'POST', form })
       return res.json({ url: data.createUrl, templateId: data.templateId, roles: roleList })
     }

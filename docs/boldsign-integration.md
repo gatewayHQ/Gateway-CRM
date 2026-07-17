@@ -135,6 +135,10 @@ Two bugs made this flow unusable/unreliable, both fixed in `src/pages/FormLibrar
 - **Alternative: visual editor.** Build/adjust via the embedded template editor (`template-editor-url`, opened from Form Library's "Build in BoldSign").
 - **Role convention:** Role 1 = Seller/Client, Role 2 = Listing Agent (same order across all state templates). Recipient name/email in the template are placeholders; the CRM overrides them per send and drops unused roles via `roleRemovalIndices`.
 
+**Package templates (multiple files in one template):**
+- A packet's PDF upload is **multi-file** — add a listing agreement + disclosures + addenda and "Build in BoldSign" sends every file as a repeated `Files` field to `createEmbeddedTemplateUrl`, which **combines them into one template document** (in the order shown). The admin then places fields across the whole combined document in the embedded editor. This is BoldSign's single-template-from-many-files behavior, not the separate mergeAndSend-at-send-time feature.
+- All source files are stored on the packet: `form_packets.storage_paths` (jsonb `[{ path, name }]`, migration 0022) holds the ordered list; `storage_path` stays the primary/first for back-compat. "Get Forms" downloads every file. `FormLibrary`'s save degrades gracefully (drops `storage_paths`) if 0022 hasn't been applied yet.
+
 **Catalog (in the CRM — Form Library):**
 - Register a template by pasting its BoldSign template id into a Form Library entry (Settings → BoldSign links here too), along with `state`, `doc_type`, and comma-separated `field_tokens`. The entry shows a **Sendable** badge and becomes selectable in a deal's "Send from Template" picker, filtered to the deal's state.
 - **Nightly drift sync** (`GET /api/cron?task=boldsign-sync`, 3am): calls `template-list` and reconciles the catalog —
