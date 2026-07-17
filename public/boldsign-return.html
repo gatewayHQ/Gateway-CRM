@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Saved — returning…</title></head>
+  <body style="font-family:system-ui,-apple-system,sans-serif;padding:28px;color:#555;font-size:14px">
+    Template saved. Returning to the Form Library…
+    <script>
+      // BoldSign redirects its embedded editor iframe here on finish. This page
+      // is same-origin with the CRM, so the parent <BoldSignFrame> can detect
+      // the return two ways: (a) reading this URL on the iframe's load event
+      // (it contains the "boldsign-return" marker), and (b) this postMessage.
+      // Either one triggers the packet save. Kept tiny so it loads instantly
+      // instead of re-rendering the whole CRM inside the popup.
+      try { window.parent && window.parent.postMessage({ status: 'gwTemplateEditorDone' }, window.location.origin) } catch (e) {}
+    </script>
+  </body>
+</html>
