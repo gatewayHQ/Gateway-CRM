@@ -1161,7 +1161,8 @@ create table if not exists form_packets (
   transaction_type     text not null check (transaction_type in ('buyer','seller','lease','general')),
   name                 text not null,
   description          text,
-  storage_path         text,
+  storage_path         text,             -- primary/first source file (back-compat)
+  storage_paths        jsonb default '[]', -- all source files in a package (listing agreement + disclosures, …)
   boldsign_template_id text,
   doc_type             text,
   field_tokens         jsonb default '[]',

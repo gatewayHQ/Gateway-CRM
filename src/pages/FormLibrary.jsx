@@ -36,7 +36,7 @@ function UploadModal({ packet, onClose, onSaved }) {
   }
   const [form, setForm]   = useState(packet ? { ...blank, ...packet, field_tokens: packet.field_tokens || [] } : blank)
   const [tokensText, setTokensText] = useState((packet?.field_tokens || []).join(', '))
-  const [file, setFile]   = useState(null)
+  const [files, setFiles] = useState([])   // newly selected package PDFs (a template can hold several)
   const [saving, setSaving] = useState(false)
   const [editorBusy, setEditorBusy] = useState(false)
   const [editorUrl, setEditorUrl] = useState(null)   // set while the embedded BoldSign editor is open in-modal
@@ -46,8 +46,14 @@ function UploadModal({ packet, onClose, onSaved }) {
   // client, role 2 = agent.
   const [roles, setRoles] = useState([{ name: 'Seller' }, { name: 'Listing Agent' }])
   const fileRef = useRef()
-  const tagFileRef = useRef()
   const savedFromEditorRef = useRef(false)   // guards against the editor firing "done" twice (message + redirect)
+
+  const addFiles   = (fileList) => setFiles(p => [...p, ...Array.from(fileList || [])])
+  const removeFile = (i) => setFiles(p => p.filter((_, j) => j !== i))
+  // Files already stored on an existing packet (multi-file, with single-file back-compat).
+  const existingFiles = (Array.isArray(packet?.storage_paths) && packet.storage_paths.length)
+    ? packet.storage_paths
+    : (packet?.storage_path ? [{ path: packet.storage_path, name: packet.storage_path.split('/').pop() }] : [])
 
   // BoldSign's embedded editor is told to return here when finished. It's a tiny
   // same-origin page (public/boldsign-return.html) so the iframe doesn't reload
@@ -64,11 +70,11 @@ function UploadModal({ packet, onClose, onSaved }) {
   // trustworthy postMessage event — see handleEditorDone. Rebuilding an existing
   // template reopens ITS edit URL (no new PDF); building fresh requires a PDF
   // and creates a brand-new BoldSign template.
-  const buildInBoldSign = async (fileForTemplate) => {
+  const buildInBoldSign = async () => {
     if (!form.state.trim()) { pushToast('State is required before building a template', 'error'); return }
     if (!form.name.trim())  { pushToast('Packet name is required before building a template', 'error'); return }
     const rebuilding = !!form.boldsign_template_id
-    if (!rebuilding && !fileForTemplate) { pushToast('Choose a PDF first', 'error'); return }
+    if (!rebuilding && !files.length) { pushToast('Add at least one PDF first', 'error'); return }
     savedFromEditorRef.current = false
     setEditorBusy(true)
     try {
@@ -78,12 +84,14 @@ function UploadModal({ packet, onClose, onSaved }) {
         setEditorUrl(url)
         return
       }
-      setFile(fileForTemplate)   // same PDF backs both the BoldSign template and the Form Library storage copy
-      const documentBase64 = await fileToBase64(fileForTemplate)
-      const templateTitle  = form.name.trim() || fileForTemplate.name.replace(/\.pdf$/i, '')
+      // Every selected PDF becomes part of the one template document, in order —
+      // BoldSign merges them (listing agreement + disclosures + addenda → one packet).
+      const templateTitle = form.name.trim() || files[0].name.replace(/\.pdf$/i, '')
+      const documents = []
+      for (const f of files) documents.push({ base64: await fileToBase64(f), name: f.name })
       const { url, templateId } = await templateEditorUrl({
         title: templateTitle, documentTitle: templateTitle,
-        documentBase64, documentName: fileForTemplate.name,
+        documents,
         redirectUrl: editorReturnUrl,
         useTextTags,
         roles: roles.map(r => r.name.trim()).filter(Boolean).map(name => ({ name })),
@@ -112,15 +120,21 @@ function UploadModal({ packet, onClose, onSaved }) {
   const save = async () => {
     if (!form.state.trim()) { pushToast('State is required', 'error'); return }
     if (!form.name.trim())  { pushToast('Packet name is required', 'error'); return }
-    if (isNew && !file)     { pushToast('Upload a PDF file', 'error'); return }
+    if (isNew && !files.length) { pushToast('Add at least one PDF file', 'error'); return }
     setSaving(true)
     try {
-      let storage_path = form.storage_path || null
-      if (file) {
-        const path = `${form.state.trim().toUpperCase()}/${form.transaction_type}/${Date.now()}-${file.name}`
-        const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, file, { upsert: true })
-        if (upErr) { pushToast(upErr.message, 'error'); setSaving(false); return }
-        storage_path = path
+      // Newly selected files replace the package; otherwise keep what's on file.
+      let storagePaths = existingFiles
+      if (files.length) {
+        const uploaded = []
+        for (let i = 0; i < files.length; i++) {
+          const f = files[i]
+          const path = `${form.state.trim().toUpperCase()}/${form.transaction_type}/${Date.now()}-${i}-${f.name}`
+          const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, f, { upsert: true })
+          if (upErr) { pushToast(upErr.message, 'error'); setSaving(false); return }
+          uploaded.push({ path, name: f.name })
+        }
+        storagePaths = uploaded
       }
       const field_tokens = tokensText.split(',').map(s => s.trim()).filter(Boolean)
       const payload = {
@@ -128,17 +142,21 @@ function UploadModal({ packet, onClose, onSaved }) {
         transaction_type: form.transaction_type,
         name: form.name.trim(),
         description: form.description || null,
-        storage_path,
+        storage_path:  storagePaths[0]?.path || null,   // primary/first (back-compat)
+        storage_paths: storagePaths,
         boldsign_template_id: form.boldsign_template_id.trim() || null,
         doc_type: form.doc_type.trim() || null,
         field_tokens,
         active: form.active,
       }
-      let error
-      if (packet?.id) {
-        ;({ error } = await supabase.from('form_packets').update(payload).eq('id', packet.id))
-      } else {
-        ;({ error } = await supabase.from('form_packets').insert([payload]))
+      const upsert = (p) => packet?.id
+        ? supabase.from('form_packets').update(p).eq('id', packet.id)
+        : supabase.from('form_packets').insert([p])
+      let { error } = await upsert(payload)
+      // Graceful fallback if migration 0022 (storage_paths) hasn't been applied yet.
+      if (error && (error.code === '42703' || /storage_paths/.test(error.message || ''))) {
+        const { storage_paths, ...legacy } = payload
+        ;({ error } = await upsert(legacy))
       }
       if (error) { pushToast(error.message, 'error'); return }
       pushToast(isNew ? 'Form packet added' : 'Packet updated')
@@ -191,19 +209,37 @@ function UploadModal({ packet, onClose, onSaved }) {
           <textarea className="form-control form-control--textarea" value={form.description || ''} onChange={e => set('description', e.target.value)} placeholder="List the forms included in this packet…" rows={3} />
         </div>
         <div className="form-group">
-          <label className="form-label">{packet?.storage_path ? 'Replace PDF (optional)' : 'Upload PDF'}</label>
-          <input ref={fileRef} type="file" accept=".pdf" style={{ display: 'none' }} onChange={e => setFile(e.target.files[0])} />
+          <label className="form-label">{existingFiles.length ? 'Replace PDFs (optional)' : 'Upload PDFs'}</label>
+          <input ref={fileRef} type="file" accept=".pdf" multiple style={{ display: 'none' }} onChange={e => { addFiles(e.target.files); e.target.value = '' }} />
           <div
             onClick={() => fileRef.current.click()}
-            style={{ border: '2px dashed var(--gw-border)', borderRadius: 'var(--radius)', padding: '16px', textAlign: 'center', cursor: 'pointer', background: file ? 'var(--gw-green-light)' : 'var(--gw-bone)' }}
+            style={{ border: '2px dashed var(--gw-border)', borderRadius: 'var(--radius)', padding: '16px', textAlign: 'center', cursor: 'pointer', background: files.length ? 'var(--gw-green-light)' : 'var(--gw-bone)' }}
           >
-            {file
-              ? <><Icon name="document" size={16} style={{ color: 'var(--gw-green)', verticalAlign: 'middle', marginRight: 6 }} />{file.name} <span style={{ color: 'var(--gw-mist)', fontSize: 11 }}>({formatBytes(file.size)})</span></>
-              : <span style={{ color: 'var(--gw-mist)', fontSize: 13 }}>{packet?.storage_path ? 'Click to replace PDF' : 'Click to choose PDF'}</span>
-            }
+            <span style={{ color: 'var(--gw-mist)', fontSize: 13 }}>
+              {files.length ? 'Add more PDFs…' : (existingFiles.length ? 'Click to replace with new PDFs' : 'Click to choose one or more PDFs')}
+            </span>
           </div>
-          {packet?.storage_path && !file && (
-            <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Current file on file — leave blank to keep it.</div>
+
+          {/* Newly selected files (in the order they'll appear in the template). */}
+          {files.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              {files.map((f, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', marginBottom: 4, background: '#fff' }}>
+                  <span style={{ width: 18, height: 18, borderRadius: '50%', background: 'var(--gw-azure)', color: '#fff', fontSize: 10, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{i + 1}</span>
+                  <Icon name="document" size={14} style={{ color: 'var(--gw-green)', flexShrink: 0 }} />
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
+                  <span style={{ color: 'var(--gw-mist)', fontSize: 11, flexShrink: 0 }}>{formatBytes(f.size)}</span>
+                  <button type="button" className="btn btn--ghost btn--sm btn--icon" onClick={() => removeFile(i)}><Icon name="x" size={11}/></button>
+                </div>
+              ))}
+              <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2 }}>Multiple PDFs are combined into one template, in this order.</div>
+            </div>
+          )}
+
+          {existingFiles.length > 0 && !files.length && (
+            <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>
+              {existingFiles.length} file{existingFiles.length > 1 ? 's' : ''} on file ({existingFiles.map(f => f.name).join(', ')}) — leave blank to keep, or select new ones to replace.
+            </div>
           )}
         </div>
 
@@ -214,6 +250,8 @@ function UploadModal({ packet, onClose, onSaved }) {
           </div>
           <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginBottom: 10 }}>
             Link this packet to a BoldSign template to make it sendable from a deal's Signatures tab.
+            Building uses the PDF(s) above — add several (e.g. a listing agreement + disclosures) and they're
+            combined into one signable template.
           </div>
 
           {!form.boldsign_template_id && (
@@ -236,12 +274,11 @@ function UploadModal({ packet, onClose, onSaved }) {
             <button
               type="button"
               className="btn btn--secondary btn--sm"
-              onClick={() => form.boldsign_template_id ? buildInBoldSign() : tagFileRef.current?.click()}
+              onClick={() => buildInBoldSign()}
               disabled={editorBusy}
             >
               <Icon name="upload" size={13}/> {editorBusy ? 'Opening…' : form.boldsign_template_id ? 'Rebuild in BoldSign' : 'Build in BoldSign'}
             </button>
-            <input ref={tagFileRef} type="file" accept=".pdf" style={{ display: 'none' }} onChange={e => buildInBoldSign(e.target.files[0])}/>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--gw-mist)', cursor: 'pointer' }}>
               <input type="checkbox" checked={useTextTags} onChange={e => setUseTextTags(e.target.checked)} style={{ width: 13, height: 13 }}/>
               PDF has text tags
@@ -332,12 +369,22 @@ export default function FormLibraryPage({ isAdmin }) {
   }
 
   const download = async (packet) => {
-    if (!packet.storage_path) { pushToast('No file uploaded for this packet', 'error'); return }
+    // A packet can hold several files (package templates). Prefer the full list,
+    // falling back to the single primary path.
+    const paths = (Array.isArray(packet.storage_paths) && packet.storage_paths.length)
+      ? packet.storage_paths.map(f => f.path).filter(Boolean)
+      : (packet.storage_path ? [packet.storage_path] : [])
+    if (!paths.length) { pushToast('No file uploaded for this packet', 'error'); return }
     setDownloading(p => ({ ...p, [packet.id]: true }))
-    const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(packet.storage_path, 300)
-    setDownloading(p => ({ ...p, [packet.id]: false }))
-    if (error) { pushToast(error.message, 'error'); return }
-    window.open(data.signedUrl, '_blank')
+    try {
+      for (const path of paths) {
+        const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(path, 300)
+        if (error) { pushToast(error.message, 'error'); continue }
+        window.open(data.signedUrl, '_blank')
+      }
+    } finally {
+      setDownloading(p => ({ ...p, [packet.id]: false }))
+    }
   }
 
   const filtered = packets.filter(p =>
@@ -438,19 +485,28 @@ create unique index if not exists uq_form_packets_boldsign_tid
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 2 }}>
                     {typeLabel}
+                    {(() => {
+                      const n = (Array.isArray(packet.storage_paths) && packet.storage_paths.length) || (packet.storage_path ? 1 : 0)
+                      return n > 1 ? <span> · {n} files</span> : null
+                    })()}
                     {packet.description && <span> · {packet.description}</span>}
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                  {(() => {
+                    const fileCount = (Array.isArray(packet.storage_paths) && packet.storage_paths.length) || (packet.storage_path ? 1 : 0)
+                    return (
                   <button
                     className="btn btn--primary btn--sm"
                     onClick={() => download(packet)}
-                    disabled={!packet.storage_path || downloading[packet.id]}
-                    title={packet.storage_path ? 'Download PDF packet' : 'No file uploaded yet'}
+                    disabled={!fileCount || downloading[packet.id]}
+                    title={fileCount ? (fileCount > 1 ? `Download ${fileCount} forms` : 'Download PDF packet') : 'No file uploaded yet'}
                   >
                     <Icon name="download" size={12} />
                     {downloading[packet.id] ? 'Opening…' : 'Get Forms'}
                   </button>
+                    )
+                  })()}
                   {isAdmin && (
                     <>
                       <button className="btn btn--secondary btn--sm btn--icon" title="Edit" onClick={() => setModal(packet)}>

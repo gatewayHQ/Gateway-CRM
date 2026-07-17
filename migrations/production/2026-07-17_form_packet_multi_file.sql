@@ -1,0 +1,12 @@
+-- ═════════════════════════════════════════════════════════════════════════════
+-- 0022 — Form packet multi-file (package templates)
+--
+-- A form packet / BoldSign template can now hold more than one source PDF
+-- (e.g. a listing agreement + disclosures + addenda combined into one template).
+-- `storage_path` stays the primary/first file for back-compat; `storage_paths`
+-- holds the full ordered list [{ path, name }].
+--
+-- Changes behavior? No — additive. Safe to run anytime; idempotent.
+-- Until it runs, packets simply keep behaving as single-file.
+-- ═════════════════════════════════════════════════════════════════════════════
+alter table form_packets add column if not exists storage_paths jsonb default '[]';
