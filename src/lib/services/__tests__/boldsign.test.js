@@ -79,7 +79,26 @@ describe('seedSignersFromDeal — auto-fill signer name/email from the deal', ()
     const roles = [{ index: 1, name: 'Seller 1' }, { index: 2, name: 'Seller 2' }]
     const out = seedSignersFromDeal({ roles, contact, activeAgent: agent })
     expect(out[1]).toEqual({ name: 'Jane Seller', email: 'jane@x.com' })
-    expect(out[2]).toEqual({ name: 'John Seller', email: '' })  // spouse email isn't stored
+    expect(out[2]).toEqual({ name: 'John Seller', email: '' })  // spouse_name fallback — no email stored
+  })
+
+  it('prefers real linked additional contacts (with their own email) over spouse_name', () => {
+    const roles = [{ index: 1, name: 'Buyer 1' }, { index: 2, name: 'Buyer 2' }]
+    const additionalContacts = [{ first_name: 'Sam', last_name: 'Cobuyer', email: 'sam@x.com' }]
+    const out = seedSignersFromDeal({ roles, contact, additionalContacts, activeAgent: agent })
+    expect(out[1]).toEqual({ name: 'Jane Seller', email: 'jane@x.com' })
+    expect(out[2]).toEqual({ name: 'Sam Cobuyer', email: 'sam@x.com' })  // linked contact wins, carries email
+  })
+
+  it('fills three client roles from primary + two linked contacts', () => {
+    const roles = [{ index: 1, name: 'Signer 1' }, { index: 2, name: 'Signer 2' }, { index: 3, name: 'Signer 3' }]
+    const additionalContacts = [
+      { first_name: 'Sam', last_name: 'Two', email: 'sam@x.com' },
+      { first_name: 'Pat', last_name: 'Three', email: 'pat@x.com' },
+    ]
+    const out = seedSignersFromDeal({ roles, contact, additionalContacts, activeAgent: agent })
+    expect(out[2]).toEqual({ name: 'Sam Two', email: 'sam@x.com' })
+    expect(out[3]).toEqual({ name: 'Pat Three', email: 'pat@x.com' })
   })
 
   it('falls back to the template placeholder when there is no deal contact', () => {

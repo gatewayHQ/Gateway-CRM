@@ -754,7 +754,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
       </div>
 
       <DealDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} deal={deal} initialTab={drawerTab}
-        agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} onSave={refreshDeal} />
+        agents={agents} contacts={contacts} properties={properties} dealContacts={db.dealContacts || []} activeAgent={activeAgent} onSave={refreshDeal} />
     </div>
   )
 }

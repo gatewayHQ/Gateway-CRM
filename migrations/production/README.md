@@ -42,6 +42,7 @@ applied to production and the findings, so the repo's history matches reality.
 | 2026-07-08 | `2026-07-08_boldsign_audit_trail.sql` | **APPLIED** — adds `boldsign_documents.audit_trail_saved`. |
 | 2026-07-16 | `2026-07-16_form_library_boldsign_unification.sql` | **PENDING** — apply with the text-tags/Form-Library-unification deploy. Adds `boldsign_template_id` / `doc_type` / `field_tokens` / `active` to `form_packets` and backfills existing rows from `boldsign_templates` (which is superseded, not dropped). Rows with a null `state` in the old registry are skipped — form_packets requires exactly one state, so add those manually per state in Form Library. Idempotent. |
 | 2026-07-17 | `2026-07-17_boldsign_identity_default.sql` | **PENDING** — apply with the sender-identity management deploy. Adds `boldsign_sender_identities.is_default` (org-wide OnBehalfOf fallback) with a partial unique index. Idempotent. |
+| 2026-07-17 | `2026-07-17_multi_contacts.sql` | **PENDING** — apply with the multi-contact deploy. Adds `deal_contacts` + `property_contacts` junction tables (additional contacts on a deal/property). ⚠ Production already has a legacy `deal_contacts` of unknown shape — `create table if not exists` won't alter it, so verify it has `(deal_id, contact_id)` + a unique constraint before/after applying (see the file header). Idempotent. |
 
 The bundle: creates `documents` (secure from day one), adds the missing
 `docusign_envelopes` columns, adds `activities.deal_id`, adds the deal value /
