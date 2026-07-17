@@ -12,7 +12,12 @@ const BIO_MAX = 600
 const autoInitials = (name) =>
   name.trim().split(/\s+/).map(w => w[0] || '').join('').toUpperCase().slice(0, 2)
 
-export default function AgentDrawer({ open, onClose, agent, onSave }) {
+export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = false, activeAgent }) {
+  // RBAC: privileged fields (role, admin flag, commission split) are editable
+  // only by an office admin. A regular agent editing their own profile sees just
+  // the personal fields; the server (api/portal profile-save) + DB RLS enforce
+  // the same rule even if the UI is bypassed.
+  const isSelf = !!agent?.id && agent.id === activeAgent?.id
   const [form,   setForm]   = useState(BLANK)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
@@ -81,39 +86,46 @@ export default function AgentDrawer({ open, onClose, agent, onSave }) {
     if (Object.keys(e).length) return
 
     setSaving(true)
+    // Send the full form; the server whitelists columns by role, so privileged
+    // fields sent by a non-admin are simply ignored (never trusted client-side).
     const payload = {
-      ...form,
-      initials: form.initials || autoInitials(form.name),
-      tagline: (form.tagline || '').trim() || null,
+      action:   'profile-save',
+      id:        agent?.id || undefined,
+      name:      form.name.trim(),
+      initials:  form.initials || autoInitials(form.name),
+      email:     form.email.trim(),
+      phone:     (form.phone || '').trim() || null,
+      photo_url: form.photo_url || null,
+      bio:       form.bio || null,
+      tagline:   (form.tagline || '').trim() || null,
+      color:     form.color,
       stats: (Array.isArray(form.stats) ? form.stats : [])
         .map(s => ({ label: (s.label || '').trim(), value: (s.value || '').trim() }))
         .filter(s => s.label || s.value),
-      default_split_pct: Number(form.default_split_pct) || 0,
+      // Privileged — only honored by the server when the caller is an admin.
+      role:               form.role,
+      is_admin:           !!form.is_admin,
+      default_split_pct:  Number(form.default_split_pct) || 0,
       no_brokerage_split: !!form.no_brokerage_split,
-      is_admin: !!form.is_admin,
     }
-    const doSave = (p) => agent?.id
-      ? supabase.from('agents').update(p).eq('id', agent.id)
-      : supabase.from('agents').insert([p])
 
-    let { error } = await doSave(payload)
-
-    // Graceful fallback if migration 0004/0005 columns haven't run yet: strip
-    // the newer fields and save the rest so the agent isn't blocked.
-    let droppedNew = false
-    if (error?.message?.includes('schema cache') || /column|default_split_pct|no_brokerage_split|is_admin|tagline|stats/i.test(error?.message || '')) {
-      const { phone, photo_url, bio, tagline, stats, default_split_pct, no_brokerage_split, is_admin, ...base } = payload
-      ;({ error } = await doSave(base))
-      if (!error) droppedNew = true
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      const res = await fetch('/api/portal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
+        body: JSON.stringify(payload),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || data.error) throw new Error(data.error || 'Could not save profile')
+      pushToast(agent?.id ? 'Profile updated' : 'Agent added')
+      onSave()
+      onClose()
+    } catch (err) {
+      pushToast(err.message || 'Could not save profile', 'error')
+    } finally {
+      setSaving(false)
     }
-    setSaving(false)
-
-    if (error) { pushToast(error.message, 'error'); return }
-    pushToast(droppedNew
-      ? 'Saved — run DB migrations 0004 & 0006 to store bio, photo, tagline & stats'
-      : (agent?.id ? 'Agent updated' : 'Agent added'))
-    onSave()
-    onClose()
   }
 
   const previewInitials = form.initials || autoInitials(form.name) || '?'
@@ -163,8 +175,9 @@ export default function AgentDrawer({ open, onClose, agent, onSave }) {
         </div>
         <div className="form-group">
           <label className="form-label">Role / Title</label>
-          <input className="form-control" value={form.role}
+          <input className="form-control" value={form.role} disabled={!isAdmin}
             onChange={e => set('role', e.target.value)} placeholder="Lead Agent, Buyer's Advisor…" />
+          {!isAdmin && <div className="form-hint">Only an admin can change your role/title.</div>}
         </div>
         <div className="form-row">
           <div className="form-group">
@@ -238,7 +251,8 @@ export default function AgentDrawer({ open, onClose, agent, onSave }) {
           </div>
         )}
 
-        {/* ── Commission & access ─────────────────────────────────────────── */}
+        {/* ── Commission & access (admin-only) ────────────────────────────── */}
+        {isAdmin && (
         <div style={{ borderTop: '1px solid var(--gw-border)', margin: '4px 0 16px', paddingTop: 16 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--gw-ink)', marginBottom: 12 }}>Commission & Access</div>
 
@@ -263,6 +277,7 @@ export default function AgentDrawer({ open, onClose, agent, onSave }) {
             <span><strong>Office admin</strong> — can view every agent's deals, documents, signatures & commissions</span>
           </label>
         </div>
+        )}
 
         <div className="form-group">
           <label className="form-label">Avatar Color</label>

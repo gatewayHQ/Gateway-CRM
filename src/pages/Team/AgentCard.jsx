@@ -1,8 +1,13 @@
 import React from 'react'
 import { Icon, Avatar } from '../../components/UI.jsx'
 
-export default function AgentCard({ agent, contacts, deals, tasks, activeAgent, onSwitchAgent, onEdit, onDelete }) {
+export default function AgentCard({ agent, contacts, deals, tasks, activeAgent, isAdmin, onSwitchAgent, onEdit, onDelete }) {
   const isActive      = agent.id === activeAgent?.id
+  // RBAC: a user may edit only their OWN profile; admins may edit anyone.
+  // Delete and "switch to" (view-as) are admin-only.
+  const isSelf   = agent.id === activeAgent?.id
+  const canEdit  = isAdmin || isSelf
+  const canSwitch = isAdmin
   const agentContacts = contacts.filter(c => c.assigned_agent_id === agent.id).length
   const agentDeals    = deals.filter(d => d.agent_id === agent.id && d.stage !== 'closed' && d.stage !== 'lost').length
   const agentTasks    = tasks.filter(t => t.agent_id === agent.id && !t.completed).length
@@ -27,13 +32,24 @@ export default function AgentCard({ agent, contacts, deals, tasks, activeAgent, 
         ))}
       </div>
       <div style={{ display: 'flex', gap: 6 }}>
-        {onSwitchAgent && !isActive && (
+        {canSwitch && onSwitchAgent && !isActive && (
           <button className="btn btn--ghost btn--sm" style={{ fontSize: 11 }} onClick={() => onSwitchAgent(agent.id)}>
             Switch to
           </button>
         )}
-        <button className="btn btn--ghost btn--icon" onClick={onEdit}><Icon name="edit" size={14} /></button>
-        <button className="btn btn--ghost btn--icon" onClick={onDelete}><Icon name="trash" size={14} /></button>
+        {canEdit && (
+          <button className="btn btn--ghost btn--icon" onClick={onEdit} title={isSelf ? 'Edit your profile' : 'Edit profile'}>
+            <Icon name="edit" size={14} />
+          </button>
+        )}
+        {isAdmin && !isSelf && (
+          <button className="btn btn--ghost btn--icon" onClick={onDelete} title="Remove agent">
+            <Icon name="trash" size={14} />
+          </button>
+        )}
+        {!canEdit && (
+          <span style={{ fontSize: 11, color: 'var(--gw-mist)', alignSelf: 'center' }}>View only</span>
+        )}
       </div>
     </div>
   )

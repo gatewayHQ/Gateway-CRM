@@ -280,10 +280,6 @@ alter table commissions enable row level security;
 
 -- Open access for all authenticated users on intentionally-shared tables
 do $$ begin
-  -- agents (roster is shared: pickers, avatars, landing pages)
-  if not exists (select 1 from pg_policies where tablename='agents' and policyname='allow_all') then
-    create policy "allow_all" on agents for all using (true) with check (true);
-  end if;
   -- properties (read anonymously by the public PropertyLanding page — scope
   -- only after that read moves behind a service-key API; see migrations/README)
   if not exists (select 1 from pg_policies where tablename='properties' and policyname='allow_all') then
@@ -294,6 +290,105 @@ do $$ begin
     create policy "allow_all" on templates for all using (true) with check (true);
   end if;
 end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- AGENTS — role-based access (RBAC). See migration 0023.
+--
+-- The roster stays READABLE by everyone (pickers, avatars, and the public
+-- landing/advisor pages read agents anonymously). WRITES are locked down:
+--   • a user may edit ONLY their own row (auth_id = auth.uid())
+--   • an office admin (app_is_admin()) may edit/insert/delete anyone
+--   • an unclaimed row (auth_id is null) may be claimed by the matching email
+--     — this is the onboarding "claim your seat" flow in App.jsx
+-- A BEFORE-UPDATE trigger additionally prevents a non-admin from escalating
+-- privilege: is_admin / role / commission fields revert to their old values
+-- unless the caller is an admin. Enforcement lives in the database, so it holds
+-- regardless of which client (or a hand-crafted API call) issues the write.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- Helper functions (also created in migration 0002; repeated idempotently here
+-- so a fresh install has them before the policies below reference them).
+create or replace function app_current_agent_id()
+returns uuid language sql stable security definer set search_path = public as $$
+  select id from agents where auth_id = auth.uid() limit 1;
+$$;
+create or replace function app_is_admin()
+returns boolean language sql stable security definer set search_path = public as $$
+  select coalesce(bool_or(is_admin or role ilike '%admin%'), false)
+  from agents where auth_id = auth.uid();
+$$;
+grant execute on function app_current_agent_id() to authenticated;
+grant execute on function app_is_admin()         to authenticated;
+
+do $$ begin
+  -- Drop the legacy wide-open policy if it exists (older installs).
+  drop policy if exists allow_all on agents;
+
+  -- READ: roster is public (anon + authenticated) for pickers and landing pages.
+  if not exists (select 1 from pg_policies where tablename='agents' and policyname='agents_public_read') then
+    create policy "agents_public_read" on agents for select using (true);
+  end if;
+
+  -- INSERT: onboarding creates your own row; admins can add teammates.
+  if not exists (select 1 from pg_policies where tablename='agents' and policyname='agents_insert_self_or_admin') then
+    create policy "agents_insert_self_or_admin" on agents for insert to authenticated
+      with check (app_is_admin() or auth_id = auth.uid());
+  end if;
+
+  -- UPDATE: your own row, an admin, or claiming an unclaimed row that matches
+  -- your verified email (onboarding). Column-level escalation is blocked by the
+  -- trigger below, not here.
+  if not exists (select 1 from pg_policies where tablename='agents' and policyname='agents_update_self_or_admin') then
+    create policy "agents_update_self_or_admin" on agents for update to authenticated
+      using (
+        app_is_admin()
+        or auth_id = auth.uid()
+        or (auth_id is null and lower(email) = lower(auth.jwt() ->> 'email'))
+      )
+      with check (
+        app_is_admin()
+        or auth_id = auth.uid()
+      );
+  end if;
+
+  -- DELETE: admins only. (The Team UI also hides the control for everyone else.)
+  if not exists (select 1 from pg_policies where tablename='agents' and policyname='agents_delete_admin') then
+    create policy "agents_delete_admin" on agents for delete to authenticated
+      using (app_is_admin());
+  end if;
+end $$;
+
+-- Privilege guard: a non-admin can never set/change role / is_admin / commission
+-- settings — on INSERT (self-onboarding) or UPDATE (editing own row) — so nobody
+-- can self-promote to admin. The service-key API (which does its own role checks)
+-- and existing admins are trusted and pass through untouched.
+create or replace function agents_guard_privileged()
+returns trigger language plpgsql as $$
+begin
+  -- Trusted callers: the service role (server API) and existing office admins.
+  if coalesce(auth.jwt() ->> 'role', '') = 'service_role' or app_is_admin() then
+    return new;
+  end if;
+  if tg_op = 'INSERT' then
+    -- A brand-new user claiming their seat cannot mint an admin/privileged row.
+    new.is_admin := false;
+    if new.role is not null and new.role ilike '%admin%' then new.role := 'Agent'; end if;
+    return new;
+  end if;
+  -- UPDATE by a non-admin (incl. their own row): privileged fields are frozen.
+  new.is_admin           := old.is_admin;
+  new.role               := old.role;
+  new.default_split_pct  := old.default_split_pct;
+  new.no_brokerage_split := old.no_brokerage_split;
+  new.cap_amount         := old.cap_amount;
+  new.cap_anniversary    := old.cap_anniversary;
+  return new;
+end $$;
+
+drop trigger if exists agents_guard_privileged_trg on agents;
+create trigger agents_guard_privileged_trg
+  before insert or update on agents
+  for each row execute function agents_guard_privileged();
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- TEAMS  (collaboration and split-commission team types)
@@ -734,9 +829,9 @@ create table if not exists mailings (
   mailing_type           text check (mailing_type in ('postcard','letter','flyer','door-hanger','other')) default 'postcard',
   status                 text check (status in ('draft','active','sent','archived')) default 'draft',
   qr_token               text not null unique,                -- short slug → /m/{token}
-  landing_type           text check (landing_type in ('property','valuation','custom','multifamily')) default 'property',
+  landing_type           text check (landing_type in ('property','valuation','custom','multifamily','mailing')) default 'property',
   landing_custom_url     text,                                -- only used when landing_type='custom'
-  landing_config         jsonb default '{}',                  -- collage/headline/highlights for custom + multifamily landings
+  landing_config         jsonb default '{}',                  -- collage/headline/highlights for custom + multifamily + mailing landings
   send_date              date,                                -- when the mailer was/will be dropped
   recipient_count        integer default 0,                   -- denormalized counter
   scan_count             integer default 0,                   -- denormalized counter
@@ -745,19 +840,19 @@ create table if not exists mailings (
   updated_at             timestamptz default now()
 );
 
--- Migration for existing installs: add landing_config + multifamily landing_type
+-- Migration for existing installs: add landing_config + multifamily/mailing landing_type
 alter table mailings add column if not exists landing_config jsonb default '{}';
 do $$ begin
   alter table mailings drop constraint if exists mailings_landing_type_check;
   alter table mailings add constraint mailings_landing_type_check
-    check (landing_type in ('property','valuation','custom','multifamily'));
+    check (landing_type in ('property','valuation','custom','multifamily','mailing'));
 exception when others then null; end $$;
 
--- Allow 'multifamily' as a valid lead source_landing for existing installs
+-- Allow 'multifamily' + 'mailing' as valid lead source_landing values for existing installs
 do $$ begin
   alter table mailing_leads drop constraint if exists mailing_leads_source_landing_check;
   alter table mailing_leads add constraint mailing_leads_source_landing_check
-    check (source_landing in ('property','valuation','custom','multifamily'));
+    check (source_landing in ('property','valuation','custom','multifamily','mailing'));
 exception when others then null; end $$;
 
 create index if not exists mailings_agent_id_idx     on mailings(agent_id);
@@ -843,7 +938,7 @@ create table if not exists mailing_leads (
   message           text,
   property_address  text,                      -- valuation requests only
   property_type     text,
-  source_landing    text check (source_landing in ('property','valuation','custom','multifamily')),
+  source_landing    text check (source_landing in ('property','valuation','custom','multifamily','mailing')),
   ip_hash           text,
   created_at        timestamptz default now()
 );
@@ -855,6 +950,51 @@ alter table mailing_leads enable row level security;
 do $$ begin
   if not exists (select 1 from pg_policies where tablename='mailing_leads' and policyname='allow_all') then
     create policy "allow_all" on mailing_leads for all using (true) with check (true);
+  end if;
+end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- MAILING SUBSCRIBERS — the durable, deduped list behind a landing_type='mailing'
+-- page. Distinct from mailing_leads (one-off property/valuation captures): this
+-- is an opt-in email list an agent grows and can manage (unsubscribe, export).
+--   • one row per (mailing, email) — the unique index prevents dupes
+--   • status tracks the opt-in lifecycle (subscribed → unsubscribed)
+--   • unsubscribe_token powers a one-click, no-login /u/{token} opt-out link
+-- Writes only ever happen via the service-key API (api/campaigns.js), which is
+-- why RLS can be locked down to authenticated reads.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists mailing_subscribers (
+  id                uuid primary key default uuid_generate_v4(),
+  mailing_id        uuid not null references mailings(id) on delete cascade,
+  contact_id        uuid references contacts(id) on delete set null,
+  email             text not null,
+  name              text,
+  phone             text,
+  status            text check (status in ('subscribed','unsubscribed')) default 'subscribed',
+  consent           boolean default true,          -- explicit opt-in captured at signup
+  source            text default 'landing',        -- landing | manual | import
+  ip_hash           text,                           -- privacy-preserving signup fingerprint
+  unsubscribe_token text not null unique default replace(uuid_generate_v4()::text, '-', ''),
+  subscribed_at     timestamptz default now(),
+  unsubscribed_at   timestamptz,
+  created_at        timestamptz default now()
+);
+
+-- One address can only be on a given list once. Emails are always stored
+-- lower-cased by the API, so a plain composite unique index both dedupes
+-- case-insensitively AND is a valid ON CONFLICT target for upserts.
+create unique index if not exists mailing_subscribers_unique
+  on mailing_subscribers(mailing_id, email);
+create index if not exists mailing_subscribers_mailing_idx on mailing_subscribers(mailing_id, status);
+create index if not exists mailing_subscribers_token_idx    on mailing_subscribers(unsubscribe_token);
+
+alter table mailing_subscribers enable row level security;
+do $$ begin
+  -- Reads are for signed-in agents (the Campaigns UI). Public signup/unsubscribe
+  -- go through the service-key API, which bypasses RLS — so no anon policy needed.
+  if not exists (select 1 from pg_policies where tablename='mailing_subscribers' and policyname='subscribers_authenticated_read') then
+    create policy "subscribers_authenticated_read" on mailing_subscribers
+      for select to authenticated using (true);
   end if;
 end $$;
 

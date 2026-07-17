@@ -5,7 +5,7 @@ import TeamModal  from './TeamModal.jsx'
 import AgentCard  from './AgentCard.jsx'
 import AgentDrawer from './AgentDrawer.jsx'
 
-export default function TeamPage({ db, setDb, activeAgent, onSwitchAgent }) {
+export default function TeamPage({ db, setDb, activeAgent, isAdmin, onSwitchAgent }) {
   const [agentDrawer, setAgentDrawer] = useState(false)
   const [editingAgent, setEditingAgent] = useState(null)
   const [confirmAgent, setConfirmAgent] = useState(null)
@@ -39,9 +39,18 @@ export default function TeamPage({ db, setDb, activeAgent, onSwitchAgent }) {
   }
 
   const deleteAgent = async (id) => {
-    await supabase.from('agents').delete().eq('id', id)
-    pushToast('Agent removed', 'info')
+    // Routed through the authenticated profile API, which enforces admin-only
+    // deletion server-side (RLS on `agents` enforces the same rule regardless).
+    const { data: { session } } = await supabase.auth.getSession()
+    const res = await fetch('/api/portal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
+      body: JSON.stringify({ action: 'profile-delete', id }),
+    })
+    const data = await res.json().catch(() => ({}))
     setConfirmAgent(null)
+    if (!res.ok || data.error) { pushToast(data.error || 'Could not remove agent', 'error'); return }
+    pushToast('Agent removed', 'info')
     reloadAgents()
   }
 
@@ -76,23 +85,29 @@ export default function TeamPage({ db, setDb, activeAgent, onSwitchAgent }) {
           <div className="page-sub">{agents.length} agent{agents.length !== 1 ? 's' : ''} · {teams.length} team{teams.length !== 1 ? 's' : ''}</div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn btn--secondary" onClick={() => { setEditingTeam(null); setTeamModal(true) }}>
-            <Icon name="plus" size={14} /> New Team
-          </button>
-          <button className="btn btn--primary" onClick={() => { setEditingAgent(null); setAgentDrawer(true) }}>
-            <Icon name="plus" size={14} /> Add Agent
-          </button>
+          {isAdmin && (
+            <button className="btn btn--secondary" onClick={() => { setEditingTeam(null); setTeamModal(true) }}>
+              <Icon name="plus" size={14} /> New Team
+            </button>
+          )}
+          {isAdmin && (
+            <button className="btn btn--primary" onClick={() => { setEditingAgent(null); setAgentDrawer(true) }}>
+              <Icon name="plus" size={14} /> Add Agent
+            </button>
+          )}
         </div>
       </div>
 
       {agents.length === 0 ? (
         <EmptyState icon="team" title="No agents yet"
-          message="Add your team members to assign contacts, deals, and tasks."
-          action={
+          message={isAdmin
+            ? "Add your team members to assign contacts, deals, and tasks."
+            : "No agents have been added yet. Ask an office admin to set up the roster."}
+          action={isAdmin && (
             <button className="btn btn--primary" onClick={() => { setEditingAgent(null); setAgentDrawer(true) }}>
               <Icon name="plus" size={14} /> Add Agent
             </button>
-          }
+          )}
         />
       ) : (
         <div>
@@ -127,7 +142,7 @@ export default function TeamPage({ db, setDb, activeAgent, onSwitchAgent }) {
                     {team.members.map(agent => (
                       <AgentCard key={agent.id}
                         agent={agent} contacts={contacts} deals={deals} tasks={tasks}
-                        activeAgent={activeAgent} onSwitchAgent={onSwitchAgent}
+                        activeAgent={activeAgent} isAdmin={isAdmin} onSwitchAgent={onSwitchAgent}
                         onEdit={() => { setEditingAgent(agent); setAgentDrawer(true) }}
                         onDelete={() => setConfirmAgent(agent.id)}
                       />
@@ -165,6 +180,7 @@ export default function TeamPage({ db, setDb, activeAgent, onSwitchAgent }) {
       <AgentDrawer
         open={agentDrawer} onClose={() => setAgentDrawer(false)}
         agent={editingAgent} onSave={reloadAgents}
+        isAdmin={isAdmin} activeAgent={activeAgent}
       />
       <TeamModal
         open={teamModal} onClose={() => setTeamModal(false)}

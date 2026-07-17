@@ -28,6 +28,14 @@ const STAGE_LABELS = {
 }
 
 export default async function handler(req, res) {
+  // Co-hosted authenticated endpoints (Vercel Hobby caps the repo at 12
+  // functions, so profile management lives here rather than in its own file).
+  // These are the SECURE profile routes: every write goes through requireAgent()
+  // and an explicit self-or-admin authorization check. See handleProfile below.
+  if (req.method === 'POST' && (req.body?.action || '').startsWith('profile-')) {
+    return handleProfile(req, res)
+  }
+
   if (req.method !== 'GET') {
     res.setHeader('Allow', 'GET')
     return res.status(405).json({ error: 'Method not allowed' })
@@ -214,7 +222,90 @@ async function handlePortalSignLink(req, res) {
 //                      fees, split_pct, gross, closed}] }
 // ─────────────────────────────────────────────────────────────────────────────
 import { agentSliceForDeal, capWindowStart } from '../src/lib/commission.js'
-import { requireAuthUser, getServiceClient, errorResponse } from './_lib/auth.js'
+import { requireAuthUser, requireAgent, getServiceClient, errorResponse } from './_lib/auth.js'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROFILE ROUTES — the secure replacement for editing agent profiles directly
+// from the browser. Every action authenticates the caller (requireAgent) and
+// enforces least-privilege authorization:
+//   • profile-save   : create (admin only) / update. A non-admin may update ONLY
+//                       their own row, and may NOT touch privileged columns
+//                       (role, is_admin, commission split/cap).
+//   • profile-delete : admin only.
+// This is defense-in-depth: the database RLS + trigger (migration 0023) enforce
+// the same rules even if a write bypasses this endpoint.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Fields any owner may edit on their own profile.
+const PROFILE_SELF_FIELDS = ['name', 'initials', 'email', 'phone', 'photo_url', 'bio', 'tagline', 'stats', 'color', 'specialty', 'nav_hidden']
+// Fields only an admin may set (role doubles as a legacy admin flag).
+const PROFILE_ADMIN_FIELDS = ['role', 'is_admin', 'default_split_pct', 'no_brokerage_split', 'cap_amount', 'cap_anniversary']
+
+async function handleProfile(req, res) {
+  let ctx
+  try {
+    ctx = await requireAgent(req)          // { user, agent, isAdmin }
+  } catch (e) { return errorResponse(res, e) }
+
+  const { agent: me, isAdmin } = ctx
+  const svc = getServiceClient()
+  const action = req.body?.action
+
+  try {
+    if (action === 'profile-save') {
+      const { id, ...fields } = req.body
+      const targetId = id || null
+      const isCreate = !targetId
+
+      // Creating a teammate is an admin-only action.
+      if (isCreate && !isAdmin) {
+        return res.status(403).json({ error: 'Only an admin can add new agents.' })
+      }
+
+      // Updating someone else's profile is admin-only; you may always edit yourself.
+      if (!isCreate && !isAdmin && targetId !== me.id) {
+        return res.status(403).json({ error: 'You can only edit your own profile.' })
+      }
+
+      // Whitelist columns by role — this is where privilege escalation is stopped.
+      const allowed = isAdmin
+        ? [...PROFILE_SELF_FIELDS, ...PROFILE_ADMIN_FIELDS]
+        : PROFILE_SELF_FIELDS
+      const payload = {}
+      for (const k of allowed) if (k in fields) payload[k] = fields[k]
+
+      if (isCreate) {
+        if (!payload.name || !payload.email) {
+          return res.status(400).json({ error: 'Name and email are required.' })
+        }
+        const { data, error } = await svc.from('agents').insert([payload]).select().single()
+        if (error) return res.status(400).json({ error: error.message })
+        return res.status(200).json({ agent: data })
+      }
+
+      if (Object.keys(payload).length === 0) {
+        return res.status(400).json({ error: 'No editable fields provided.' })
+      }
+      const { data, error } = await svc.from('agents').update(payload).eq('id', targetId).select().single()
+      if (error) return res.status(400).json({ error: error.message })
+      return res.status(200).json({ agent: data })
+    }
+
+    if (action === 'profile-delete') {
+      if (!isAdmin) return res.status(403).json({ error: 'Only an admin can remove agents.' })
+      const { id } = req.body
+      if (!id) return res.status(400).json({ error: 'id required' })
+      if (id === me.id) return res.status(400).json({ error: 'You cannot delete your own profile.' })
+      const { error } = await svc.from('agents').delete().eq('id', id)
+      if (error) return res.status(400).json({ error: error.message })
+      return res.status(200).json({ ok: true })
+    }
+
+    return res.status(400).json({ error: `Unknown profile action: ${action}` })
+  } catch (e) {
+    return errorResponse(res, e)
+  }
+}
 
 async function handleMyEarnings(req, res) {
   let user, svc

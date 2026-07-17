@@ -174,6 +174,8 @@ export default async function handler(req, res) {
         dest = `/lp/valuation/${m.id}`
       } else if (m.landing_type === 'multifamily') {
         dest = `/lp/multifamily/${m.id}`
+      } else if (m.landing_type === 'mailing') {
+        dest = `/lp/mailing/${m.id}`
       } else {
         dest = `/lp/property/${m.id}`
       }
@@ -229,7 +231,7 @@ export default async function handler(req, res) {
         .single()
       if (!m) return res.status(404).send('Mailing not found')
 
-      const type = lt === 'valuation' ? 'valuation' : lt === 'multifamily' ? 'multifamily' : 'property'
+      const type = ['valuation','multifamily','mailing'].includes(lt) ? lt : 'property'
       const dest = `/lp/${type}/${m.id}`
       const { title, description, image } = mailingOgFields(m)
       res.setHeader('Content-Type', 'text/html; charset=utf-8')
@@ -337,6 +339,24 @@ export default async function handler(req, res) {
         .order('created_at', { ascending: false })
       if (error) throw error
       return json(res, 200, { leads: data })
+    }
+
+    // ── List subscribers (mailing-list campaigns) ───────────────────────────
+    if (action === 'subscribers') {
+      const { mailing_id } = req.query
+      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      const { data, error } = await db()
+        .from('mailing_subscribers')
+        .select('*')
+        .eq('mailing_id', mailing_id)
+        .order('subscribed_at', { ascending: false })
+      if (error) throw error
+      const subs = data || []
+      return json(res, 200, {
+        subscribers: subs,
+        active: subs.filter(s => s.status === 'subscribed').length,
+        unsubscribed: subs.filter(s => s.status === 'unsubscribed').length,
+      })
     }
 
     // ── Per-mailing analytics rollup ────────────────────────────────────────
@@ -611,6 +631,109 @@ export default async function handler(req, res) {
       }).eq('id', mailing_id)
 
       return json(res, 200, { ok: true, lead_id: lead.id })
+    }
+
+    // ── Public: subscribe to a mailing-list landing page ─────────────────────
+    // Adds (or reactivates) an opt-in subscriber on the mailing's list. Email is
+    // lower-cased and deduped by the (mailing_id, email) unique index so
+    // re-submits never create a second row. Also best-effort upserts a CRM
+    // contact tagged as a newsletter subscriber.
+    if (action === 'capture_subscriber') {
+      const { mailing_id, email, name, phone, consent } = req.body
+      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      const cleanEmail = (email || '').trim().toLowerCase()
+      // Basic shape check — the real gate is the DB, but fail fast on junk.
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(cleanEmail)) {
+        return json(res, 400, { error: 'A valid email address is required' })
+      }
+
+      const ipHash = hashIp(clientIp(req))
+      const cleanName  = (name  || '').trim() || null
+      const cleanPhone = (phone || '').trim() || null
+
+      // Upsert on the unique (mailing_id, email) index. On conflict we
+      // re-subscribe (in case they'd unsubscribed) and refresh name/phone.
+      const { data: sub, error: subErr } = await db()
+        .from('mailing_subscribers')
+        .upsert({
+          mailing_id,
+          email:           cleanEmail,
+          name:            cleanName,
+          phone:           cleanPhone,
+          status:          'subscribed',
+          consent:         consent !== false,
+          source:          'landing',
+          ip_hash:         ipHash,
+          subscribed_at:   new Date().toISOString(),
+          unsubscribed_at: null,
+        }, { onConflict: 'mailing_id,email', ignoreDuplicates: false })
+        .select()
+        .single()
+
+      // If the upsert can't run (e.g. the unique index isn't present yet on an
+      // older DB), fall back to find-then-update, and insert when brand new — so
+      // a subscriber is never lost.
+      let subscriber = sub
+      if (subErr) {
+        const { data: existing } = await db()
+          .from('mailing_subscribers')
+          .select('id').eq('mailing_id', mailing_id).ilike('email', cleanEmail).limit(1)
+        if (existing?.length) {
+          const { data: upd } = await db().from('mailing_subscribers')
+            .update({ status: 'subscribed', name: cleanName, phone: cleanPhone, unsubscribed_at: null })
+            .eq('id', existing[0].id).select().single()
+          subscriber = upd
+        } else {
+          const { data: ins, error: insErr } = await db().from('mailing_subscribers').insert([{
+            mailing_id, email: cleanEmail, name: cleanName, phone: cleanPhone,
+            status: 'subscribed', consent: consent !== false, source: 'landing', ip_hash: ipHash,
+          }]).select().single()
+          if (insErr) throw insErr
+          subscriber = ins
+        }
+      }
+
+      // Best-effort: mirror into contacts as a newsletter subscriber. Never fail
+      // the subscribe if this errors.
+      try {
+        const parts = (cleanName || '').split(/\s+/)
+        const first = parts[0] || '—'
+        const last  = parts.slice(1).join(' ') || '—'
+        const { data: existing } = await db()
+          .from('contacts').select('id, tags').eq('email', cleanEmail).limit(1)
+        if (existing?.length) {
+          const tags = Array.isArray(existing[0].tags) ? existing[0].tags : []
+          if (!tags.includes('newsletter')) {
+            await db().from('contacts').update({ tags: [...tags, 'newsletter'] }).eq('id', existing[0].id)
+          }
+          if (subscriber) await db().from('mailing_subscribers').update({ contact_id: existing[0].id }).eq('id', subscriber.id)
+        } else {
+          const { data: created } = await db().from('contacts').insert([{
+            first_name: first, last_name: last,
+            email: cleanEmail, phone: cleanPhone,
+            source: 'mailing-landing', type: 'buyer', status: 'lead',
+            tags: ['newsletter'],
+          }]).select('id').single()
+          if (created && subscriber) await db().from('mailing_subscribers').update({ contact_id: created.id }).eq('id', subscriber.id)
+        }
+      } catch { /* swallow — subscriber is already saved */ }
+
+      return json(res, 200, { ok: true, subscriber_id: subscriber?.id || null })
+    }
+
+    // ── Public: one-click unsubscribe (no login) ─────────────────────────────
+    if (action === 'unsubscribe') {
+      const token = (req.body?.token || req.query?.token || '').trim()
+      if (!token) return json(res, 400, { error: 'token required' })
+      const { data, error } = await db()
+        .from('mailing_subscribers')
+        .update({ status: 'unsubscribed', unsubscribed_at: new Date().toISOString() })
+        .eq('unsubscribe_token', token)
+        .select('id, email')
+        .maybeSingle()
+      if (error) throw error
+      if (!data) return json(res, 404, { error: 'This unsubscribe link is no longer valid.' })
+      return json(res, 200, { ok: true, email: data.email })
     }
 
     // ── Deal Machine neighbor lookup ────────────────────────────────────────
