@@ -12,6 +12,7 @@ import { OPERATING_STATES } from '../lib/constants.js'
 import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
   'Title Search Ordered',
@@ -1308,7 +1309,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   )
 }
 
-function SignaturesTab({ deal, contacts, properties, activeAgent }) {
+function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeAgent }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
@@ -1585,7 +1586,7 @@ create policy "agent_notifications_policy" on agent_notifications
 
       {tplOpen && (
         <SendFromTemplateModal
-          deal={deal} contacts={contacts} properties={properties} templates={templates} activeAgent={activeAgent}
+          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} templates={templates} activeAgent={activeAgent}
           onClose={() => setTplOpen(false)}
           onSent={() => { setTplOpen(false); loadEnvelopes() }}
         />
@@ -1599,7 +1600,7 @@ create policy "agent_notifications_policy" on agent_notifications
 //    editable (CRM-prefilled) input per field, then sends via /api/boldsign.
 const prettyLabel = (id) => String(id || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 
-function SendFromTemplateModal({ deal, contacts, properties, templates, activeAgent, onClose, onSent }) {
+function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], templates, activeAgent, onClose, onSent }) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
 
@@ -1636,7 +1637,7 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
         // Seed signer name/email from the deal's linked contact (+ spouse for a
         // second client role) and the acting agent. See seedSignersFromDeal.
         const tokenVals = crmTokenValues({ deal, property, contact, agent: activeAgent })
-        setSigners(seedSignersFromDeal({ roles, contact, activeAgent }))
+        setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent }))
 
         const seededValues = {}
         for (const f of fields) seededValues[f.id] = tokenVals[f.id] || ''
@@ -1879,18 +1880,41 @@ function PortalTab({ deal }) {
   )
 }
 
-export function DealDrawer({ open, onClose, deal, agents, contacts, properties, activeAgent, onSave, initialTab = 'details' }) {
+// Reconcile a deal's additional-contact link rows (deal_contacts) to match the
+// chosen id list — inserts new links, deletes removed ones. Best-effort.
+async function syncDealContacts(dealId, contactIds) {
+  try {
+    const { data: existing } = await supabase.from('deal_contacts').select('contact_id').eq('deal_id', dealId)
+    const have = new Set((existing || []).map(r => r.contact_id))
+    const want = new Set(contactIds)
+    const toAdd    = contactIds.filter(id => !have.has(id))
+    const toRemove = [...have].filter(id => !want.has(id))
+    if (toAdd.length)    await supabase.from('deal_contacts').insert(toAdd.map(contact_id => ({ deal_id: dealId, contact_id })))
+    if (toRemove.length) await supabase.from('deal_contacts').delete().eq('deal_id', dealId).in('contact_id', toRemove)
+  } catch (e) { console.error('[syncDealContacts]', e) }
+}
+
+export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, onSave, initialTab = 'details' }) {
   const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
   const [tab, setTab]       = useState(initialTab)
+  // Additional contacts (husband & wife, co-buyers) — the primary stays contact_id.
+  const [additionalContactIds, setAdditionalContactIds] = useState([])
 
   React.useEffect(() => {
     setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {} } : blank)
     setErrors({})
     setTab(deal?.id ? initialTab : 'details')
-  }, [deal, open, initialTab])
+    setAdditionalContactIds(
+      deal?.id ? (dealContacts || []).filter(dc => dc.deal_id === deal.id).map(dc => dc.contact_id) : []
+    )
+  }, [deal, open, initialTab, dealContacts])
+
+  // Resolved additional-contact objects — used for the "Send from Template"
+  // signer prefill on the Signatures tab (co-signers get their own rows).
+  const extraContacts = additionalContactIds.map(id => contacts.find(c => c.id === id)).filter(Boolean)
 
   const set  = (k, v) => setForm(p => ({...p, [k]: v}))
   const setCD = (k, v) => setForm(p => ({...p, comp_data: {...(p.comp_data||{}), [k]: v}}))
@@ -1929,13 +1953,19 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         prop_subtype:        form.prop_subtype  || null,
         comp_data:           form.comp_data     || null,
       }
-      let error
+      let error, savedId = deal?.id
       if (deal?.id) {
         ;({ error } = await supabase.from('deals').update(payload).eq('id', deal.id))
       } else {
-        ;({ error } = await supabase.from('deals').insert([payload]))
+        let data
+        ;({ data, error } = await supabase.from('deals').insert([payload]).select('id').single())
+        savedId = data?.id
       }
       if (error) { pushToast(error.message, 'error'); return }
+
+      // Sync additional contacts (best-effort — the deal itself is already saved).
+      if (savedId) await syncDealContacts(savedId, additionalContactIds)
+
       pushToast(deal?.id ? 'Deal updated' : 'Deal added')
       await onSave()
       onClose()
@@ -2023,6 +2053,11 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
             </div>
             <div className="form-group"><label className="form-label">Expected Close Date</label><input className="form-control" type="date" value={form.expected_close_date||''} onChange={e=>set('expected_close_date',e.target.value)} /></div>
             <div className="form-group"><label className="form-label">Contact</label><SearchDropdown items={contacts} value={form.contact_id} onSelect={v=>set('contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
+            <div className="form-group">
+              <label className="form-label">Additional Contacts</label>
+              <ContactMultiSelect contacts={contacts} selectedIds={additionalContactIds} onChange={setAdditionalContactIds} excludeId={form.contact_id} placeholder="Add co-buyer, spouse, co-owner…" />
+              <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Husband &amp; wife, co-buyers, co-owners — these also pre-fill as signers when you Send from Template.</div>
+            </div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
             <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
 
@@ -2152,7 +2187,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
-        <SignaturesTab deal={deal} contacts={contacts} properties={properties} activeAgent={activeAgent} />
+        <SignaturesTab deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} activeAgent={activeAgent} />
       )}
 
       {/* Client Portal tab */}
@@ -2279,11 +2314,12 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const [dragOverStatus, setDragOverStatus] = useState(null)
   const [agentFilter, setAgentFilter] = useState('all')
 
-  const deals      = db.deals      || []
-  const agents     = db.agents     || []
-  const contacts   = db.contacts   || []
-  const properties = db.properties || []
-  const tasks      = db.tasks      || []
+  const deals        = db.deals        || []
+  const agents       = db.agents       || []
+  const contacts     = db.contacts     || []
+  const properties   = db.properties   || []
+  const tasks        = db.tasks        || []
+  const dealContacts = db.dealContacts || []   // additional-contact link rows (migration 0021)
 
   // O(1) lookups — built once per data change, not per-card in render loop
   const contactMap  = useMemo(() => Object.fromEntries(contacts.map(c => [c.id, c])),   [contacts])
@@ -2800,7 +2836,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
       <DealDrawer open={drawer} onClose={() => setDrawer(false)}
         deal={editing ? editing : { stage: defaultStage }}
-        agents={agents} contacts={contacts} properties={properties} activeAgent={activeAgent} onSave={reload} />
+        agents={agents} contacts={contacts} properties={properties} dealContacts={dealContacts} activeAgent={activeAgent} onSave={reload} />
       {confirm && <ConfirmDialog message="This will permanently delete this deal." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {confirmProp && <ConfirmDialog message="Remove this listing from the pipeline? Any linked deals are kept but will be unlinked from the property." onConfirm={() => delProperty(confirmProp)} onCancel={() => setConfirmProp(null)} />}
     </div>

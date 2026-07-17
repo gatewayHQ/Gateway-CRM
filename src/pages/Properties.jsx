@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { formatCurrency } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
 import { findMatchingBuyers } from '../lib/matching.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
@@ -801,7 +802,28 @@ function CompsTab({ property, onUpdateComps }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent, onSave, go, setDb }) {
+// Seed a freshly-created deal's additional contacts from a property's list.
+async function syncDealContactsFromProperty(dealId, contactIds) {
+  try {
+    await supabase.from('deal_contacts').insert(contactIds.map(contact_id => ({ deal_id: dealId, contact_id })))
+  } catch (e) { console.error('[syncDealContactsFromProperty]', e) }
+}
+
+// Reconcile a property's additional-contact link rows (property_contacts) to
+// match the chosen id list — inserts new links, deletes removed ones. Best-effort.
+async function syncPropertyContacts(propertyId, contactIds) {
+  try {
+    const { data: existing } = await supabase.from('property_contacts').select('contact_id').eq('property_id', propertyId)
+    const have = new Set((existing || []).map(r => r.contact_id))
+    const want = new Set(contactIds)
+    const toAdd    = contactIds.filter(id => !have.has(id))
+    const toRemove = [...have].filter(id => !want.has(id))
+    if (toAdd.length)    await supabase.from('property_contacts').insert(toAdd.map(contact_id => ({ property_id: propertyId, contact_id })))
+    if (toRemove.length) await supabase.from('property_contacts').delete().eq('property_id', propertyId).in('contact_id', toRemove)
+  } catch (e) { console.error('[syncPropertyContacts]', e) }
+}
+
+function PropertyDrawer({ open, onClose, property, agents, contacts, propertyContacts = [], activeAgent, onSave, go, setDb }) {
   const blank = { address:'', city:'', state:'', zip:'', county:'', submarket:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{}, listing_expiry_date:'', price_history:[], comps:[] }
   const [form, setForm]             = useState(property || blank)
   const [errors, setErrors]         = useState({})
@@ -809,6 +831,8 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
   const [startingDeal, setStartingDeal] = useState(false)
   const [tab, setTab]               = useState('details')
   const [tempId] = useState(() => property?.id || crypto.randomUUID())
+  // Additional contacts (co-owners, husband & wife) — primary stays linked_contact_id.
+  const [additionalContactIds, setAdditionalContactIds] = useState([])
 
   React.useEffect(() => {
     setForm(property
@@ -816,7 +840,10 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
       : { ...blank, assigned_agent_id: activeAgent?.id || '' })
     setErrors({})
     setTab('details')
-  }, [property, open, activeAgent?.id])
+    setAdditionalContactIds(
+      property?.id ? (propertyContacts || []).filter(pc => pc.property_id === property.id).map(pc => pc.contact_id) : []
+    )
+  }, [property, open, activeAgent?.id, propertyContacts])
 
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
 
@@ -845,6 +872,8 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
     const { data, error } = await supabase.from('deals').insert([dealPayload]).select().single()
     setStartingDeal(false)
     if (error) { pushToast(error.message, 'error'); return }
+    // Carry the property's additional contacts onto the new deal.
+    if (data?.id && additionalContactIds.length) await syncDealContactsFromProperty(data.id, additionalContactIds)
     if (setDb) setDb(p => ({ ...p, deals: [data, ...(p.deals || [])] }))
     pushToast('Deal created — opening Pipeline')
     onClose()
@@ -896,6 +925,9 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
 
     // Geocode on save if address changed or not yet geocoded
     const savedId = data?.id || resolvedId
+
+    // Sync additional contacts (best-effort — property is already saved).
+    if (savedId) await syncPropertyContacts(savedId, additionalContactIds)
     const addressChanged = !property?.id || form.address !== property?.address || form.city !== property?.city
     if (savedId && addressChanged && (!form.lat || !form.lng)) {
       const fullAddr = [form.address, form.city, form.state, form.zip].filter(Boolean).join(', ')
@@ -1045,6 +1077,11 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, activeAgent
 
         {/* Always-present fields */}
         <div className="form-group"><label className="form-label">Linked Contact</label><SearchDropdown items={contacts} value={form.linked_contact_id} onSelect={v=>set('linked_contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
+        <div className="form-group">
+          <label className="form-label">Additional Contacts</label>
+          <ContactMultiSelect contacts={contacts} selectedIds={additionalContactIds} onChange={setAdditionalContactIds} excludeId={form.linked_contact_id} placeholder="Add co-owner, spouse…" />
+          <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Co-owners, husband &amp; wife — carried onto a new deal when you Start a Deal from this property.</div>
+        </div>
         <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.assigned_agent_id||''} onChange={e=>set('assigned_agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
         {/* Co-Agents */}
         {agents.filter(a => a.id !== form.assigned_agent_id).length > 0 && (
@@ -1406,9 +1443,10 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
   const [confirm, setConfirm]         = useState(null)
   const [radiusProp, setRadiusProp]   = useState(null)
 
-  const properties = db.properties || []
-  const agents     = db.agents     || []
-  const contacts   = db.contacts   || []
+  const properties     = db.properties     || []
+  const agents         = db.agents         || []
+  const contacts       = db.contacts       || []
+  const propertyContacts = db.propertyContacts || []   // additional-contact links (migration 0021)
 
   const counties = [...new Set(properties.map(p => p.county).filter(Boolean))].sort()
 
@@ -1567,7 +1605,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
         </div>
       )}
 
-      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} activeAgent={activeAgent} onSave={handleSave} go={go} setDb={setDb} />
+      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} propertyContacts={propertyContacts} activeAgent={activeAgent} onSave={handleSave} go={go} setDb={setDb} />
       {confirm && <ConfirmDialog message="This will permanently delete this property." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {radiusProp && (
         <RadiusMailingModal

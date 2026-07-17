@@ -127,11 +127,19 @@ const CLIENT_ROLE_RE = /(seller|buyer|client|owner|purchaser|grantor|grantee|lan
 // Returns { [roleIndex]: { name, email } }. Pure — the agent can still edit any
 // field before sending. Requires the deal to have a linked contact; with none,
 // client roles fall back to the template placeholder (usually blank).
-export function seedSignersFromDeal({ roles = [], contact = null, activeAgent = null } = {}) {
-  const contactName = contact ? `${contact.first_name || ''} ${contact.last_name || ''}`.trim() : ''
+export function seedSignersFromDeal({ roles = [], contact = null, additionalContacts = [], activeAgent = null } = {}) {
+  const toPerson = c => ({ name: `${c?.first_name || ''} ${c?.last_name || ''}`.trim(), email: c?.email || '' })
   const people = []
-  if (contactName || contact?.email) people.push({ name: contactName, email: contact?.email || '' })
-  if (contact?.spouse_name)          people.push({ name: contact.spouse_name, email: '' }) // spouse email isn't stored
+  if (contact && (contact.first_name || contact.last_name || contact.email)) people.push(toPerson(contact))
+  // Real linked additional contacts (co-buyers / spouses) come next, in order —
+  // these carry their own email, unlike the stored spouse_name below.
+  for (const c of (additionalContacts || [])) {
+    const p = toPerson(c)
+    if (p.name || p.email) people.push(p)
+  }
+  // Fall back to the primary contact's stored spouse name (no email on file)
+  // only when no real additional contacts are linked to the deal.
+  if (!(additionalContacts || []).length && contact?.spouse_name) people.push({ name: contact.spouse_name, email: '' })
   const out = {}
   let usedAgent = false, personIdx = 0
   for (const r of roles) {
