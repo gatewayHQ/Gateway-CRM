@@ -9,7 +9,7 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
@@ -1633,21 +1633,10 @@ function SendFromTemplateModal({ deal, contacts, properties, templates, activeAg
         const fields = (det.fields || []).filter(f => isFillableField(f.type))
         setDetails({ roles, fields })
 
-        // Seed signers: match role name to the deal's people (first match wins).
+        // Seed signer name/email from the deal's linked contact (+ spouse for a
+        // second client role) and the acting agent. See seedSignersFromDeal.
         const tokenVals = crmTokenValues({ deal, property, contact, agent: activeAgent })
-        const seededSigners = {}
-        let usedContact = false, usedAgent = false
-        for (const r of roles) {
-          const n = String(r.name).toLowerCase()
-          if (!usedAgent && /agent/.test(n) && activeAgent?.email) {
-            seededSigners[r.index] = { name: activeAgent.name || '', email: activeAgent.email || '' }; usedAgent = true
-          } else if (!usedContact && /(seller|buyer|client|owner)/.test(n) && contact) {
-            seededSigners[r.index] = { name: `${contact.first_name || ''} ${contact.last_name || ''}`.trim(), email: contact.email || '' }; usedContact = true
-          } else {
-            seededSigners[r.index] = { name: r.defaultName || '', email: r.defaultEmail || '' }
-          }
-        }
-        setSigners(seededSigners)
+        setSigners(seedSignersFromDeal({ roles, contact, activeAgent }))
 
         const seededValues = {}
         for (const f of fields) seededValues[f.id] = tokenVals[f.id] || ''

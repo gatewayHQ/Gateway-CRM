@@ -142,6 +142,14 @@ Two bugs made this flow unusable/unreliable, both fixed in `src/pages/FormLibrar
   - **draft-registers** (inactive) any BoldSign template not yet in the catalog, but *only* when its title confidently maps to one of `OPERATING_STATES` (`detectStateFromTitle()`) — ambiguous titles are reported in the job's response, never guessed, since `state` is compliance-relevant;
   - never overwrites an admin-set name/state/tokens on an existing entry, and never auto-activates a draft — an admin reviews and flips `active` in Form Library.
 
+## Signer auto-fill (Send from Template)
+When an agent picks a template on a deal's Signatures tab, the signer name/email rows are pre-filled by `seedSignersFromDeal()` (`src/lib/services/boldsign.js`, unit-tested):
+- A role whose name mentions **agent** → the acting agent.
+- **Client-type roles** (seller/buyer/client/owner/purchaser/grantor/grantee/landlord/tenant/lessor/lessee/borrower/customer/signer) → the deal's **linked contact**, and the contact's **spouse** for a *second* client role (co-buyers / husband & wife).
+- Any other role (e.g. Witness) keeps the template's placeholder.
+
+The agent can edit every field before sending. **Prerequisite:** the deal must have a linked Contact (`deals.contact_id`) with an email — if a deal has no contact, client rows fall back to the template placeholder (usually blank). Spouse email isn't stored, so a second signer seeds with a name only.
+
 ## CRM prefill tokens
 `property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `broker_name` · `agent_name` · `agent_email` · `list_price` · `commission_pct` · `listing_start_date` · `listing_end_date` · `close_date`
 
