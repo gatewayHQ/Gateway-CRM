@@ -47,6 +47,12 @@ function UploadModal({ packet, onClose, onSaved }) {
   const [roles, setRoles] = useState([{ name: 'Seller' }, { name: 'Listing Agent' }])
   const fileRef = useRef()
   const tagFileRef = useRef()
+  const savedFromEditorRef = useRef(false)   // guards against the editor firing "done" twice (message + redirect)
+
+  // BoldSign's embedded editor is told to return here when finished. It's a tiny
+  // same-origin page (public/boldsign-return.html) so the iframe doesn't reload
+  // the whole CRM inside the popup, and BoldSignFrame can detect the return.
+  const editorReturnUrl = `${window.location.origin}/boldsign-return.html`
 
   const setRoleName = (i, name) => setRoles(p => p.map((r, j) => j === i ? { name } : r))
   const addRole      = () => setRoles(p => [...p, { name: `Signer ${p.length + 1}` }])
@@ -63,10 +69,11 @@ function UploadModal({ packet, onClose, onSaved }) {
     if (!form.name.trim())  { pushToast('Packet name is required before building a template', 'error'); return }
     const rebuilding = !!form.boldsign_template_id
     if (!rebuilding && !fileForTemplate) { pushToast('Choose a PDF first', 'error'); return }
+    savedFromEditorRef.current = false
     setEditorBusy(true)
     try {
       if (rebuilding) {
-        const { url } = await templateEditorUrl({ templateId: form.boldsign_template_id, redirectUrl: window.location.href })
+        const { url } = await templateEditorUrl({ templateId: form.boldsign_template_id, redirectUrl: editorReturnUrl })
         if (!url) { pushToast('BoldSign did not return an editor URL', 'error'); return }
         setEditorUrl(url)
         return
@@ -77,7 +84,7 @@ function UploadModal({ packet, onClose, onSaved }) {
       const { url, templateId } = await templateEditorUrl({
         title: templateTitle, documentTitle: templateTitle,
         documentBase64, documentName: fileForTemplate.name,
-        redirectUrl: window.location.href,
+        redirectUrl: editorReturnUrl,
         useTextTags,
         roles: roles.map(r => r.name.trim()).filter(Boolean).map(name => ({ name })),
       })
@@ -91,6 +98,8 @@ function UploadModal({ packet, onClose, onSaved }) {
   // packet (with its new boldsign_template_id) back to Form Library right
   // away instead of relying on the admin to remember a separate Save click.
   const handleEditorDone = async () => {
+    if (savedFromEditorRef.current) return   // the editor can signal done twice (postMessage + redirect) — save once
+    savedFromEditorRef.current = true
     setEditorUrl(null)
     pushToast('Template saved in BoldSign — saving to Form Library…', 'success')
     await save()
@@ -156,7 +165,7 @@ function UploadModal({ packet, onClose, onSaved }) {
           <div style={{ padding: '10px 24px', fontSize: 12, color: 'var(--gw-mist)', borderBottom: '1px solid var(--gw-border)' }}>
             Place fields, then click <strong>Finish</strong> in BoldSign — the template saves back to this packet automatically.
           </div>
-          <BoldSignFrame url={editorUrl} onDone={handleEditorDone} onError={handleEditorError} />
+          <BoldSignFrame url={editorUrl} onDone={handleEditorDone} onError={handleEditorError} returnUrlMarker="boldsign-return" />
         </div>
       ) : (
       <>
