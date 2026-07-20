@@ -48,7 +48,10 @@ function UploadModal({ packet, onClose, onSaved }) {
   const fileRef = useRef()
   const savedFromEditorRef = useRef(false)   // guards against the editor firing "done" twice (message + redirect)
 
-  const addFiles   = (fileList) => setFiles(p => [...p, ...Array.from(fileList || [])])
+  // Takes an ALREADY-materialized array — the caller must Array.from() the live
+  // FileList before resetting the input's value, or the files vanish (the state
+  // updater runs after value='' has cleared the FileList).
+  const addFiles   = (picked) => setFiles(p => [...p, ...(picked || [])])
   const removeFile = (i) => setFiles(p => p.filter((_, j) => j !== i))
   // Files already stored on an existing packet (multi-file, with single-file back-compat).
   const existingFiles = (Array.isArray(packet?.storage_paths) && packet.storage_paths.length)
@@ -210,7 +213,7 @@ function UploadModal({ packet, onClose, onSaved }) {
         </div>
         <div className="form-group">
           <label className="form-label">{existingFiles.length ? 'Replace PDFs (optional)' : 'Upload PDFs'}</label>
-          <input ref={fileRef} type="file" accept=".pdf" multiple style={{ display: 'none' }} onChange={e => { addFiles(e.target.files); e.target.value = '' }} />
+          <input ref={fileRef} type="file" accept=".pdf" multiple style={{ display: 'none' }} onChange={e => { const picked = Array.from(e.target.files || []); e.target.value = ''; addFiles(picked) }} />
           <div
             onClick={() => fileRef.current.click()}
             style={{ border: '2px dashed var(--gw-border)', borderRadius: 'var(--radius)', padding: '16px', textAlign: 'center', cursor: 'pointer', background: files.length ? 'var(--gw-green-light)' : 'var(--gw-bone)' }}
@@ -371,16 +374,26 @@ export default function FormLibraryPage({ isAdmin }) {
   const download = async (packet) => {
     // A packet can hold several files (package templates). Prefer the full list,
     // falling back to the single primary path.
-    const paths = (Array.isArray(packet.storage_paths) && packet.storage_paths.length)
-      ? packet.storage_paths.map(f => f.path).filter(Boolean)
-      : (packet.storage_path ? [packet.storage_path] : [])
-    if (!paths.length) { pushToast('No file uploaded for this packet', 'error'); return }
+    const items = (Array.isArray(packet.storage_paths) && packet.storage_paths.length)
+      ? packet.storage_paths.filter(f => f?.path)
+      : (packet.storage_path ? [{ path: packet.storage_path, name: packet.storage_path.split('/').pop() }] : [])
+    if (!items.length) { pushToast('No file uploaded for this packet', 'error'); return }
     setDownloading(p => ({ ...p, [packet.id]: true }))
     try {
-      for (const path of paths) {
-        const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(path, 300)
-        if (error) { pushToast(error.message, 'error'); continue }
-        window.open(data.signedUrl, '_blank')
+      // Trigger a real download per file (Content-Disposition via the `download`
+      // option) instead of window.open — multiple window.open calls get killed by
+      // the popup blocker, which is why only the first file used to open.
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i]
+        const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(it.path, 300, { download: it.name || true })
+        if (error) { pushToast(`Couldn't fetch ${it.name || 'a file'}: ${error.message}`, 'error'); continue }
+        const a = document.createElement('a')
+        a.href = data.signedUrl
+        a.download = it.name || ''
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        if (i < items.length - 1) await new Promise(r => setTimeout(r, 500))  // stagger so the browser doesn't drop rapid downloads
       }
     } finally {
       setDownloading(p => ({ ...p, [packet.id]: false }))
