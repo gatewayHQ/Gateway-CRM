@@ -11,8 +11,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "0.91.1",
-    "@supabase/supabase-js": "^2.39.0",
+    "@anthropic-ai/sdk": "0.112.3",
+    "@supabase/supabase-js": "^2.110.7",
     "@vercel/analytics": "^2.0.1",
     "pdf-lib": "^1.17.1",
     "react": "^18.3.1",
