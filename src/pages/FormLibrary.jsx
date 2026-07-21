@@ -147,23 +147,31 @@ function UploadModal({ packet, onClose, onSaved }) {
         description: form.description || null,
         storage_path:  storagePaths[0]?.path || null,   // primary/first (back-compat)
         storage_paths: storagePaths,
-        boldsign_template_id: form.boldsign_template_id.trim() || null,
-        doc_type: form.doc_type.trim() || null,
+        // null-safe: a packet created without a doc_type / template id stores null,
+        // and null.trim() would throw and silently abort the whole save.
+        boldsign_template_id: (form.boldsign_template_id || '').trim() || null,
+        doc_type: (form.doc_type || '').trim() || null,
         field_tokens,
         active: form.active,
       }
       const upsert = (p) => packet?.id
-        ? supabase.from('form_packets').update(p).eq('id', packet.id)
-        : supabase.from('form_packets').insert([p])
-      let { error } = await upsert(payload)
+        ? supabase.from('form_packets').update(p).eq('id', packet.id).select()
+        : supabase.from('form_packets').insert([p]).select()
+      let { data, error } = await upsert(payload)
       // Graceful fallback if migration 0022 (storage_paths) hasn't been applied yet.
-      if (error && (error.code === '42703' || /storage_paths/.test(error.message || ''))) {
+      if (error && (error.code === '42703' || error.code === 'PGRST204' || /storage_paths/.test(error.message || ''))) {
         const { storage_paths, ...legacy } = payload
-        ;({ error } = await upsert(legacy))
+        ;({ data, error } = await upsert(legacy))
       }
-      if (error) { pushToast(error.message, 'error'); return }
+      if (error) { pushToast(`Couldn't save: ${error.message}`, 'error'); return }
+      if (packet?.id && Array.isArray(data) && data.length === 0) {
+        pushToast('Nothing was updated — the change did not persist.', 'error'); return
+      }
       pushToast(isNew ? 'Form packet added' : 'Packet updated')
       onSaved()
+    } catch (e) {
+      console.error('[FormLibrary] save error:', e)
+      pushToast(`Couldn't save: ${e.message}`, 'error')
     } finally {
       setSaving(false)
     }
