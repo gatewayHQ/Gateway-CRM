@@ -6,6 +6,8 @@ import PropertyLandingPage from './pages/PropertyLanding.jsx'
 import LandingProperty from './pages/LandingProperty.jsx'
 import LandingValuation from './pages/LandingValuation.jsx'
 import LandingMultifamily from './pages/LandingMultifamily.jsx'
+import LandingMailing from './pages/LandingMailing.jsx'
+import Unsubscribe from './pages/Unsubscribe.jsx'
 import AdvisorProfile from './pages/AdvisorProfile.jsx'
 import { DEMO_LISTING } from './pages/landingDemoData.js'
 import ClientPortal from './pages/ClientPortal.jsx'
@@ -47,6 +49,8 @@ const listingMatch   = pathname.match(/^\/listing\/([0-9a-f-]{36})/i)
 const lpPropMatch    = pathname.match(/^\/lp\/property\/([0-9a-f-]{36})/i)
 const lpValMatch     = pathname.match(/^\/lp\/valuation\/([0-9a-f-]{36})/i)
 const lpMultiMatch   = pathname.match(/^\/lp\/multifamily\/([0-9a-f-]{36})/i)
+const lpMailingMatch = pathname.match(/^\/lp\/mailing\/([0-9a-f-]{36})/i)
+const unsubMatch     = pathname.match(/^\/u\/([0-9a-z]{16,40})/i)
 const advisorMatch   = pathname.match(/^\/advisor\/([0-9a-f-]{36})/i)
 const portalMatch    = pathname.match(/^\/portal\/([0-9a-f-]{36})/i)
 
@@ -58,6 +62,8 @@ else if (listingMatch)   publicView = <PropertyLandingPage propertyId={listingMa
 else if (lpPropMatch)    publicView = <LandingProperty   mailingId={lpPropMatch[1]} />
 else if (lpValMatch)     publicView = <LandingValuation  mailingId={lpValMatch[1]} />
 else if (lpMultiMatch)   publicView = <LandingMultifamily mailingId={lpMultiMatch[1]} />
+else if (lpMailingMatch) publicView = <LandingMailing     mailingId={lpMailingMatch[1]} />
+else if (unsubMatch)     publicView = <Unsubscribe        token={unsubMatch[1]} />
 else if (advisorMatch)   publicView = <AdvisorProfile     agentId={advisorMatch[1]} />
 else if (portalMatch)    publicView = <ClientPortal       token={portalMatch[1]} />
 else if (isLeadPage)     publicView = <LeadCapturePage />
