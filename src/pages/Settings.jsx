@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, pushToast } from '../components/UI.jsx'
 import BoldSignAdmin from './settings/BoldSignAdmin.jsx'
+import SharingGroups from './settings/SharingGroups.jsx'
+import TeamVisibility from './settings/TeamVisibility.jsx'
 
 const TRACKING_SCRIPT = `<!-- Gateway CRM — Lead Tracker -->
 <script>
@@ -454,6 +456,10 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
           </div>
         )}
       </div>
+
+      <SharingGroups db={db} activeAgent={activeAgent} />
+
+      {activeAgent?.is_admin && <TeamVisibility activeAgent={activeAgent} />}
 
       {activeAgent?.is_admin && <BoldSignAdmin agents={db.agents || []} go={go} />}
 
