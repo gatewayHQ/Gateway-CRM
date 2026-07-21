@@ -954,7 +954,7 @@ function MailingListBuilder({ cfg, setCfg }) {
         {/* Fields to collect */}
         <div>
           <label style={fieldLabel}>Fields to collect</label>
-          <div style={{ display: 'flex', gap: 16, marginTop: 6 }}>
+          <div style={{ display: 'flex', gap: 16, marginTop: 6, flexWrap: 'wrap' }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
               <input type="checkbox" checked={cfg.collect_name !== false} onChange={e => setCfg('collect_name', e.target.checked)} />
               Name
@@ -963,9 +963,31 @@ function MailingListBuilder({ cfg, setCfg }) {
               <input type="checkbox" checked={cfg.collect_phone === true} onChange={e => setCfg('collect_phone', e.target.checked)} />
               Phone
             </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+              <input type="checkbox" checked={cfg.collect_message !== false} onChange={e => setCfg('collect_message', e.target.checked)} />
+              Message
+            </label>
             <span style={{ fontSize: 12, color: 'var(--gw-mist)', alignSelf: 'center' }}>Email is always collected.</span>
           </div>
         </div>
+
+        {/* Editable message-field heading — "what do you want from the list / to be contacted about" */}
+        {cfg.collect_message !== false && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div>
+              <label style={fieldLabel}>Message field heading</label>
+              <input className="input" maxLength={80} value={cfg.message_label || ''}
+                     placeholder="What are you hoping to get? (optional)"
+                     onChange={e => setCfg('message_label', e.target.value)} />
+            </div>
+            <div>
+              <label style={fieldLabel}>Message field placeholder</label>
+              <input className="input" maxLength={140} value={cfg.message_placeholder || ''}
+                     placeholder="Tell us what you want us to reach out about…"
+                     onChange={e => setCfg('message_placeholder', e.target.value)} />
+            </div>
+          </div>
+        )}
 
         {/* Perks */}
         <div>
@@ -1770,9 +1792,9 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
   }
 
   const exportSubscribersCSV = () => {
-    const headers = ['Email', 'Name', 'Phone', 'Status', 'Consent', 'Subscribed At']
+    const headers = ['Email', 'Name', 'Phone', 'Message', 'Status', 'Consent', 'Subscribed At']
     const rows = subscribers.map(s => [
-      s.email || '', s.name || '', s.phone || '', s.status || '',
+      s.email || '', s.name || '', s.phone || '', s.message || '', s.status || '',
       s.consent ? 'Yes' : 'No', s.subscribed_at ? new Date(s.subscribed_at).toISOString().slice(0, 10) : '',
     ])
     const csv = [headers, ...rows].map(row => row.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n')
@@ -2061,7 +2083,7 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
               <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
                 {subscribers.map(s => (
                   <div key={s.id} style={{ border:'1px solid var(--gw-border)', borderRadius:8, padding:'10px 12px',
-                                           display:'flex', alignItems:'center', gap:12,
+                                           display:'flex', alignItems:'flex-start', gap:12,
                                            opacity: s.status === 'unsubscribed' ? 0.55 : 1 }}>
                     <div style={{ flex:1, minWidth:0 }}>
                       <div style={{ fontWeight:700, fontSize:13 }}>
@@ -2076,6 +2098,12 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
                         {s.phone && <span><Icon name="phone" size={10} /> {s.phone}</span>}
                         <span>{new Date(s.subscribed_at || s.created_at).toLocaleDateString()}</span>
                       </div>
+                      {s.message && (
+                        <div style={{ fontSize:12.5, color:'var(--gw-ink)', marginTop:6, padding:'7px 9px',
+                                      background:'var(--gw-bone)', borderRadius:6, lineHeight:1.45 }}>
+                          “{s.message}”
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}

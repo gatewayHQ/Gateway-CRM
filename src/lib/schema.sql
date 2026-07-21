@@ -970,6 +970,7 @@ create table if not exists mailing_subscribers (
   email             text not null,
   name              text,
   phone             text,
+  message           text,                           -- what the subscriber wants / to be contacted about
   status            text check (status in ('subscribed','unsubscribed')) default 'subscribed',
   consent           boolean default true,          -- explicit opt-in captured at signup
   source            text default 'landing',        -- landing | manual | import

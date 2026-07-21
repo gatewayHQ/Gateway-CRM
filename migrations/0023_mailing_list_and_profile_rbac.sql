@@ -49,6 +49,7 @@ create table if not exists mailing_subscribers (
   email             text not null,
   name              text,
   phone             text,
+  message           text,
   status            text check (status in ('subscribed','unsubscribed')) default 'subscribed',
   consent           boolean default true,
   source            text default 'landing',
@@ -58,6 +59,9 @@ create table if not exists mailing_subscribers (
   unsubscribed_at   timestamptz,
   created_at        timestamptz default now()
 );
+
+-- For installs where the table predates this column.
+alter table mailing_subscribers add column if not exists message text;
 
 -- Plain composite unique (emails are stored lower-cased by the API) — also a
 -- valid ON CONFLICT target for the subscribe upsert.

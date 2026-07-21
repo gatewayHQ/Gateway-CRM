@@ -83,7 +83,7 @@ export default function LandingMailing({ mailingId }) {
   const [submitted,  setSubmitted]  = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error,      setError]      = useState(null)
-  const [form, setForm] = useState({ email: '', name: '', phone: '' })
+  const [form, setForm] = useState({ email: '', name: '', phone: '', message: '' })
 
   useEffect(() => {
     let active = true
@@ -127,8 +127,11 @@ export default function LandingMailing({ mailingId }) {
   const listSub   = cfg.list_subheading || 'Enter your email — takes five seconds.'
   const submitLbl = cfg.submit_label || 'Subscribe'
   const successMsg = cfg.success_message || "You're on the list. Watch your inbox for the next one."
-  const collectName  = cfg.collect_name  !== false
-  const collectPhone = cfg.collect_phone === true
+  const collectName    = cfg.collect_name    !== false
+  const collectPhone   = cfg.collect_phone   === true
+  const collectMessage = cfg.collect_message !== false          // on by default
+  const messageLabel   = cfg.message_label   || 'What are you hoping to get? (optional)'
+  const messagePlaceholder = cfg.message_placeholder || 'Tell us what you want from the list — a submarket, deal size, or what you’d like us to reach out about.'
   const perks    = (Array.isArray(cfg.perks) ? cfg.perks : []).filter(Boolean)
   const highlights = (Array.isArray(cfg.highlights) ? cfg.highlights : []).filter(h => h && (h.value || h.label)).slice(0, 4)
   const images   = (Array.isArray(cfg.images) ? cfg.images : [])
@@ -149,6 +152,7 @@ export default function LandingMailing({ mailingId }) {
         body: JSON.stringify({
           action: 'capture_subscriber', mailing_id: mailingId,
           email, name: collectName ? form.name : '', phone: collectPhone ? form.phone : '',
+          message: collectMessage ? form.message : '',
           consent: true,
         }),
       })
@@ -303,6 +307,13 @@ export default function LandingMailing({ mailingId }) {
                                  onChange={e => setForm(p => ({ ...p, phone: e.target.value }))} />
                         </Field>
                       )}
+                      {collectMessage && (
+                        <Field label={messageLabel} theme={theme}>
+                          <textarea rows={3} value={form.message} placeholder={messagePlaceholder}
+                                    style={{ ...inp, resize: 'vertical', minHeight: 76, lineHeight: 1.5 }}
+                                    onChange={e => setForm(p => ({ ...p, message: e.target.value }))} />
+                        </Field>
+                      )}
 
                       {error && (
                         <div style={{ color: '#e57373', fontSize: 13, background: 'rgba(229,115,115,0.12)',
@@ -349,8 +360,8 @@ export default function LandingMailing({ mailingId }) {
         html, body { margin: 0; }
         #root { overflow-x: hidden; }
         .ml-page, .ml-page * { box-sizing: border-box; }
-        .ml-page input:focus { border-color: ${accent} !important; box-shadow: 0 0 0 3px ${accent}22; }
-        .ml-page input::placeholder { color: ${theme.faint}; }
+        .ml-page input:focus, .ml-page textarea:focus { border-color: ${accent} !important; box-shadow: 0 0 0 3px ${accent}22; }
+        .ml-page input::placeholder, .ml-page textarea::placeholder { color: ${theme.faint}; }
         .ml-submit { transition: transform 140ms ease, box-shadow 140ms ease, filter 140ms ease; }
         .ml-submit:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 26px ${accent}55; filter: brightness(1.04); }
         .ml-submit:active:not(:disabled) { transform: translateY(0); }

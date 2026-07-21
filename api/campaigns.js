@@ -639,7 +639,7 @@ export default async function handler(req, res) {
     // re-submits never create a second row. Also best-effort upserts a CRM
     // contact tagged as a newsletter subscriber.
     if (action === 'capture_subscriber') {
-      const { mailing_id, email, name, phone, consent } = req.body
+      const { mailing_id, email, name, phone, message, consent } = req.body
       if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
       const cleanEmail = (email || '').trim().toLowerCase()
       // Basic shape check — the real gate is the DB, but fail fast on junk.
@@ -648,8 +648,9 @@ export default async function handler(req, res) {
       }
 
       const ipHash = hashIp(clientIp(req))
-      const cleanName  = (name  || '').trim() || null
-      const cleanPhone = (phone || '').trim() || null
+      const cleanName    = (name    || '').trim() || null
+      const cleanPhone   = (phone   || '').trim() || null
+      const cleanMessage = (message || '').trim().slice(0, 2000) || null
 
       // Upsert on the unique (mailing_id, email) index. On conflict we
       // re-subscribe (in case they'd unsubscribed) and refresh name/phone.
@@ -660,6 +661,7 @@ export default async function handler(req, res) {
           email:           cleanEmail,
           name:            cleanName,
           phone:           cleanPhone,
+          message:         cleanMessage,
           status:          'subscribed',
           consent:         consent !== false,
           source:          'landing',
@@ -680,12 +682,12 @@ export default async function handler(req, res) {
           .select('id').eq('mailing_id', mailing_id).ilike('email', cleanEmail).limit(1)
         if (existing?.length) {
           const { data: upd } = await db().from('mailing_subscribers')
-            .update({ status: 'subscribed', name: cleanName, phone: cleanPhone, unsubscribed_at: null })
+            .update({ status: 'subscribed', name: cleanName, phone: cleanPhone, message: cleanMessage, unsubscribed_at: null })
             .eq('id', existing[0].id).select().single()
           subscriber = upd
         } else {
           const { data: ins, error: insErr } = await db().from('mailing_subscribers').insert([{
-            mailing_id, email: cleanEmail, name: cleanName, phone: cleanPhone,
+            mailing_id, email: cleanEmail, name: cleanName, phone: cleanPhone, message: cleanMessage,
             status: 'subscribed', consent: consent !== false, source: 'landing', ip_hash: ipHash,
           }]).select().single()
           if (insErr) throw insErr
