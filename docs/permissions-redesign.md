@@ -15,6 +15,8 @@ The existing model is well-built but couples three concerns that the new busines
 |---|---|---|
 | **Deal ownership** | `deals.agent_id` (single owner column) | Only one agent can be the "owner"; additional agents aren't first-class. |
 | **Additional-agent visibility** | *Inferred* from `commissions.participants` jsonb + legacy `deals.co_agent_ids[]` | Visibility is welded to payroll. You can't grant view access without putting someone on the split, and you can't remove view access without touching commissions. |
+
+> **⚠️ Critical drift found while validating against the live pipeline UI.** The avatar chips shown on pipeline cards (`Pipeline.jsx:2607`, `2713`) are computed from **`property.details.co_agent_ids`** — a jsonb array on the *property* — **not** from `commissions.participants`, which is what RLS actually uses to grant visibility. So there are **three disagreeing "co-agent" sources**: `deals.agent_id` (primary chip), `property.details.co_agent_ids` (the extra chips users SEE), and `commissions.participants` + `deals.co_agent_ids` (what the DB ENFORCES). A person can appear as a chip without DB access, or have DB access with no chip. The redesign's whole job is to collapse all three into one source of truth (`deal_agents`) that the chips render from and RLS enforces from — so "the chips are who can see it" becomes literally true.
 | **Team visibility** | `team_splits.share_contacts/share_properties/share_deals`, **all default `TRUE`** | Teammates auto-see each other's deals. The brief says the opposite: default OFF. |
 | **Cross-team partner sharing** | *Does not exist* | No way for Daniel & Nic (different teams) to share specific records. |
 
@@ -173,18 +175,36 @@ alter table sharing_group_members  enable row level security;
 alter table sharing_group_records  enable row level security;
 alter table visibility_settings    enable row level security;
 
--- 2) Backfill tags from the EXISTING model so nobody loses access -----------
+-- 2) Backfill tags from ALL THREE existing sources so the tags match what
+--    users SEE on the cards AND what RLS currently enforces (see drift note §0).
 --    Primary = current deals.agent_id
 insert into deal_agents (deal_id, agent_id, role)
   select id, agent_id, 'primary' from deals where agent_id is not null
   on conflict (deal_id, agent_id) do nothing;
---    Additional = current commission participants + legacy co_agent_ids
+--    Additional (a) = the chips users actually see: property.details.co_agent_ids,
+--    mapped onto every deal that references that property.
+insert into deal_agents (deal_id, agent_id, role)
+  select d.id, (ca)::uuid, 'additional'
+  from deals d
+  join properties pr on pr.id = d.property_id
+  cross join lateral jsonb_array_elements_text(coalesce(pr.details->'co_agent_ids','[]'::jsonb)) ca
+  where (ca) ~ '^[0-9a-f-]{36}$'
+  on conflict (deal_id, agent_id) do nothing;
+--    Additional (b) = commission participants (what RLS enforced) + legacy co_agent_ids
 insert into deal_agents (deal_id, agent_id, role)
   select c.deal_id, (p->>'agent_id')::uuid, 'additional'
   from commissions c
   cross join lateral jsonb_array_elements(coalesce(c.participants,'[]'::jsonb)) p
   where (p->>'agent_id') ~ '^[0-9a-f-]{36}$'
   on conflict (deal_id, agent_id) do nothing;
+insert into deal_agents (deal_id, agent_id, role)
+  select id, unnest(co_agent_ids), 'additional' from deals
+  where co_agent_ids is not null
+  on conflict (deal_id, agent_id) do nothing;
+-- NOTE: the union of these sources may GRANT access that RLS didn't give before
+-- (chip-only agents who weren't commission participants). That is the intended
+-- reconciliation — it makes access match what the pipeline already displays.
+-- Review the diff (query in the verification checklist) before Phase B.
 
 -- 3) Grandfather team sharing: seed a team-level setting mirroring today -----
 insert into visibility_settings (scope, scope_id, team_deal_visibility)
@@ -364,14 +384,27 @@ export async function fetchVisibleDeals(client, { isAdmin }) {
 
 > Because RLS is now the single authority, the client no longer needs to reconstruct the visibility set (`visibleAgentIds`, `dealAgentIds`, chunked co-list merges in `App.jsx`). It fetches `select('*')` and receives exactly its slice. That deletes a whole class of client/DB drift bugs. The `deal_agents` fetch is only needed for *editing* the tag list on the Deal page.
 
-### 4.5 Deal-page tagging UI
+### 4.5 Pipeline card chips — re-source from `deal_agents`
+
+Today `Pipeline.jsx` builds card chips from `deal.agent_id + property.details.co_agent_ids` (lines ~2607 and ~2713). Change both to render from the deal's tags so the chips = the visibility set exactly:
+
+```js
+// was: [deal.agent_id, ...(propertyMap[deal.property_id]?.details?.co_agent_ids || [])]
+const tagAgents = (dealAgentsMap[deal.id] || [])      // rows from deal_agents
+  .sort((a,b) => (a.role==='primary'?-1:1))            // primary first
+  .map(t => agentMap[t.agent_id]).filter(Boolean)
+```
+
+Load `dealAgentsMap` once alongside deals (a single `select('deal_id,agent_id,role')` from `deal_agents`, already RLS-scoped to visible deals). `property.details.co_agent_ids` is then deprecated for visibility — keep it only if it drives anything else (it shouldn't after this).
+
+### 4.6 Deal-page tagging UI
 
 On `src/pages/DealPage.jsx`, add an **"Agents on this deal"** panel:
 - Primary Agent selector (single, required) → writes `deals.agent_id` (trigger syncs the tag).
 - Additional Agents multi-select (reuse `OptionMultiSelect`/`ContactMultiSelect` patterns) → upserts/deletes `deal_agents` rows with `role='additional'`.
 - A subtle note: *"Tagged agents can view this deal and its records. Paying an agent is set separately in Commissions."* — reinforcing pay≠access.
 
-### 4.6 Admin configuration UI (`src/pages/Settings.jsx`)
+### 4.7 Admin configuration UI (`src/pages/Settings.jsx`)
 
 - **Brokerage tab (admin):** default team-deal-visibility (`off` recommended), and per-property-type defaults.
 - **Team tab (lead/admin):** toggle "Members see all team deals" → writes `visibility_settings(scope='team')`; optional per-type matrix (commercial/residential × on/off) → `rules.by_prop_category`.
