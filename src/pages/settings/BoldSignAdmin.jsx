@@ -56,7 +56,12 @@ export default function BoldSignAdmin({ agents = [], go }) {
 
   const sync = async () => {
     setBusy('sync')
-    try { const r = await syncIdentities(); pushToast(`Synced ${r.count} identities`, 'success'); await load() }
+    try {
+      const r = await syncIdentities()
+      const added = r.inserted ? `, pulled in ${r.inserted} new` : ''
+      pushToast(`Synced ${r.matched ?? r.count} identities${added}`, 'success')
+      await load()
+    }
     catch (e) { pushToast(e.message, 'error') } finally { setBusy('') }
   }
 

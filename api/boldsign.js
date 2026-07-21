@@ -596,17 +596,49 @@ export default async function handler(req, res) {
 
     if (body.action === 'identity-sync') {
       if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
-      const list  = await boldsign('/senderIdentities/list')
+      const list  = await boldsign('/senderIdentities/list?page=1&pageSize=100')
       const items = list.result || list.identities || (Array.isArray(list) ? list : [])
       const svc   = getServiceClient()
+
+      // Match BoldSign identities back to agents by email so we can INSERT rows
+      // for identities that were registered directly in BoldSign (not via the
+      // CRM "Register" button). Without this the panel shows those agents as
+      // "Not Registered" forever — an update-only sync can't create the row it
+      // needs to update. agent_id is NOT NULL, so an identity whose email maps
+      // to no agent can only refresh an existing row, never create one.
+      const { data: agents } = await svc.from('agents').select('id, email')
+      const agentByEmail = new Map(
+        (agents || []).filter(a => a.email).map(a => [a.email.toLowerCase(), a.id])
+      )
+
+      let matched = 0, inserted = 0, updated = 0
+      const now = new Date().toISOString()
       for (const it of items) {
         const email = it.email || it.senderEmail
         if (!email) continue
-        await svc.from('boldsign_sender_identities')
-          .update({ status: normalizeIdentityStatus(it.status || it.approvalStatus), updated_at: new Date().toISOString() })
-          .eq('email', email)
+        const status  = normalizeIdentityStatus(it.status || it.approvalStatus)
+        const agentId = agentByEmail.get(email.toLowerCase())
+
+        if (agentId) {
+          matched++
+          // Upsert keyed on agent_id (same conflict target as identity-create).
+          // Only touch agent_id/email/name/status — leaving is_default and
+          // created_at untouched so a locally-set default survives the sync.
+          const { data: existing } = await svc.from('boldsign_sender_identities')
+            .select('id').eq('agent_id', agentId).maybeSingle()
+          await svc.from('boldsign_sender_identities').upsert({
+            agent_id: agentId, email, name: it.name || null, status, updated_at: now,
+          }, { onConflict: 'agent_id' })
+          existing ? updated++ : inserted++
+        } else {
+          // No agent for this email — can't create a row (agent_id required),
+          // but refresh status on any existing row that happens to match.
+          const { data } = await svc.from('boldsign_sender_identities')
+            .update({ status, updated_at: now }).eq('email', email).select('id')
+          if (data?.length) updated++
+        }
       }
-      return res.json({ ok: true, count: items.length })
+      return res.json({ ok: true, count: items.length, matched, inserted, updated })
     }
 
     if (body.action === 'identity-resend') {
