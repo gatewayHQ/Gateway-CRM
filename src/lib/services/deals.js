@@ -32,49 +32,61 @@ async function selectInChunks(client, table, column, ids, order) {
   return { data: out, error: null }
 }
 
-// IDs of deals the agent is co-listed on, from both sources:
-//   1. structured commission participants (jsonb containment:
-//      participants @> [{"agent_id": "..."}]) — the canonical model, and
-//   2. the legacy deals.co_agent_ids uuid[] that exists only in the original
-//      production database (its query errors harmlessly where the column
-//      doesn't exist, e.g. fresh installs).
-// Returns an error only when BOTH sources fail.
-export async function fetchCoListedDealIds(client, agentId) {
+// IDs of every deal the agent is TAGGED on (primary or additional) — the
+// canonical visibility source after migration 0024 (deal_agents). Being tagged
+// is what grants sight of a deal + its property, contacts, and commissions.
+export async function fetchTaggedDealIds(client, agentId) {
   if (!agentId) return { data: [], error: null }
-  const [viaParticipants, viaLegacy] = await Promise.all([
-    client.from('commissions').select('deal_id')
-      .contains('participants', JSON.stringify([{ agent_id: agentId }])),
-    client.from('deals').select('id').contains('co_agent_ids', [agentId]),
-  ])
-  const ids = new Set()
-  if (!viaParticipants.error) for (const r of viaParticipants.data || []) { if (r.deal_id) ids.add(r.deal_id) }
-  if (!viaLegacy.error) for (const r of viaLegacy.data || []) { if (r.id) ids.add(r.id) }
-  const error = viaParticipants.error && viaLegacy.error ? viaParticipants.error : null
-  return { data: [...ids], error }
+  const { data, error } = await client
+    .from('deal_agents').select('deal_id').eq('agent_id', agentId)
+  if (error) return { data: [], error }
+  return { data: [...new Set((data || []).map(r => r.deal_id).filter(Boolean))], error: null }
 }
 
-// Every deal the agent may see, newest first. Admins get the firm; everyone
-// else gets own + team-shared + co-listed, merged and de-duplicated.
-export async function fetchVisibleDeals(client, { isAdmin, agentId, dealAgentIds }) {
+// Every deal the agent may see, newest first.
+//   • Admin  → the whole firm.
+//   • Others → deals they are tagged on (deal_agents). We ALSO fetch by
+//     agent_id as a safety net so a freshly-created deal is never missing
+//     before its primary tag lands (trigger/app both write it, but this keeps
+//     the list correct even if one lags). Team-override deals are included by
+//     RLS when a team opts in; the client list stays a subset/superset-safe
+//     union of what the agent owns or is tagged on.
+// Works whether or not RLS Phase B is active — visibility is enforced by the
+// tag query here, not by trusting an unscoped select('*').
+export async function fetchVisibleDeals(client, { isAdmin, agentId }) {
   if (isAdmin) {
     return client.from('deals').select('*').order('created_at', { ascending: false })
   }
-  const owners = dealAgentIds?.length ? dealAgentIds : (agentId ? [agentId] : [])
-  const [ownRes, coRes] = await Promise.all([
-    client.from('deals').select('*').in('agent_id', owners).order('created_at', { ascending: false }),
-    fetchCoListedDealIds(client, agentId),
+  const [ownRes, tagRes] = await Promise.all([
+    agentId
+      ? client.from('deals').select('*').eq('agent_id', agentId).order('created_at', { ascending: false })
+      : Promise.resolve({ data: [], error: null }),
+    fetchTaggedDealIds(client, agentId),
   ])
   if (ownRes.error) return ownRes
-  // Co-listing is additive: if the participant lookup fails, still return the
-  // agent's own deals rather than nothing.
   const ownIds = new Set((ownRes.data || []).map(d => d.id))
-  const extraIds = (coRes.data || []).filter(id => !ownIds.has(id))
+  const extraIds = (tagRes.data || []).filter(id => !ownIds.has(id))
   if (!extraIds.length) return ownRes
   const extraRes = await selectInChunks(client, 'deals', 'id', extraIds)
   if (extraRes.error) return ownRes
   const merged = [...(ownRes.data || []), ...extraRes.data]
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
   return { data: merged, error: null }
+}
+
+// The deal_agents tag rows for a set of visible deals — used to render the
+// "who's on this deal" chips straight from the source of truth.
+export async function fetchDealAgentTags(client, dealIds) {
+  if (!dealIds?.length) return { data: [], error: null }
+  const out = []
+  for (let i = 0; i < dealIds.length; i += 150) {
+    const { data, error } = await client
+      .from('deal_agents').select('deal_id,agent_id,role')
+      .in('deal_id', dealIds.slice(i, i + 150))
+    if (error) return { data: out, error }
+    out.push(...(data || []))
+  }
+  return { data: out, error: null }
 }
 
 // Commissions for exactly the deals the caller can see. Admins fetch all.

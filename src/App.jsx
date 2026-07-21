@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase.js'
 import { primeCache, invalidate } from './lib/queryCache.js'
-import { fetchVisibleDeals, fetchVisibleCommissions } from './lib/services/deals.js'
+import { fetchVisibleDeals, fetchVisibleCommissions, fetchDealAgentTags } from './lib/services/deals.js'
 import { Icon, Avatar, Modal, Badge, ToastHost, Loading, ErrorBoundary, pushToast } from './components/UI.jsx'
 // All pages are lazy-loaded — only the current route's bundle downloads
 const Dashboard        = React.lazy(() => import('./pages/Dashboard.jsx'))
@@ -390,6 +390,11 @@ export default function App() {
         ? await fetchVisibleCommissions(supabase, { isAdmin: true })
         : { data: [], error: null }
 
+      // deal_agents tags for the visible deals — the source of truth for the
+      // "who's on this deal" chips (migration 0024). Degrades gracefully to an
+      // empty list if the table doesn't exist yet (pre-migration).
+      const dealTagsRes = await fetchDealAgentTags(supabase, (deals.data || []).map(d => d.id))
+
       const dbPayload = {
         contacts:         contacts.data     || [],
         properties:       properties.data   || [],
@@ -403,6 +408,7 @@ export default function App() {
         activitiesReady:  !activitiesRes.error,
         dealContacts:     dealContactsRes.data     || [],
         propertyContacts: propertyContactsRes.data || [],
+        dealAgents:       dealTagsRes.data          || [],
       }
       setDb(dbPayload)
 

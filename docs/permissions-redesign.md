@@ -1,6 +1,6 @@
 # Gateway CRM — Visibility & Permission System Redesign
 
-**Status:** Proposal for review (no schema applied yet)
+**Status:** Implemented on branch `claude/gateway-crm-permissions-wbpvzu` — migration `0024_tagging_and_sharing.sql` + app wiring written and passing build/tests. **Not yet applied to any database** (run the migration in staging per the checklist before production).
 **Author:** Architecture
 **Date:** 2026-07-21
 **Supersedes the visibility model in:** `migrations/0002`, `migrations/0011`, `src/lib/schema.sql` (SCOPED RLS POLICIES section)

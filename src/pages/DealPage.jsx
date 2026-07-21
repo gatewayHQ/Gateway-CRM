@@ -97,6 +97,41 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   }, [dealId])
   useEffect(() => { loadExtras() }, [loadExtras])
 
+  // ── Deal-agent tags (migration 0024 — the source of truth for visibility) ──
+  const [dealTags, setDealTags] = useState([])   // rows from deal_agents
+  const [tagBusy, setTagBusy]   = useState(false)
+  const loadTags = useCallback(async () => {
+    const { data } = await supabase
+      .from('deal_agents').select('agent_id,role,can_edit').eq('deal_id', dealId)
+    setDealTags(data || [])
+  }, [dealId])
+  useEffect(() => { if (dealId) loadTags() }, [dealId, loadTags])
+
+  // Add an additional agent tag. The primary is derived from deals.agent_id
+  // (kept in lockstep by the DB trigger), so this only manages 'additional's.
+  const addAgentTag = useCallback(async (agentId) => {
+    if (!agentId || tagBusy) return
+    setTagBusy(true)
+    const { error } = await supabase.from('deal_agents')
+      .upsert({ deal_id: dealId, agent_id: agentId, role: 'additional', added_by: activeAgent?.id || null },
+              { onConflict: 'deal_id,agent_id', ignoreDuplicates: true })
+    setTagBusy(false)
+    if (error) { pushToast(error.message || 'Could not add agent', 'error'); return }
+    pushToast('Agent added to deal')
+    loadTags()
+  }, [dealId, activeAgent, tagBusy, loadTags])
+
+  const removeAgentTag = useCallback(async (agentId) => {
+    if (!agentId || tagBusy) return
+    setTagBusy(true)
+    const { error } = await supabase.from('deal_agents')
+      .delete().eq('deal_id', dealId).eq('agent_id', agentId).eq('role', 'additional')
+    setTagBusy(false)
+    if (error) { pushToast(error.message || 'Could not remove agent', 'error'); return }
+    pushToast('Agent removed from deal')
+    loadTags()
+  }, [dealId, tagBusy, loadTags])
+
   // ── Drawer (deep edit) ─────────────────────────────────────────────────────
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [drawerTab, setDrawerTab]   = useState('details')
@@ -143,17 +178,25 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     return () => { alive = false }
   }, [dealId, isAdmin])
 
-  // Everyone on the deal: owner + legacy co-agents, deduped (participants are
-  // admin-only data, so non-admins see owner + co_agent_ids)
+  // Everyone on the deal = the deal_agents tags (migration 0024) — the exact
+  // visibility set. Primary first, then additional. Falls back to owner +
+  // legacy co-agents for deals not yet tagged (pre-migration / mid-backfill).
   const team = useMemo(() => {
     if (!deal) return []
-    const ids = [
-      deal.agent_id,
-      ...(deal.co_agent_ids || []),
-      ...((breakdown?.participants || []).map(p => p.agent_id)),
-    ].filter(Boolean)
+    const byRole = { primary: [], additional: [] }
+    for (const t of dealTags) (byRole[t.role] || byRole.additional).push(t.agent_id)
+    let ids = [...byRole.primary, ...byRole.additional]
+    if (!ids.length) {
+      ids = [deal.agent_id, ...(deal.co_agent_ids || []), ...((breakdown?.participants || []).map(p => p.agent_id))].filter(Boolean)
+    }
     return [...new Set(ids)].map(id => agents.find(a => a.id === id)).filter(Boolean)
-  }, [deal, breakdown, agents])
+  }, [deal, dealTags, breakdown, agents])
+
+  // Agents not yet on the deal — candidates for the "add" picker.
+  const addableAgents = useMemo(() => {
+    const on = new Set(team.map(a => a.id))
+    return agents.filter(a => !on.has(a.id))
+  }, [agents, team])
   const myTake = useMemo(() => {
     if (isAdmin && breakdown && activeAgent) {
       return breakdown.participants.filter(p => p.agent_id === activeAgent.id).reduce((s, p) => s + p.agent_take, 0)
@@ -492,15 +535,38 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
             <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8 }}>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>Agents on deal</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                {(team.length ? team : agent ? [agent] : []).map(a => (
-                  <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                    <Avatar agent={a} size={20} />
-                    <span style={{ fontSize: 12.5 }}>{a.name}</span>
-                    {a.id === deal.agent_id && <span style={{ fontSize: 10, color: 'var(--gw-mist)' }}>primary</span>}
-                  </div>
-                ))}
+                {(team.length ? team : agent ? [agent] : []).map(a => {
+                  const isPrimary = a.id === deal.agent_id
+                  const canEdit   = (isAdmin || team.some(t => t.id === activeAgent?.id)) && !isPrimary
+                  return (
+                    <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                      <Avatar agent={a} size={20} />
+                      <span style={{ fontSize: 12.5 }}>{a.name}</span>
+                      <span style={{ fontSize: 10, color: 'var(--gw-mist)' }}>{isPrimary ? 'primary' : 'additional'}</span>
+                      {canEdit && (
+                        <button onClick={() => removeAgentTag(a.id)} disabled={tagBusy} title="Remove from deal"
+                          style={{ marginLeft: 'auto', border: 'none', background: 'none', color: 'var(--gw-mist)', cursor: 'pointer', fontSize: 12, padding: 2 }}>
+                          <Icon name="x" size={13} />
+                        </button>
+                      )}
+                    </div>
+                  )
+                })}
                 {!team.length && !agent && <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>Unassigned</div>}
               </div>
+              {(isAdmin || team.some(t => t.id === activeAgent?.id)) && addableAgents.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <select defaultValue="" disabled={tagBusy}
+                    onChange={e => { const v = e.target.value; e.target.value = ''; addAgentTag(v) }}
+                    className="form-control" style={{ fontSize: 12.5, padding: '5px 8px' }}>
+                    <option value="" disabled>+ Add an additional agent…</option>
+                    {addableAgents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                  <div style={{ fontSize: 10.5, color: 'var(--gw-mist)', marginTop: 4 }}>
+                    Tagged agents can view this deal &amp; its records. Paying an agent is set separately in Commissions.
+                  </div>
+                </div>
+              )}
             </div>
             {isAdmin && breakdown && (deal.value > 0) && (
               <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8, display: 'flex', gap: 16, fontSize: 12 }}>

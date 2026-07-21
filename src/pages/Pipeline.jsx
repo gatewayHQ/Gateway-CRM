@@ -2320,11 +2320,35 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const properties   = db.properties   || []
   const tasks        = db.tasks        || []
   const dealContacts = db.dealContacts || []   // additional-contact link rows (migration 0021)
+  const dealAgents   = db.dealAgents   || []   // deal_agents tag rows (migration 0024)
 
   // O(1) lookups — built once per data change, not per-card in render loop
   const contactMap  = useMemo(() => Object.fromEntries(contacts.map(c => [c.id, c])),   [contacts])
   const agentMap    = useMemo(() => Object.fromEntries(agents.map(a => [a.id, a])),     [agents])
   const propertyMap = useMemo(() => Object.fromEntries(properties.map(p => [p.id, p])), [properties])
+
+  // deal_id -> ordered [{agent, role}] tagged on the deal (primary first).
+  // The tags ARE the visibility set (migration 0024), so the chips render
+  // exactly who can see the deal. Falls back to owner + property.co_agent_ids
+  // for any deal with no tag rows yet (pre-migration / mid-backfill).
+  const dealTeamMap = useMemo(() => {
+    const byDeal = {}
+    for (const t of dealAgents) (byDeal[t.deal_id] ||= []).push(t)
+    const resolve = (deal) => {
+      const rows = byDeal[deal.id]
+      if (rows?.length) {
+        return rows
+          .slice()
+          .sort((a, b) => (a.role === 'primary' ? -1 : 0) - (b.role === 'primary' ? -1 : 0))
+          .map(r => agentMap[r.agent_id]).filter(Boolean)
+      }
+      const legacy = propertyMap[deal.property_id]?.details?.co_agent_ids || []
+      return [deal.agent_id, ...legacy].filter(Boolean)
+        .map(id => agentMap[id]).filter(Boolean)
+        .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
+    }
+    return { resolve }
+  }, [dealAgents, agentMap, propertyMap])
 
   // Filter deals for admin view (by agent) or show all
   const visibleDeals = useMemo(() => {
@@ -2604,10 +2628,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                     const contact    = contactMap[deal.contact_id]
                     const agent      = agentMap[deal.agent_id]
                     const dealProp   = deal.property_id ? propertyMap[deal.property_id] : null
-                    const coAgIds    = dealProp?.details?.co_agent_ids || []
-                    const allAgents  = [deal.agent_id, ...coAgIds].filter(Boolean)
-                      .map(id => agentMap[id]).filter(Boolean)
-                      .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
+                    const allAgents  = dealTeamMap.resolve(deal)
                     const overdue    = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
                     const urgency    = getKeyDateUrgency(deal)
                     const nearestKD  = urgency ? getNearestKeyDate(deal) : null
@@ -2710,9 +2731,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
               <tbody>
                 {listRows.map(({ deal, contact, weighted, dis, rotting, activity, keyDate }) => {
                   const col = boardStageFor(deal, resolvedTrack)
-                  const teamAgents = [deal.agent_id, ...((propertyMap[deal.property_id]?.details?.co_agent_ids) || [])]
-                    .filter(Boolean).map(id => agentMap[id]).filter(Boolean)
-                    .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
+                  const teamAgents = dealTeamMap.resolve(deal)
                   const kdColor = keyDate == null ? 'var(--gw-mist)' : keyDate.daysUntil <= 2 ? '#dc2626' : keyDate.daysUntil <= 7 ? '#d97706' : 'var(--gw-ink)'
                   return (
                     <tr key={deal.id} onClick={() => go(`deal/${deal.id}`)}

@@ -1542,3 +1542,183 @@ drop policy if exists agent_nudges_scope on agent_nudges;
 create policy agent_nudges_scope on agent_nudges for all to authenticated
   using      (app_is_admin() or agent_id = app_current_agent_id() or deal_id in (select app_visible_deal_ids()))
   with check (app_is_admin() or agent_id = app_current_agent_id() or deal_id in (select app_visible_deal_ids()));
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- TAG-BASED VISIBILITY + CROSS-TEAM SHARING + CONFIG  (migration 0024)
+--
+-- deal_agents is the SOLE source of deal visibility: an agent sees a deal (and
+-- its property, contacts, commissions) only if tagged on it (primary or
+-- additional). Team membership grants nothing by default; a team may opt-in via
+-- visibility_settings. Cross-team partners share specific contacts/properties
+-- through sharing_groups without exposing deals or teams. Pay (commissions.
+-- participants) is independent of sight (deal_agents). This section is the
+-- fresh-install definition; existing DBs reach the same state via 0024.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create table if not exists deal_agents (
+  id         uuid primary key default uuid_generate_v4(),
+  deal_id    uuid not null references deals(id)  on delete cascade,
+  agent_id   uuid not null references agents(id) on delete cascade,
+  role       text not null check (role in ('primary','additional')) default 'additional',
+  can_edit   boolean not null default true,
+  added_by   uuid references agents(id) on delete set null,
+  created_at timestamptz default now(),
+  unique (deal_id, agent_id)
+);
+create unique index if not exists deal_agents_one_primary on deal_agents(deal_id) where role='primary';
+create index if not exists deal_agents_agent_idx on deal_agents(agent_id);
+create index if not exists deal_agents_deal_idx  on deal_agents(deal_id);
+alter table deal_agents enable row level security;
+
+create table if not exists sharing_groups (
+  id uuid primary key default uuid_generate_v4(),
+  name text not null, description text,
+  created_by uuid references agents(id) on delete set null,
+  archived boolean not null default false,
+  created_at timestamptz default now()
+);
+alter table sharing_groups enable row level security;
+
+create table if not exists sharing_group_members (
+  id uuid primary key default uuid_generate_v4(),
+  group_id uuid not null references sharing_groups(id) on delete cascade,
+  agent_id uuid not null references agents(id) on delete cascade,
+  role text not null check (role in ('owner','member')) default 'member',
+  created_at timestamptz default now(),
+  unique (group_id, agent_id)
+);
+create index if not exists sgm_agent_idx on sharing_group_members(agent_id);
+alter table sharing_group_members enable row level security;
+
+create table if not exists sharing_group_records (
+  id uuid primary key default uuid_generate_v4(),
+  group_id uuid not null references sharing_groups(id) on delete cascade,
+  entity_type text not null check (entity_type in ('contact','property')),
+  entity_id uuid not null,
+  shared_by uuid references agents(id) on delete set null,
+  created_at timestamptz default now(),
+  unique (group_id, entity_type, entity_id)
+);
+create index if not exists sgr_lookup_idx on sharing_group_records(entity_type, entity_id);
+create index if not exists sgr_group_idx on sharing_group_records(group_id);
+alter table sharing_group_records enable row level security;
+
+create table if not exists visibility_settings (
+  id uuid primary key default uuid_generate_v4(),
+  scope text not null check (scope in ('brokerage','team','user')),
+  scope_id uuid,
+  team_deal_visibility text check (team_deal_visibility in ('off','all','leads_only')) default 'off',
+  rules jsonb not null default '{}',
+  updated_by uuid references agents(id) on delete set null,
+  updated_at timestamptz default now(),
+  unique (scope, scope_id)
+);
+alter table visibility_settings enable row level security;
+
+-- Keep deals.agent_id and the primary tag in lockstep.
+create or replace function sync_primary_deal_agent()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if new.agent_id is not null then
+    delete from deal_agents where deal_id=new.id and role='primary' and agent_id<>new.agent_id;
+    insert into deal_agents (deal_id, agent_id, role) values (new.id, new.agent_id, 'primary')
+      on conflict (deal_id, agent_id) do update set role='primary';
+  end if;
+  return new;
+end $$;
+drop trigger if exists trg_sync_primary_deal_agent on deals;
+create trigger trg_sync_primary_deal_agent
+  after insert or update of agent_id on deals
+  for each row execute function sync_primary_deal_agent();
+
+create or replace function app_team_deal_visibility(p_team uuid, p_prop_category text)
+returns text language sql stable security definer set search_path = public as $$
+  with s as (select scope, team_deal_visibility, rules from visibility_settings
+             where (scope='team' and scope_id=p_team) or scope='brokerage')
+  select coalesce(
+    (select rules->'by_prop_category'->>p_prop_category from s where scope='team'),
+    (select team_deal_visibility from s where scope='team'),
+    (select rules->'by_prop_category'->>p_prop_category from s where scope='brokerage'),
+    (select team_deal_visibility from s where scope='brokerage'),
+    'off');
+$$;
+
+-- Deal visibility = admin + explicitly tagged + team-override (opt-in).
+create or replace function app_visible_deal_ids()
+returns setof uuid language sql stable security definer set search_path = public as $$
+  select id from deals where app_is_admin()
+  union
+  select deal_id from deal_agents where agent_id = app_current_agent_id()
+  union
+  select d.id from deals d
+  join deal_agents da on da.deal_id=d.id and da.role='primary'
+  join team_splits ots on ots.agent_id=da.agent_id
+  join team_splits mts on mts.team_id=ots.team_id and mts.agent_id=app_current_agent_id()
+  where app_team_deal_visibility(ots.team_id, d.prop_category) in ('all','leads_only');
+$$;
+
+create or replace function app_shared_contact_ids()
+returns setof uuid language sql stable security definer set search_path = public as $$
+  select r.entity_id from sharing_group_records r
+  join sharing_group_members m on m.group_id=r.group_id
+  join sharing_groups g on g.id=r.group_id and not g.archived
+  where r.entity_type='contact' and m.agent_id=app_current_agent_id();
+$$;
+
+create or replace function app_shared_property_ids()
+returns setof uuid language sql stable security definer set search_path = public as $$
+  select r.entity_id from sharing_group_records r
+  join sharing_group_members m on m.group_id=r.group_id
+  join sharing_groups g on g.id=r.group_id and not g.archived
+  where r.entity_type='property' and m.agent_id=app_current_agent_id();
+$$;
+
+grant execute on function app_team_deal_visibility(uuid,text) to authenticated;
+grant execute on function app_visible_deal_ids()              to authenticated;
+grant execute on function app_shared_contact_ids()            to authenticated;
+grant execute on function app_shared_property_ids()           to authenticated;
+
+-- DEALS — purely tag-driven (overrides the earlier definition in this file).
+drop policy if exists deals_agent_scope on deals;
+create policy deals_agent_scope on deals for all to authenticated
+  using (id in (select app_visible_deal_ids()))
+  with check (app_is_admin() or id in (select app_visible_deal_ids()) or agent_id = app_current_agent_id());
+
+-- CONTACTS — own + tagged-deal-linked + group-shared (overrides earlier def).
+drop policy if exists contacts_agent_scope on contacts;
+create policy contacts_agent_scope on contacts for all to authenticated
+  using (
+    app_is_admin()
+    or assigned_agent_id in (select app_visible_agent_ids('contacts'))
+    or id in (select app_shared_contact_ids())
+    or id in (select contact_id from deals where id in (select app_visible_deal_ids()) and contact_id is not null)
+    or id in (select contact_id from deal_contacts where deal_id in (select app_visible_deal_ids()))
+  )
+  with check (app_is_admin() or assigned_agent_id in (select app_visible_agent_ids('contacts')));
+
+drop policy if exists deal_agents_scope on deal_agents;
+create policy deal_agents_scope on deal_agents for all to authenticated
+  using      (app_is_admin() or deal_id in (select app_visible_deal_ids()))
+  with check (app_is_admin() or deal_id in (select app_visible_deal_ids()));
+
+drop policy if exists sg_scope on sharing_groups;
+create policy sg_scope on sharing_groups for all to authenticated
+  using (app_is_admin() or id in (select group_id from sharing_group_members where agent_id=app_current_agent_id()))
+  with check (app_is_admin() or created_by=app_current_agent_id()
+     or id in (select group_id from sharing_group_members where agent_id=app_current_agent_id() and role='owner'));
+
+drop policy if exists sgm_scope on sharing_group_members;
+create policy sgm_scope on sharing_group_members for all to authenticated
+  using (app_is_admin() or group_id in (select group_id from sharing_group_members where agent_id=app_current_agent_id()))
+  with check (app_is_admin() or group_id in (select group_id from sharing_group_members where agent_id=app_current_agent_id() and role='owner'));
+
+drop policy if exists sgr_scope on sharing_group_records;
+create policy sgr_scope on sharing_group_records for all to authenticated
+  using (app_is_admin() or group_id in (select group_id from sharing_group_members where agent_id=app_current_agent_id()))
+  with check (app_is_admin() or group_id in (select group_id from sharing_group_members where agent_id=app_current_agent_id()));
+
+drop policy if exists vs_read on visibility_settings;
+create policy vs_read on visibility_settings for select to authenticated using (true);
+drop policy if exists vs_write on visibility_settings;
+create policy vs_write on visibility_settings for all to authenticated
+  using (app_is_admin()) with check (app_is_admin());
