@@ -1895,7 +1895,9 @@ async function syncDealContacts(dealId, contactIds) {
 }
 
 export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, onSave, initialTab = 'details' }) {
-  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
+  // Default the owner to the current user (the DB also stamps it on insert, but
+  // pre-filling makes ownership explicit in the form and avoids a null agent_id).
+  const blank = { title:'', contact_id:'', property_id:'', agent_id: activeAgent?.id || '', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
