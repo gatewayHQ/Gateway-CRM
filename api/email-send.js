@@ -25,10 +25,12 @@
  *  • Centralized rate limiting + retry logic
  */
 
+import { requireAgent, errorResponse } from './_lib/auth.js'
+
 const SHARED_HEADERS = {
   'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, x-resend-key, x-gateway-secret',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-resend-key, x-gateway-secret',
 }
 
 // In-memory rate limit (per cold-start). Resets when the function reloads.
@@ -57,6 +59,14 @@ export default async function handler(req, res) {
   applyCors(res)
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' })
+
+  // Auth — a logged-in agent, OR the internal cron secret (the sequence worker
+  // may call this server-to-server). Previously this was an open relay.
+  const gate = req.headers['x-gateway-secret']
+  const hasGate = process.env.GATEWAY_CRON_SECRET && gate === process.env.GATEWAY_CRON_SECRET
+  if (!hasGate) {
+    try { await requireAgent(req) } catch (e) { return errorResponse(res, e) }
+  }
 
   // ── Rate limit ────────────────────────────────────────────────────────────
   const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||

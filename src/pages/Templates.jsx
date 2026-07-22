@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '../lib/supabase.js'
+import { authedFetch } from '../lib/authFetch.js'
 import { Icon, Badge, Drawer, EmptyState, ConfirmDialog, Modal, pushToast } from '../components/UI.jsx'
 
 // Load from Supabase auth metadata first (cross-device), fall back to localStorage
@@ -261,7 +262,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
     ].filter(Boolean).join('\n')
 
     try {
-      const res = await fetch('/api/claude', {
+      const res = await authedFetch('/api/claude', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system, messages: [{ role: 'user', content: userMsg }], max_tokens: 1024 }),
@@ -311,7 +312,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
         const fromAddr = resendFrom || (agent.email ? `${agent.name || 'Gateway'} <${agent.email}>` : 'onboarding@resend.dev')
         // Route through our server — keeps the API key off the wire and
         // gives us a server-side audit trail + retry handling.
-        const res = await fetch('/api/email-send', {
+        const res = await authedFetch('/api/email-send', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

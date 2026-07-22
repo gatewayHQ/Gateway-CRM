@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase.js'
-import { primeCache, invalidate } from './lib/queryCache.js'
 import { fetchVisibleDeals, fetchVisibleCommissions } from './lib/services/deals.js'
 import { Icon, Avatar, Modal, Badge, ToastHost, Loading, ErrorBoundary, pushToast } from './components/UI.jsx'
 // All pages are lazy-loaded — only the current route's bundle downloads
@@ -260,7 +259,7 @@ export default function App() {
   // computed lower for prop-passing, but the nav builds before that)
   const navAdmin = (() => {
     const a = db.agents?.find(x => x.id === activeAgentId)
-    return a?.is_admin === true || (a?.role?.toLowerCase().includes('admin') ?? false)
+    return a?.is_admin === true
   })()
   const officeBase = NAV_OFFICE.filter(n => navAdmin || !n.adminOnly)
   const NAV = [
@@ -335,7 +334,7 @@ export default function App() {
       setActiveAgentId(matched.id)
       // Office admin: prefer the explicit is_admin flag (migration 0005); fall
       // back to the free-text role for agents created before the column existed.
-      const isAdminAgent = matched.is_admin === true || (matched.role?.toLowerCase().includes('admin') ?? false)
+      const isAdminAgent = matched.is_admin === true
 
       // ── Compute scoped agent ID lists ──────────────────────────────────────
       // Each team member row carries explicit share_* flags (default true).
@@ -402,16 +401,6 @@ export default function App() {
       }
       setDb(dbPayload)
 
-      // Seed query cache so page components skip redundant fetches
-      const agentKey = matched.id
-      primeCache(`contacts:${agentKey}`,    dbPayload.contacts)
-      primeCache(`properties:${agentKey}`,  dbPayload.properties)
-      primeCache(`deals:${agentKey}`,       dbPayload.deals)
-      primeCache(`tasks:${agentKey}`,       dbPayload.tasks)
-      primeCache(`templates:${agentKey}`,   dbPayload.templates)
-      primeCache(`activities:${agentKey}`,  dbPayload.activities)
-      primeCache(`agents:all`,              dbPayload.agents)
-
       setLoading(false)
     }
     load()
@@ -470,7 +459,7 @@ export default function App() {
   const activeAgent = db.agents.find(a => a.id === activeAgentId) || null
   // Office admin: honor the explicit is_admin flag (migration 0005) first, then
   // fall back to the free-text role for profiles created before the column.
-  const isAdmin     = activeAgent?.is_admin === true || (activeAgent?.role?.toLowerCase().includes('admin') ?? false)
+  const isAdmin     = activeAgent?.is_admin === true
   const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin, visibleAgentIds, dealAgentIds }
 
   if (loading) return (
@@ -591,10 +580,6 @@ export default function App() {
           <div>
             <div className="topbar__title">{TITLES[route]?.title}</div>
             <div className="topbar__breadcrumb">{TITLES[route]?.crumb}</div>
-          </div>
-          <div className="topbar__search">
-            <Icon name="search" size={14} style={{ color: 'var(--gw-mist)' }} />
-            <input placeholder="Search contacts, properties, deals…" defaultValue="" />
           </div>
           {activeAgent && (
             <div className="topbar__agent-badge">

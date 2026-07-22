@@ -10,7 +10,13 @@ const CORS_HEADERS = {
 
 function checkAuth(req, res) {
   const secret = req.headers['x-gateway-secret']
-  if (process.env.GATEWAY_SECRET && secret !== process.env.GATEWAY_SECRET) {
+  // Fail CLOSED: if no secret is configured, refuse rather than run open — this
+  // endpoint posts to the firm's connected social profiles.
+  if (!process.env.GATEWAY_SECRET) {
+    res.status(500).json({ error: 'Server misconfigured: GATEWAY_SECRET is not set' })
+    return false
+  }
+  if (secret !== process.env.GATEWAY_SECRET) {
     res.status(401).json({ error: 'Unauthorized' })
     return false
   }

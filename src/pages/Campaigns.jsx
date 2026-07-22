@@ -13,6 +13,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { authedFetch } from '../lib/authFetch.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { Icon, Modal, pushToast, EmptyState, ConfirmDialog } from '../components/UI.jsx'
 
@@ -615,7 +616,7 @@ function CollageBuilder({ cfg, setCfg, variant = 'multifamily' }) {
     if (!aiInput.trim()) return pushToast('Describe the property or campaign first', 'error')
     setAiLoading(true)
     try {
-      const r = await fetch('/api/claude', {
+      const r = await authedFetch('/api/claude', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -823,7 +824,7 @@ function MailingListBuilder({ cfg, setCfg }) {
     if (!aiInput.trim()) return pushToast('Describe your list or audience first', 'error')
     setAiLoading(true)
     try {
-      const r = await fetch('/api/claude', {
+      const r = await authedFetch('/api/claude', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           max_tokens: 600,

@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { authedFetch } from '../lib/authFetch.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { formatCurrency } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -1272,7 +1273,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
       const label  = campaignType === 'Custom' ? customName : campaignType
       const tag    = `${label} — ${property.address}`
 
-      const res = await fetch('/api/mailchimp', {
+      const res = await authedFetch('/api/mailchimp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

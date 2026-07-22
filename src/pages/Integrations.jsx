@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { authedFetch } from '../lib/authFetch.js'
 import { Icon, pushToast } from '../components/UI.jsx'
 import { WEBHOOK_EVENTS } from '../lib/webhooks.js'
 
@@ -48,7 +49,7 @@ function MailchimpSection() {
     if (!apiKey.trim()) { pushToast('Enter your Mailchimp API key', 'error'); return }
     setStatus('testing'); setErrMsg('')
     try {
-      const res = await fetch('/api/mailchimp', {
+      const res = await authedFetch('/api/mailchimp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'getLists', apiKey: apiKey.trim() }),

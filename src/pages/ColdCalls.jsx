@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { authedFetch } from '../lib/authFetch.js'
 import { Icon, Modal, pushToast } from '../components/UI.jsx'
 import { CONTACT_TYPES, PROPERTY_TYPES, titleCase } from '../lib/enums.js'
 
@@ -431,7 +432,7 @@ function PowerDialer({ leads, startIndex, agents, activeAgent, onClose, onUpdate
     ].filter(Boolean).join('\n')
 
     try {
-      const res = await fetch('/api/claude', {
+      const res = await authedFetch('/api/claude', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -2485,9 +2485,18 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   // so "days in stage" / rotting is precise going forward (no schema change).
   const moveStage = useCallback(async (dealId, newStage) => {
     const deal = deals.find(d => d.id === dealId)
+    const prevStage = deal?.stage
+    const prevComp  = deal?.comp_data
     const comp_data = { ...(deal?.comp_data || {}), stage_since: new Date().toISOString() }
-    await supabase.from('deals').update({ stage: newStage, comp_data }).eq('id', dealId)
+    // Optimistic move, then verify the write actually landed.
     setDb(p => ({ ...p, deals: p.deals.map(d => d.id === dealId ? { ...d, stage: newStage, comp_data } : d) }))
+    const { error } = await supabase.from('deals').update({ stage: newStage, comp_data }).eq('id', dealId)
+    if (error) {
+      // Roll the board back so it never claims a move that didn't persist.
+      setDb(p => ({ ...p, deals: p.deals.map(d => d.id === dealId ? { ...d, stage: prevStage, comp_data: prevComp } : d) }))
+      pushToast(`Couldn't move deal: ${error.message}`, 'error')
+      return
+    }
     pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
 
     const auto = AUTO_TASKS[newStage]
@@ -2496,21 +2505,25 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     const due = new Date()
     due.setDate(due.getDate() + auto.daysOut)
     due.setHours(9, 0, 0, 0)
-    const { data: newTask } = await supabase.from('tasks').insert([{
+    // Assign the follow-up to whoever moved the deal — tasks are personal
+    // (RLS requires agent_id = the caller), so using the deal owner's id would
+    // silently fail when a co-listed agent moves the deal.
+    const { data: newTask, error: taskErr } = await supabase.from('tasks').insert([{
       title: auto.title(deal),
       type: auto.type,
       priority: auto.priority,
       due_date: due.toISOString(),
-      agent_id: deal.agent_id || null,
+      agent_id: activeAgent?.id || deal.agent_id || null,
       contact_id: deal.contact_id || null,
       deal_id: dealId,
       completed: false,
     }]).select().single()
+    if (taskErr) { pushToast(`Deal moved, but the auto-task couldn't be created: ${taskErr.message}`, 'error'); return }
     if (newTask) {
       setDb(p => ({ ...p, tasks: [newTask, ...(p.tasks || [])] }))
       pushToast(`Task auto-created: ${newTask.title}`, 'info')
     }
-  }, [setDb, deals])
+  }, [setDb, deals, activeAgent])
 
   return (
     <div className="page-content" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>

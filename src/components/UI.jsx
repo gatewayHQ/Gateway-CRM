@@ -1,4 +1,29 @@
-import React, { useState, useEffect, Component } from 'react'
+import React, { useState, useEffect, useRef, Component } from 'react'
+
+// Shared dialog behavior: trap Tab focus inside the dialog, focus it on open,
+// and restore focus to the triggering element on close. Escape handling stays
+// with each component. Applied to Modal + Drawer so every dialog inherits it.
+function useDialogFocus(open, ref) {
+  useEffect(() => {
+    if (!open) return
+    const node = ref.current
+    const prev = document.activeElement
+    const list = () => node
+      ? [...node.querySelectorAll('a[href],button:not([disabled]),textarea,input:not([disabled]),select,[tabindex]:not([tabindex="-1"])')]
+          .filter(el => el.offsetParent !== null)
+      : []
+    ;(list()[0] || node)?.focus?.()
+    const onKey = (e) => {
+      if (e.key !== 'Tab') return
+      const f = list(); if (!f.length) return
+      const first = f[0], last = f[f.length - 1]
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
+    }
+    node?.addEventListener('keydown', onKey)
+    return () => { node?.removeEventListener('keydown', onKey); prev?.focus?.() }
+  }, [open, ref])
+}
 
 // ─── ICONS ───────────────────────────────────────────────────────────────────
 const ICONS = {
@@ -81,16 +106,19 @@ export function Badge({ variant, children }) {
 
 // ─── MODAL ────────────────────────────────────────────────────────────────────
 export function Modal({ open, onClose, children, width = 520 }) {
+  const ref = useRef(null)
   useEffect(() => {
     const handler = (e) => { if (e.key === 'Escape') onClose() }
     if (open) window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [open, onClose])
+  useDialogFocus(open, ref)
 
   if (!open) return null
   return (
     <div className="modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" style={{ width, maxWidth: 'calc(100vw - 48px)' }}>
+      <div className="modal" ref={ref} role="dialog" aria-modal="true" tabIndex={-1}
+           style={{ width, maxWidth: 'calc(100vw - 48px)' }}>
         {children}
       </div>
     </div>
@@ -99,20 +127,23 @@ export function Modal({ open, onClose, children, width = 520 }) {
 
 // ─── DRAWER ───────────────────────────────────────────────────────────────────
 export function Drawer({ open, onClose, title, children, width = 480 }) {
+  const ref = useRef(null)
   useEffect(() => {
     const handler = (e) => { if (e.key === 'Escape') onClose() }
     if (open) window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [open, onClose])
+  useDialogFocus(open, ref)
 
   if (!open) return null
   return (
     <>
       <div className="drawer-backdrop" onClick={onClose} />
-      <div className="drawer" style={{ width, maxWidth: 'calc(100vw - 48px)' }}>
+      <div className="drawer" ref={ref} role="dialog" aria-modal="true" aria-label={typeof title === 'string' ? title : undefined}
+           tabIndex={-1} style={{ width, maxWidth: 'calc(100vw - 48px)' }}>
         <div className="drawer__head">
           <div className="drawer__title">{title}</div>
-          <button className="drawer__close" onClick={onClose}><Icon name="x" size={18} /></button>
+          <button className="drawer__close" onClick={onClose} aria-label="Close"><Icon name="x" size={18} /></button>
         </div>
         {children}
       </div>

@@ -3,19 +3,28 @@
 // Never hardcode secrets here — the key travels in the POST body, authenticated
 // only by Supabase RLS on the integrations table.
 
+import { requireAgent, errorResponse } from './_lib/auth.js'
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+
+  // Require a logged-in agent (was unauthenticated).
+  try { await requireAgent(req) } catch (e) { return errorResponse(res, e) }
 
   const { action, apiKey, listId, members, tag } = req.body || {}
   if (!apiKey) return res.status(400).json({ error: 'Missing apiKey' })
 
-  // Mailchimp API key encodes the datacenter: xxxx-us6 → us6.api.mailchimp.com
+  // Mailchimp API key encodes the datacenter: xxxx-us6 → us6.api.mailchimp.com.
+  // Validate the datacenter token strictly (letters+digits) so a crafted key
+  // can't redirect the server's request to an arbitrary host (SSRF).
   const dc = apiKey.split('-').pop()
-  if (!dc || dc === apiKey) return res.status(400).json({ error: 'Invalid Mailchimp API key format (expected: key-dc)' })
+  if (!dc || dc === apiKey || !/^[a-z]+[0-9]+$/.test(dc)) {
+    return res.status(400).json({ error: 'Invalid Mailchimp API key format (expected: key-dc, e.g. …-us6)' })
+  }
 
   const base = `https://${dc}.api.mailchimp.com/3.0`
   const auth = 'Basic ' + Buffer.from(`anystring:${apiKey}`).toString('base64')

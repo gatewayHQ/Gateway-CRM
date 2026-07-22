@@ -325,7 +325,7 @@ async function handleMyEarnings(req, res) {
     // 3. Load context. Deals where the caller is owner, legacy co-agent, or a
     //    commission participant — everything else is filtered out below anyway.
     const dealFilter = req.query?.deal_id ? { col: 'id', val: req.query.deal_id } : null
-    let dealQuery = svc.from('deals').select('id, title, stage, value, probability, agent_id, co_agent_ids, expected_close_date, updated_at, created_at, comp_data')
+    let dealQuery = svc.from('deals').select('id, title, stage, value, probability, agent_id, closed_at, expected_close_date, updated_at, created_at, comp_data')
     if (dealFilter) dealQuery = dealQuery.eq(dealFilter.col, dealFilter.val)
     const [{ data: deals }, { data: commissions }, { data: agents }] = await Promise.all([
       dealQuery,
@@ -342,7 +342,9 @@ async function handleMyEarnings(req, res) {
       const slice = agentSliceForDeal(deal, commByDeal.get(deal.id), agents || [], me.id)
       if (!slice.onDeal || (slice.take === 0 && slice.cap === 0 && slice.fees === 0 && deal.agent_id !== me.id)) continue
       const closed = deal.stage === 'closed'
-      const closedAt = deal.updated_at || deal.created_at
+      // Real close date (0027). Falls back to last-edit only for legacy rows
+      // that predate the closed_at backfill.
+      const closedAt = deal.closed_at || deal.updated_at || deal.created_at
       rows.push({
         deal_id: deal.id, title: deal.title, stage: deal.stage,
         value: deal.value, closed, closed_at: closed ? closedAt : null,

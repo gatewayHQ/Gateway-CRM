@@ -127,9 +127,27 @@ create table if not exists deals (
   comp_data           jsonb default '{}',   -- { key_dates:[{type,date}], portal_docs:[name], state, transaction_type }
   portal_token        uuid,                 -- client portal share token (unguessable)
   portal_enabled      boolean default false,
+  closed_at           timestamptz,          -- set when stage → 'closed' (trigger); drives commission cap-year accounting (0027)
   created_at          timestamptz default now(),
   updated_at          timestamptz default now()
 );
+
+-- Stamp closed_at when a deal enters 'closed' (and clear it if re-opened) so
+-- commission cap-year math keys off the real close date, not last-edit. (0027)
+create or replace function deals_set_closed_at()
+returns trigger language plpgsql as $$
+begin
+  if new.stage = 'closed' and (tg_op = 'INSERT' or old.stage is distinct from 'closed') then
+    new.closed_at := now();
+  elsif new.stage <> 'closed' then
+    new.closed_at := null;
+  end if;
+  return new;
+end $$;
+drop trigger if exists deals_set_closed_at_trg on deals;
+create trigger deals_set_closed_at_trg
+  before insert or update on deals
+  for each row execute function deals_set_closed_at();
 create unique index if not exists deals_portal_token_idx
   on deals(portal_token) where portal_token is not null;
 
@@ -282,9 +300,10 @@ alter table commissions enable row level security;
 -- (properties is NOT here — it is agent-scoped in the SCOPED RLS section below;
 -- its public landing/share reads go through /api/property-public. See 0025.)
 do $$ begin
-  -- templates (shared across all agents by design)
-  if not exists (select 1 from pg_policies where tablename='templates' and policyname='allow_all') then
-    create policy "allow_all" on templates for all using (true) with check (true);
+  -- templates (shared across all agents by design — but authenticated only)
+  drop policy if exists allow_all on templates;
+  if not exists (select 1 from pg_policies where tablename='templates' and policyname='templates_auth') then
+    create policy "templates_auth" on templates for all to authenticated using (true) with check (true);
   end if;
 end $$;
 
@@ -311,7 +330,9 @@ returns uuid language sql stable security definer set search_path = public as $$
 $$;
 create or replace function app_is_admin()
 returns boolean language sql stable security definer set search_path = public as $$
-  select coalesce(bool_or(is_admin or role ilike '%admin%'), false)
+  -- Admin is the explicit is_admin flag ONLY (0027). The old role-substring
+  -- fallback matched "Administrative Assistant" etc. and over-granted access.
+  select coalesce(bool_or(is_admin), false)
   from agents where auth_id = auth.uid();
 $$;
 grant execute on function app_current_agent_id() to authenticated;
@@ -400,8 +421,9 @@ create table if not exists teams (
 
 alter table teams enable row level security;
 do $$ begin
-  if not exists (select 1 from pg_policies where tablename='teams' and policyname='allow_all') then
-    create policy "allow_all" on teams for all using (true) with check (true);
+  drop policy if exists allow_all on teams;
+  if not exists (select 1 from pg_policies where tablename='teams' and policyname='teams_auth') then
+    create policy "teams_auth" on teams for all to authenticated using (true) with check (true);
   end if;
 end $$;
 
@@ -713,6 +735,8 @@ create index if not exists idx_activities_agent   on activities(agent_id);
 -- commissions are keyed uniquely by deal_id (the unique constraint already
 -- provides the lookup index); no agent_id/paid columns in the canonical model.
 create index if not exists idx_commissions_deal    on commissions(deal_id);
+-- app_visible_deal_ids() scans participants (jsonb) on every scoped read — index it. (0027)
+create index if not exists idx_commissions_participants on commissions using gin (participants jsonb_path_ops);
 
 -- agent_notifications — real-time inbox queries
 create index if not exists idx_notif_agent_unread on agent_notifications(agent_id, read) where read = false;
@@ -867,9 +891,13 @@ create trigger mailings_updated_at before update on mailings
   for each row execute function set_updated_at();
 
 alter table mailings enable row level security;
+-- Public landing pages read a campaign by id with the anon key, so SELECT is
+-- public; writes happen only via the service-key API (bypasses RLS), so no
+-- authenticated write policy is granted. Closes anon insert/update/delete. (0027)
+drop policy if exists allow_all on mailings;
 do $$ begin
-  if not exists (select 1 from pg_policies where tablename='mailings' and policyname='allow_all') then
-    create policy "allow_all" on mailings for all using (true) with check (true);
+  if not exists (select 1 from pg_policies where tablename='mailings' and policyname='mailings_public_read') then
+    create policy "mailings_public_read" on mailings for select using (true);
   end if;
 end $$;
 
@@ -902,9 +930,11 @@ create index if not exists mailing_recipients_contact_idx  on mailing_recipients
 create index if not exists mailing_recipients_responded_idx on mailing_recipients(mailing_id, responded);
 
 alter table mailing_recipients enable row level security;
+-- PII (names/addresses) — service-key API only; authenticated, never anon. (0027)
+drop policy if exists allow_all on mailing_recipients;
 do $$ begin
-  if not exists (select 1 from pg_policies where tablename='mailing_recipients' and policyname='allow_all') then
-    create policy "allow_all" on mailing_recipients for all using (true) with check (true);
+  if not exists (select 1 from pg_policies where tablename='mailing_recipients' and policyname='mailing_recipients_auth') then
+    create policy "mailing_recipients_auth" on mailing_recipients for all to authenticated using (true) with check (true);
   end if;
 end $$;
 
@@ -923,9 +953,10 @@ create index if not exists mailing_scans_mailing_idx  on mailing_scans(mailing_i
 create index if not exists mailing_scans_recipient_idx on mailing_scans(recipient_id);
 
 alter table mailing_scans enable row level security;
+drop policy if exists allow_all on mailing_scans;
 do $$ begin
-  if not exists (select 1 from pg_policies where tablename='mailing_scans' and policyname='allow_all') then
-    create policy "allow_all" on mailing_scans for all using (true) with check (true);
+  if not exists (select 1 from pg_policies where tablename='mailing_scans' and policyname='mailing_scans_auth') then
+    create policy "mailing_scans_auth" on mailing_scans for all to authenticated using (true) with check (true);
   end if;
 end $$;
 
@@ -949,9 +980,12 @@ create index if not exists mailing_leads_mailing_idx on mailing_leads(mailing_id
 create index if not exists mailing_leads_contact_idx on mailing_leads(contact_id);
 
 alter table mailing_leads enable row level security;
+-- Lead PII (name/email/phone/message) — service-key API only; authenticated,
+-- never anon. This was the anonymous-dump path. (0027)
+drop policy if exists allow_all on mailing_leads;
 do $$ begin
-  if not exists (select 1 from pg_policies where tablename='mailing_leads' and policyname='allow_all') then
-    create policy "allow_all" on mailing_leads for all using (true) with check (true);
+  if not exists (select 1 from pg_policies where tablename='mailing_leads' and policyname='mailing_leads_auth') then
+    create policy "mailing_leads_auth" on mailing_leads for all to authenticated using (true) with check (true);
   end if;
 end $$;
 
@@ -1237,7 +1271,7 @@ begin
   foreach t in array array[
     'cold_call_lists','cold_call_leads','sequences','sequence_steps',
     'contact_sequences','property_showings',
-    'listing_checklist_steps','integrations','webhook_configs','email_log',
+    'listing_checklist_steps','webhook_configs','email_log',
     'option_values'
   ] loop
     execute format('alter table %I enable row level security', t);
@@ -1245,6 +1279,14 @@ begin
     execute format('create policy allow_all on %I for all to authenticated using (true) with check (true)', t);
   end loop;
 end $$;
+
+-- integrations stores workspace credentials (e.g. the Mailchimp API key), so it
+-- is ADMIN-only rather than readable by every agent. (0027)
+alter table integrations enable row level security;
+drop policy if exists allow_all           on integrations;
+drop policy if exists integrations_admin  on integrations;
+create policy integrations_admin on integrations for all to authenticated
+  using (app_is_admin()) with check (app_is_admin());
 
 -- visitor_events & lead_captures accept anonymous inserts (landing pages),
 -- authenticated read only.
@@ -1333,7 +1375,9 @@ $$;
 create or replace function app_is_admin()
 returns boolean
 language sql stable security definer set search_path = public as $$
-  select coalesce(bool_or(is_admin or role ilike '%admin%'), false)
+  -- Admin is the explicit is_admin flag ONLY (0027). The old role-substring
+  -- fallback matched "Administrative Assistant" etc. and over-granted access.
+  select coalesce(bool_or(is_admin), false)
   from agents where auth_id = auth.uid();
 $$;
 
