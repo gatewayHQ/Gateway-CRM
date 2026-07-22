@@ -26,10 +26,13 @@ async function readRawBody(req) {
 
 // Verify BoldSign's X-BoldSign-Signature header ("t=<unix>, s0=<hmac-sha256-hex>")
 // over `${t}.${rawBody}` using the endpoint's signing secret. Returns:
-//   'ok'         — verified (or no secret configured → verification disabled)
-//   'invalid'    — secret configured but signature/timestamp did not match
+//   'ok'         — verified
+//   'invalid'    — signature/timestamp did not match, OR no secret configured
+// Fail CLOSED: an unset secret means we cannot authenticate the sender, so we
+// treat events as unverified rather than trusting them. BOLDSIGN_WEBHOOK_SECRET
+// must be set for webhook-driven status sync to run.
 function verifyWebhookSignature(rawBody, header) {
-  if (!WEBHOOK_SECRET) return 'ok'                  // opt-in — unset preserves prior behavior
+  if (!WEBHOOK_SECRET) return 'invalid'             // fail closed — no secret ⇒ cannot trust
   if (!header) return 'invalid'
   const parts = {}
   for (const kv of String(header).split(',')) {

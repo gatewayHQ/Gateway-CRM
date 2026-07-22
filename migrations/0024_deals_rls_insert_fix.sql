@@ -58,11 +58,16 @@ create policy deals_select on deals for select to authenticated
 -- INSERT — an agent may create deals they own, or that a share-deals team peer
 -- owns; admins may create for anyone. (No `id in (...)` branch: meaningless on
 -- INSERT.) The trigger above has already stamped a null agent_id to the caller.
+-- INSERT — any claimed agent (or admin) may create a deal. Ownership/visibility
+-- is enforced on SELECT/UPDATE via app_visible_deal_ids(); it CANNOT be gated
+-- here, because in the deal_agents ownership model the owning link can only be
+-- written after the deals row exists (chicken-and-egg). Gating on the caller's
+-- identity — not on who the row is assigned to — is what unblocks creation.
 drop policy if exists deals_insert on deals;
 create policy deals_insert on deals for insert to authenticated
   with check (
     app_is_admin()
-    or agent_id in (select app_visible_agent_ids('deals'))
+    or app_current_agent_id() is not null
   );
 
 -- UPDATE — edit any deal you can see; the new row must still be one you own /

@@ -278,13 +278,10 @@ alter table activities  enable row level security;
 alter table documents   enable row level security;
 alter table commissions enable row level security;
 
--- Open access for all authenticated users on intentionally-shared tables
+-- Open access for all authenticated users on intentionally-shared tables.
+-- (properties is NOT here — it is agent-scoped in the SCOPED RLS section below;
+-- its public landing/share reads go through /api/property-public. See 0025.)
 do $$ begin
-  -- properties (read anonymously by the public PropertyLanding page — scope
-  -- only after that read moves behind a service-key API; see migrations/README)
-  if not exists (select 1 from pg_policies where tablename='properties' and policyname='allow_all') then
-    create policy "allow_all" on properties for all using (true) with check (true);
-  end if;
   -- templates (shared across all agents by design)
   if not exists (select 1 from pg_policies where tablename='templates' and policyname='allow_all') then
     create policy "allow_all" on templates for all using (true) with check (true);
@@ -425,11 +422,16 @@ create table if not exists team_splits (
 );
 
 alter table team_splits enable row level security;
-do $$ begin
-  if not exists (select 1 from pg_policies where tablename='team_splits' and policyname='allow_all') then
-    create policy "allow_all" on team_splits for all using (true) with check (true);
-  end if;
-end $$;
+-- Membership is readable by any authenticated user (the app builds its
+-- visible-agent lists from it) but WRITES are admin-only — team composition is
+-- an office-admin responsibility, and gating it removes a privilege-escalation
+-- path (an agent could otherwise share themselves into a peer's book). See 0025.
+drop policy if exists allow_all         on team_splits;
+drop policy if exists team_splits_read  on team_splits;
+create policy team_splits_read   on team_splits for select to authenticated using (true);
+create policy team_splits_insert on team_splits for insert to authenticated with check (app_is_admin());
+create policy team_splits_update on team_splits for update to authenticated using (app_is_admin()) with check (app_is_admin());
+create policy team_splits_delete on team_splits for delete to authenticated using (app_is_admin());
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- AGENT NOTIFICATIONS
@@ -1415,6 +1417,31 @@ create policy contacts_agent_scope on contacts for all to authenticated
   using      (app_is_admin() or assigned_agent_id in (select app_visible_agent_ids('contacts')))
   with check (app_is_admin() or assigned_agent_id in (select app_visible_agent_ids('contacts')));
 
+-- PROPERTIES — own + share-properties team peers; admins see all. Public
+-- landing/share reads go through /api/property-public (service key, single id),
+-- so the table itself is not world-readable. See migration 0025.
+drop policy if exists allow_all              on properties;
+drop policy if exists properties_agent_scope on properties;
+create policy properties_agent_scope on properties for all to authenticated
+  using      (app_is_admin() or assigned_agent_id in (select app_visible_agent_ids('properties')))
+  with check (app_is_admin() or assigned_agent_id in (select app_visible_agent_ids('properties')));
+
+-- Owner-stamp: default a null assigned_agent_id to the creator so listings
+-- created from paths that don't set one aren't orphaned. Mirrors deals.
+create or replace function properties_stamp_owner()
+returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.assigned_agent_id is null then
+    new.assigned_agent_id := app_current_agent_id();
+  end if;
+  return new;
+end $$;
+drop trigger if exists properties_stamp_owner_trg on properties;
+create trigger properties_stamp_owner_trg
+  before insert on properties
+  for each row execute function properties_stamp_owner();
+
 -- ACTIVITIES — visible through the parent contact OR the parent deal; the
 -- author always sees their own entries; admins see all.
 drop policy if exists activities_contact_scope on activities;
@@ -1473,11 +1500,13 @@ create policy deals_select on deals for select to authenticated
   using (id in (select app_visible_deal_ids()));
 
 -- INSERT — create deals you own or a share-deals peer owns; admins for anyone.
+-- INSERT — any claimed agent (or admin) may create a deal; ownership/visibility
+-- is enforced on SELECT/UPDATE (it can't be gated at insert time). See 0024.
 drop policy if exists deals_insert on deals;
 create policy deals_insert on deals for insert to authenticated
   with check (
     app_is_admin()
-    or agent_id in (select app_visible_agent_ids('deals'))
+    or app_current_agent_id() is not null
   );
 
 -- UPDATE — edit any deal you can see; a co-listed participant may edit too.

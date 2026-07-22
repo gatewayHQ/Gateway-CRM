@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase } from '../lib/supabase.js'
 
 const fmt = (n) => n != null ? `$${Number(n).toLocaleString()}` : null
 const COMMERCIAL = ['multifamily','office','land','retail','industrial','mixed-use','commercial']
@@ -354,15 +353,19 @@ export default function PropertyLandingPage({ propertyId }) {
 
   useEffect(() => {
     async function load() {
-      const { data, error } = await supabase
-        .from('properties')
-        .select('*, agent:assigned_agent_id(id, name, email, role, color, initials)')
-        .eq('id', propertyId)
-        .single()
-      setLoading(false)
-      if (error || !data) { setNotFound(true); return }
-      setProperty(data)
-      if (data.agent) setAgent(data.agent)
+      // Properties are RLS-scoped; the public listing comes through the
+      // service-key by-id gateway rather than a direct (anon) table read.
+      try {
+        const r = await fetch(`/api/property-public?id=${encodeURIComponent(propertyId)}&format=json`)
+        const { property: data } = await r.json()
+        setLoading(false)
+        if (!r.ok || !data) { setNotFound(true); return }
+        setProperty(data)
+        if (data.agent) setAgent(data.agent)
+      } catch {
+        setLoading(false)
+        setNotFound(true)
+      }
     }
     load()
   }, [propertyId])

@@ -1,11 +1,28 @@
 import { createClient } from '@supabase/supabase-js'
+import { requireAgent, errorResponse } from './_lib/auth.js'
 
 function basicAuth(sid, token) {
   return 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64')
 }
 
+// Actions that manage the brokerage's Twilio account (buy numbers, list, probe
+// credentials) are admin-only. Sending a message is available to any agent.
+const PROVISIONING_ACTIONS = new Set(['test', 'search', 'buy', 'list'])
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+
+  // Require a logged-in agent for every path — this endpoint previously ran
+  // unauthenticated, letting anyone send SMS on the firm's Twilio account.
+  let caller
+  try {
+    caller = await requireAgent(req)
+  } catch (e) {
+    return errorResponse(res, e)
+  }
+  if (PROVISIONING_ACTIONS.has(req.body?.action) && !caller.isAdmin) {
+    return res.status(403).json({ error: 'Admin only' })
+  }
 
   const SID   = process.env.TWILIO_ACCOUNT_SID
   const TOKEN = process.env.TWILIO_AUTH_TOKEN

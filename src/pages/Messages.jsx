@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { authedFetch } from '../lib/authFetch.js'
 import { Icon, Avatar, EmptyState, pushToast } from '../components/UI.jsx'
 
 function fmtTime(ts) {
@@ -324,7 +325,7 @@ export default function MessagesPage({ db, activeAgent }) {
     ))
 
     try {
-      const res  = await fetch('/api/twilio-send', {
+      const res  = await authedFetch('/api/twilio-send', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

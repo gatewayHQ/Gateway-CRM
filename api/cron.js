@@ -358,10 +358,15 @@ async function runSequences(supabase) {
 // Dispatcher
 // ─────────────────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
-  // Auth — header or ?secret= query (Vercel Cron sets the header automatically)
+  // Auth — header or ?secret= query (Vercel Cron sets the header automatically).
+  // Fail CLOSED: if the secret isn't configured, refuse rather than run this
+  // firm-wide job for anyone who finds the URL. GATEWAY_CRON_SECRET is required.
   const expectedSecret = process.env.GATEWAY_CRON_SECRET
   const providedSecret = req.headers['x-gateway-secret'] || req.query?.secret
-  if (expectedSecret && providedSecret !== expectedSecret) {
+  if (!expectedSecret) {
+    return res.status(500).json({ error: 'Server misconfigured: GATEWAY_CRON_SECRET is not set' })
+  }
+  if (providedSecret !== expectedSecret) {
     return res.status(401).json({ error: 'Unauthorized' })
   }
 

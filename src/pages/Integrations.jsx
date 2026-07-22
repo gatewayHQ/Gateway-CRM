@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { authedFetch } from '../lib/authFetch.js'
 import { Icon, pushToast } from '../components/UI.jsx'
 import { WEBHOOK_EVENTS } from '../lib/webhooks.js'
 
@@ -486,7 +487,7 @@ function TwilioSection({ db }) {
 
   // Load numbers already in Twilio account
   const loadOwned = useCallback(async () => {
-    const r = await fetch('/api/twilio-send', {
+    const r = await authedFetch('/api/twilio-send', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'list' }),
     })
@@ -496,7 +497,7 @@ function TwilioSection({ db }) {
 
   // Test connection on mount
   useEffect(() => {
-    fetch('/api/twilio-send', {
+    authedFetch('/api/twilio-send', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'test' }),
     })
@@ -517,7 +518,7 @@ function TwilioSection({ db }) {
 
   const search = async () => {
     setSearching(true); setAvailable([])
-    const r = await fetch('/api/twilio-send', {
+    const r = await authedFetch('/api/twilio-send', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'search', areaCode }),
     })
@@ -529,7 +530,7 @@ function TwilioSection({ db }) {
 
   const buy = async (number) => {
     setBuying(number)
-    const r = await fetch('/api/twilio-send', {
+    const r = await authedFetch('/api/twilio-send', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'buy', phoneNumber: number, friendlyName: 'Gateway CRM' }),
     })

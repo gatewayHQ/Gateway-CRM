@@ -28,6 +28,15 @@
 
 import { createClient } from '@supabase/supabase-js'
 import crypto from 'crypto'
+import { requireAgent } from './_lib/auth.js'
+
+// Actions reachable without a session — the public-facing surface: QR-scan
+// redirect, Open Graph card, landing-page lead + subscriber forms, email
+// unsubscribe link, and the DB-free uptime probe. EVERYTHING else runs on the
+// service key (bypasses RLS), so it MUST prove a logged-in agent.
+const PUBLIC_ACTIONS = new Set([
+  'scan', 'og', 'health', 'capture_lead', 'capture_subscriber', 'unsubscribe',
+])
 
 // ─── Supabase client (lazy singleton — avoids cold-start env-var crashes) ───
 let _supabase = null
@@ -153,6 +162,19 @@ export default async function handler(req, res) {
   const action = req.body?.action || req.query?.action
   if (!action) return json(res, 400, { error: 'action is required' })
 
+  // Authenticate everything except the explicitly-public actions. This closes
+  // the anonymous read/write/delete hole: previously the whole controller ran
+  // on the service key with no identity check and "scoped" only by a spoofable
+  // ?agent_id query param.
+  let auth = null
+  if (!PUBLIC_ACTIONS.has(action)) {
+    try {
+      auth = await requireAgent(req)
+    } catch (e) {
+      return json(res, e.status || 401, { error: e.message || 'Sign in required' })
+    }
+  }
+
   try {
     // ── Public: QR scan tracking + redirect ─────────────────────────────────
     if (action === 'scan') {
@@ -247,12 +269,12 @@ export default async function handler(req, res) {
     // ── List mailings (scoped) ──────────────────────────────────────────────
     // Each agent sees ONLY their own campaigns, plus any they collaborate on
     // (their id is the primary agent_id OR appears in landing_config.agent_ids).
-    // Admins pass all=1 to see every campaign. The client supplies agent_id/all;
-    // this endpoint runs on the service key, so DB-level RLS (migration 0002,
-    // deferred) is the eventual hard guarantee — this filter is the product rule.
     if (action === 'list') {
-      const agentId = req.query.agent_id || null
-      const all = req.query.all === '1' || req.query.all === 'true'
+      // Scope is derived from the VERIFIED identity, never the query string.
+      // Admins see every campaign; an agent sees only their own (and any they
+      // co-advise on via landing_config.agent_ids).
+      const agentId = auth.agent.id
+      const all = auth.isAdmin
 
       const { data, error } = await db()
         .from('mailings')
@@ -262,9 +284,6 @@ export default async function handler(req, res) {
 
       let mailings = data || []
       if (!all) {
-        // Non-admin with no resolved identity yet → return nothing rather than
-        // leaking the whole list during the first-paint window.
-        if (!agentId) return json(res, 200, { mailings: [] })
         mailings = mailings.filter(m => {
           if (m.agent_id === agentId) return true
           const ids = m.landing_config?.agent_ids

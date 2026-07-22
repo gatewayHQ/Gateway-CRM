@@ -230,14 +230,18 @@ function autoMapColumns(headers) {
 // ─── API helper ───────────────────────────────────────────────────────────────
 
 async function api(action, payload = {}, method = 'POST') {
+  // The campaigns API now authenticates every non-public action, so carry the
+  // caller's Supabase session token on every request.
+  const { data: { session } } = await supabase.auth.getSession()
+  const authHeader = session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}
   if (method === 'GET') {
     const qs = new URLSearchParams({ action, ...payload }).toString()
-    const r = await fetch(`/api/campaigns?${qs}`)
+    const r = await fetch(`/api/campaigns?${qs}`, { headers: authHeader })
     return r.json()
   }
   const r = await fetch('/api/campaigns', {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeader },
     body: JSON.stringify({ action, ...payload }),
   })
   return r.json()

@@ -20,23 +20,50 @@ function esc(str) {
   return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
 }
 
+// Server-side single-listing read via the SERVICE key. Properties are RLS-scoped
+// (migration 0025), so the public listing/share pages can no longer read the
+// table directly with the anon key — they go through this by-id gateway, which
+// returns exactly one listing and never allows enumeration.
+async function fetchListing(id, select) {
+  const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
+  const SERVICE_KEY  = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!SERVICE_KEY) throw new Error('Server configuration error')
+  const r = await fetch(
+    `${SUPABASE_URL}/rest/v1/properties?id=eq.${encodeURIComponent(id)}&select=${encodeURIComponent(select)}&limit=1`,
+    { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } }
+  )
+  if (!r.ok) { const e = new Error('Database error'); e.status = 500; throw e }
+  const rows = await r.json()
+  return rows?.[0] || null
+}
+
+// ── GET (JSON): single public listing for the /listing/:id landing page ──────
+async function handleListingJson(req, res) {
+  const id = req.query.id
+  if (!id || !/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Invalid property ID' })
+  try {
+    const property = await fetchListing(id, '*,agent:assigned_agent_id(id,name,email,role,color,initials)')
+    if (!property) return res.status(404).json({ error: 'Listing not found' })
+    res.setHeader('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=3600')
+    return res.status(200).json({ property })
+  } catch (e) {
+    return res.status(e.status || 500).json({ error: e.message || 'Server error' })
+  }
+}
+
 // ── GET: social-share HTML (formerly /api/share) ─────────────────────────────
 async function handleShare(req, res) {
   const id = req.query.id || req.url?.split('/').pop()?.split('?')[0]
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).send('Invalid property ID')
 
-  const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
-  const ANON_KEY     = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR3Z3dlbWtpaHB3bGdsaWZ0YWdnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNjkzMjAsImV4cCI6MjA5MjY0NTMyMH0.YRaCsDpExXjuPyrssFyzXP9RQktFAW7GTuEMgQq8sZU'
+  let p
+  try {
+    p = await fetchListing(id, 'address,city,state,zip,type,status,list_price,beds,baths,sqft,details,notes')
+  } catch {
+    return res.status(500).send('Database error')
+  }
+  if (!p) return res.status(404).send('Listing not found')
 
-  const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/properties?id=eq.${id}&select=address,city,state,zip,type,status,list_price,beds,baths,sqft,details,notes&limit=1`,
-    { headers: { apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` } }
-  )
-  if (!r.ok) return res.status(500).send('Database error')
-  const rows = await r.json()
-  if (!rows?.length) return res.status(404).send('Listing not found')
-
-  const p          = rows[0]
   const proto      = req.headers['x-forwarded-proto'] || 'https'
   const base       = `${proto}://${req.headers.host}`
   const listingUrl = `${base}/listing/${id}`
@@ -320,5 +347,7 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end()
 
   if (req.method === 'POST') return handleGate(req, res)
+  // The SPA landing page asks for JSON; social crawlers get the OG-tag HTML.
+  if (req.query?.format === 'json') return handleListingJson(req, res)
   return handleShare(req, res)
 }

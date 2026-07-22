@@ -33,9 +33,15 @@ export default async function handler(req, res) {
   const raw    = await readRawBody(req)
   const params = Object.fromEntries(new URLSearchParams(raw))
 
-  // Validate Twilio signature (skipped only if auth token not yet configured)
+  // Validate Twilio signature. Fail CLOSED: an unset auth token means we cannot
+  // prove the request came from Twilio, so we refuse it rather than accept
+  // unverified inbound SMS. (TWILIO_AUTH_TOKEN is already required to send SMS.)
   const TOKEN = process.env.TWILIO_AUTH_TOKEN
-  if (TOKEN) {
+  if (!TOKEN) {
+    res.status(500).send('Server misconfigured: TWILIO_AUTH_TOKEN is not set')
+    return
+  }
+  {
     const sig   = req.headers['x-twilio-signature'] || ''
     const proto = req.headers['x-forwarded-proto'] || 'https'
     const url   = `${proto}://${req.headers.host}/api/twilio-webhook`
