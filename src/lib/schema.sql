@@ -1447,17 +1447,53 @@ create policy tasks_agent_scope on tasks for all to authenticated
   using      (agent_id = app_current_agent_id())
   with check (agent_id = app_current_agent_id());
 
--- DEALS — own + team-shared + co-listed; admins see all. The with check arm
--- lets an agent create deals owned by themselves / a sharing peer, and lets a
--- co-listed participant edit a deal they can already see.
+-- DEALS — own + team-shared + co-listed; admins see all. Explicit per-command
+-- policies (see migration 0024). A BEFORE INSERT trigger stamps a null agent_id
+-- to the caller's own agent id, so an authenticated agent always owns what they
+-- create and the INSERT check below can never trip on a null owner.
+create or replace function deals_stamp_owner()
+returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.agent_id is null then
+    new.agent_id := app_current_agent_id();  -- null for service role / unclaimed seat
+  end if;
+  return new;
+end $$;
+drop trigger if exists deals_stamp_owner_trg on deals;
+create trigger deals_stamp_owner_trg
+  before insert on deals
+  for each row execute function deals_stamp_owner();
+
 drop policy if exists deals_agent_scope on deals;
-create policy deals_agent_scope on deals for all to authenticated
+
+-- SELECT — own + team-shared + co-listed; admin sees all.
+drop policy if exists deals_select on deals;
+create policy deals_select on deals for select to authenticated
+  using (id in (select app_visible_deal_ids()));
+
+-- INSERT — create deals you own or a share-deals peer owns; admins for anyone.
+drop policy if exists deals_insert on deals;
+create policy deals_insert on deals for insert to authenticated
+  with check (
+    app_is_admin()
+    or agent_id in (select app_visible_agent_ids('deals'))
+  );
+
+-- UPDATE — edit any deal you can see; a co-listed participant may edit too.
+drop policy if exists deals_update on deals;
+create policy deals_update on deals for update to authenticated
   using (id in (select app_visible_deal_ids()))
   with check (
     app_is_admin()
     or agent_id in (select app_visible_agent_ids('deals'))
     or id in (select app_visible_deal_ids())
   );
+
+-- DELETE — owner or admin only (least privilege).
+drop policy if exists deals_delete on deals;
+create policy deals_delete on deals for delete to authenticated
+  using (app_is_admin() or agent_id = app_current_agent_id());
 
 -- COMMISSIONS — back office: ADMIN-ONLY (decided 2026-06-12). Each agent's
 -- split/take-home is private even from co-agents on the same deal; agents get
