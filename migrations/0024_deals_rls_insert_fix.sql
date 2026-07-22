@@ -55,9 +55,6 @@ drop policy if exists deals_select on deals;
 create policy deals_select on deals for select to authenticated
   using (id in (select app_visible_deal_ids()));
 
--- INSERT — an agent may create deals they own, or that a share-deals team peer
--- owns; admins may create for anyone. (No `id in (...)` branch: meaningless on
--- INSERT.) The trigger above has already stamped a null agent_id to the caller.
 -- INSERT — any claimed agent (or admin) may create a deal. Ownership/visibility
 -- is enforced on SELECT/UPDATE via app_visible_deal_ids(); it CANNOT be gated
 -- here, because in the deal_agents ownership model the owning link can only be
