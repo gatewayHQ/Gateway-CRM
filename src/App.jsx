@@ -10,7 +10,6 @@ const PropertiesPage   = React.lazy(() => import('./pages/Properties.jsx'))
 const PipelinePage     = React.lazy(() => import('./pages/Pipeline.jsx'))
 const DealPage         = React.lazy(() => import('./pages/DealPage.jsx'))
 const TasksPage        = React.lazy(() => import('./pages/Tasks.jsx'))
-const MessagesPage     = React.lazy(() => import('./pages/Messages.jsx'))
 const CommissionPage   = React.lazy(() => import('./pages/Commission.jsx'))
 const TemplatesPage    = React.lazy(() => import('./pages/Templates.jsx'))
 const TeamPage         = React.lazy(() => import('./pages/Team/index.jsx'))
@@ -39,7 +38,6 @@ const NAV_CORE = [
   { id: 'properties', label: 'Properties', icon: 'building' },
   { id: 'pipeline',   label: 'Pipeline',   icon: 'pipeline' },
   { id: 'tasks',      label: 'Tasks',      icon: 'tasks' },
-  { id: 'messages',   label: 'Messages',   icon: 'mail' },
 ]
 
 // Office: business operations, reviewed regularly
@@ -66,7 +64,6 @@ const HIDEABLE_NAV = [
   { id: 'contacts',     label: 'Contacts',        group: 'Core'   },
   { id: 'properties',   label: 'Properties',      group: 'Core'   },
   { id: 'tasks',        label: 'Tasks',            group: 'Core'   },
-  { id: 'messages',     label: 'Messages',         group: 'Core'   },
   { id: 'commission',   label: 'Commission',       group: 'Office' },
   { id: 'coldcalls',    label: 'Cold Calls',       group: 'Office' },
   { id: 'campaigns',    label: 'Campaigns',        group: 'Office' },
@@ -98,7 +95,6 @@ const TITLES = {
   campaigns:  { title: 'Campaigns',        crumb: 'Marketing · Mail · Tracking' },
   commission: { title: 'Commission',       crumb: 'Deals · Earnings' },
   tasks:      { title: 'Tasks',            crumb: 'Follow-ups · Reminders' },
-  messages:   { title: 'Messages',         crumb: 'SMS · Twilio Inbox' },
   team:       { title: 'Team',             crumb: 'Agents · Roster' },
   templates:  { title: 'Email Templates',  crumb: 'Communications · Library' },
   sequences:  { title: 'Drip Sequences',   crumb: 'Marketing · Automation' },
@@ -696,7 +692,6 @@ export default function App() {
           {route === 'campaigns'  && <CampaignsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
           {route === 'commission' && <CommissionPage {...props} />}
           {route === 'tasks'      && <TasksPage {...props} />}
-          {route === 'messages'   && <MessagesPage db={db} activeAgent={activeAgent} />}
           {route === 'team'       && <TeamPage {...props} onSwitchAgent={id => setActiveAgentId(id)} />}
           {route === 'templates'  && <TemplatesPage {...props} />}
           {route === 'sequences'  && <SequencesPage {...props} />}

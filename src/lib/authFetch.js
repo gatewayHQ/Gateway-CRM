@@ -1,8 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // authedFetch — fetch() that carries the current Supabase session as a Bearer
 // token. Use for any /api/* endpoint that authenticates the caller (campaigns,
-// twilio-send, boldsign, portal, …). One place to attach auth means the header
-// logic can't drift call-site to call-site.
+// boldsign, portal, …). One place to attach auth means the header logic can't
+// drift call-site to call-site.
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from './supabase.js'
 

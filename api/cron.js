@@ -28,9 +28,6 @@ import { OPERATING_STATES } from '../src/lib/constants.js'
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
-function basicTwilioAuth(sid, token) {
-  return 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64')
-}
 
 async function sendResend(apiKey, from, to, subject, html, text, idempotencyKey) {
   if (!apiKey || !from || !to) return { ok: false, reason: 'missing email config' }
@@ -55,21 +52,6 @@ function daysUntil(dateStr, today) {
   const todayMidnight = new Date(today)
   todayMidnight.setHours(0, 0, 0, 0)
   return Math.round((target - todayMidnight) / 86400000)
-}
-
-async function sendSms(sid, token, from, to, body) {
-  if (!sid || !token || !from || !to) return { ok: false, reason: 'missing twilio config' }
-  const url = `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Authorization: basicTwilioAuth(sid, token),
-    },
-    body: new URLSearchParams({ From: from, To: to, Body: body }),
-  })
-  const data = await r.json().catch(() => ({}))
-  return { ok: r.ok, status: r.status, sid: data.sid, error: data.message }
 }
 
 function thresholdLabel(t) {
@@ -117,9 +99,6 @@ function smsBody(deal, dateName, threshold, propertyAddress) {
 async function runReminders(supabase) {
   const resendKey  = process.env.RESEND_API_KEY  || ''
   const resendFrom = process.env.RESEND_FROM     || ''
-  const twilioSid  = process.env.TWILIO_ACCOUNT_SID  || ''
-  const twilioToken= process.env.TWILIO_AUTH_TOKEN   || ''
-  const smsEnabled = !!(twilioSid && twilioToken)
 
   const today = new Date()
   const log   = { sent: [], skipped: [], errors: [] }
@@ -144,7 +123,7 @@ async function runReminders(supabase) {
   const propertyIds = [...new Set(dealsWithDates.map(d => d.property_id).filter(Boolean))]
 
   const [agentsRes, contactsRes, propertiesRes] = await Promise.all([
-    agentIds.length    ? supabase.from('agents').select('id, name, email, twilio_number').in('id', agentIds)              : Promise.resolve({ data: [] }),
+    agentIds.length    ? supabase.from('agents').select('id, name, email').in('id', agentIds)                             : Promise.resolve({ data: [] }),
     contactIds.length  ? supabase.from('contacts').select('id, first_name, last_name, phone, email').in('id', contactIds) : Promise.resolve({ data: [] }),
     propertyIds.length ? supabase.from('properties').select('id, address, city, state').in('id', propertyIds)             : Promise.resolve({ data: [] }),
   ])
@@ -192,12 +171,6 @@ async function runReminders(supabase) {
           const text  = smsBody(deal.title, entry.type, threshold, propertyAddress)
           const result = await sendResend(resendKey, resendFrom, agent.email, subject, html, text)
           sends.push({ channel: 'email:agent', ...result })
-        }
-
-        if (smsEnabled && contact?.phone && agent?.twilio_number) {
-          const body   = smsBody(deal.title, entry.type, threshold, propertyAddress)
-          const result = await sendSms(twilioSid, twilioToken, agent.twilio_number, contact.phone, body)
-          sends.push({ channel: 'sms:contact', ...result })
         }
 
         if (sends.some(s => s.ok)) {

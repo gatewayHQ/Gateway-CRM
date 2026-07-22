@@ -1126,37 +1126,8 @@ create table if not exists contact_sequences (
 create index if not exists idx_contact_seq_contact on contact_sequences(contact_id);
 create index if not exists idx_contact_seq_status   on contact_sequences(status);
 
--- ─── Twilio SMS ──────────────────────────────────────────────────────────────
-alter table agents add column if not exists twilio_number text;
-alter table agents add column if not exists twilio_sid    text;
-
-create table if not exists conversations (
-  id                uuid primary key default uuid_generate_v4(),
-  contact_id        uuid references contacts(id) on delete set null,
-  agent_id          uuid references agents(id)   on delete set null,
-  twilio_number     text not null,
-  contact_number    text not null,
-  contact_name      text,
-  last_message_body text,
-  last_message_at   timestamptz default now(),
-  unread_count      integer default 0,
-  created_at        timestamptz default now(),
-  unique (twilio_number, contact_number)
-);
-create index if not exists idx_conversations_agent on conversations(agent_id);
-
-create table if not exists messages (
-  id              uuid primary key default uuid_generate_v4(),
-  conversation_id uuid references conversations(id) on delete cascade not null,
-  direction       text check (direction in ('inbound','outbound')) not null,
-  body            text not null,
-  status          text default 'sent',
-  twilio_sid      text,
-  agent_id        uuid references agents(id) on delete set null,
-  error_message   text,
-  created_at      timestamptz default now()
-);
-create index if not exists idx_messages_conversation on messages(conversation_id, created_at);
+-- (Twilio SMS was removed 2026-07 — see migration 0026. The conversations /
+-- messages tables and agents.twilio_number/twilio_sid no longer exist.)
 
 -- ─── Website tracking ────────────────────────────────────────────────────────
 create table if not exists visitor_events (
@@ -1265,7 +1236,7 @@ declare t text;
 begin
   foreach t in array array[
     'cold_call_lists','cold_call_leads','sequences','sequence_steps',
-    'contact_sequences','conversations','messages','property_showings',
+    'contact_sequences','property_showings',
     'listing_checklist_steps','integrations','webhook_configs','email_log',
     'option_values'
   ] loop
