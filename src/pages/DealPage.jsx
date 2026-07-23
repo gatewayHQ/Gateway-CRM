@@ -59,7 +59,7 @@ const drawerLink = (label, onClick) => (
   <button className="btn btn--ghost btn--sm" style={{ fontSize: 11, padding: '2px 8px' }} onClick={onClick}>{label}</button>
 )
 
-export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }) {
+export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, deepTab }) {
   const deals      = db.deals      || []
   const agents     = db.agents     || []
   const contacts   = db.contacts   || []
@@ -101,6 +101,17 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [drawerTab, setDrawerTab]   = useState('details')
   const openDrawer = (tab) => { setDrawerTab(tab); setDrawerOpen(true) }
+
+  // Deep-link: arriving at deal/{id}/{tab} (e.g. "Go to property → documents"
+  // from the Review queue) drops the admin straight into the paperwork. Runs
+  // once per navigation, once the deal has loaded, so a manual close sticks.
+  const deepLinkDone = React.useRef(false)
+  useEffect(() => {
+    if (deepLinkDone.current || !deepTab || !deal) return
+    const valid = ['details', 'dates', 'checklist', 'documents', 'signatures', 'portal']
+    if (valid.includes(deepTab)) { setDrawerTab(deepTab); setDrawerOpen(true) }
+    deepLinkDone.current = true
+  }, [deepTab, deal])
   const refreshDeal = useCallback(async () => {
     const { data } = await supabase.from('deals').select('*').eq('id', dealId).single()
     if (data) {

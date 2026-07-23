@@ -4,8 +4,9 @@ import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx
 import { formatCurrency, formatDate, STAGE_LABELS } from '../lib/helpers.js'
 import { getClosingGate, gateBadge } from '../lib/compliance.js'
 import { daysBetween } from '../lib/pipeline.js'
-import { TABLES, REVIEW_STATUS } from '../lib/constants.js'
+import { TABLES, REVIEW_STATUS, BUCKETS } from '../lib/constants.js'
 import { decideDealReview } from '../lib/services/review.js'
+import { signDealDocumentUrl } from '../lib/services/documents.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AdminReview — the broker's review inbox.
@@ -32,20 +33,31 @@ export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin })
   const [openId, setOpenId] = useState(null)        // expanded deal row
   const [stepsByDeal,    setStepsByDeal]    = useState({})
   const [envByDeal,      setEnvByDeal]      = useState({})
+  const [filesByDeal,    setFilesByDeal]    = useState({})
   const [notes, setNotes] = useState('')
   const [busy,  setBusy]  = useState(null)
 
-  // Pull steps + envelopes only for the dealsexpanded in the queue, so we don't
-  // round-trip the world.
+  // Pull steps + envelopes + uploaded files only for the deals expanded in the
+  // queue, so we don't round-trip the world. Surfacing the actual paperwork here
+  // means the admin can vet a deal without hunting for it in the pipeline.
   const loadDealDetails = useCallback(async (dealId) => {
     if (!dealId || stepsByDeal[dealId]) return
-    const [s, e] = await Promise.all([
+    const [s, e, f] = await Promise.all([
       supabase.from(TABLES.TRANSACTION_STEPS).select('id, title, completed, if_applicable, doc_action').eq('deal_id', dealId),
       supabase.from(TABLES.BOLDSIGN_DOCUMENTS).select('id, status, document_name').eq('deal_id', dealId),
+      supabase.storage.from(BUCKETS.DEAL_DOCS).list(`deal-${dealId}`, { sortBy: { column: 'created_at', order: 'desc' } }),
     ])
     setStepsByDeal(p => ({ ...p, [dealId]: s.data || [] }))
     setEnvByDeal(p => ({ ...p, [dealId]: e.data || [] }))
+    setFilesByDeal(p => ({ ...p, [dealId]: (f.data || []).filter(x => x.name !== '.emptyFolderPlaceholder') }))
   }, [stepsByDeal])
+
+  // Open an uploaded document in a new tab via a short-lived signed URL.
+  const openFile = async (dealId, name) => {
+    const { url, error } = await signDealDocumentUrl(`deal-${dealId}/${name}`)
+    if (!url) { pushToast(error || 'Could not open file', 'error'); return }
+    window.open(url, '_blank', 'noopener')
+  }
 
   useEffect(() => {
     if (openId) loadDealDetails(openId)
@@ -134,6 +146,9 @@ export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin })
             const isOpen = openId === deal.id
             const steps     = stepsByDeal[deal.id] || []
             const envelopes = envByDeal[deal.id] || []
+            const uploaded  = filesByDeal[deal.id] || []
+            const reqSteps     = steps.filter(s => !s.if_applicable)
+            const missingSteps = reqSteps.filter(s => !s.completed)
             const gate = isOpen ? getClosingGate(deal, { steps, envelopes, commission, hasCommissionVisibility: true }) : null
             const gb   = isOpen ? gateBadge(gate) : null
             return (
@@ -170,8 +185,8 @@ export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin })
                       )}
                     </div>
                   </div>
-                  <button className="btn btn--ghost btn--sm" onClick={(e) => { e.stopPropagation(); go(`deal/${deal.id}`) }}>
-                    Open deal →
+                  <button className="btn btn--ghost btn--sm" onClick={(e) => { e.stopPropagation(); go(`deal/${deal.id}/documents`) }}>
+                    Go to property →
                   </button>
                 </div>
 
@@ -190,6 +205,73 @@ export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin })
                           {gate.issues.map(i => <li key={i.code}>{i.label}</li>)}
                         </ul>
                       )}
+                    </div>
+
+                    {/* Documents & Forms — the paperwork, right in the queue, so the
+                        admin can vet a deal without hunting for the property. */}
+                    <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 10 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                        <strong style={{ fontSize: 13 }}>Documents &amp; Forms</strong>
+                        <button className="btn btn--ghost btn--sm" onClick={(e) => { e.stopPropagation(); go(`deal/${deal.id}/documents`) }}>
+                          Go to property →
+                        </button>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 14 }}>
+                        {/* Forms checklist */}
+                        <div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>
+                            Forms · {reqSteps.length - missingSteps.length}/{reqSteps.length}
+                          </div>
+                          {reqSteps.length === 0 ? (
+                            <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>No checklist yet.</div>
+                          ) : missingSteps.length === 0 ? (
+                            <div style={{ fontSize: 12, color: 'var(--gw-green)' }}>All required forms complete.</div>
+                          ) : (
+                            <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              {missingSteps.slice(0, 6).map(s => <li key={s.id} style={{ color: 'var(--gw-mist)' }}>{s.title}</li>)}
+                              {missingSteps.length > 6 && <li style={{ color: 'var(--gw-mist)' }}>+{missingSteps.length - 6} more</li>}
+                            </ul>
+                          )}
+                        </div>
+                        {/* Uploaded documents */}
+                        <div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>
+                            Uploaded · {uploaded.length}
+                          </div>
+                          {uploaded.length === 0 ? (
+                            <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>No documents uploaded yet.</div>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                              {uploaded.slice(0, 6).map(f => (
+                                <button key={f.name} onClick={(e) => { e.stopPropagation(); openFile(deal.id, f.name) }} title="Open"
+                                  style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', cursor: 'pointer', padding: 0, textAlign: 'left', fontSize: 12, color: 'var(--gw-ink)', fontFamily: 'var(--font-body)' }}>
+                                  <Icon name="document" size={12} />
+                                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
+                                </button>
+                              ))}
+                              {uploaded.length > 6 && <span style={{ fontSize: 11.5, color: 'var(--gw-mist)' }}>+{uploaded.length - 6} more</span>}
+                            </div>
+                          )}
+                        </div>
+                        {/* Signatures */}
+                        <div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>
+                            Signatures · {envelopes.length}
+                          </div>
+                          {envelopes.length === 0 ? (
+                            <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>No e-sign envelopes.</div>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                              {envelopes.slice(0, 6).map(env => (
+                                <div key={env.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                                  <Badge variant={env.status === 'completed' ? 'closed' : env.status === 'voided' ? 'lost' : 'pending'}>{env.status}</Badge>
+                                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{env.document_name || 'Envelope'}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     </div>
 
                     {/* Decision form (only on pending; resubmitted-changes deals show here too) */}

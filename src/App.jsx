@@ -691,7 +691,12 @@ export default function App() {
           {route === 'contacts'   && <ContactsPage {...props} />}
           {route === 'properties' && <PropertiesPage {...props} />}
           {route === 'pipeline'   && <PipelinePage {...props} isAdmin={isAdmin} />}
-          {route.startsWith('deal/') && <DealPage {...props} dealId={route.slice(5)} />}
+          {route.startsWith('deal/') && (() => {
+            // deal/{id} or deal/{id}/{tab} — the optional tab deep-links straight
+            // into the deal's drawer (e.g. "Go to property → documents" from Review).
+            const [dealId, deepTab] = route.slice(5).split('/')
+            return <DealPage {...props} dealId={dealId} deepTab={deepTab} />
+          })()}
           {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
           {route === 'campaigns'  && <CampaignsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
           {route === 'commission' && <CommissionPage {...props} />}
