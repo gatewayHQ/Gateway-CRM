@@ -108,30 +108,36 @@ describe('fetchVisibleDeals', () => {
 })
 
 describe('fetchTaggedDeals', () => {
-  it('returns own + co-listed deals scoped to the agent, newest first, with coAgentDealIds', async () => {
+  it('returns own/partner + co-listed deals, newest first, with coAgentDealIds', async () => {
     const client = mockClient((call) => {
       if (call.table === 'commissions') return { data: [{ deal_id: 'co1' }], error: null }
       if (call.filters.some(f => f[0] === 'contains')) return { data: [], error: null } // legacy co_agent_ids lookup
-      if (call.filters.some(f => f[0] === 'eq')) {
-        return { data: [deal('own1', 'a1', '2026-06-01')], error: null } // owner query
+      const inF = call.filters.find(f => f[0] === 'in')
+      if (inF?.[1] === 'agent_id') {
+        // owner query scoped to self + partner
+        return { data: [deal('own1', 'a1', '2026-06-01'), deal('p1', 'partner', '2026-06-03')], error: null }
       }
-      // co-listed fetch by id
-      const inFilter = call.filters.find(f => f[0] === 'in')
-      expect(inFilter[2]).toEqual(['co1'])
+      // co-listed fetch by id — only the id not already owned
+      expect(inF[2]).toEqual(['co1'])
       return { data: [deal('co1', 'other', '2026-06-05')], error: null }
     })
-    const { data, coAgentDealIds } = await fetchTaggedDeals(client, { agentId: 'a1' })
-    expect(data.map(d => d.id)).toEqual(['co1', 'own1']) // newest first
+    const { data, coAgentDealIds } = await fetchTaggedDeals(client, { agentId: 'a1', ownerIds: ['a1', 'partner'] })
+    expect(data.map(d => d.id)).toEqual(['co1', 'p1', 'own1']) // newest first
     expect(coAgentDealIds).toEqual(['co1'])
   })
 
-  it('scopes the owner query with eq(agent_id) — never .in on team peers', async () => {
-    const client = mockClient((call) =>
-      call.table === 'commissions' ? { data: [], error: null } : { data: [], error: null })
+  it('scopes the owner query to the given ownerIds (self + partners)', async () => {
+    const client = mockClient(() => ({ data: [], error: null }))
+    await fetchTaggedDeals(client, { agentId: 'a1', ownerIds: ['a1', 'partner'] })
+    const ownerCall = client.calls.find(c => c.table === 'deals' && c.filters.some(f => f[0] === 'in' && f[1] === 'agent_id'))
+    expect(ownerCall.filters).toContainEqual(['in', 'agent_id', ['a1', 'partner']])
+  })
+
+  it('defaults ownerIds to [agentId] when not provided (co-agent-only, no partners)', async () => {
+    const client = mockClient(() => ({ data: [], error: null }))
     await fetchTaggedDeals(client, { agentId: 'a1' })
-    const ownerCall = client.calls.find(c => c.table === 'deals' && c.filters.some(f => f[0] === 'eq'))
-    expect(ownerCall.filters).toContainEqual(['eq', 'agent_id', 'a1'])
-    expect(client.calls.some(c => c.filters.some(f => f[0] === 'in' && f[1] === 'agent_id'))).toBe(false)
+    const ownerCall = client.calls.find(c => c.table === 'deals' && c.filters.some(f => f[0] === 'in' && f[1] === 'agent_id'))
+    expect(ownerCall.filters).toContainEqual(['in', 'agent_id', ['a1']])
   })
 
   it('still returns own deals when the co-listed lookup fails', async () => {
@@ -139,7 +145,7 @@ describe('fetchTaggedDeals', () => {
       if (call.table === 'commissions') return { data: null, error: { message: 'boom' } }
       // legacy co_agent_ids lookup (deals + .contains) also fails
       if (call.filters.some(f => f[0] === 'contains')) return { data: null, error: { message: 'boom' } }
-      // owner query (deals + .eq) succeeds
+      // owner query (deals + .in agent_id) succeeds
       return { data: [deal('own1', 'a1', '2026-06-01')], error: null }
     })
     const { data, coAgentDealIds, error } = await fetchTaggedDeals(client, { agentId: 'a1' })

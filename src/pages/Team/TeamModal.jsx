@@ -2,22 +2,19 @@ import React, { useState, useEffect } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { Icon, Avatar, Modal, pushToast } from '../../components/UI.jsx'
 
-// What each team member can share with the team. Deals are intentionally NOT
-// here: since 2026-07 deal visibility is co-agent-only (a member sees a deal
-// only if they own it or are tagged on it as a co-agent), so a team-wide
-// "share my pipeline" toggle no longer exists. See docs/co-agent-visibility.md.
-const SHARE_TOGGLES = [
-  { key: 'share_contacts',   label: 'Contacts'   },
-  { key: 'share_properties', label: 'Properties' },
-]
+// Team-wide sharing toggles are retired (2026-07). Visibility is now
+// ownership + co-agent tags + admin Partner links (see docs/co-agent-visibility.md);
+// a team no longer widens what its members can see. Teams still exist for
+// commission splits and org structure — just not for data visibility.
 
 const defaultMember = (agentId) => ({
   agent_id:         agentId,
   split_pct:        0,
   is_lead:          false,
-  share_contacts:   true,
-  share_properties: true,
-  share_deals:      false, // deprecated — deals are co-agent-only
+  // deprecated visibility flags — no longer affect what members see
+  share_contacts:   false,
+  share_properties: false,
+  share_deals:      false,
 })
 
 export default function TeamModal({ open, onClose, team, agents, splits, onSave }) {
@@ -49,9 +46,6 @@ export default function TeamModal({ open, onClose, team, agents, splits, onSave 
     setMembers(p => [...p, defaultMember(agentId)])
   }
 
-  const updateMember = (agentId, field, value) =>
-    setMembers(p => p.map(m => m.agent_id === agentId ? { ...m, [field]: value } : m))
-
   const removeMember = (agentId) =>
     setMembers(p => p.filter(m => m.agent_id !== agentId))
 
@@ -78,9 +72,10 @@ export default function TeamModal({ open, onClose, team, agents, splits, onSave 
             agent_id:         m.agent_id,
             split_pct:        parseFloat(m.split_pct) || 0,
             is_lead:          !!m.is_lead,
-            share_contacts:   !!m.share_contacts,
-            share_properties: !!m.share_properties,
-            share_deals:      false, // deprecated — deals are co-agent-only (2026-07)
+            // deprecated visibility flags (retired 2026-07) — written false
+            share_contacts:   false,
+            share_properties: false,
+            share_deals:      false,
           }))
         )
       }
@@ -123,9 +118,10 @@ export default function TeamModal({ open, onClose, team, agents, splits, onSave 
         <div className="form-group" style={{ marginBottom: 0 }}>
           <label className="form-label">Members</label>
           <p style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 4, marginBottom: 12, lineHeight: 1.5 }}>
-            Toggle what each member shares with the team. Deals aren’t shared team-wide:
-            each member sees only deals they own or are tagged on as a co-agent — add a
-            co-agent on a deal to give a teammate access.
+            Teams organize agents and commission splits. They don’t control visibility:
+            each member only sees deals, contacts, and properties they own or are tagged on.
+            To let two agents see each other’s full book, an admin links them under
+            <strong> Team → Partner links</strong>.
           </p>
 
           {members.length === 0 && (
@@ -141,27 +137,10 @@ export default function TeamModal({ open, onClose, team, agents, splits, onSave 
               <div key={m.agent_id} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, padding: '10px 12px', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', background: 'var(--gw-bone)' }}>
                 <Avatar agent={agent} size={30} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{agent.name}</div>
-                  <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                    {SHARE_TOGGLES.map(f => {
-                      const on = !!m[f.key]
-                      return (
-                        <label key={f.key} style={{
-                          display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer',
-                          fontSize: 11, fontWeight: 600, padding: '3px 10px', borderRadius: 20,
-                          color:      on ? 'var(--gw-azure)' : 'var(--gw-mist)',
-                          background: on ? 'var(--gw-sky)'   : '#fff',
-                          border:     `1px solid ${on ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
-                          transition: 'all 120ms', userSelect: 'none',
-                        }}>
-                          <input type="checkbox" checked={on}
-                            onChange={e => updateMember(m.agent_id, f.key, e.target.checked)}
-                            style={{ display: 'none' }} />
-                          {f.label}
-                        </label>
-                      )
-                    })}
-                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{agent.name}</div>
+                  {m.is_lead && (
+                    <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2 }}>Team lead</div>
+                  )}
                 </div>
                 <button className="btn btn--ghost btn--icon btn--sm" onClick={() => removeMember(m.agent_id)}>
                   <Icon name="x" size={12} />

@@ -1,26 +1,26 @@
 import React, { useState } from 'react'
 import { Icon } from '../../components/UI.jsx'
-import useTaggedDeals, { VIEW } from './useTaggedDeals.js'
-import DealList from './DealList.jsx'
+import DealList from '../../components/records/DealList.jsx'
+import useVisibleRecords, { VIEW } from '../../hooks/useVisibleRecords.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Team Deals — the agent-facing view of the co-agent-only visibility model.
-// It renders ONLY the deals the active agent is personally on (primary or
-// co-agent) and makes that rule explicit. The scoping itself happens upstream
-// in the data layer (see docs/co-agent-visibility.md); this view derives the
-// per-deal relationship for badging via useTaggedDeals and quarantines anything
-// that should not have reached a member's browser.
+// My Deals — the agent-facing view of the visibility model. Shows ONLY the
+// deals the active agent may see (own, co-agent, or via an admin Partner link)
+// and makes the reason explicit per card. Scoping happens upstream in the data
+// layer (docs/co-agent-visibility.md); this view derives the per-record reason
+// for badging and quarantines anything that should not have reached the browser.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const FILTERS = [
   { key: VIEW.ALL,      label: 'All' },
-  { key: VIEW.PRIMARY,  label: 'Primary' },
+  { key: VIEW.OWN,      label: 'Owned' },
   { key: VIEW.CO_AGENT, label: 'Co-agent' },
+  { key: VIEW.PARTNER,  label: 'Partner' },
 ]
 
 /**
  * @param {object}  props
- * @param {object}  props.db           App data store (deals, commissions, agents, coAgentDealIds).
+ * @param {object}  props.db           App store (deals, agents, coAgentDealIds, partnerIds).
  * @param {object}  props.activeAgent
  * @param {boolean} [props.isAdmin]
  * @param {(route: string) => void} props.go
@@ -30,21 +30,21 @@ export default function TeamDealsView({ db, activeAgent, isAdmin = false, go }) 
   const agentId = activeAgent?.id
   const loading = !activeAgent
 
-  const { deals, counts, leaked, relationshipOf } = useTaggedDeals({
-    deals: db?.deals,
-    coAgentDealIds: db?.coAgentDealIds,
-    commissions: db?.commissions,
+  const { records, counts, leaked, visibilityOf } = useVisibleRecords({
+    records: db?.deals,
+    entity: 'deal',
     agentId,
+    coAgentIds: db?.coAgentDealIds,
+    partnerIds: db?.partnerIds,
     view,
   })
 
   const filterCount = {
     [VIEW.ALL]:      counts.total,
-    [VIEW.PRIMARY]:  counts.primary + counts.both,
-    [VIEW.CO_AGENT]: counts.coAgent + counts.both,
+    [VIEW.OWN]:      counts.own,
+    [VIEW.CO_AGENT]: counts.coAgent,
+    [VIEW.PARTNER]:  counts.partner,
   }
-
-  const openDeal = (deal) => go && go(`deal/${deal.id}`)
 
   return (
     <div className="page-content">
@@ -54,35 +54,31 @@ export default function TeamDealsView({ db, activeAgent, isAdmin = false, go }) 
           <div className="page-sub">
             {isAdmin
               ? 'As office admin you can open every deal from Pipeline — this view shows the deals you’re personally on.'
-              : 'Deals you own or are tagged on as a co-agent. Deals worked by other team members stay private to them.'}
+              : 'Deals you own, are tagged on as a co-agent, or can see through an admin Partner link.'}
           </div>
         </div>
       </div>
 
-      {/* Visibility explainer — communicates the rule (accessible, not colour-only) */}
       <div className="visibility-note" role="note">
-        <Icon name="eye" size={15} aria-hidden="true" />
+        <Icon name="eye" size={15} />
         <span>
-          <strong>Co-agent visibility.</strong> You’re seeing {counts.total} deal{counts.total === 1 ? '' : 's'} —
-          {' '}{counts.primary + counts.both} as primary agent and {counts.coAgent + counts.both} as a co-agent.
-          To give a teammate access to a deal, add them as a co-agent on it.
+          <strong>Why you can see these.</strong> {counts.own} you own · {counts.coAgent} as a co-agent
+          {counts.partner > 0 && <> · {counts.partner} via a Partner link</>}.
+          {' '}To share a deal with a teammate, add them as a co-agent — a firm-wide Partner link is set up by an admin.
         </span>
       </div>
 
-      {/* Quarantine banner: a member should never receive a deal they're not on.
-          If one slips past the data layer we hide it and say so, rather than leak it. */}
       {!isAdmin && leaked.length > 0 && (
         <div className="visibility-note visibility-note--warn" role="alert">
-          <Icon name="alert" size={15} aria-hidden="true" />
+          <Icon name="alert" size={15} />
           <span>
-            {leaked.length} deal{leaked.length === 1 ? '' : 's'} you’re not tagged on {leaked.length === 1 ? 'was' : 'were'}
-            {' '}hidden from this view. If this keeps happening, let the office know.
+            {leaked.length} deal{leaked.length === 1 ? '' : 's'} you’re not entitled to see {leaked.length === 1 ? 'was' : 'were'}
+            {' '}hidden. If this keeps happening, let the office know.
           </span>
         </div>
       )}
 
-      {/* Role filter */}
-      <div className="segmented" role="group" aria-label="Filter deals by your role on them">
+      <div className="segmented" role="group" aria-label="Filter deals by why they're visible">
         {FILTERS.map(f => (
           <button
             key={f.key}
@@ -98,12 +94,17 @@ export default function TeamDealsView({ db, activeAgent, isAdmin = false, go }) 
       </div>
 
       <DealList
-        deals={deals}
-        relationshipOf={relationshipOf}
+        deals={records}
+        visibilityOf={visibilityOf}
         loading={loading}
         agents={db?.agents || []}
-        onOpenDeal={openDeal}
-        emptyTitle={view === VIEW.CO_AGENT ? 'No deals you’re a co-agent on' : view === VIEW.PRIMARY ? 'No deals you own' : "No deals you're tagged on"}
+        onOpen={deal => go && go(`deal/${deal.id}`)}
+        emptyTitle={
+          view === VIEW.CO_AGENT ? 'No deals you’re a co-agent on'
+          : view === VIEW.OWN ? 'No deals you own'
+          : view === VIEW.PARTNER ? 'No deals shared via a Partner link'
+          : 'No deals you can see'
+        }
       />
     </div>
   )

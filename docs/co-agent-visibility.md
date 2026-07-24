@@ -1,219 +1,239 @@
-# Co-Agent Deal Visibility — Design & Components
+# Visibility: Co-Agent + Admin Partner Links — Design & Components
 
-How Gateway CRM enforces and communicates the rule that **a team member sees a
-deal only when they are personally on it** — as the primary agent, or tagged as
-a co-agent. Being on the same team as the owner is not enough.
+How Gateway CRM decides — and shows — **who can see which deals, contacts, and
+properties**, and the one sanctioned way to widen that.
 
-> Applies to deals and the data that follows a deal (commissions, documents,
-> transaction steps, deadlines — all already scoped by `app_visible_deal_ids()`).
+> **The rule (everyone).** An agent sees a deal / contact / property only when
+> they **own** it or are tagged on it as a **co-agent**.
+>
+> **Partner links (admin-only).** An admin can pair two agents; each then sees
+> the other's **full book** (all deals, contacts, properties). Agents cannot
+> create, accept, enable, or disable a link — it is strictly admin-controlled.
+> Sharing a *team* grants nothing.
 
 ---
 
 ## 0. Investigation first — what already existed
 
-Before building anything we checked whether this was already implemented and
-never shipped. Findings:
+Two passes, before writing code.
 
-| Area | State before this change |
+| Area | State before this work |
 |---|---|
-| **Co-agent tagging + filtering plumbing** | **Already built & shipping.** `commissions.participants[].agent_id` (canonical) and the legacy `deals.co_agent_ids[]` are the tags; `src/lib/services/deals.js#fetchCoListedDealIds` reads both; `app_visible_deal_ids()` mirrors it in RLS. |
-| **Per-member `share_deals` flag** | Existed (`team_splits.share_deals`, shown as "Pipeline" in the Team modal) but **defaulted to ON**, so every member saw every teammate's deals. It was an opt-out, not a guarantee. |
-| **Co-agent-*only* as the enforced default** | **Missing.** `App.jsx` computed `dealPeerIds` from `share_deals !== false` and fetched `own + team-peers + co-listed`. |
-| **UI that enforces/communicates the rule** | **Missing.** No component distinguished "deals I'm tagged on" from a teammate's deal. |
-| **Dormant/bypassed feature flag for this** | None found. RLS "Phase B" (in `migrations/production/`) enforces the *old* model, not co-agent-only. |
+| **Co-agent tagging + filtering (deals)** | ✅ Already shipping (`commissions.participants[]`, legacy `deals.co_agent_ids[]`, `fetchCoListedDealIds`, RLS `app_visible_deal_ids()`). |
+| **Co-agent-only default for deals** | ✅ Shipped earlier in this branch (removed the team-peer branch). |
+| **Co-agent-only default for contacts & properties** | ❌ Not present — still scoped to `self + team-peers-who-share` via `team_splits.share_contacts/share_properties`. |
+| **Agent-to-agent Partner / share-all / visibility-link** | ❌ **None anywhere.** "partner" in the codebase only ever meant a *spouse contact* or commission narration. Fully new. |
+| **Feature flags/config for any of it** | None. |
 
-**Conclusion: partially present.** The tagging/filtering layer was solid and
-reused; what was missing was making co-agent-only the *enforced default* and the
-UI to communicate it. This change closes both with minimal, surgical edits on
-top of the existing architecture — no reinvention.
+**Conclusion:** the co-agent plumbing was solid and is reused; the Partner
+concept and the contacts/properties default were genuinely missing. The Partner
+link slots into the existing `app_visible_agent_ids()` seam — we swap the
+visibility *source* from team-peer share-flags to admin-created links — so the
+change is surgical rather than a rewrite.
 
 ---
 
-## 1. The rule (one definition, reused everywhere)
+## 1. One rule, one engine
 
-A non-admin agent may see deal *D* iff:
+`src/lib/visibility.js` is the pure single source of truth. It answers *why* a
+record is visible, and the same function backs both the fetch scoping and the
+badge:
 
 ```
-D.agent_id == me                      (I'm the primary agent)      → REL.PRIMARY
-OR me ∈ D.co_agent_ids                (legacy co-agent tag)        → REL.CO_AGENT
-OR me ∈ commission(D).participants    (structured co-agent tag)    → REL.CO_AGENT
+OWN       record.<ownerField> === me                       → priority 1
+CO_AGENT  me tagged on it (deals: participant / co_agent_ids) → priority 2
+PARTNER   the owner is an admin-created Partner of mine       → priority 3
+NONE      none of the above — must never render for a member
 ```
 
-Primary **and** tagged → `REL.BOTH`. None of the above → `REL.NONE` (must never
-render in a member's view). Admins (office admin / TC) still see the whole firm.
-
-This lives in one pure module, **`src/lib/dealVisibility.js`**, imported by both
-the data layer and the UI so the value we *scope on* is the value we *badge*.
+`ownerField` is `agent_id` for deals, `assigned_agent_id` for contacts and
+properties (see `ENTITY` presets). Highest-priority reason wins, so the badge
+shows the most personal explanation.
 
 ---
 
 ## 2. Architecture & data flow
 
 ```
-Supabase (RLS: app_visible_deal_ids — own + co-listed, NO team branch)
-   │
-   ▼
-src/lib/services/deals.js
-   fetchTaggedDeals(client,{agentId})  →  { data: deals, coAgentDealIds }
-   (own via eq(agent_id) + co-listed via fetchCoListedDealIds; NO team peers)
-   │
-   ▼
-src/App.jsx  (load)
-   db.deals           = co-agent-scoped rows            (admins: whole firm)
-   db.coAgentDealIds  = subset the agent is co-tagged on (for badging)
-   │
-   ▼
-src/pages/TeamDeals/
-   index.jsx  TeamDealsView   ← container: reads db + activeAgent, owns view state
-     └ useTaggedDeals.js       ← derives relationship map, counts, leak set (pure/memoised)
-        └ src/lib/dealVisibility.js   ← the rule (pure)
-     └ DealList.jsx            ← grid · loading skeletons · empty state
-        └ DealCard.jsx         ← one deal (presentational, keyboard-accessible)
-           └ CoAgentBadge.jsx  ← reusable relationship badge (icon + text)
+Supabase
+  agent_partners (admin-only writes, RLS)      ← the ONLY visibility-widening data
+  app_partner_agent_ids()  = my partners
+  app_visible_agent_ids()  = self ∪ partners   ← used by deals/contacts/properties RLS
+  app_visible_deal_ids()   = admin | own/partner-owned | co-listed
+        │
+        ▼
+src/lib/services/{deals,partners}.js
+  fetchPartnerLinks → partnerAgentIds(links, me) = partnerIds
+  fetchTaggedDeals({ agentId, ownerIds:[me,...partners] }) → { deals, coAgentDealIds }
+        │
+        ▼
+src/App.jsx (load)
+  visibleAgentIds = dealAgentIds = [me, ...partnerIds]   → scopes contacts/properties/deals
+  db.partnerIds, db.coAgentDealIds stored for badging
+        │
+        ▼
+src/lib/visibility.js  ← pure rule (own / co-agent / partner / none)
+  ├─ src/hooks/useVisibleRecords.js         derive shown/leaked/counts/visibilityOf
+  ├─ src/components/VisibilityBadge.jsx     why-visible chip (icon + text)
+  └─ src/components/records/
+        RecordList.jsx                      generic grid · loading · empty · leak
+        DealList / ContactList / PropertyList   thin entity configs
+src/pages/TeamDeals/index.jsx  "My Deals" — consumes DealList + useVisibleRecords
+src/pages/Team/PartnerManager.jsx  AdminPartnerManager — create/remove links (admin-only)
 ```
 
-Because every deal surface (Pipeline, Commission, Reports, Dashboard) reads the
-same centralized `db.deals`, the scope change fixes them all at once — the new
-`TeamDealsView` is the focused, self-explaining surface, not the only one
-protected.
+Because every list surface reads the shared, already-scoped `db.*`, the rule is
+enforced everywhere at once; the components communicate it.
 
-### Folder structure
-
+### Folder structure (this feature)
 ```
 src/
 ├─ lib/
-│  ├─ dealVisibility.js              # pure rule + types (single source of truth)
-│  └─ services/deals.js              # + fetchTaggedDeals()
-└─ pages/TeamDeals/
-   ├─ index.jsx                      # TeamDealsView (container)
-   ├─ useTaggedDeals.js              # hook: derive relationships/counts/leaks
-   ├─ DealList.jsx                   # presentational list + states
-   ├─ DealCard.jsx                   # presentational card
-   └─ CoAgentBadge.jsx               # reusable badge
+│  ├─ visibility.js                    # pure rule + ENTITY presets + types
+│  └─ services/
+│     ├─ deals.js                      # fetchTaggedDeals({ ownerIds })
+│     └─ partners.js                   # fetch/create/remove links + partnerAgentIds
+├─ hooks/useVisibleRecords.js          # derive view from loaded state
+├─ components/
+│  ├─ VisibilityBadge.jsx              # reusable why-visible badge
+│  └─ records/{RecordList,DealList,ContactList,PropertyList}.jsx
+└─ pages/
+   ├─ TeamDeals/index.jsx              # "My Deals" view
+   └─ Team/PartnerManager.jsx          # AdminPartnerManager (admin-only)
+migrations/0025_agent_partners.sql     # table + RLS + visibility functions
 ```
 
 ---
 
 ## 3. Props / API design
 
-### `dealVisibility.js` (pure)
+### `visibility.js` (pure)
 ```ts
-type DealRelationship = 'primary' | 'co-agent' | 'primary+co-agent' | 'none'
-const REL: { PRIMARY, CO_AGENT, BOTH, NONE }
+type VisibilityReason = 'own' | 'co-agent' | 'partner' | 'none'
+type Visibility = { reason: VisibilityReason, partnerId?: string }
+const REASON: { OWN, CO_AGENT, PARTNER, NONE }
+const ENTITY: { deal, contact, property }   // { ownerField, coAgentField }
 
-dealRelationship(deal, { agentId, coAgentDealIds?, commissions? }): DealRelationship
-isTaggedOn(deal, ctx): boolean
-partitionTaggedDeals(deals, ctx): { tagged, leaked, byId: Map<id, DealRelationship> }
-relationshipLabel(rel): string
+recordVisibility(record, { agentId, ownerField?, coAgentField?, coAgentIds?, partnerIds? }): Visibility
+isVisible(record, ctx): boolean
+partitionVisible(records, ctx): { visible, leaked, byId: Map<id, Visibility> }
+reasonLabel(reason): string
 ```
-`coAgentDealIds` accepts a `Set` or array. `commissions` only contributes when
-the caller actually has the rows (admins) — members get the co-agent signal
-pre-computed via `coAgentDealIds`, so admin-only commission data is never needed
-in the browser to badge correctly.
 
-### `useTaggedDeals({ deals, coAgentDealIds?, commissions?, agentId, view? })`
-Returns `{ deals (filtered by view), allTagged, leaked, counts, relationshipOf }`.
-`counts = { total, primary, coAgent, both }`. Memoised on its inputs, so an
-agent switch or a mid-session refresh re-derives without a reload. `view` is one
-of `VIEW.ALL | VIEW.PRIMARY | VIEW.CO_AGENT`.
+### `partners.js` (service)
+```ts
+fetchPartnerLinks(client): Promise<{ data, error }>          // RLS: my pairs, or all for admins
+partnerAgentIds(links, agentId): string[]                    // bidirectional
+createPartnerLink(client, { agentA, agentB, createdBy }): Promise<…>  // admin-only (RLS)
+removePartnerLink(client, id): Promise<…>                    // admin-only (RLS)
+```
 
-### `<TeamDealsView db activeAgent isAdmin go />`
-Container. Reads `db.deals / db.coAgentDealIds / db.commissions / db.agents`,
-owns the view filter, renders the explainer, the quarantine banner (members
-only), the role filter, and `DealList`. `go(route)` navigates (`deal/:id`).
+### `useVisibleRecords({ records, entity, agentId, coAgentIds?, partnerIds?, view? })`
+Returns `{ records (filtered by view), allVisible, leaked, counts, visibilityOf }`,
+`counts = { total, own, coAgent, partner }`. Memoised on inputs, so a Partner
+link added/removed mid-session — or an agent switch — re-derives with no reload.
+`view` ∈ `VIEW.ALL | OWN | CO_AGENT | PARTNER`.
 
-### `<DealList deals relationshipOf loading agents onOpenDeal emptyTitle emptyMessage emptyAction skeletonCount />`
-Presentational. `loading` → skeleton grid + polite live region; empty → shared
-`EmptyState`; else a `role="list"` grid of `DealCard`.
+### `<RecordList records visibilityOf agents fields loading onOpen empty* skeletonCount />`
+Generic presentational grid. `fields = { title, subtitle?, badges?, stats?, ownerId? }`
+(render fns) is the only entity-specific input — `DealList` / `ContactList` /
+`PropertyList` are one-screen configs of it. Loading → skeletons + polite live
+region; empty → shared `EmptyState`; each card shows a `VisibilityBadge` and a
+red `--leak` treatment if a `NONE` record ever slips through.
 
-### `<DealCard deal relationship agents onOpen />`
-Presentational, no state/fetches. `role="button"`, `tabIndex=0`, Enter/Space to
-open, descriptive `aria-label`. Leaked deals render with a red `deal-card--leak`
-treatment (defensive; should never appear).
+### `<VisibilityBadge reason partnerName? compact? />`
+Reusable on any deal/contact/property surface. Every variant is icon **+ text**
+(never colour alone); the PARTNER variant names the partner ("Partner · Nic").
 
-### `<CoAgentBadge relationship compact />`
-Reusable anywhere a deal is shown (deal page header, pipeline card, etc.).
-Icon **and** text for every variant — colour is never the only signal.
+### `<AdminPartnerManager agents activeAgent isAdmin onChange />`
+The **only** UI for Partner links. Renders `null` for non-admins; writes are
+additionally blocked by RLS, so the gate is real, not cosmetic. Create (two
+agent selects) / list / remove (confirm). `onChange` lets the host re-scope the
+session after a change.
 
 ---
 
 ## 4. Consuming the backend
 
-The frontend assumes the API returns only deals the caller may see, and
-**re-verifies** rather than trusts:
+The API is assumed to return only rows the caller may see; the frontend
+**re-verifies**:
 
-1. **Fetch** co-agent-scoped rows via `fetchTaggedDeals` (members) — own
-   (`eq('agent_id', me)`) + co-listed (`fetchCoListedDealIds`), no team peers.
-2. **Classify** each returned deal with `dealRelationship`; anything that comes
-   back `REL.NONE` is treated as a **leak**: hidden from the list and surfaced in
-   a quarantine banner instead of being shown. Defense in depth — a looser query
-   or a future regression can't silently expose a teammate's deal.
-3. **Badge** from the same classification, so the label matches the scope.
+1. **Fetch** partner-scoped rows — contacts/properties via `.in('assigned_agent_id', [me,...partners])`; deals via `fetchTaggedDeals({ ownerIds:[me,...partners] })` (adds co-listed).
+2. **Classify** each row with `recordVisibility`; any `NONE` is a **leak** — hidden and surfaced in a quarantine banner, never shown.
+3. **Badge** from the same classification, so the label always matches the scope.
 
-RLS is the hard backstop: `app_visible_deal_ids()` (see `src/lib/schema.sql` and
-`migrations/0024_deals_coagent_only_visibility.sql`) drops the team-peer branch,
-so even a raw query can't return a deal the caller isn't on.
+RLS is the hard backstop (`migrations/0025`): `agent_partners` is admin-write-only,
+and `app_visible_agent_ids()`/`app_visible_deal_ids()` resolve visibility from
+partners — so even a raw query can't cross the line.
 
 ---
 
-## 5. Edge cases handled
+## 5. Security — the admin-only Partner rule (non-negotiable)
 
-- **Primary *and* co-agent** → `REL.BOTH`; counted in both the Primary and
-  Co-agent filters; badged distinctly (purple).
-- **Multiple co-agents on a deal** → co-agent avatars stack on the card; the
-  badge still reflects *the viewer's* relationship.
-- **Permission change mid-session** → `useTaggedDeals` is memoised on its
-  inputs; when `db.deals` refreshes (Pipeline/Commission refresh paths reuse the
-  same `[self]` scope) or the active agent switches, the view re-derives with no
-  reload.
-- **Admin** → sees the whole firm in Pipeline; `TeamDealsView` shows the deals
-  *they* are on and silently omits the rest (not treated as a leak).
-- **Legacy vs structured tags** → both `deals.co_agent_ids` and
-  `commissions.participants` are honored; the RLS migration includes the legacy
-  branch only where the column exists (production), matching `fetchCoListedDealIds`.
-- **Loading** → skeleton cards + `role="status"`; **empty** → "No deals you're
-  tagged on" with a message explaining teammates' deals stay private.
+- **DB-enforced.** `agent_partners` ships with RLS on: `agent_partners_admin_write`
+  allows insert/update/delete **only** when `app_is_admin()`. A non-admin's
+  create/remove fails at Postgres regardless of the UI.
+- **UI-gated.** `AdminPartnerManager` returns `null` for non-admins and is only
+  mounted on the admin path of the Team page.
+- **No agent self-service.** There is no request/accept/enable/disable flow —
+  by design, agents have zero ability to widen their own or anyone's visibility.
+- **Order-normalized pairs** (`agent_a < agent_b` + unique) mean a pair can't be
+  double-linked from opposite sides.
 
 ---
 
-## 6. Accessibility (WCAG 2.1 AA)
+## 6. Edge cases handled
 
-- Relationship conveyed by icon **+ text**, not colour alone (1.4.1).
-- Cards are real controls: `role="button"`, `tabIndex=0`, Enter/Space, visible
-  `:focus-visible` ring, descriptive `aria-label` (2.1.1, 2.4.7).
-- Filter is a labelled `role="group"` of `aria-pressed` buttons.
-- Loading announced via a polite live region; skeletons are `aria-hidden`.
-- Quarantine uses `role="alert"`; explainer uses `role="note"`.
-- `prefers-reduced-motion` disables hover lift and skeleton shimmer.
-
----
-
-## 7. Stack decision (why JSX, not TS + Tailwind)
-
-The brief suggested "React + TypeScript; Tailwind or CSS Modules." Gateway CRM
-is **100% JSX with a global design-token stylesheet** (`src/styles/app.css`,
-`--gw-*`) and shared primitives in `src/components/UI.jsx`. Introducing
-TypeScript tooling and Tailwind for one feature would fragment the build and the
-component vocabulary. The senior call is to **match the codebase**: JSX +
-existing primitives + design tokens, with **JSDoc `@typedef`/`@param`** giving
-real editor intellisense and documented contracts without a compiler. Types are
-expressed above in TS notation for review; the code ships them as JSDoc.
+- **Own + co-agent + partner overlap** → single, highest-priority reason (OWN > CO_AGENT > PARTNER).
+- **Partner link added/removed mid-session** → the admin's session re-scopes via `onChange`; the hook re-derives on `db.partnerIds` change. Other agents pick it up on their next load (documented; realtime propagation is out of scope).
+- **Multiple co-agents / multiple partners** → all resolved; the badge always reflects *the viewer's* reason.
+- **Admin** → sees the whole firm; "My Deals" shows the deals they're personally on and silently omits the rest (not a leak).
+- **Legacy vs structured co-agent tags** → both honored; the RLS migration includes the legacy `co_agent_ids` branch only where the column exists.
+- **Loading / empty** → skeletons + `role=status`; "No deals/contacts/properties you can see" with an explanatory message.
 
 ---
 
-## 8. Usage
+## 7. Accessibility (WCAG 2.1 AA)
+
+Icon **+ text** badges (1.4.1) · cards are real controls (`role=button`,
+`tabIndex=0`, Enter/Space, `:focus-visible`, descriptive `aria-label`; 2.1.1 /
+2.4.7) · labelled `role=group` filter of `aria-pressed` buttons · loading via a
+polite live region, skeletons `aria-hidden` · quarantine `role=alert` · Partner
+Manager selects have real `<label htmlFor>` and the remove button an
+`aria-label` naming both agents · `prefers-reduced-motion` disables hover lift
+and shimmer.
+
+---
+
+## 8. Stack decision (JSX, not TS + Tailwind)
+
+Gateway CRM is 100% JSX with a global `--gw-*` token stylesheet and shared
+primitives (`components/UI.jsx`). Introducing TypeScript tooling + Tailwind for
+one feature would fragment the build and component vocabulary. The senior call
+is to match the codebase — JSX + tokens — and express contracts as JSDoc
+`@typedef`/`@param` (real editor intellisense, no compiler). Types are shown in
+TS notation here for review; the code ships them as JSDoc.
+
+---
+
+## 9. Usage
 
 ```jsx
-// Routed automatically as "My Deals" in App.jsx; to embed elsewhere:
-import TeamDealsView from './pages/TeamDeals/index.jsx'
-<TeamDealsView db={db} activeAgent={activeAgent} isAdmin={isAdmin} go={setRoute} />
+// "My Deals" is routed in App.jsx. AdminPartnerManager is mounted on the Team
+// page for admins only:
+<AdminPartnerManager agents={agents} activeAgent={activeAgent} isAdmin={isAdmin} onChange={refreshPartners} />
 
-// Reuse the badge on any deal surface:
-import CoAgentBadge from './pages/TeamDeals/CoAgentBadge.jsx'
-import { dealRelationship } from './lib/dealVisibility.js'
-<CoAgentBadge relationship={dealRelationship(deal, { agentId, coAgentDealIds })} />
+// Reusable list for any entity:
+import ContactList from './components/records/ContactList.jsx'
+import useVisibleRecords from './hooks/useVisibleRecords.js'
+const { records, visibilityOf, leaked } = useVisibleRecords({
+  records: db.contacts, entity: 'contact', agentId: activeAgent.id, partnerIds: db.partnerIds,
+})
+<ContactList contacts={records} visibilityOf={visibilityOf} agents={db.agents} onOpen={openContact} />
 
-// Filter a list yourself:
-import { partitionTaggedDeals } from './lib/dealVisibility.js'
-const { tagged, leaked } = partitionTaggedDeals(deals, { agentId, coAgentDealIds })
+// Badge anywhere:
+import VisibilityBadge from './components/VisibilityBadge.jsx'
+import { recordVisibility, ENTITY } from './lib/visibility.js'
+const v = recordVisibility(property, { agentId, ...ENTITY.property, partnerIds })
+<VisibilityBadge reason={v.reason} partnerName={agents.find(a => a.id === v.partnerId)?.name} />
 ```
