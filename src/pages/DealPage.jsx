@@ -2,6 +2,8 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
+import VisibilityBadge from '../components/VisibilityBadge.jsx'
+import { recordVisibility, REASON, ENTITY } from '../lib/visibility.js'
 import { formatCurrency, formatDate, formatPhone, STAGE_LABELS } from '../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
@@ -154,6 +156,15 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     ].filter(Boolean)
     return [...new Set(ids)].map(id => agents.find(a => a.id === id)).filter(Boolean)
   }, [deal, breakdown, agents])
+
+  // The current agent's own relationship to this deal (own / co-agent / partner),
+  // for the header badge + "who can see this" note.
+  const myVis = useMemo(() => deal ? recordVisibility(deal, {
+    agentId: activeAgent?.id, ...ENTITY.deal,
+    coAgentIds: new Set(db.coAgentDealIds || []),
+    partnerIds: new Set(db.partnerIds || []),
+  }) : { reason: REASON.NONE }, [deal, activeAgent?.id, db.coAgentDealIds, db.partnerIds])
+
   const myTake = useMemo(() => {
     if (isAdmin && breakdown && activeAgent) {
       return breakdown.participants.filter(p => p.agent_id === activeAgent.id).reduce((s, p) => s + p.agent_take, 0)
@@ -376,6 +387,12 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
               {!isOpenStage(deal.stage) && (
                 <Badge variant={deal.stage === 'closed' ? 'closed' : 'lost'}>{STAGE_LABELS[deal.stage]}</Badge>
               )}
+              {myVis.reason !== REASON.NONE && (
+                <VisibilityBadge
+                  reason={myVis.reason}
+                  partnerName={myVis.reason === REASON.PARTNER ? agents.find(a => a.id === myVis.partnerId)?.name : undefined}
+                />
+              )}
             </div>
             <div style={{ display: 'flex', gap: 16, fontSize: 13, color: 'var(--gw-mist)', flexWrap: 'wrap' }}>
               {deal.value > 0 && <span><strong style={{ color: 'var(--gw-ink)' }}>{formatCurrency(deal.value)}</strong> deal value</span>}
@@ -492,14 +509,27 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
             <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8 }}>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>Agents on deal</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                {(team.length ? team : agent ? [agent] : []).map(a => (
-                  <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                    <Avatar agent={a} size={20} />
-                    <span style={{ fontSize: 12.5 }}>{a.name}</span>
-                    {a.id === deal.agent_id && <span style={{ fontSize: 10, color: 'var(--gw-mist)' }}>primary</span>}
-                  </div>
-                ))}
+                {(team.length ? team : agent ? [agent] : []).map(a => {
+                  const isPrimary = a.id === deal.agent_id
+                  const isYou     = a.id === activeAgent?.id
+                  return (
+                    <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                      <Avatar agent={a} size={20} />
+                      <span style={{ fontSize: 12.5, fontWeight: isYou ? 700 : 400 }}>{a.name}{isYou ? ' (you)' : ''}</span>
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em',
+                        padding: '1px 6px', borderRadius: 6,
+                        color:      isPrimary ? 'var(--gw-azure)' : 'var(--gw-purple)',
+                        background:  isPrimary ? 'var(--gw-sky)'   : 'var(--gw-purple-light)',
+                      }}>{isPrimary ? 'Primary' : 'Co-agent'}</span>
+                    </div>
+                  )
+                })}
                 {!team.length && !agent && <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>Unassigned</div>}
+              </div>
+              <div style={{ display: 'flex', gap: 5, alignItems: 'flex-start', fontSize: 11, color: 'var(--gw-mist)', marginTop: 8, lineHeight: 1.5 }}>
+                <Icon name="eye" size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+                <span>Only the agents on this deal, their admin-set Partners, and office admins can see it. To add a teammate, tag them as a co-agent when you edit the deal.</span>
               </div>
             </div>
             {isAdmin && breakdown && (deal.value > 0) && (

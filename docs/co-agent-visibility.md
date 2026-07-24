@@ -73,17 +73,16 @@ src/App.jsx (load)
         │
         ▼
 src/lib/visibility.js  ← pure rule (own / co-agent / partner / none)
-  ├─ src/hooks/useVisibleRecords.js         derive shown/leaked/counts/visibilityOf
-  ├─ src/components/VisibilityBadge.jsx     why-visible chip (icon + text)
-  └─ src/components/records/
-        RecordList.jsx                      generic grid · loading · empty · leak
-        DealList / ContactList / PropertyList   thin entity configs
-src/pages/TeamDeals/index.jsx  "My Deals" — consumes DealList + useVisibleRecords
+  └─ src/components/VisibilityBadge.jsx     why-visible chip (icon + text)
+src/pages/Pipeline.jsx   deal cards show a badge + a relationship filter (own/co-agent/partner)
+src/pages/DealPage.jsx   header "your role" badge + "who can see this" note
 src/pages/Team/PartnerManager.jsx  AdminPartnerManager — create/remove links (admin-only)
 ```
 
-Because every list surface reads the shared, already-scoped `db.*`, the rule is
-enforced everywhere at once; the components communicate it.
+Because every surface reads the shared, already-scoped `db.*`, the rule is
+enforced everywhere at once. The **co-agent experience lives where agents work**
+— Pipeline and the deal page — rather than in a separate tab (an earlier "My
+Deals" view was removed as redundant with Pipeline; see the changelog).
 
 ### Folder structure (this feature)
 ```
@@ -93,12 +92,10 @@ src/
 │  └─ services/
 │     ├─ deals.js                      # fetchTaggedDeals({ ownerIds })
 │     └─ partners.js                   # fetch/create/remove links + partnerAgentIds
-├─ hooks/useVisibleRecords.js          # derive view from loaded state
-├─ components/
-│  ├─ VisibilityBadge.jsx              # reusable why-visible badge
-│  └─ records/{RecordList,DealList,ContactList,PropertyList}.jsx
+├─ components/VisibilityBadge.jsx      # reusable why-visible badge
 └─ pages/
-   ├─ TeamDeals/index.jsx              # "My Deals" view
+   ├─ Pipeline.jsx                     # per-card badge + relationship filter (integrated)
+   ├─ DealPage.jsx                     # "your role" badge + who-can-see note
    └─ Team/PartnerManager.jsx          # AdminPartnerManager (admin-only)
 migrations/0025_agent_partners.sql     # table + RLS + visibility functions
 ```
@@ -128,18 +125,13 @@ createPartnerLink(client, { agentA, agentB, createdBy }): Promise<…>  // admin
 removePartnerLink(client, id): Promise<…>                    // admin-only (RLS)
 ```
 
-### `useVisibleRecords({ records, entity, agentId, coAgentIds?, partnerIds?, view? })`
-Returns `{ records (filtered by view), allVisible, leaked, counts, visibilityOf }`,
-`counts = { total, own, coAgent, partner }`. Memoised on inputs, so a Partner
-link added/removed mid-session — or an agent switch — re-derives with no reload.
-`view` ∈ `VIEW.ALL | OWN | CO_AGENT | PARTNER`.
-
-### `<RecordList records visibilityOf agents fields loading onOpen empty* skeletonCount />`
-Generic presentational grid. `fields = { title, subtitle?, badges?, stats?, ownerId? }`
-(render fns) is the only entity-specific input — `DealList` / `ContactList` /
-`PropertyList` are one-screen configs of it. Loading → skeletons + polite live
-region; empty → shared `EmptyState`; each card shows a `VisibilityBadge` and a
-red `--leak` treatment if a `NONE` record ever slips through.
+### Pipeline integration (in `Pipeline.jsx`)
+`recordVisibility` powers a memoised `dealVisibility(deal)` used for two things:
+a **relationship filter** in the toolbar (All / Mine / Co-agent / Partner —
+shown to non-admins only, and only once they actually have shared-in deals) and
+a **per-card badge** on co-agent/partner deals. The filter drives `visibleDeals`,
+so every view (Board / List / Focus) honours it, and the empty state is
+filter-aware ("No deals you're a co-agent on" → "Show all deals").
 
 ### `<VisibilityBadge reason partnerName? compact? />`
 Reusable on any deal/contact/property surface. Every variant is icon **+ text**
@@ -187,7 +179,7 @@ partners — so even a raw query can't cross the line.
 - **Own + co-agent + partner overlap** → single, highest-priority reason (OWN > CO_AGENT > PARTNER).
 - **Partner link added/removed mid-session** → the admin's session re-scopes via `onChange`; the hook re-derives on `db.partnerIds` change. Other agents pick it up on their next load (documented; realtime propagation is out of scope).
 - **Multiple co-agents / multiple partners** → all resolved; the badge always reflects *the viewer's* reason.
-- **Admin** → sees the whole firm; "My Deals" shows the deals they're personally on and silently omits the rest (not a leak).
+- **Admin** → sees the whole firm; the relationship filter/badges are hidden for admins (they aren't scoped, so "why visible" doesn't apply).
 - **Legacy vs structured co-agent tags** → both honored; the RLS migration includes the legacy `co_agent_ids` branch only where the column exists.
 - **Loading / empty** → skeletons + `role=status`; "No deals/contacts/properties you can see" with an explanatory message.
 
@@ -219,21 +211,20 @@ TS notation here for review; the code ships them as JSDoc.
 ## 9. Usage
 
 ```jsx
-// "My Deals" is routed in App.jsx. AdminPartnerManager is mounted on the Team
-// page for admins only:
+// AdminPartnerManager is mounted on the Team page for admins only:
 <AdminPartnerManager agents={agents} activeAgent={activeAgent} isAdmin={isAdmin} onChange={refreshPartners} />
 
-// Reusable list for any entity:
-import ContactList from './components/records/ContactList.jsx'
-import useVisibleRecords from './hooks/useVisibleRecords.js'
-const { records, visibilityOf, leaked } = useVisibleRecords({
-  records: db.contacts, entity: 'contact', agentId: activeAgent.id, partnerIds: db.partnerIds,
-})
-<ContactList contacts={records} visibilityOf={visibilityOf} agents={db.agents} onOpen={openContact} />
-
-// Badge anywhere:
+// Classify + badge any record (deal, contact, or property) — this is exactly
+// how Pipeline and DealPage show "why can I see this":
 import VisibilityBadge from './components/VisibilityBadge.jsx'
-import { recordVisibility, ENTITY } from './lib/visibility.js'
-const v = recordVisibility(property, { agentId, ...ENTITY.property, partnerIds })
-<VisibilityBadge reason={v.reason} partnerName={agents.find(a => a.id === v.partnerId)?.name} />
+import { recordVisibility, REASON, ENTITY } from './lib/visibility.js'
+
+const v = recordVisibility(deal, {
+  agentId: activeAgent.id, ...ENTITY.deal,
+  coAgentIds: new Set(db.coAgentDealIds), partnerIds: new Set(db.partnerIds),
+})
+{v.reason !== REASON.NONE && (
+  <VisibilityBadge reason={v.reason}
+    partnerName={v.reason === REASON.PARTNER ? agents.find(a => a.id === v.partnerId)?.name : undefined} />
+)}
 ```

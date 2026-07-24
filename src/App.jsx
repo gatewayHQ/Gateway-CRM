@@ -9,7 +9,6 @@ const Dashboard        = React.lazy(() => import('./pages/Dashboard.jsx'))
 const ContactsPage     = React.lazy(() => import('./pages/Contacts.jsx'))
 const PropertiesPage   = React.lazy(() => import('./pages/Properties.jsx'))
 const PipelinePage     = React.lazy(() => import('./pages/Pipeline.jsx'))
-const TeamDealsPage    = React.lazy(() => import('./pages/TeamDeals/index.jsx'))
 const DealPage         = React.lazy(() => import('./pages/DealPage.jsx'))
 const TasksPage        = React.lazy(() => import('./pages/Tasks.jsx'))
 const MessagesPage     = React.lazy(() => import('./pages/Messages.jsx'))
@@ -40,7 +39,6 @@ const NAV_CORE = [
   { id: 'contacts',   label: 'Contacts',   icon: 'contacts' },
   { id: 'properties', label: 'Properties', icon: 'building' },
   { id: 'pipeline',   label: 'Pipeline',   icon: 'pipeline' },
-  { id: 'my-deals',   label: 'My Deals',   icon: 'tag' },
   { id: 'tasks',      label: 'Tasks',      icon: 'tasks' },
   { id: 'messages',   label: 'Messages',   icon: 'mail' },
 ]
@@ -68,7 +66,6 @@ const NAV_TOOLS = [
 const HIDEABLE_NAV = [
   { id: 'contacts',     label: 'Contacts',        group: 'Core'   },
   { id: 'properties',   label: 'Properties',      group: 'Core'   },
-  { id: 'my-deals',     label: 'My Deals',        group: 'Core'   },
   { id: 'tasks',        label: 'Tasks',            group: 'Core'   },
   { id: 'messages',     label: 'Messages',         group: 'Core'   },
   { id: 'commission',   label: 'Commission',       group: 'Office' },
@@ -98,7 +95,6 @@ const TITLES = {
   contacts:   { title: 'Contacts',         crumb: 'CRM · People' },
   properties: { title: 'Properties',       crumb: 'Database · Listings' },
   pipeline:   { title: 'Pipeline',         crumb: 'Deals · Kanban' },
-  'my-deals': { title: 'My Deals',         crumb: 'Deals · You’re tagged on' },
   coldcalls:  { title: 'Cold Call Lists',  crumb: 'Prospecting · Dialer' },
   campaigns:  { title: 'Campaigns',        crumb: 'Marketing · Mail · Tracking' },
   commission: { title: 'Commission',       crumb: 'Deals · Earnings' },
@@ -705,7 +701,6 @@ export default function App() {
           {route === 'contacts'   && <ContactsPage {...props} />}
           {route === 'properties' && <PropertiesPage {...props} />}
           {route === 'pipeline'   && <PipelinePage {...props} isAdmin={isAdmin} />}
-          {route === 'my-deals'   && <TeamDealsPage {...props} isAdmin={isAdmin} />}
           {route.startsWith('deal/') && <DealPage {...props} dealId={route.slice(5)} />}
           {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
           {route === 'campaigns'  && <CampaignsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
