@@ -77,6 +77,32 @@ export async function fetchVisibleDeals(client, { isAdmin, agentId, dealAgentIds
   return { data: merged, error: null }
 }
 
+// Deals the agent is personally TAGGED ON — the co-agent-only visibility model
+// (2026-07). This is own (primary) + co-listed (participant / legacy
+// co_agent_ids) with NO team-peer branch: a member never sees a teammate's deal
+// just for sharing a team. Returns the merged deal rows plus `coAgentDealIds`,
+// the subset the agent is co-tagged on, so the UI can badge "you're co-agent"
+// vs "you're primary" without re-deriving it. Admins should use fetchVisibleDeals.
+export async function fetchTaggedDeals(client, { agentId }) {
+  if (!agentId) return { data: [], coAgentDealIds: [], error: null }
+  const [ownRes, coRes] = await Promise.all([
+    client.from('deals').select('*').eq('agent_id', agentId).order('created_at', { ascending: false }),
+    fetchCoListedDealIds(client, agentId),
+  ])
+  if (ownRes.error) return { data: [], coAgentDealIds: [], error: ownRes.error }
+  // Co-listing is additive: a failed participant lookup still returns own deals.
+  const coAgentDealIds = coRes.data || []
+  const ownIds = new Set((ownRes.data || []).map(d => d.id))
+  const extraIds = coAgentDealIds.filter(id => !ownIds.has(id))
+  let merged = ownRes.data || []
+  if (extraIds.length) {
+    const extraRes = await selectInChunks(client, 'deals', 'id', extraIds)
+    if (!extraRes.error) merged = [...merged, ...extraRes.data]
+  }
+  merged = merged.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+  return { data: merged, coAgentDealIds, error: null }
+}
+
 // Commissions for exactly the deals the caller can see. Admins fetch all.
 export async function fetchVisibleCommissions(client, { isAdmin, dealIds }) {
   if (isAdmin) return client.from('commissions').select('*')

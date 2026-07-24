@@ -419,7 +419,9 @@ create table if not exists team_splits (
   is_lead          boolean default false,
   share_contacts   boolean default true,   -- peer can see this member's contacts
   share_properties boolean default true,   -- peer can see this member's properties
-  share_deals      boolean default true,   -- peer can see this member's pipeline deals
+  share_deals      boolean default true,   -- DEPRECATED (2026-07): deals are co-agent-only;
+                                           -- this flag no longer affects deal visibility. Kept
+                                           -- for backward compat. See docs/co-agent-visibility.md.
   created_at       timestamptz default now(),
   unique(team_id, agent_id)
 );
@@ -1386,15 +1388,18 @@ language sql stable security definer set search_path = public as $$
         end is not false;
 $$;
 
--- Every deal the current user may see: all (admin), own + team-shared, or
--- co-listed (they appear as a participant on the deal's commission).
+-- Every deal the current user may see (CO-AGENT-ONLY, 2026-07): all (admin),
+-- OWN (they are the primary agent), or CO-LISTED (they appear as a participant
+-- on the deal's commission). Being on the same team as the owner is NOT enough —
+-- the team-peer branch was removed so members only see deals they're on.
+-- See docs/co-agent-visibility.md.
 create or replace function app_visible_deal_ids()
 returns setof uuid
 language sql stable security definer set search_path = public as $$
   select d.id from deals d where app_is_admin()
   union
   select d.id from deals d
-  where d.agent_id in (select app_visible_agent_ids('deals'))
+  where d.agent_id = app_current_agent_id()
   union
   select c.deal_id
   from commissions c
@@ -1455,7 +1460,9 @@ create policy deals_agent_scope on deals for all to authenticated
   using (id in (select app_visible_deal_ids()))
   with check (
     app_is_admin()
-    or agent_id in (select app_visible_agent_ids('deals'))
+    -- members may create/own only their OWN deals (co-agent-only, 2026-07)…
+    or agent_id = app_current_agent_id()
+    -- …and edit any deal they can already see (own or co-listed).
     or id in (select app_visible_deal_ids())
   );
 

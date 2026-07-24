@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase.js'
 import { primeCache, invalidate } from './lib/queryCache.js'
-import { fetchVisibleDeals, fetchVisibleCommissions } from './lib/services/deals.js'
+import { fetchVisibleDeals, fetchVisibleCommissions, fetchTaggedDeals } from './lib/services/deals.js'
 import { Icon, Avatar, Modal, Badge, ToastHost, Loading, ErrorBoundary, pushToast } from './components/UI.jsx'
 // All pages are lazy-loaded — only the current route's bundle downloads
 const Dashboard        = React.lazy(() => import('./pages/Dashboard.jsx'))
 const ContactsPage     = React.lazy(() => import('./pages/Contacts.jsx'))
 const PropertiesPage   = React.lazy(() => import('./pages/Properties.jsx'))
 const PipelinePage     = React.lazy(() => import('./pages/Pipeline.jsx'))
+const TeamDealsPage    = React.lazy(() => import('./pages/TeamDeals/index.jsx'))
 const DealPage         = React.lazy(() => import('./pages/DealPage.jsx'))
 const TasksPage        = React.lazy(() => import('./pages/Tasks.jsx'))
 const MessagesPage     = React.lazy(() => import('./pages/Messages.jsx'))
@@ -38,6 +39,7 @@ const NAV_CORE = [
   { id: 'contacts',   label: 'Contacts',   icon: 'contacts' },
   { id: 'properties', label: 'Properties', icon: 'building' },
   { id: 'pipeline',   label: 'Pipeline',   icon: 'pipeline' },
+  { id: 'my-deals',   label: 'My Deals',   icon: 'tag' },
   { id: 'tasks',      label: 'Tasks',      icon: 'tasks' },
   { id: 'messages',   label: 'Messages',   icon: 'mail' },
 ]
@@ -65,6 +67,7 @@ const NAV_TOOLS = [
 const HIDEABLE_NAV = [
   { id: 'contacts',     label: 'Contacts',        group: 'Core'   },
   { id: 'properties',   label: 'Properties',      group: 'Core'   },
+  { id: 'my-deals',     label: 'My Deals',        group: 'Core'   },
   { id: 'tasks',        label: 'Tasks',            group: 'Core'   },
   { id: 'messages',     label: 'Messages',         group: 'Core'   },
   { id: 'commission',   label: 'Commission',       group: 'Office' },
@@ -94,6 +97,7 @@ const TITLES = {
   contacts:   { title: 'Contacts',         crumb: 'CRM · People' },
   properties: { title: 'Properties',       crumb: 'Database · Listings' },
   pipeline:   { title: 'Pipeline',         crumb: 'Deals · Kanban' },
+  'my-deals': { title: 'My Deals',         crumb: 'Deals · You’re tagged on' },
   coldcalls:  { title: 'Cold Call Lists',  crumb: 'Prospecting · Dialer' },
   campaigns:  { title: 'Campaigns',        crumb: 'Marketing · Mail · Tracking' },
   commission: { title: 'Commission',       crumb: 'Deals · Earnings' },
@@ -119,6 +123,9 @@ const EMPTY_DB = {
   agents: [], templates: [], commissions: [], commissionsReady: true,
   activities: [], activitiesReady: true,
   dealContacts: [], propertyContacts: [],
+  // Subset of `deals` the active agent is co-tagged on (vs. owns). Lets the UI
+  // badge "you're a co-agent" without exposing admin-only commission rows.
+  coAgentDealIds: [],
 }
 
 const nameFromEmail = (email = '') => {
@@ -349,10 +356,15 @@ export default function App() {
 
       // Peer rows where the peer has opted to share contacts/properties (default true when column is absent)
       const contactPeerIds = [...new Set(peerSplits.filter(ts => ts.share_contacts !== false).map(ts => ts.agent_id))]
-      const dealPeerIds    = [...new Set(peerSplits.filter(ts => ts.share_deals    !== false).map(ts => ts.agent_id))]
 
-      const myVisible     = [matched.id, ...contactPeerIds]
-      const myDealVisible = [matched.id, ...dealPeerIds]
+      const myVisible = [matched.id, ...contactPeerIds]
+      // DEALS: co-agent-only visibility (2026-07, see docs/co-agent-visibility.md).
+      // A member sees a deal only when they OWN it or are TAGGED on it as a
+      // co-agent — never a teammate's deal just for sharing a team. The owner
+      // scope is therefore *self only*; fetchTaggedDeals/fetchVisibleDeals add
+      // the co-listed deals on top. Keeping this as [self] means every refresh
+      // path (Pipeline, Commission) enforces the same rule with no extra code.
+      const myDealVisible = [matched.id]
 
       setVisibleAgentIds(myVisible)
       setDealAgentIds(myDealVisible)
@@ -370,8 +382,13 @@ export default function App() {
         isAdminAgent
           ? supabase.from('properties').select('*').order('created_at', { ascending: false })
           : supabase.from('properties').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
-        // Own + team-shared + co-listed (commission participant) deals
-        fetchVisibleDeals(supabase, { isAdmin: isAdminAgent, agentId: matched.id, dealAgentIds: myDealVisible }),
+        // Deals the agent may see. Admins get the whole firm; everyone else gets
+        // ONLY deals they own or are co-tagged on (co-agent-only). fetchTaggedDeals
+        // also returns which of those the agent is a co-agent on, for UI badging.
+        isAdminAgent
+          ? fetchVisibleDeals(supabase, { isAdmin: true, agentId: matched.id, dealAgentIds: myDealVisible })
+              .then(r => ({ ...r, coAgentDealIds: [] }))
+          : fetchTaggedDeals(supabase, { agentId: matched.id }),
         // Tasks are personal — never shared, even for an admin
         supabase.from('tasks').select('*').eq('agent_id', matched.id).order('due_date', { ascending: true }),
         supabase.from('templates').select('*').order('created_at', { ascending: false }),
@@ -394,6 +411,7 @@ export default function App() {
         contacts:         contacts.data     || [],
         properties:       properties.data   || [],
         deals:            deals.data         || [],
+        coAgentDealIds:   deals.coAgentDealIds || [],
         tasks:            tasks.data         || [],
         agents:           agentsData,
         templates:        templates.data     || [],
@@ -691,6 +709,7 @@ export default function App() {
           {route === 'contacts'   && <ContactsPage {...props} />}
           {route === 'properties' && <PropertiesPage {...props} />}
           {route === 'pipeline'   && <PipelinePage {...props} isAdmin={isAdmin} />}
+          {route === 'my-deals'   && <TeamDealsPage {...props} isAdmin={isAdmin} />}
           {route.startsWith('deal/') && <DealPage {...props} dealId={route.slice(5)} />}
           {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
           {route === 'campaigns'  && <CampaignsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}

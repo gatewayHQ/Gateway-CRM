@@ -2,11 +2,13 @@ import React, { useState, useEffect } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { Icon, Avatar, Modal, pushToast } from '../../components/UI.jsx'
 
-// What each team member can share with the team
+// What each team member can share with the team. Deals are intentionally NOT
+// here: since 2026-07 deal visibility is co-agent-only (a member sees a deal
+// only if they own it or are tagged on it as a co-agent), so a team-wide
+// "share my pipeline" toggle no longer exists. See docs/co-agent-visibility.md.
 const SHARE_TOGGLES = [
   { key: 'share_contacts',   label: 'Contacts'   },
   { key: 'share_properties', label: 'Properties' },
-  { key: 'share_deals',      label: 'Pipeline'   },
 ]
 
 const defaultMember = (agentId) => ({
@@ -15,7 +17,7 @@ const defaultMember = (agentId) => ({
   is_lead:          false,
   share_contacts:   true,
   share_properties: true,
-  share_deals:      true,
+  share_deals:      false, // deprecated — deals are co-agent-only
 })
 
 export default function TeamModal({ open, onClose, team, agents, splits, onSave }) {
@@ -78,7 +80,7 @@ export default function TeamModal({ open, onClose, team, agents, splits, onSave 
             is_lead:          !!m.is_lead,
             share_contacts:   !!m.share_contacts,
             share_properties: !!m.share_properties,
-            share_deals:      !!m.share_deals,
+            share_deals:      false, // deprecated — deals are co-agent-only (2026-07)
           }))
         )
       }
@@ -121,7 +123,9 @@ export default function TeamModal({ open, onClose, team, agents, splits, onSave 
         <div className="form-group" style={{ marginBottom: 0 }}>
           <label className="form-label">Members</label>
           <p style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 4, marginBottom: 12, lineHeight: 1.5 }}>
-            Toggle what each member shares with the team.
+            Toggle what each member shares with the team. Deals aren’t shared team-wide:
+            each member sees only deals they own or are tagged on as a co-agent — add a
+            co-agent on a deal to give a teammate access.
           </p>
 
           {members.length === 0 && (

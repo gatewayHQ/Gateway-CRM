@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { fetchVisibleDeals, fetchVisibleCommissions, fetchCoListedDealIds } from '../deals.js'
+import { fetchVisibleDeals, fetchVisibleCommissions, fetchCoListedDealIds, fetchTaggedDeals } from '../deals.js'
 
 // Minimal supabase-shaped mock: routes each from(table) call through `handler`
 // and records the chained filters so assertions can inspect them.
@@ -13,6 +13,7 @@ function mockClient(handler) {
       const chain = {
         select() { return chain },
         order(column, opts) { call.filters.push(['order', column, opts]); return chain },
+        eq(column, value) { call.filters.push(['eq', column, value]); return chain },
         in(column, values) { call.filters.push(['in', column, values]); return chain },
         contains(column, value) { call.filters.push(['contains', column, value]); return chain },
         then(resolve, reject) { return Promise.resolve(handler(call)).then(resolve, reject) },
@@ -103,6 +104,55 @@ describe('fetchVisibleDeals', () => {
     const { data, error } = await fetchVisibleDeals(client, { isAdmin: false, agentId: 'a1', dealAgentIds: ['a1'] })
     expect(error).toBeNull()
     expect(data.map(d => d.id)).toEqual(['own1'])
+  })
+})
+
+describe('fetchTaggedDeals', () => {
+  it('returns own + co-listed deals scoped to the agent, newest first, with coAgentDealIds', async () => {
+    const client = mockClient((call) => {
+      if (call.table === 'commissions') return { data: [{ deal_id: 'co1' }], error: null }
+      if (call.filters.some(f => f[0] === 'contains')) return { data: [], error: null } // legacy co_agent_ids lookup
+      if (call.filters.some(f => f[0] === 'eq')) {
+        return { data: [deal('own1', 'a1', '2026-06-01')], error: null } // owner query
+      }
+      // co-listed fetch by id
+      const inFilter = call.filters.find(f => f[0] === 'in')
+      expect(inFilter[2]).toEqual(['co1'])
+      return { data: [deal('co1', 'other', '2026-06-05')], error: null }
+    })
+    const { data, coAgentDealIds } = await fetchTaggedDeals(client, { agentId: 'a1' })
+    expect(data.map(d => d.id)).toEqual(['co1', 'own1']) // newest first
+    expect(coAgentDealIds).toEqual(['co1'])
+  })
+
+  it('scopes the owner query with eq(agent_id) — never .in on team peers', async () => {
+    const client = mockClient((call) =>
+      call.table === 'commissions' ? { data: [], error: null } : { data: [], error: null })
+    await fetchTaggedDeals(client, { agentId: 'a1' })
+    const ownerCall = client.calls.find(c => c.table === 'deals' && c.filters.some(f => f[0] === 'eq'))
+    expect(ownerCall.filters).toContainEqual(['eq', 'agent_id', 'a1'])
+    expect(client.calls.some(c => c.filters.some(f => f[0] === 'in' && f[1] === 'agent_id'))).toBe(false)
+  })
+
+  it('still returns own deals when the co-listed lookup fails', async () => {
+    const client = mockClient((call) => {
+      if (call.table === 'commissions') return { data: null, error: { message: 'boom' } }
+      // legacy co_agent_ids lookup (deals + .contains) also fails
+      if (call.filters.some(f => f[0] === 'contains')) return { data: null, error: { message: 'boom' } }
+      // owner query (deals + .eq) succeeds
+      return { data: [deal('own1', 'a1', '2026-06-01')], error: null }
+    })
+    const { data, coAgentDealIds, error } = await fetchTaggedDeals(client, { agentId: 'a1' })
+    expect(error).toBeNull()
+    expect(data.map(d => d.id)).toEqual(['own1'])
+    expect(coAgentDealIds).toEqual([])
+  })
+
+  it('returns empty without querying when there is no agent', async () => {
+    const client = mockClient(() => { throw new Error('should not query') })
+    const { data, coAgentDealIds } = await fetchTaggedDeals(client, { agentId: null })
+    expect(data).toEqual([])
+    expect(coAgentDealIds).toEqual([])
   })
 })
 
