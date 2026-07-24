@@ -77,6 +77,35 @@ export async function fetchVisibleDeals(client, { isAdmin, agentId, dealAgentIds
   return { data: merged, error: null }
 }
 
+// Deals the agent may see under the co-agent-only + Partner model (2026-07):
+// deals OWNED by anyone in `ownerIds` (self, plus any admin-created Partners)
+// PLUS deals the agent is CO-LISTED on (participant / legacy co_agent_ids).
+// There is NO team-peer branch — sharing a team grants nothing. Returns the
+// merged rows plus `coAgentDealIds` (the subset the agent is co-tagged on) so
+// the UI can badge own vs co-agent vs partner without re-deriving it.
+// `ownerIds` defaults to [agentId] (co-agent-only, no partners). Admins should
+// use fetchVisibleDeals (whole firm).
+export async function fetchTaggedDeals(client, { agentId, ownerIds } = {}) {
+  if (!agentId) return { data: [], coAgentDealIds: [], error: null }
+  const owners = ownerIds?.length ? ownerIds : [agentId]
+  const [ownRes, coRes] = await Promise.all([
+    client.from('deals').select('*').in('agent_id', owners).order('created_at', { ascending: false }),
+    fetchCoListedDealIds(client, agentId),
+  ])
+  if (ownRes.error) return { data: [], coAgentDealIds: [], error: ownRes.error }
+  // Co-listing is additive: a failed participant lookup still returns own/partner deals.
+  const coAgentDealIds = coRes.data || []
+  const ownIds = new Set((ownRes.data || []).map(d => d.id))
+  const extraIds = coAgentDealIds.filter(id => !ownIds.has(id))
+  let merged = ownRes.data || []
+  if (extraIds.length) {
+    const extraRes = await selectInChunks(client, 'deals', 'id', extraIds)
+    if (!extraRes.error) merged = [...merged, ...extraRes.data]
+  }
+  merged = merged.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+  return { data: merged, coAgentDealIds, error: null }
+}
+
 // Commissions for exactly the deals the caller can see. Admins fetch all.
 export async function fetchVisibleCommissions(client, { isAdmin, dealIds }) {
   if (isAdmin) return client.from('commissions').select('*')

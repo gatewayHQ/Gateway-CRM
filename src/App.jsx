@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase.js'
 import { primeCache, invalidate } from './lib/queryCache.js'
-import { fetchVisibleDeals, fetchVisibleCommissions } from './lib/services/deals.js'
+import { fetchVisibleDeals, fetchVisibleCommissions, fetchTaggedDeals } from './lib/services/deals.js'
+import { fetchPartnerLinks, partnerAgentIds } from './lib/services/partners.js'
 import { Icon, Avatar, Modal, Badge, ToastHost, Loading, ErrorBoundary, pushToast } from './components/UI.jsx'
 // All pages are lazy-loaded — only the current route's bundle downloads
 const Dashboard        = React.lazy(() => import('./pages/Dashboard.jsx'))
@@ -119,6 +120,11 @@ const EMPTY_DB = {
   agents: [], templates: [], commissions: [], commissionsReady: true,
   activities: [], activitiesReady: true,
   dealContacts: [], propertyContacts: [],
+  // Subset of `deals` the active agent is co-tagged on (vs. owns). Lets the UI
+  // badge "you're a co-agent" without exposing admin-only commission rows.
+  coAgentDealIds: [],
+  // Agent ids the active agent is partnered with (admin-created share-all links).
+  partnerIds: [],
 }
 
 const nameFromEmail = (email = '') => {
@@ -293,17 +299,16 @@ export default function App() {
   useEffect(() => {
     if (!session) return
     const load = async () => {
-      // ── Phase 1: identity + team membership ──────────────────────────────
-      // Fetch agents and team_splits (with sharing flags) first so we know who
-      // is logged in and what data each team peer has opted to share.
-      const [agentsRes, teamSplitsRes] = await Promise.all([
+      // ── Phase 1: identity + partner links ────────────────────────────────
+      // Fetch agents and admin-created Partner links first so we know who is
+      // logged in and whose books they're allowed to see (self + partners).
+      const [agentsRes, partnerRes] = await Promise.all([
         supabase.from('agents').select('*').order('created_at', { ascending: true }),
-        supabase.from('team_splits').select('agent_id,team_id,share_contacts,share_properties,share_deals')
-          .then(r => r, () => ({ data: [] })),
+        fetchPartnerLinks(supabase).then(r => r, () => ({ data: [] })),
       ])
 
-      let agentsData      = agentsRes.data      || []
-      const allTeamSplits = teamSplitsRes.data  || []
+      let agentsData       = agentsRes.data   || []
+      const partnerLinks   = partnerRes.data  || []
 
       const userId        = session?.user?.id
       const loggedInEmail = session?.user?.email?.toLowerCase()
@@ -342,17 +347,14 @@ export default function App() {
       const isAdminAgent = matched.is_admin === true || (matched.role?.toLowerCase().includes('admin') ?? false)
 
       // ── Compute scoped agent ID lists ──────────────────────────────────────
-      // Each team member row carries explicit share_* flags (default true).
-      // Visibility is driven purely by those flags — no team-type rules needed.
-      const myTeamIds  = allTeamSplits.filter(ts => ts.agent_id === matched.id).map(ts => ts.team_id)
-      const peerSplits = allTeamSplits.filter(ts => myTeamIds.includes(ts.team_id) && ts.agent_id !== matched.id)
-
-      // Peer rows where the peer has opted to share contacts/properties (default true when column is absent)
-      const contactPeerIds = [...new Set(peerSplits.filter(ts => ts.share_contacts !== false).map(ts => ts.agent_id))]
-      const dealPeerIds    = [...new Set(peerSplits.filter(ts => ts.share_deals    !== false).map(ts => ts.agent_id))]
-
-      const myVisible     = [matched.id, ...contactPeerIds]
-      const myDealVisible = [matched.id, ...dealPeerIds]
+      // Visibility (2026-07, see docs/co-agent-visibility.md): an agent sees the
+      // books of THEMSELVES + any admin-created Partners. Sharing a team no
+      // longer widens visibility — only ownership, co-agent tags, and Partner
+      // links do. `myVisible` scopes contacts + properties (owner set); deals
+      // add co-listed on top via fetchTaggedDeals.
+      const partnerIds    = partnerAgentIds(partnerLinks, matched.id)
+      const myVisible     = [matched.id, ...partnerIds]
+      const myDealVisible = [matched.id, ...partnerIds]
 
       setVisibleAgentIds(myVisible)
       setDealAgentIds(myDealVisible)
@@ -370,8 +372,14 @@ export default function App() {
         isAdminAgent
           ? supabase.from('properties').select('*').order('created_at', { ascending: false })
           : supabase.from('properties').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
-        // Own + team-shared + co-listed (commission participant) deals
-        fetchVisibleDeals(supabase, { isAdmin: isAdminAgent, agentId: matched.id, dealAgentIds: myDealVisible }),
+        // Deals the agent may see. Admins get the whole firm; everyone else gets
+        // deals they own, are co-tagged on, or reach through a Partner link
+        // (owners = self + partners). fetchTaggedDeals also returns which of
+        // those the agent is a co-agent on, for UI badging.
+        isAdminAgent
+          ? fetchVisibleDeals(supabase, { isAdmin: true, agentId: matched.id, dealAgentIds: myDealVisible })
+              .then(r => ({ ...r, coAgentDealIds: [] }))
+          : fetchTaggedDeals(supabase, { agentId: matched.id, ownerIds: myDealVisible }),
         // Tasks are personal — never shared, even for an admin
         supabase.from('tasks').select('*').eq('agent_id', matched.id).order('due_date', { ascending: true }),
         supabase.from('templates').select('*').order('created_at', { ascending: false }),
@@ -394,6 +402,8 @@ export default function App() {
         contacts:         contacts.data     || [],
         properties:       properties.data   || [],
         deals:            deals.data         || [],
+        coAgentDealIds:   deals.coAgentDealIds || [],
+        partnerIds:       partnerIds,
         tasks:            tasks.data         || [],
         agents:           agentsData,
         templates:        templates.data     || [],

@@ -13,6 +13,16 @@ import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, do
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
+import VisibilityBadge from '../components/VisibilityBadge.jsx'
+import { recordVisibility, REASON, ENTITY } from '../lib/visibility.js'
+
+// Relationship filter (non-admins): why a deal is visible to the current agent.
+const REL_FILTERS = [
+  { key: 'all',      label: 'All' },
+  { key: REASON.OWN,      label: 'Mine' },
+  { key: REASON.CO_AGENT, label: 'Co-agent' },
+  { key: REASON.PARTNER,  label: 'Partner' },
+]
 
 const DEFAULT_STEPS_RESIDENTIAL = [
   'Title Search Ordered',
@@ -2313,6 +2323,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const [dragListing, setDragListing] = useState(null)
   const [dragOverStatus, setDragOverStatus] = useState(null)
   const [agentFilter, setAgentFilter] = useState('all')
+  const [relFilter, setRelFilter] = useState('all') // non-admin: own | co-agent | partner | all
 
   const deals        = db.deals        || []
   const agents       = db.agents       || []
@@ -2326,11 +2337,31 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const agentMap    = useMemo(() => Object.fromEntries(agents.map(a => [a.id, a])),     [agents])
   const propertyMap = useMemo(() => Object.fromEntries(properties.map(p => [p.id, p])), [properties])
 
-  // Filter deals for admin view (by agent) or show all
+  // Why the active agent can see each deal — own, co-agent, or via a Partner
+  // link. Same pure engine the data layer scopes on (src/lib/visibility.js), so
+  // the badge always matches what was fetched. Admins see the whole firm, so
+  // relationship badges/filters don't apply to them.
+  const dealVisibility = useMemo(() => {
+    const coAgentIds = new Set(db.coAgentDealIds || [])
+    const partnerIds = new Set(db.partnerIds || [])
+    return (deal) => recordVisibility(deal, { agentId: activeAgent?.id, ...ENTITY.deal, coAgentIds, partnerIds })
+  }, [db.coAgentDealIds, db.partnerIds, activeAgent?.id])
+
+  // Counts per relationship (non-admins) — drive the filter chips, which only
+  // appear once the agent actually has shared-in deals (no clutter otherwise).
+  const relCounts = useMemo(() => {
+    const c = { [REASON.OWN]: 0, [REASON.CO_AGENT]: 0, [REASON.PARTNER]: 0 }
+    if (!isAdmin) for (const d of deals) { const r = dealVisibility(d).reason; if (c[r] != null) c[r]++ }
+    return c
+  }, [deals, isAdmin, dealVisibility])
+  const hasSharedDeals = relCounts[REASON.CO_AGENT] + relCounts[REASON.PARTNER] > 0
+
+  // Admins filter by agent; everyone else filters by relationship to the deal.
   const visibleDeals = useMemo(() => {
-    if (!isAdmin || agentFilter === 'all') return deals
-    return deals.filter(d => d.agent_id === agentFilter)
-  }, [deals, isAdmin, agentFilter])
+    if (isAdmin) return agentFilter === 'all' ? deals : deals.filter(d => d.agent_id === agentFilter)
+    if (relFilter === 'all') return deals
+    return deals.filter(d => dealVisibility(d).reason === relFilter)
+  }, [deals, isAdmin, agentFilter, relFilter, dealVisibility])
 
   // One unified pipeline — every deal on the same board (no res/comm split).
   const resolvedTrack = UNIFIED
@@ -2572,6 +2603,20 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
               {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
           )}
+          {!isAdmin && pipelineTab === 'deals' && hasSharedDeals && (
+            <div className="relfilter" role="group" aria-label="Filter deals by why you can see them">
+              {REL_FILTERS
+                .filter(f => f.key === 'all' || f.key === REASON.OWN || relCounts[f.key] > 0)
+                .map(f => (
+                  <button key={f.key} type="button" aria-pressed={relFilter === f.key}
+                    className={`relfilter__btn${relFilter === f.key ? ' is-active' : ''}`}
+                    onClick={() => setRelFilter(f.key)}>
+                    {f.label}
+                    {f.key !== 'all' && <span className="relfilter__count">{relCounts[f.key]}</span>}
+                  </button>
+                ))}
+            </div>
+          )}
           {!isAdmin && pipelineTab === 'deals' && (
             <button className="btn btn--primary" onClick={() => { setEditing(null); setDefaultStage(track.stages[0]); setDrawer(true) }}>
               <Icon name="plus" size={14} /> Add Deal
@@ -2581,8 +2626,15 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
       </div>
 
       {pipelineTab === 'deals' && dealView === 'board' && (
-        deals.length === 0 ? (
-          <EmptyState icon="pipeline" title="No deals yet" message="Add your first deal to start tracking your pipeline." action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Deal</button>} />
+        visibleDeals.length === 0 ? (
+          deals.length === 0 ? (
+            <EmptyState icon="pipeline" title="No deals yet" message="Add your first deal to start tracking your pipeline." action={<button className="btn btn--primary" onClick={() => { setEditing(null); setDrawer(true) }}><Icon name="plus" size={14} /> Add Deal</button>} />
+          ) : (
+            <EmptyState icon="pipeline"
+              title={relFilter === REASON.CO_AGENT ? 'No deals you’re a co-agent on' : relFilter === REASON.PARTNER ? 'No deals shared through a Partner link' : 'No deals match this filter'}
+              message="Deals you own or are tagged on will show under the other filters."
+              action={<button className="btn btn--secondary" onClick={() => setRelFilter('all')}>Show all deals</button>} />
+          )
         ) : (
           <div className="kanban-board">
             {track.stages.map(stage => (
@@ -2603,6 +2655,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                   {stageGroups[stage].map(deal => {
                     const contact    = contactMap[deal.contact_id]
                     const agent      = agentMap[deal.agent_id]
+                    const vis        = isAdmin ? null : dealVisibility(deal)
                     const dealProp   = deal.property_id ? propertyMap[deal.property_id] : null
                     const coAgIds    = dealProp?.details?.co_agent_ids || []
                     const allAgents  = [deal.agent_id, ...coAgIds].filter(Boolean)
@@ -2637,6 +2690,15 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                               background: act.color, boxShadow: act.state === 'none' ? 'inset 0 0 0 1px var(--gw-border)' : undefined }} />
                           <div className="deal-card__title" style={{ flex:1 }}>{deal.title}</div>
                         </div>
+                        {vis && (vis.reason === REASON.CO_AGENT || vis.reason === REASON.PARTNER) && (
+                          <div style={{ marginBottom: 2 }}>
+                            <VisibilityBadge
+                              reason={vis.reason}
+                              partnerName={vis.reason === REASON.PARTNER ? agentMap[vis.partnerId]?.name : undefined}
+                              compact
+                            />
+                          </div>
+                        )}
                         {isAdmin && agent && (
                           <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:2 }}>
                             <Avatar agent={agent} size={14} />

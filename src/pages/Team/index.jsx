@@ -4,6 +4,8 @@ import { Icon, EmptyState, ConfirmDialog, pushToast } from '../../components/UI.
 import TeamModal  from './TeamModal.jsx'
 import AgentCard  from './AgentCard.jsx'
 import AgentDrawer from './AgentDrawer.jsx'
+import AdminPartnerManager from './PartnerManager.jsx'
+import { fetchPartnerLinks, partnerAgentIds } from '../../lib/services/partners.js'
 
 export default function TeamPage({ db, setDb, activeAgent, isAdmin, onSwitchAgent }) {
   const [agentDrawer, setAgentDrawer] = useState(false)
@@ -36,6 +38,14 @@ export default function TeamPage({ db, setDb, activeAgent, isAdmin, onSwitchAgen
   const reloadAgents = async () => {
     const { data } = await supabase.from('agents').select('*').order('created_at', { ascending: true })
     setDb(p => ({ ...p, agents: data || [] }))
+  }
+
+  // After an admin adds/removes a Partner link, re-derive the active agent's
+  // partner set so their session reflects it without a full reload. (Other
+  // agents pick up the change on their next load — see docs/co-agent-visibility.md.)
+  const refreshPartners = async () => {
+    const { data } = await fetchPartnerLinks(supabase)
+    setDb(p => ({ ...p, partnerIds: partnerAgentIds(data || [], activeAgent?.id) }))
   }
 
   const deleteAgent = async (id) => {
@@ -97,6 +107,13 @@ export default function TeamPage({ db, setDb, activeAgent, isAdmin, onSwitchAgen
           )}
         </div>
       </div>
+
+      {isAdmin && agents.length > 0 && (
+        <AdminPartnerManager
+          agents={agents} activeAgent={activeAgent} isAdmin={isAdmin}
+          onChange={refreshPartners}
+        />
+      )}
 
       {agents.length === 0 ? (
         <EmptyState icon="team" title="No agents yet"

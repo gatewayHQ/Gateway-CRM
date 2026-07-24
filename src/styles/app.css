@@ -1442,3 +1442,57 @@ select.form-control { cursor: pointer; }
 }
 .coagent-item span:first-of-type { flex: 1; }
 .lp__404-sub { font-size: 15px; color: var(--gw-mist); margin-bottom: 28px; }
+
+/* ── Visibility (co-agent + admin Partner) ────────────────────────────────── */
+
+/* Visibility badge — WHY a record is visible. Icon + text, never colour alone. */
+.vis-badge {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+  padding: 3px 9px; border-radius: 20px; white-space: nowrap;
+  font-size: 11px; font-weight: 700; line-height: 1.4; border: 1px solid transparent;
+}
+.vis-badge--own     { background: var(--gw-gold-light);   color: #7a5c10;         border-color: #e3cf8f; }
+.vis-badge--co      { background: var(--gw-sky);          color: var(--gw-azure); border-color: #bcd3ef; }
+.vis-badge--partner { background: var(--gw-purple-light); color: var(--gw-purple); border-color: #d5c9f1; }
+.vis-badge--none    { background: var(--gw-red-light);    color: var(--gw-red);   border-color: #f2c3bd; }
+
+/* Pipeline relationship filter (own / co-agent / partner) — matches the view switcher */
+.relfilter { display: flex; background: var(--gw-bone); border-radius: var(--radius); padding: 3px; gap: 2px; }
+.relfilter__btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px;
+  border: none; background: transparent; border-radius: var(--radius); cursor: pointer;
+  font-family: var(--font-body); font-size: 12px; font-weight: 600; color: var(--gw-mist);
+  transition: background 150ms, color 150ms;
+}
+.relfilter__btn:hover { color: var(--gw-slate); }
+.relfilter__btn.is-active { background: var(--gw-slate); color: #fff; }
+.relfilter__btn:focus-visible { outline: 2px solid var(--gw-azure); outline-offset: 2px; }
+.relfilter__count {
+  font-size: 10px; font-weight: 700; padding: 0 6px; border-radius: 8px; line-height: 16px;
+  background: var(--gw-border); color: var(--gw-slate);
+}
+.relfilter__btn.is-active .relfilter__count { background: rgba(255,255,255,0.22); color: #fff; }
+
+/* Admin Partner Manager */
+.partner-manager { border: 1px solid var(--gw-border); border-radius: var(--radius-lg, 12px); background: #fff; padding: 18px 20px; margin-bottom: 28px; }
+.partner-manager__head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.partner-manager__title { font-size: 14px; font-weight: 700; color: var(--gw-ink); }
+.partner-manager__admin-tag {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--gw-purple); background: var(--gw-purple-light); padding: 2px 7px; border-radius: 6px;
+}
+.partner-manager__sub { font-size: 12px; color: var(--gw-mist); line-height: 1.5; margin-bottom: 14px; }
+.partner-manager__form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin-bottom: 16px; }
+.partner-manager__field { flex: 1; min-width: 160px; }
+.partner-manager__field label { display: block; font-size: 11px; font-weight: 700; color: var(--gw-mist); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+.partner-link {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  border: 1px solid var(--gw-border); border-radius: var(--radius); background: var(--gw-bone); margin-bottom: 8px;
+}
+.partner-link__pair { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; flex-wrap: wrap; }
+.partner-link__names { font-size: 13px; font-weight: 600; color: var(--gw-slate); }
+.partner-link__meta { font-size: 11px; color: var(--gw-mist); }
+
+@media (max-width: 768px) {
+  .partner-manager__form { flex-direction: column; align-items: stretch; }
+}

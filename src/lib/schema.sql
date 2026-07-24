@@ -417,9 +417,12 @@ create table if not exists team_splits (
   agent_id         uuid references agents(id) on delete cascade,
   split_pct        numeric default 0 check (split_pct >= 0 and split_pct <= 100),
   is_lead          boolean default false,
-  share_contacts   boolean default true,   -- peer can see this member's contacts
-  share_properties boolean default true,   -- peer can see this member's properties
-  share_deals      boolean default true,   -- peer can see this member's pipeline deals
+  -- DEPRECATED (2026-07): visibility is co-agent-only + admin Partner links
+  -- (see agent_partners). These share_* flags no longer affect visibility; kept
+  -- for backward compat. See docs/co-agent-visibility.md.
+  share_contacts   boolean default true,
+  share_properties boolean default true,
+  share_deals      boolean default true,
   created_at       timestamptz default now(),
   unique(team_id, agent_id)
 );
@@ -430,6 +433,40 @@ do $$ begin
     create policy "allow_all" on team_splits for all using (true) with check (true);
   end if;
 end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- AGENT PARTNERS  (admin-controlled share-all links, 2026-07)
+-- An admin pairs two agents; each then sees the other's full book (deals,
+-- contacts, properties). Agents cannot create/accept/enable/disable a link —
+-- writes are ADMIN-ONLY at the database. See docs/co-agent-visibility.md.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists agent_partners (
+  id         uuid primary key default uuid_generate_v4(),
+  agent_a    uuid not null references agents(id) on delete cascade,
+  agent_b    uuid not null references agents(id) on delete cascade,
+  created_by uuid references agents(id) on delete set null,
+  created_at timestamptz default now(),
+  -- order-normalized (agent_a < agent_b) so a pair is unique regardless of side
+  constraint agent_partners_distinct check (agent_a <> agent_b),
+  constraint agent_partners_ordered  check (agent_a < agent_b),
+  constraint agent_partners_unique   unique (agent_a, agent_b)
+);
+create index if not exists idx_agent_partners_a on agent_partners(agent_a);
+create index if not exists idx_agent_partners_b on agent_partners(agent_b);
+
+alter table agent_partners enable row level security;
+grant select, insert, update, delete on table agent_partners to authenticated, service_role;
+
+-- READ: a member of the pair (they can see each other's data anyway) or admin.
+drop policy if exists agent_partners_read on agent_partners;
+create policy agent_partners_read on agent_partners for select to authenticated
+  using (app_is_admin() or agent_a = app_current_agent_id() or agent_b = app_current_agent_id());
+
+-- WRITE: ADMIN ONLY — the non-negotiable rule. No agent can create or remove a
+-- Partner link, so none can grant themselves visibility into another's data.
+drop policy if exists agent_partners_admin_write on agent_partners;
+create policy agent_partners_admin_write on agent_partners for all to authenticated
+  using (app_is_admin()) with check (app_is_admin());
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- AGENT NOTIFICATIONS
@@ -1364,30 +1401,32 @@ language sql stable security definer set search_path = public as $$
   from agents where auth_id = auth.uid();
 $$;
 
--- The set of agent_ids whose data the current user may see for a given
--- dimension: self + team peers who share that dimension. A null share flag is
--- treated as "shared" to match the app's default.
+-- Agents partnered with the current user (bidirectional). Partner links are
+-- created/removed ONLY by admins (see agent_partners below).
+create or replace function app_partner_agent_ids()
+returns setof uuid
+language sql stable security definer set search_path = public as $$
+  select agent_b from agent_partners where agent_a = app_current_agent_id()
+  union
+  select agent_a from agent_partners where agent_b = app_current_agent_id();
+$$;
+
+-- The set of agent_ids whose data the current user may see: self + admin-created
+-- partners (2026-07). Partners share everything, so `dimension` is accepted for
+-- call-site compatibility but no longer differentiates — team_splits.share_*
+-- sharing is retired. See docs/co-agent-visibility.md.
 create or replace function app_visible_agent_ids(dimension text)
 returns setof uuid
 language sql stable security definer set search_path = public as $$
   select app_current_agent_id()
   union
-  select peer.agent_id
-  from team_splits me
-  join team_splits peer
-    on peer.team_id = me.team_id
-   and peer.agent_id <> me.agent_id
-  where me.agent_id = app_current_agent_id()
-    and case dimension
-          when 'contacts'   then peer.share_contacts
-          when 'properties' then peer.share_properties
-          when 'deals'      then peer.share_deals
-          else false
-        end is not false;
+  select app_partner_agent_ids();
 $$;
 
--- Every deal the current user may see: all (admin), own + team-shared, or
--- co-listed (they appear as a participant on the deal's commission).
+-- Every deal the current user may see: all (admin), OWN or a PARTNER's (owner in
+-- app_visible_agent_ids), or CO-LISTED (participant on the deal's commission).
+-- Sharing a team is NOT sufficient — only ownership, co-agent tag, or an
+-- admin-created Partner link grants visibility.
 create or replace function app_visible_deal_ids()
 returns setof uuid
 language sql stable security definer set search_path = public as $$
@@ -1406,6 +1445,7 @@ $$;
 
 grant execute on function app_current_agent_id()      to authenticated;
 grant execute on function app_is_admin()              to authenticated;
+grant execute on function app_partner_agent_ids()     to authenticated;
 grant execute on function app_visible_agent_ids(text) to authenticated;
 grant execute on function app_visible_deal_ids()      to authenticated;
 
@@ -1455,7 +1495,9 @@ create policy deals_agent_scope on deals for all to authenticated
   using (id in (select app_visible_deal_ids()))
   with check (
     app_is_admin()
-    or agent_id in (select app_visible_agent_ids('deals'))
+    -- members may create/own only their OWN deals (co-agent-only, 2026-07)…
+    or agent_id = app_current_agent_id()
+    -- …and edit any deal they can already see (own or co-listed).
     or id in (select app_visible_deal_ids())
   );
 
