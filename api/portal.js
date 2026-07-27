@@ -325,10 +325,22 @@ async function handleMyEarnings(req, res) {
     // 3. Load context. Deals where the caller is owner, legacy co-agent, or a
     //    commission participant — everything else is filtered out below anyway.
     const dealFilter = req.query?.deal_id ? { col: 'id', val: req.query.deal_id } : null
-    let dealQuery = svc.from('deals').select('id, title, stage, value, probability, agent_id, co_agent_ids, expected_close_date, updated_at, created_at, comp_data')
-    if (dealFilter) dealQuery = dealQuery.eq(dealFilter.col, dealFilter.val)
+    const DEAL_COLS_BASE = 'id, title, stage, value, probability, agent_id, co_agent_ids, expected_close_date, updated_at, created_at, comp_data'
+    // agent_comp_* — the agent's own entry prices the deal until an admin saves
+    // a commission row, so it has to travel with the deal (migration 0024). On a
+    // database that hasn't had 0024 applied, fall back to the pre-0024 columns
+    // rather than failing the whole earnings page.
+    const loadDeals = async () => {
+      const q = (cols) => {
+        const base = svc.from('deals').select(cols)
+        return dealFilter ? base.eq(dealFilter.col, dealFilter.val) : base
+      }
+      const res = await q(`${DEAL_COLS_BASE}, agent_comp_type, agent_comp_rate_pct, agent_comp_flat`)
+      if (res.error && /agent_comp/i.test(res.error.message || '')) return q(DEAL_COLS_BASE)
+      return res
+    }
     const [{ data: deals }, { data: commissions }, { data: agents }] = await Promise.all([
-      dealQuery,
+      loadDeals(),
       svc.from('commissions').select('*'),
       svc.from('agents').select('id, name, default_split_pct, no_brokerage_split'),
     ])

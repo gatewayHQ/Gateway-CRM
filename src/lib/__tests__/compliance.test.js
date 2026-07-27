@@ -83,6 +83,15 @@ describe('getClosingGate', () => {
     expect(withoutVis.issues.some(i => i.code === ISSUE_CODES.COMMISSION_MISSING)).toBe(false)
   })
 
+  it('the agent-set compensation on the deal satisfies the commission gate', () => {
+    const rate = getClosingGate(dealReady({ agent_comp_type: 'rate', agent_comp_rate_pct: 3 }),
+      { steps: steps(1), envelopes: [], commission: null, hasCommissionVisibility: true })
+    const flat = getClosingGate(dealReady({ agent_comp_type: 'flat', agent_comp_flat: 2500 }),
+      { steps: steps(1), envelopes: [], commission: null, hasCommissionVisibility: true })
+    expect(rate.issues.some(i => i.code === ISSUE_CODES.COMMISSION_MISSING)).toBe(false)
+    expect(flat.issues.some(i => i.code === ISSUE_CODES.COMMISSION_MISSING)).toBe(false)
+  })
+
   it('does not flag commission_missing for zero-value deals', () => {
     const gate = getClosingGate(dealReady({ value: 0 }), { steps: steps(1), envelopes: [], commission: null, hasCommissionVisibility: true })
     expect(gate.issues.some(i => i.code === ISSUE_CODES.COMMISSION_MISSING)).toBe(false)

@@ -28,8 +28,11 @@ src/lib/commission.js  ← pure engine, no I/O (shared by editor + reports)
 
 A transaction is two stacked concepts:
 
-- **Sides** — where commission comes from. `{ key, label, rate_pct, referral_pct,
-  referral_flat }`. One side for a normal deal; two when the brokerage double-ends
+- **Sides** — where commission comes from. `{ key, label, rate_pct, flat,
+  referral_pct, referral_flat }`. A side is priced **either** by rate **or** by a
+  flat fee (`flat > 0` wins) — flat-fee pricing is normal on commercial/BOV work
+  where the fee doesn't scale with price.
+  One side for a normal deal; two when the brokerage double-ends
   (listing + buyer). A referral lives on the side it actually applied to, which
   is the only correct way to model "the listing was referred in, the buyer side
   wasn't."
@@ -64,6 +67,34 @@ legacy flat columns remain and are written as a best-effort mirror;
 identically until re-saved. This keeps one row per deal (no schema churn) while
 being extensible — a `commission_splits` child table is the natural next step if
 per-participant reporting outgrows client-side aggregation.
+
+### Where the numbers come from — precedence
+
+Three layers, highest first:
+
+1. **The commissions row** an admin saved — sides, participants, splits,
+   referrals, overrides. Authoritative the moment it exists.
+2. **The agent's own entry on the deal** — `deals.agent_comp_type`
+   (`'rate' | 'flat'`) plus `agent_comp_rate_pct` **or** `agent_comp_flat`,
+   entered on the deal form at creation. This is the deal's default
+   compensation, so the office no longer has to open every transaction just to
+   record the agent's cut. Resolved by `dealCompensation(deal)`.
+3. **The firm default** — `DEFAULTS.GROSS_PCT` (3%) with the agent's stored
+   `default_split_pct`. What every pre-0024 deal still uses.
+
+`breakdownForDeal()` reports which layer priced a deal as
+`comp_source: 'admin' | 'agent' | 'default'`, and flags flat pricing as
+`is_flat` — the Back Office tracker uses both (an `AGENT-SET` tag, and `flat`
+instead of a meaningless percentage in the GC % column).
+
+**Who may write layer 2.** The agent sets it while creating the deal (or fills it
+in on a deal that predates the field); after that it is admin-only. Splits,
+overrides and every later change stay entirely with the office. This is enforced
+in the database by the `deals_guard_agent_comp` trigger (migration 0024), not
+just in the form — a co-listed agent or a sharing team peer who can otherwise
+edit the deal can never touch another agent's compensation, whatever client
+issues the write. The deal form mirrors the same rule: the fields are hidden from
+other agents and rendered read-only once locked.
 
 ### Worked example — 400 S Mulberry ($345,000)
 Listing 3% w/ 20% referral + buyer 2%; Nic keeps 100% of 60%, Daniel 40% @ his split.
@@ -113,3 +144,11 @@ needs no new column.
 `migrations/0005_commission_structured_admin.sql` — additive only, idempotent,
 safe to run anytime. Adds the jsonb columns, the per-agent split defaults, and
 `is_admin` (back-filled). Nothing about existing deals changes until edited.
+
+`migrations/0024_deal_agent_compensation.sql` — additive only, idempotent. Adds
+the three `deals.agent_comp_*` columns, their CHECK guards (rate 0–100, flat ≥ 0,
+and "the chosen type must carry its amount", which is what keeps rate and flat
+mutually exclusive at rest), and the `deals_guard_agent_comp` trigger. Existing
+deals have all three columns NULL, so every current number is unchanged until an
+agent sets a value. Until it is applied, the deal form saves without the
+compensation and says so, and `my-earnings` falls back to the pre-0024 columns.

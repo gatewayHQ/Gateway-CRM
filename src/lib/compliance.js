@@ -8,6 +8,8 @@
 // how to render them; admins can override-with-confirm, agents cannot.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { dealCompensation } from './commission.js'
+
 // Issue codes are stable identifiers so the UI can route to the right tab and
 // the cron nudges can target the right next-action.
 export const ISSUE_CODES = {
@@ -89,7 +91,10 @@ export function getClosingGate(deal, { steps = [], envelopes = [], commission = 
   //    (admin); a non-admin can't see commission, so flagging it as a blocker
   //    on their view would be a phantom warning they can't act on.
   if (hasCommissionVisibility) {
-    const hasComm = commission && Number(commission.gross_pct || 0) > 0
+    // The agent's own entry on the deal (rate or flat fee) counts: the engine
+    // resolves a full disbursement from it, so the office no longer has to open
+    // every transaction just to unblock closing (migration 0024).
+    const hasComm = (commission && Number(commission.gross_pct || 0) > 0) || !!dealCompensation(deal)
     if ((Number(deal.value) || 0) > 0 && !hasComm) {
       issues.push({
         code: ISSUE_CODES.COMMISSION_MISSING,

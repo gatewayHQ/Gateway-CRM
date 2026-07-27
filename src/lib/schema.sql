@@ -125,6 +125,21 @@ create table if not exists deals (
   prop_category       text,                 -- 'residential' | 'commercial' (deal-level category)
   prop_subtype        text,                 -- commercial subtype: multifamily, office, land, retail, industrial
   comp_data           jsonb default '{}',   -- { key_dates:[{type,date}], portal_docs:[name], state, transaction_type }
+  -- AGENT-SET COMPENSATION (migration 0024) — what the agent entered for
+  -- themselves when they created the deal, EITHER a rate OR a flat fee. It is
+  -- the default the commission engine uses; an admin-saved commissions row
+  -- always wins (src/lib/commission.js). NULL = never set → firm default rate.
+  agent_comp_type     text constraint deals_agent_comp_type_check
+                        check (agent_comp_type is null or agent_comp_type in ('rate','flat')),
+  agent_comp_rate_pct numeric constraint deals_agent_comp_rate_range
+                        check (agent_comp_rate_pct is null or (agent_comp_rate_pct >= 0 and agent_comp_rate_pct <= 100)),
+  agent_comp_flat     numeric constraint deals_agent_comp_flat_nonneg
+                        check (agent_comp_flat is null or agent_comp_flat >= 0),
+  constraint deals_agent_comp_amount_present check (
+    agent_comp_type is null
+    or (agent_comp_type = 'rate' and agent_comp_rate_pct is not null)
+    or (agent_comp_type = 'flat' and agent_comp_flat     is not null)
+  ),
   portal_token        uuid,                 -- client portal share token (unguessable)
   portal_enabled      boolean default false,
   created_at          timestamptz default now(),
@@ -1458,6 +1473,34 @@ create policy deals_agent_scope on deals for all to authenticated
     or agent_id in (select app_visible_agent_ids('deals'))
     or id in (select app_visible_deal_ids())
   );
+
+-- DEALS — agent-set compensation is write-once for agents (migration 0024).
+-- The deal's own agent may fill in agent_comp_* while they are still empty (at
+-- creation, or on a deal that predates the field); changing a value that is
+-- already set is admin-only, and a co-listed agent or sharing team peer — who
+-- may otherwise edit the deal — can never touch someone else's compensation.
+create or replace function deals_guard_agent_comp()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare
+  was_set boolean;
+begin
+  if coalesce(auth.jwt() ->> 'role', '') = 'service_role' or app_is_admin() then
+    return new;
+  end if;
+  was_set := old.agent_comp_type is not null;
+  if not was_set and old.agent_id = app_current_agent_id() then
+    return new;
+  end if;
+  new.agent_comp_type     := old.agent_comp_type;
+  new.agent_comp_rate_pct := old.agent_comp_rate_pct;
+  new.agent_comp_flat     := old.agent_comp_flat;
+  return new;
+end $$;
+
+drop trigger if exists deals_guard_agent_comp_trg on deals;
+create trigger deals_guard_agent_comp_trg
+  before update on deals
+  for each row execute function deals_guard_agent_comp();
 
 -- COMMISSIONS — back office: ADMIN-ONLY (decided 2026-06-12). Each agent's
 -- split/take-home is private even from co-agents on the same deal; agents get

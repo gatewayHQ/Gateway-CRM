@@ -30,6 +30,17 @@
  *      agent's annual cap — the cap measures only the brokerage SPLIT. A
  *      per-agent `fee` > 0 overrides that agent's share of the flat fee.
  *
+ * A side is priced EITHER as a rate (% of sale price) OR as a flat fee in
+ * dollars (`flat` > 0 wins). Flat-fee listings are common on commercial and
+ * BOV/consulting work where the fee doesn't scale with price.
+ *
+ * ── Where the numbers come from (precedence) ─────────────────────────────────
+ * 1. The commissions row an ADMIN saved — always authoritative once it exists.
+ * 2. The agent-set compensation on the DEAL itself (deals.agent_comp_type +
+ *    agent_comp_rate_pct / agent_comp_flat), entered at deal creation so the
+ *    office no longer has to touch every transaction just to set the cut.
+ * 3. DEFAULTS.GROSS_PCT — the firm's typical one-side rate.
+ *
  * ── Backward compatibility ───────────────────────────────────────────────────
  * Existing rows use the old flat shape (gross_pct / referral_pct / broker_pct /
  * agent_pct / co_agent_pct / transaction_fee). `normalizeCommission` upgrades
@@ -70,11 +81,61 @@ export function makeParticipant({ agent = null, role = 'primary', allocation_pct
   }
 }
 
-/** A single-side commission (the simple, most common case). */
-export function makeSide(key = 'sale', rate_pct = DEFAULTS.GROSS_PCT) {
+/**
+ * A single-side commission (the simple, most common case). Priced by rate, or
+ * by a flat dollar fee when `flat` > 0 (the flat fee then wins over the rate).
+ */
+export function makeSide(key = 'sale', rate_pct = DEFAULTS.GROSS_PCT, flat = 0) {
   const label = key === 'listing' ? 'Listing side' : key === 'buyer' ? 'Buyer side' : 'Sale'
-  return { id: uid(), key, label, rate_pct, referral_pct: 0, referral_flat: 0 }
+  return { id: uid(), key, label, rate_pct, flat, referral_pct: 0, referral_flat: 0 }
 }
+
+/** The two ways an agent can set their compensation on a deal. */
+export const DEAL_COMP_TYPES = ['rate', 'flat']
+
+/**
+ * The agent-set compensation stored on a deal, normalized — or null when the
+ * agent never set one (every legacy deal). Mutually exclusive by construction:
+ * the stored `agent_comp_type` decides which of the two amounts is read.
+ *
+ * Returns { type: 'rate'|'flat', rate_pct, flat }.
+ */
+export function dealCompensation(deal) {
+  if (!deal) return null
+  if (deal.agent_comp_type === 'flat') {
+    const flat = num(deal.agent_comp_flat, 0)
+    return flat > 0 ? { type: 'flat', rate_pct: 0, flat } : null
+  }
+  if (deal.agent_comp_type === 'rate') {
+    const rate_pct = num(deal.agent_comp_rate_pct, 0)
+    return rate_pct > 0 ? { type: 'rate', rate_pct, flat: 0 } : null
+  }
+  return null
+}
+
+/**
+ * Deal-form fields → the three `deals` columns, in the one shape the CHECK
+ * constraints accept: the chosen type always carries its amount, and the other
+ * amount is nulled out so a rate and a flat fee can never both be stored.
+ * An empty amount clears all three (the firm default rate then applies).
+ */
+export function dealCompPayload({ agent_comp_type, agent_comp_rate_pct, agent_comp_flat } = {}) {
+  const type = agent_comp_type === 'flat' ? 'flat' : 'rate'
+  const raw  = type === 'flat' ? agent_comp_flat : agent_comp_rate_pct
+  const n    = Number(raw)
+  if (raw === '' || raw === null || raw === undefined || !Number.isFinite(n)) {
+    return { agent_comp_type: null, agent_comp_rate_pct: null, agent_comp_flat: null }
+  }
+  return {
+    agent_comp_type:     type,
+    agent_comp_rate_pct: type === 'rate' ? n : null,
+    agent_comp_flat:     type === 'flat' ? n : null,
+  }
+}
+
+/** The `deals` columns this feature owns — used to strip them on retry when a
+ *  database hasn't had migration 0024 applied yet. */
+export const DEAL_COMP_COLUMNS = ['agent_comp_type', 'agent_comp_rate_pct', 'agent_comp_flat']
 
 /**
  * Coerce any stored commission row (legacy flat OR new structured) plus the
@@ -89,20 +150,30 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
       Array.isArray(commission.participants) && commission.participants.length) {
     return {
       sale_price,
-      sides: commission.sides.map(s => ({ ...makeSide(s.key, s.rate_pct), ...s })),
+      sides: commission.sides.map(s => ({ ...makeSide(s.key, s.rate_pct, s.flat), ...s })),
       participants: commission.participants.map(p => ({ ...makeParticipant(), ...p })),
       transaction_fee: num(commission.transaction_fee, 0),
+      comp_source: 'admin',
     }
   }
 
   // Legacy flat shape (or no row yet) → upgrade to one side + participants.
-  const gross_pct    = num(commission?.gross_pct, DEFAULTS.GROSS_PCT)
   const referral_pct = num(commission?.referral_pct, 0)
   const agent_pct    = num(commission?.agent_pct, DEFAULTS.SPLIT_PCT)
   const co_agent_pct = num(commission?.co_agent_pct, 0)
   const fee          = num(commission?.transaction_fee, 0)
 
-  const sides = [{ ...makeSide('sale', gross_pct), referral_pct }]
+  // No admin-saved row at all → the agent's own entry on the deal is the
+  // default. An existing row (legacy flat columns) always wins: an admin
+  // already priced this deal by hand.
+  const hasAdminRow = !!(commission && (commission.id != null || commission.gross_pct != null))
+  const agentComp   = hasAdminRow ? null : dealCompensation(deal)
+  const comp_source = hasAdminRow ? 'admin' : agentComp ? 'agent' : 'default'
+
+  const gross_pct = num(commission?.gross_pct, agentComp?.type === 'rate' ? agentComp.rate_pct : DEFAULTS.GROSS_PCT)
+  const flat      = agentComp?.type === 'flat' ? agentComp.flat : 0
+
+  const sides = [{ ...makeSide('sale', flat > 0 ? 0 : gross_pct, flat), referral_pct }]
 
   const primaryAgent = agents.find(a => a.id === deal?.agent_id) || null
   const primary = makeParticipant({ agent: primaryAgent, role: 'primary', allocation_pct: 100 })
@@ -122,7 +193,7 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
 
   // The legacy flat `transaction_fee` was a single deal-level fee — carry it
   // straight through as the deal-level fee (no longer pinned to the primary).
-  return { sale_price, sides, participants, transaction_fee: fee, _legacy: true }
+  return { sale_price, sides, participants, transaction_fee: fee, comp_source, _legacy: true }
 }
 
 /**
@@ -136,7 +207,9 @@ export function computeCommission(input) {
 
   const sides = rawSides.map(s => {
     const rate = num(s.rate_pct, 0)
-    const gross = sale_price * rate / 100
+    // A flat fee prices the side outright; otherwise it's a % of sale price.
+    const flat = num(s.flat, 0)
+    const gross = flat > 0 ? flat : sale_price * rate / 100
     const referral = num(s.referral_flat, 0) > 0
       ? num(s.referral_flat, 0)
       : gross * num(s.referral_pct, 0) / 100
@@ -247,6 +320,12 @@ export function computeCommission(input) {
     transaction_fee_total,   // total flat fees charged on this deal (on top of cap)
     house_split_total,       // brokerage split only — the cap-counting portion
     primary,
+    // Where the pricing came from: 'admin' (saved commission row), 'agent'
+    // (the agent's entry at deal creation), or 'default' (firm rate).
+    comp_source: input?.comp_source || 'default',
+    // True when any side is priced as a flat fee rather than a rate — the "%"
+    // columns are meaningless then and surfaces show "Flat" instead.
+    is_flat: sides.some(s => num(s.flat, 0) > 0),
     // Effective blended rate (for the dashboard's "GC %" column).
     effective_rate_pct: sale_price > 0 ? round2(gross_total / sale_price * 100) : 0,
     // Legacy-compatible fields consumed by existing report rollups:
