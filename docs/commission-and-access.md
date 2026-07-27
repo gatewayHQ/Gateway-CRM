@@ -108,6 +108,48 @@ Listing 3% w/ 20% referral + buyer 2%; Nic keeps 100% of 60%, Daniel 40% @ his s
 | Daniel — 40% allocation, his split − fee | his take |
 | Brokerage | the remainder |
 
+### Earnings chart — what it shows and how it's computed
+
+`src/components/EarningsChart.jsx` draws an agent's commission income over time
+on **My Earnings** (and, for admins, on Back Office → **Agent Earnings** for any
+agent or the firm). One bar per period, stacked into the two ways a deal can be
+priced: **% commission** (green) and **flat fee** (blue).
+
+- **What a bar is worth** — the sum of `agentSliceForDeal(...).take` for the
+  deals that CLOSED in that period, i.e. the agent's take after sides, referrals,
+  allocation, their brokerage split and transaction fees. It is the same function
+  My Earnings' table, the deal page and the brokerage report use, so admin
+  overrides and splits are already baked in. Open deals earn nothing and are not
+  charted (they still show in the table as projected).
+- **Rate vs flat** — `is_flat` from the resolved breakdown. A deal with any
+  flat-priced side counts as flat, matching how the tracker suppresses the
+  meaningless "%" reading for those deals.
+- **When a deal counts** — `deals.updated_at` (fall back: `created_at`) for a
+  deal in the `closed` stage. That is the same closing timestamp the cap tracker
+  and the monthly chart already use.
+- **Buckets** — `src/lib/earnings.js` (`resolveRange` + `buildEarningsSeries`).
+  Presets: last 30 days and last 3 months by Monday-based week, last 12 months
+  and this year by month, plus a custom range that picks weeks up to ~4 months and
+  months beyond. Empty periods are kept, so the timeline reads as time rather
+  than as a list of paydays.
+- **Where it's aggregated** — server-side for the agent
+  (`/api/portal?action=my-earnings&range=…` returns a ready-made `series`), so a
+  large book of business never ships row-by-row to a phone; in the browser for
+  the admin view, which already holds every deal and commission. Same pure
+  functions either way.
+- **Privacy** — the endpoint has no `agent_id` parameter: the caller's JWT
+  decides whose numbers come back, so one agent cannot request another's chart.
+  Only admins get the agent picker, and it runs on data the DB already lets them
+  read.
+- **Interaction** — hover or keyboard-focus a bar for a tooltip (period, total,
+  rate/flat split, top deals); click or press Enter to filter the deals table
+  below to that period. Bars are `role="button"` with a full aria-label, and the
+  same numbers are repeated in a visually-hidden table for screen readers.
+
+No charting dependency: it's one inline `<svg>` whose width is measured from its
+container (so labels stay 10px on a phone instead of being scaled into mush) and
+which scrolls horizontally only when bars would fall below 30px.
+
 ## 3. Admin access
 
 `agents.is_admin` (explicit flag, back-filled from any role containing "admin").

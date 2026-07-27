@@ -1,12 +1,14 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Avatar, Badge, Drawer, EmptyState, pushToast } from '../components/UI.jsx'
-import { formatCurrency } from '../lib/helpers.js'
+import { formatCurrency, formatDate } from '../lib/helpers.js'
 import { fetchVisibleDeals, fetchVisibleCommissions } from '../lib/services/deals.js'
 import MyEarnings from './MyEarnings.jsx'
 import { BrokerageReport, CapsEditor } from './BackOffice.jsx'
+import EarningsChart from '../components/EarningsChart.jsx'
+import { buildEarningsSeries, resolveRange } from '../lib/earnings.js'
 import {
-  computeCommission, normalizeCommission, breakdownForDeal,
+  computeCommission, normalizeCommission, breakdownForDeal, agentSliceForDeal,
   makeSide, makeParticipant, dealCompensation, DEFAULTS,
 } from '../lib/commission.js'
 
@@ -683,6 +685,135 @@ function MonthlyBarChart({ deals, calcFn }) {
   )
 }
 
+// ── Agent Earnings (admin) ───────────────────────────────────────────────────
+// The same chart the agent sees on My Earnings, for any agent the admin picks —
+// or the whole firm. Agents get their series from the server (they can't read
+// commission rows); an admin already holds every deal and commission in `db`, so
+// this aggregates in place with the very same pure functions. One chart
+// component, one bucketing implementation, two data paths.
+function AgentEarningsPanel({ db, activeAgent }) {
+  const deals       = db.deals       || []
+  const agents      = db.agents      || []
+  const commissions = db.commissions || []
+
+  const [agentId, setAgentId] = useState(activeAgent?.id || '')
+  const [range, setRange]     = useState({ preset: '12m', from: '', to: '' })
+  const [picked, setPicked]   = useState(null)
+
+  const commByDeal = useMemo(() => new Map(commissions.map(c => [c.deal_id, c])), [commissions])
+
+  // One row per closed deal this view covers: the take being charted, and how
+  // the deal was priced (rate vs flat) so the bars can split.
+  const rows = useMemo(() => {
+    const out = []
+    for (const deal of deals) {
+      if (deal.stage !== 'closed') continue
+      const comm = commByDeal.get(deal.id)
+      if (agentId) {
+        const slice = agentSliceForDeal(deal, comm, agents, agentId)
+        if (!slice.onDeal || slice.take === 0) continue
+        out.push({
+          deal_id: deal.id, title: deal.title, closed_at: deal.updated_at || deal.created_at,
+          take: slice.take, fees: slice.fees, gross: slice.gross, is_flat: slice.isFlat,
+        })
+      } else {
+        // Firm view: every agent's take on the deal, combined.
+        const r = breakdownForDeal(deal, comm, agents)
+        if (r.agent_total === 0) continue
+        out.push({
+          deal_id: deal.id, title: deal.title, closed_at: deal.updated_at || deal.created_at,
+          take: r.agent_total, fees: r.transaction_fee_total, gross: r.gross_total, is_flat: r.is_flat,
+        })
+      }
+    }
+    return out
+  }, [deals, commByDeal, agents, agentId])
+
+  const series = useMemo(() => {
+    const resolved = resolveRange({ preset: range.preset, from: range.from, to: range.to })
+    return { preset: resolved.preset, ...buildEarningsSeries(rows, resolved) }
+  }, [rows, range])
+
+  const agent = agents.find(a => a.id === agentId) || null
+  const pickedPoint = picked ? series.points.find(p => p.key === picked) : null
+
+  const changeRange = (next) => {
+    // Switching to Custom starts from the window already on screen.
+    if (next.preset === 'custom' && !next.from && !next.to) {
+      setRange({ preset: 'custom', from: series.from, to: series.to }); return
+    }
+    if (next.preset === 'custom' && !(next.from && next.to)) { setRange(r => ({ ...r, ...next })); return }
+    setRange(next)
+  }
+
+  const picker = (
+    <>
+      <label htmlFor="earnings-agent" style={{ fontSize: 12, color: 'var(--gw-mist)' }}>Agent</label>
+      <select id="earnings-agent" className="filter-select" value={agentId}
+        onChange={e => { setAgentId(e.target.value); setPicked(null) }}>
+        <option value="">Everyone (firm total)</option>
+        {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+      </select>
+    </>
+  )
+
+  return (
+    <>
+      <EarningsChart
+        series={series}
+        range={range}
+        onRangeChange={changeRange}
+        selectedKey={picked}
+        onSelect={setPicked}
+        headerExtra={picker}
+        title={agent ? `${agent.name}'s Commissions` : 'Firm — Agent Commissions'}
+        subtitle={agent
+          ? 'Their take on closed deals — after splits, referrals and fees'
+          : 'Every agent\'s take on closed deals, combined'}
+      />
+
+      {pickedPoint && (
+        <div className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 20 }}>
+          <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--gw-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>
+              {pickedPoint.label} — {formatCurrency(pickedPoint.take)} across {pickedPoint.deals} deal{pickedPoint.deals === 1 ? '' : 's'}
+            </div>
+            <button className="btn btn--ghost btn--sm" onClick={() => setPicked(null)} style={{ fontSize: 12 }}>
+              <Icon name="x" size={11} /> Clear
+            </button>
+          </div>
+          <div className="data-table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Deal</th>
+                  <th>Priced</th>
+                  <th style={{ textAlign: 'right' }}>{agent ? 'Their take' : 'Agent take'}</th>
+                  <th>Closed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pickedPoint.items.map(it => (
+                  <tr key={it.deal_id}>
+                    <td style={{ fontWeight: 600, fontSize: 13 }}>{it.title}</td>
+                    <td>
+                      {it.is_flat
+                        ? <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--gw-azure)', background: '#eff6ff', padding: '2px 7px', borderRadius: 8, whiteSpace: 'nowrap' }}>Flat fee</span>
+                        : <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--gw-green)', background: '#f0fdf4', padding: '2px 7px', borderRadius: 8, whiteSpace: 'nowrap' }}>% rate</span>}
+                    </td>
+                    <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--gw-green)' }}>{formatCurrency(it.take)}</td>
+                    <td style={{ color: 'var(--gw-mist)', fontSize: 12, whiteSpace: 'nowrap' }}>{formatDate(it.closed_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
 // ── Res/Commercial breakdown card ────────────────────────────────────────────
 function CategoryBreakdown({ closedDeals, calcFn }) {
   const res  = closedDeals.filter(d => !d.prop_category || d.prop_category === 'residential')
@@ -913,7 +1044,7 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
         </div>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
           <div style={{ display:'flex', background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:3, gap:2 }}>
-            {[['tracker','Tracker'],['report','Brokerage Report'],['caps','Agents & Caps']].map(([id, label]) => (
+            {[['tracker','Tracker'],['earnings','Agent Earnings'],['report','Brokerage Report'],['caps','Agents & Caps']].map(([id, label]) => (
               <button key={id} onClick={() => setBoTab(id)} style={{
                 padding:'5px 14px', border:'none', borderRadius:'var(--radius)', cursor:'pointer',
                 fontFamily:'var(--font-body)', fontSize:12, fontWeight:600,
@@ -926,8 +1057,9 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
         </div>
       </div>
 
-      {boTab === 'report' && <BrokerageReport db={db} />}
-      {boTab === 'caps'   && <CapsEditor db={db} setDb={setDb} />}
+      {boTab === 'earnings' && <AgentEarningsPanel db={db} activeAgent={activeAgent} />}
+      {boTab === 'report'   && <BrokerageReport db={db} />}
+      {boTab === 'caps'     && <CapsEditor db={db} setDb={setDb} />}
 
       {boTab === 'tracker' && (<>
       {/* ── Summary stats ── */}

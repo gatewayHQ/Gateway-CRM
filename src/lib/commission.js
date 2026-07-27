@@ -359,9 +359,14 @@ export function breakdownForDeal(deal, commission, agents) {
  * agent; falls back to deal ownership for legacy rows with no participants.
  * This is THE authoritative per-agent number used by My Earnings, the deal
  * page, and the brokerage report — one formula, three surfaces.
+ *
+ * `isFlat` / `compSource` describe how the deal was priced (see computeCommission)
+ * so the earnings chart can separate percentage from flat-fee income without
+ * re-deriving anything.
  */
 export function agentSliceForDeal(deal, commission, agents, agentId) {
   const r = breakdownForDeal(deal, commission, agents)
+  const how = { isFlat: !!r.is_flat, compSource: r.comp_source }
   const mine = r.participants.filter(p => p.agent_id === agentId)
   if (mine.length) {
     return {
@@ -372,6 +377,7 @@ export function agentSliceForDeal(deal, commission, agents, agentId) {
       fees:  round2(mine.reduce((s, p) => s + num(p.fee, 0), 0)),
       splitPct: mine[0] ? num(mine[0].split_pct, null) : null,
       gross: r.gross_total,
+      ...how,
     }
   }
   if (deal.agent_id === agentId) {
@@ -379,9 +385,10 @@ export function agentSliceForDeal(deal, commission, agents, agentId) {
       onDeal: true, take: r.agent_total, house: r.house_total,
       cap: r.house_split_total, fees: r.transaction_fee_total ?? 0,
       splitPct: r.primary ? num(r.primary.split_pct, null) : null, gross: r.gross_total,
+      ...how,
     }
   }
-  return { onDeal: false, take: 0, house: 0, cap: 0, fees: 0, splitPct: null, gross: 0 }
+  return { onDeal: false, take: 0, house: 0, cap: 0, fees: 0, splitPct: null, gross: 0, ...how }
 }
 
 /**

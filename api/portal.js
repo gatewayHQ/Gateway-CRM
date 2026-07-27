@@ -206,7 +206,9 @@ async function handlePortalSignLink(req, res) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// My Earnings — GET /api/portal?action=my-earnings[&deal_id=<uuid>]
+// My Earnings — GET /api/portal?action=my-earnings
+//                 [&deal_id=<uuid>] [&range=30d|3m|12m|ytd|custom]
+//                 [&from=YYYY-MM-DD&to=YYYY-MM-DD] [&bucket=week|month]
 //
 // Commissions are ADMIN-ONLY at the database level (back office, 2026-06-12):
 // an agent cannot read raw commission rows, because each row contains every
@@ -216,12 +218,20 @@ async function handlePortalSignLink(req, res) {
 // (src/lib/commission.js), and returns ONLY the caller's numbers — partner
 // splits never leave the server.
 //
+// The earnings chart is aggregated HERE, not in the browser: `series` arrives
+// pre-bucketed (src/lib/earnings.js), so an agent with hundreds of closings
+// still renders one small payload on a phone. There is no agent_id parameter by
+// design — the caller's JWT decides whose numbers these are, so no agent can ask
+// for another's chart.
+//
 // Response: { agent_id, cap: {amount, anniversary, window_start, prepaid,
 //             ytd_cap_paid, ytd_fees, capped}, ytd: {take, deals},
 //             deals: [{deal_id, title, stage, value, closed_at, take, cap,
-//                      fees, split_pct, gross, closed}] }
+//                      fees, split_pct, gross, is_flat, closed}],
+//             series: { bucket, from, to, preset, points[], totals, best } }
 // ─────────────────────────────────────────────────────────────────────────────
 import { agentSliceForDeal, capWindowStart } from '../src/lib/commission.js'
+import { buildEarningsSeries, resolveRange } from '../src/lib/earnings.js'
 import { requireAuthUser, requireAgent, getServiceClient, errorResponse } from './_lib/auth.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -360,12 +370,27 @@ async function handleMyEarnings(req, res) {
         value: deal.value, closed, closed_at: closed ? closedAt : null,
         take: slice.take, cap: slice.cap, fees: slice.fees,
         split_pct: slice.splitPct, gross: slice.gross,
+        // How the deal was priced — the chart splits percentage from flat-fee
+        // income, and the table labels each row.
+        is_flat: slice.isFlat, comp_source: slice.compSource,
       })
       if (closed && new Date(closedAt) >= windowStart) {
         ytdTake += slice.take; ytdCapPaid += slice.cap; ytdFees += slice.fees; ytdDeals += 1
       }
     }
     rows.sort((a, b) => new Date(b.closed_at || '2999') - new Date(a.closed_at || '2999'))
+
+    // Chart series — aggregated server-side over the caller's CLOSED slices.
+    // Skipped for the single-deal lookup (the deal page only wants one slice).
+    const range = resolveRange({
+      preset: req.query?.range,
+      from: req.query?.from,
+      to: req.query?.to,
+      bucket: req.query?.bucket,
+    })
+    const series = dealFilter
+      ? null
+      : { preset: range.preset, ...buildEarningsSeries(rows.filter(r => r.closed), range) }
 
     const capAmount = me.cap_amount != null ? Number(me.cap_amount) : null
     return res.status(200).json({
@@ -381,6 +406,7 @@ async function handleMyEarnings(req, res) {
       },
       ytd: { take: Math.round(ytdTake * 100) / 100, deals: ytdDeals },
       deals: rows,
+      series,
     })
   } catch (e) {
     console.error('[my-earnings]', e)
