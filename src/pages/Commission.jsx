@@ -1,13 +1,15 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Avatar, Badge, Drawer, EmptyState, pushToast } from '../components/UI.jsx'
-import { formatCurrency } from '../lib/helpers.js'
+import { formatCurrency, formatDate } from '../lib/helpers.js'
 import { fetchVisibleDeals, fetchVisibleCommissions } from '../lib/services/deals.js'
 import MyEarnings from './MyEarnings.jsx'
 import { BrokerageReport, CapsEditor } from './BackOffice.jsx'
+import EarningsChart from '../components/EarningsChart.jsx'
+import { buildEarningsSeries, resolveRange } from '../lib/earnings.js'
 import {
-  computeCommission, normalizeCommission, breakdownForDeal,
-  makeSide, makeParticipant, DEFAULTS,
+  computeCommission, normalizeCommission, breakdownForDeal, agentSliceForDeal,
+  makeSide, makeParticipant, dealCompensation, DEFAULTS,
 } from '../lib/commission.js'
 
 const D_GROSS = DEFAULTS.GROSS_PCT
@@ -78,8 +80,21 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
 
   const [form, setForm] = useState(buildInitial)
   const [saving, setSaving] = useState(false)
+  // Which sides are priced as a flat fee rather than a rate. Kept in UI state
+  // (not derived from `flat > 0`) so a side can sit in flat mode with the amount
+  // still blank while the admin types it.
+  const [flatSides, setFlatSides] = useState(() => new Set(form.sides.filter(s => Number(s.flat) > 0).map(s => s.id)))
 
-  React.useEffect(() => { setForm(buildInitial()) /* eslint-disable-next-line */ }, [commission, open, deal?.id])
+  React.useEffect(() => {
+    const next = buildInitial()
+    setForm(next)
+    setFlatSides(new Set(next.sides.filter(s => Number(s.flat) > 0).map(s => s.id)))
+    /* eslint-disable-next-line */
+  }, [commission, open, deal?.id])
+
+  // What the agent entered when they created the deal — shown so the admin can
+  // see (and knowingly override) the agent's own number.
+  const agentComp = dealCompensation(deal)
 
   const sp = deal?.value || 0
 
@@ -94,6 +109,19 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
   // ── Side editing ────────────────────────────────────────────────────────
   const setSide = (id, patch) =>
     setForm(p => ({ ...p, sides: p.sides.map(s => s.id === id ? { ...s, ...patch } : s) }))
+
+  // Rate ⇄ flat fee for one side. The two are mutually exclusive: switching
+  // zeroes the other so `flat > 0 ? flat : rate` can never be ambiguous.
+  const setSidePricing = (id, mode) => {
+    setFlatSides(prev => {
+      const next = new Set(prev)
+      mode === 'flat' ? next.add(id) : next.delete(id)
+      return next
+    })
+    setSide(id, mode === 'flat'
+      ? { flat: '', rate_pct: 0 }
+      : { flat: 0, rate_pct: DEFAULTS.GROSS_PCT })
+  }
 
   const toggleTwoSided = (on) => {
     setForm(p => {
@@ -158,7 +186,9 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
     const primary = result.primary
     const payload = {
       deal_id: deal.id,
-      sides: form.sides,
+      // `flat` comes from a number input, so an emptied field is '' — store a
+      // real 0 rather than a blank string in the jsonb.
+      sides: form.sides.map(s => ({ ...s, flat: Number(s.flat) || 0 })),
       participants: form.participants,
       // Legacy mirror (single-side blended view):
       gross_pct:       result.effective_rate_pct,
@@ -203,6 +233,20 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
           {sp>0 && <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:2 }}>Sale Price: {formatCurrency(sp)}</div>}
         </div>
 
+        {/* What the agent set on the deal itself. It is the default until this
+            drawer is saved — after that, what's here wins. */}
+        {agentComp && (
+          <div style={{ background:'#eff6ff', border:'1px solid var(--gw-azure)', borderRadius:'var(--radius)', padding:'9px 12px', marginBottom:18, fontSize:12, color:'var(--gw-ink)' }}>
+            Agent set at deal creation:{' '}
+            <strong>{agentComp.type === 'flat' ? `${formatCurrency(agentComp.flat)} flat fee` : `${agentComp.rate_pct}% commission`}</strong>
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>
+              {commission?.id
+                ? 'Your saved commission below overrides it.'
+                : 'Used as the default until you save below — then your numbers win.'}
+            </div>
+          </div>
+        )}
+
         {/* ── SIDES ─────────────────────────────────────────────────────── */}
         <div style={{ marginBottom:18 }}>
           <div style={sectionTitle}>
@@ -215,14 +259,38 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
 
           {form.sides.map((s, i) => {
             const rs = result.sides[i] || {}
+            const isFlat = flatSides.has(s.id)
             return (
               <div key={s.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:8 }}>
-                {form.twoSided && <div style={{ fontSize:12, fontWeight:700, marginBottom:8 }}>{s.label}</div>}
+                <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:8, gap:8 }}>
+                  {form.twoSided ? <div style={{ fontSize:12, fontWeight:700 }}>{s.label}</div> : <span />}
+                  {/* Rate ⇄ flat fee, per side */}
+                  <div style={{ display:'flex', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
+                    {[['rate','Rate %'],['flat','Flat $']].map(([mode, label]) => (
+                      <button key={mode} type="button" onClick={()=>setSidePricing(s.id, mode)}
+                        style={{ padding:'3px 10px', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:11, fontWeight:600,
+                          background: (mode === 'flat') === isFlat ? 'var(--gw-slate)' : '#fff',
+                          color:      (mode === 'flat') === isFlat ? '#fff'            : 'var(--gw-mist)' }}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <div className="form-row" style={{ display:'flex', gap:10 }}>
                   <div style={{ flex:1 }}>
-                    <label style={fieldLabel}>Rate (%)</label>
-                    <input className="form-control" type="number" min="0" max="100" step="0.1" value={s.rate_pct}
-                      onChange={e=>setSide(s.id,{ rate_pct:e.target.value })} />
+                    {isFlat ? (
+                      <>
+                        <label style={fieldLabel}>Flat fee ($)</label>
+                        <input className="form-control" type="number" min="0" step="100" value={s.flat ?? ''}
+                          onChange={e=>setSide(s.id,{ flat:e.target.value })} placeholder="2500" />
+                      </>
+                    ) : (
+                      <>
+                        <label style={fieldLabel}>Rate (%)</label>
+                        <input className="form-control" type="number" min="0" max="100" step="0.1" value={s.rate_pct}
+                          onChange={e=>setSide(s.id,{ rate_pct:e.target.value })} />
+                      </>
+                    )}
                   </div>
                   <div style={{ flex:1 }}>
                     <label style={fieldLabel}>Referral (% of this side)</label>
@@ -325,13 +393,13 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
         </div>
 
         {/* ── BREAKDOWN ─────────────────────────────────────────────────── */}
-        {sp > 0 && (
+        {(sp > 0 || result.gross_total > 0) && (
           <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'12px 14px', marginBottom:16, fontSize:12 }}>
             <div style={{ fontWeight:700, marginBottom:8, fontSize:11, textTransform:'uppercase', letterSpacing:'0.06em', color:'var(--gw-mist)' }}>Commission Breakdown</div>
             {[
               { label:'Sale Price', val: sp, color:'var(--gw-ink)' },
               ...result.sides.flatMap(s => [
-                { label:`${form.twoSided ? s.label + ' — ' : ''}Gross (${s.rate_pct}%)`, val: s.gross, color:'var(--gw-ink)' },
+                { label:`${form.twoSided ? s.label + ' — ' : ''}Gross (${Number(s.flat) > 0 ? 'flat fee' : `${s.rate_pct}%`})`, val: s.gross, color:'var(--gw-ink)' },
                 s.referral > 0 && { label:`  Referral (${s.referral_pct}%)`, val:-s.referral, color:'var(--gw-red)' },
               ]),
               { label:'Net to Split', val: result.net_total, color:'var(--gw-ink)', rule:true },
@@ -617,6 +685,135 @@ function MonthlyBarChart({ deals, calcFn }) {
   )
 }
 
+// ── Agent Earnings (admin) ───────────────────────────────────────────────────
+// The same chart the agent sees on My Earnings, for any agent the admin picks —
+// or the whole firm. Agents get their series from the server (they can't read
+// commission rows); an admin already holds every deal and commission in `db`, so
+// this aggregates in place with the very same pure functions. One chart
+// component, one bucketing implementation, two data paths.
+function AgentEarningsPanel({ db, activeAgent }) {
+  const deals       = db.deals       || []
+  const agents      = db.agents      || []
+  const commissions = db.commissions || []
+
+  const [agentId, setAgentId] = useState(activeAgent?.id || '')
+  const [range, setRange]     = useState({ preset: '12m', from: '', to: '' })
+  const [picked, setPicked]   = useState(null)
+
+  const commByDeal = useMemo(() => new Map(commissions.map(c => [c.deal_id, c])), [commissions])
+
+  // One row per closed deal this view covers: the take being charted, and how
+  // the deal was priced (rate vs flat) so the bars can split.
+  const rows = useMemo(() => {
+    const out = []
+    for (const deal of deals) {
+      if (deal.stage !== 'closed') continue
+      const comm = commByDeal.get(deal.id)
+      if (agentId) {
+        const slice = agentSliceForDeal(deal, comm, agents, agentId)
+        if (!slice.onDeal || slice.take === 0) continue
+        out.push({
+          deal_id: deal.id, title: deal.title, closed_at: deal.updated_at || deal.created_at,
+          take: slice.take, fees: slice.fees, gross: slice.gross, is_flat: slice.isFlat,
+        })
+      } else {
+        // Firm view: every agent's take on the deal, combined.
+        const r = breakdownForDeal(deal, comm, agents)
+        if (r.agent_total === 0) continue
+        out.push({
+          deal_id: deal.id, title: deal.title, closed_at: deal.updated_at || deal.created_at,
+          take: r.agent_total, fees: r.transaction_fee_total, gross: r.gross_total, is_flat: r.is_flat,
+        })
+      }
+    }
+    return out
+  }, [deals, commByDeal, agents, agentId])
+
+  const series = useMemo(() => {
+    const resolved = resolveRange({ preset: range.preset, from: range.from, to: range.to })
+    return { preset: resolved.preset, ...buildEarningsSeries(rows, resolved) }
+  }, [rows, range])
+
+  const agent = agents.find(a => a.id === agentId) || null
+  const pickedPoint = picked ? series.points.find(p => p.key === picked) : null
+
+  const changeRange = (next) => {
+    // Switching to Custom starts from the window already on screen.
+    if (next.preset === 'custom' && !next.from && !next.to) {
+      setRange({ preset: 'custom', from: series.from, to: series.to }); return
+    }
+    if (next.preset === 'custom' && !(next.from && next.to)) { setRange(r => ({ ...r, ...next })); return }
+    setRange(next)
+  }
+
+  const picker = (
+    <>
+      <label htmlFor="earnings-agent" style={{ fontSize: 12, color: 'var(--gw-mist)' }}>Agent</label>
+      <select id="earnings-agent" className="filter-select" value={agentId}
+        onChange={e => { setAgentId(e.target.value); setPicked(null) }}>
+        <option value="">Everyone (firm total)</option>
+        {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+      </select>
+    </>
+  )
+
+  return (
+    <>
+      <EarningsChart
+        series={series}
+        range={range}
+        onRangeChange={changeRange}
+        selectedKey={picked}
+        onSelect={setPicked}
+        headerExtra={picker}
+        title={agent ? `${agent.name}'s Commissions` : 'Firm — Agent Commissions'}
+        subtitle={agent
+          ? 'Their take on closed deals — after splits, referrals and fees'
+          : 'Every agent\'s take on closed deals, combined'}
+      />
+
+      {pickedPoint && (
+        <div className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 20 }}>
+          <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--gw-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>
+              {pickedPoint.label} — {formatCurrency(pickedPoint.take)} across {pickedPoint.deals} deal{pickedPoint.deals === 1 ? '' : 's'}
+            </div>
+            <button className="btn btn--ghost btn--sm" onClick={() => setPicked(null)} style={{ fontSize: 12 }}>
+              <Icon name="x" size={11} /> Clear
+            </button>
+          </div>
+          <div className="data-table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Deal</th>
+                  <th>Priced</th>
+                  <th style={{ textAlign: 'right' }}>{agent ? 'Their take' : 'Agent take'}</th>
+                  <th>Closed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pickedPoint.items.map(it => (
+                  <tr key={it.deal_id}>
+                    <td style={{ fontWeight: 600, fontSize: 13 }}>{it.title}</td>
+                    <td>
+                      {it.is_flat
+                        ? <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--gw-azure)', background: '#eff6ff', padding: '2px 7px', borderRadius: 8, whiteSpace: 'nowrap' }}>Flat fee</span>
+                        : <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--gw-green)', background: '#f0fdf4', padding: '2px 7px', borderRadius: 8, whiteSpace: 'nowrap' }}>% rate</span>}
+                    </td>
+                    <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--gw-green)' }}>{formatCurrency(it.take)}</td>
+                    <td style={{ color: 'var(--gw-mist)', fontSize: 12, whiteSpace: 'nowrap' }}>{formatDate(it.closed_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
 // ── Res/Commercial breakdown card ────────────────────────────────────────────
 function CategoryBreakdown({ closedDeals, calcFn }) {
   const res  = closedDeals.filter(d => !d.prop_category || d.prop_category === 'residential')
@@ -847,7 +1044,7 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
         </div>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
           <div style={{ display:'flex', background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:3, gap:2 }}>
-            {[['tracker','Tracker'],['report','Brokerage Report'],['caps','Agents & Caps']].map(([id, label]) => (
+            {[['tracker','Tracker'],['earnings','Agent Earnings'],['report','Brokerage Report'],['caps','Agents & Caps']].map(([id, label]) => (
               <button key={id} onClick={() => setBoTab(id)} style={{
                 padding:'5px 14px', border:'none', borderRadius:'var(--radius)', cursor:'pointer',
                 fontFamily:'var(--font-body)', fontSize:12, fontWeight:600,
@@ -860,8 +1057,9 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
         </div>
       </div>
 
-      {boTab === 'report' && <BrokerageReport db={db} />}
-      {boTab === 'caps'   && <CapsEditor db={db} setDb={setDb} />}
+      {boTab === 'earnings' && <AgentEarningsPanel db={db} activeAgent={activeAgent} />}
+      {boTab === 'report'   && <BrokerageReport db={db} />}
+      {boTab === 'caps'     && <CapsEditor db={db} setDb={setDb} />}
 
       {boTab === 'tracker' && (<>
       {/* ── Summary stats ── */}
@@ -1007,7 +1205,7 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
           {agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
         <span style={{ fontSize:12, color:'var(--gw-mist)', marginLeft:'auto' }}>
-          Defaults: {D_GROSS}% gross · {D_AGENT}/{D_BROKER} agent/broker. Click edit to customize.
+          Pricing: the agent's entry on the deal, else {D_GROSS}% gross · {D_AGENT}/{D_BROKER} agent/broker. Click edit to override or split.
         </span>
       </div>
 
@@ -1035,7 +1233,7 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
               </thead>
               <tbody>
                 {filtered.map(deal => {
-                  const { gross_pct, agent_pct, sp, gross, agentAmt, brokerAmt } = calc(deal)
+                  const { gross_pct, agent_pct, sp, gross, agentAmt, brokerAmt, is_flat, comp_source } = calc(deal)
                   const agent   = agents.find(a => a.id === deal.agent_id)
                   const contact = contacts.find(c => c.id === deal.contact_id)
                   const isCustom = !!getComm(deal.id)
@@ -1045,6 +1243,12 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
                         <div style={{ fontWeight:600, fontSize:13 }}>{deal.title}</div>
                         {contact && <div style={{ fontSize:11, color:'var(--gw-mist)' }}>{contact.first_name} {contact.last_name}</div>}
                         {isCustom && <span style={{ fontSize:10, color:'var(--gw-azure)', fontWeight:600 }}>CUSTOM SPLIT</span>}
+                        {/* No admin row yet — the agent's own entry is pricing this deal. */}
+                        {!isCustom && comp_source === 'agent' && (
+                          <span style={{ fontSize:10, color:'var(--gw-green)', fontWeight:600 }}>
+                            AGENT-SET · {is_flat ? 'FLAT FEE' : `${gross_pct}%`}
+                          </span>
+                        )}
                       </td>
                       <td>
                         {agent ? <div style={{ display:'flex', alignItems:'center', gap:6 }}><Avatar agent={agent} size={22} /><span style={{ fontSize:12 }}>{agent.name}</span></div>
@@ -1058,11 +1262,16 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
                       </td>
                       <td><Badge variant={deal.stage==='under-contract'?'active':deal.stage}>{deal.stage.replace('-',' ')}</Badge></td>
                       <td style={{ textAlign:'right', fontWeight:600 }}>{sp>0?formatCurrency(sp):'—'}</td>
-                      <td style={{ textAlign:'right', color:'var(--gw-mist)', fontSize:12 }}>{gross_pct}%</td>
-                      <td style={{ textAlign:'right' }}>{sp>0?formatCurrency(gross):'—'}</td>
+                      <td style={{ textAlign:'right', color:'var(--gw-mist)', fontSize:12 }}
+                        title={is_flat && sp > 0 ? `Flat fee — ${gross_pct}% effective` : undefined}>
+                        {is_flat ? 'flat' : `${gross_pct}%`}
+                      </td>
+                      {/* Gated on the computed gross, not the sale price — a flat-fee
+                          deal earns before it has a price (BOVs, consulting). */}
+                      <td style={{ textAlign:'right' }}>{gross>0?formatCurrency(gross):'—'}</td>
                       <td style={{ textAlign:'right', color:'var(--gw-mist)', fontSize:12 }}>{agent_pct}%</td>
-                      <td style={{ textAlign:'right', fontWeight:600, color:'var(--gw-green)' }}>{sp>0?formatCurrency(agentAmt):'—'}</td>
-                      <td style={{ textAlign:'right', color:'var(--gw-azure)' }}>{sp>0?formatCurrency(brokerAmt):'—'}</td>
+                      <td style={{ textAlign:'right', fontWeight:600, color:'var(--gw-green)' }}>{gross>0?formatCurrency(agentAmt):'—'}</td>
+                      <td style={{ textAlign:'right', color:'var(--gw-azure)' }}>{gross>0?formatCurrency(brokerAmt):'—'}</td>
                       <td>
                         <button className="btn btn--ghost btn--icon btn--sm" onClick={()=>{setSelectedDeal(deal);setDrawer(true)}} title="Edit splits">
                           <Icon name="edit" size={13} />

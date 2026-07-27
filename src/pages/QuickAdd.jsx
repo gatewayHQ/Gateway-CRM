@@ -2,6 +2,8 @@ import React, { useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Drawer, pushToast } from '../components/UI.jsx'
 import { STAGE_ORDER, STAGE_LABELS } from '../lib/helpers.js'
+import { DEFAULTS as COMM_DEFAULTS, dealCompPayload, DEAL_COMP_COLUMNS } from '../lib/commission.js'
+import { validateAgentComp } from '../lib/validation.js'
 
 function QuickContactDrawer({ open, onClose, agents, activeAgent, onSaved }) {
   const blank = () => ({ first_name: '', last_name: '', phone: '', email: '', type: 'buyer', assigned_agent_id: activeAgent?.id || '' })
@@ -67,23 +69,43 @@ function QuickContactDrawer({ open, onClose, agents, activeAgent, onSaved }) {
 }
 
 function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
-  const blank = () => ({ title: '', value: '', stage: 'lead', agent_id: activeAgent?.id || '' })
+  // Compensation defaults to the firm's typical one-side rate, so the quick path
+  // stays one-field-fast while still recording the agent's own cut.
+  const blank = () => ({
+    title: '', value: '', stage: 'lead', agent_id: activeAgent?.id || '',
+    agent_comp_type: 'rate', agent_comp_rate_pct: COMM_DEFAULTS.GROSS_PCT, agent_comp_flat: '',
+  })
   const [form, setForm] = useState(blank())
   const [saving, setSaving] = useState(false)
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }))
+  const compIsFlat = form.agent_comp_type === 'flat'
 
   React.useEffect(() => { setForm(blank()) }, [open, activeAgent?.id])
 
   const save = async () => {
     if (!form.title.trim()) { pushToast('Deal title required', 'error'); return }
+    const comp = validateAgentComp(
+      { type: form.agent_comp_type, rate_pct: form.agent_comp_rate_pct, flat: form.agent_comp_flat },
+    )
+    if (!comp.valid) { pushToast(comp.error, 'error'); return }
     setSaving(true)
-    const { error } = await supabase.from('deals').insert([{
-      ...form,
+    const payload = {
+      title: form.title,
+      stage: form.stage,
       value: form.value ? Number(form.value) : null,
       probability: 25,
       updated_at: new Date().toISOString(),
       agent_id: form.agent_id || null,
-    }])
+      ...dealCompPayload(form),
+    }
+    let { error } = await supabase.from('deals').insert([payload])
+    // Database without migration 0024 — keep the deal, drop the new columns.
+    if (error && /agent_comp/i.test(error.message || '')) {
+      const bare = { ...payload }
+      for (const col of DEAL_COMP_COLUMNS) delete bare[col]
+      ;({ error } = await supabase.from('deals').insert([bare]))
+      if (!error) pushToast('Saved — ask an admin to apply migration 0024 to store your commission', 'error')
+    }
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast(`Deal "${form.title}" added`)
@@ -115,6 +137,23 @@ function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
             <option value="">Unassigned</option>
             {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
           </select>
+        </div>
+        {/* My compensation — a commission rate OR a flat fee, never both. */}
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label required">My Compensation</label>
+            <select className="form-control" value={form.agent_comp_type} onChange={e => set('agent_comp_type', e.target.value)}>
+              <option value="rate">Commission rate (%)</option>
+              <option value="flat">Flat fee ($)</option>
+            </select>
+          </div>
+          <div className="form-group">
+            <label className="form-label required">{compIsFlat ? 'Flat fee (USD)' : 'Rate (%)'}</label>
+            <input className="form-control" type="number" min="0" step={compIsFlat ? '100' : '0.1'} {...(compIsFlat ? {} : { max: '100' })}
+              value={compIsFlat ? form.agent_comp_flat : form.agent_comp_rate_pct}
+              onChange={e => set(compIsFlat ? 'agent_comp_flat' : 'agent_comp_rate_pct', e.target.value)}
+              placeholder={compIsFlat ? '2500' : String(COMM_DEFAULTS.GROSS_PCT)} />
+          </div>
         </div>
       </div>
       <div className="drawer__foot">

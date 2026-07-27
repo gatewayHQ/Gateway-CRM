@@ -206,7 +206,9 @@ async function handlePortalSignLink(req, res) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// My Earnings — GET /api/portal?action=my-earnings[&deal_id=<uuid>]
+// My Earnings — GET /api/portal?action=my-earnings
+//                 [&deal_id=<uuid>] [&range=30d|3m|12m|ytd|custom]
+//                 [&from=YYYY-MM-DD&to=YYYY-MM-DD] [&bucket=week|month]
 //
 // Commissions are ADMIN-ONLY at the database level (back office, 2026-06-12):
 // an agent cannot read raw commission rows, because each row contains every
@@ -216,12 +218,20 @@ async function handlePortalSignLink(req, res) {
 // (src/lib/commission.js), and returns ONLY the caller's numbers — partner
 // splits never leave the server.
 //
+// The earnings chart is aggregated HERE, not in the browser: `series` arrives
+// pre-bucketed (src/lib/earnings.js), so an agent with hundreds of closings
+// still renders one small payload on a phone. There is no agent_id parameter by
+// design — the caller's JWT decides whose numbers these are, so no agent can ask
+// for another's chart.
+//
 // Response: { agent_id, cap: {amount, anniversary, window_start, prepaid,
 //             ytd_cap_paid, ytd_fees, capped}, ytd: {take, deals},
 //             deals: [{deal_id, title, stage, value, closed_at, take, cap,
-//                      fees, split_pct, gross, closed}] }
+//                      fees, split_pct, gross, is_flat, closed}],
+//             series: { bucket, from, to, preset, points[], totals, best } }
 // ─────────────────────────────────────────────────────────────────────────────
 import { agentSliceForDeal, capWindowStart } from '../src/lib/commission.js'
+import { buildEarningsSeries, resolveRange } from '../src/lib/earnings.js'
 import { requireAuthUser, requireAgent, getServiceClient, errorResponse } from './_lib/auth.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -325,10 +335,22 @@ async function handleMyEarnings(req, res) {
     // 3. Load context. Deals where the caller is owner, legacy co-agent, or a
     //    commission participant — everything else is filtered out below anyway.
     const dealFilter = req.query?.deal_id ? { col: 'id', val: req.query.deal_id } : null
-    let dealQuery = svc.from('deals').select('id, title, stage, value, probability, agent_id, co_agent_ids, expected_close_date, updated_at, created_at, comp_data')
-    if (dealFilter) dealQuery = dealQuery.eq(dealFilter.col, dealFilter.val)
+    const DEAL_COLS_BASE = 'id, title, stage, value, probability, agent_id, co_agent_ids, expected_close_date, updated_at, created_at, comp_data'
+    // agent_comp_* — the agent's own entry prices the deal until an admin saves
+    // a commission row, so it has to travel with the deal (migration 0024). On a
+    // database that hasn't had 0024 applied, fall back to the pre-0024 columns
+    // rather than failing the whole earnings page.
+    const loadDeals = async () => {
+      const q = (cols) => {
+        const base = svc.from('deals').select(cols)
+        return dealFilter ? base.eq(dealFilter.col, dealFilter.val) : base
+      }
+      const res = await q(`${DEAL_COLS_BASE}, agent_comp_type, agent_comp_rate_pct, agent_comp_flat`)
+      if (res.error && /agent_comp/i.test(res.error.message || '')) return q(DEAL_COLS_BASE)
+      return res
+    }
     const [{ data: deals }, { data: commissions }, { data: agents }] = await Promise.all([
-      dealQuery,
+      loadDeals(),
       svc.from('commissions').select('*'),
       svc.from('agents').select('id, name, default_split_pct, no_brokerage_split'),
     ])
@@ -348,12 +370,27 @@ async function handleMyEarnings(req, res) {
         value: deal.value, closed, closed_at: closed ? closedAt : null,
         take: slice.take, cap: slice.cap, fees: slice.fees,
         split_pct: slice.splitPct, gross: slice.gross,
+        // How the deal was priced — the chart splits percentage from flat-fee
+        // income, and the table labels each row.
+        is_flat: slice.isFlat, comp_source: slice.compSource,
       })
       if (closed && new Date(closedAt) >= windowStart) {
         ytdTake += slice.take; ytdCapPaid += slice.cap; ytdFees += slice.fees; ytdDeals += 1
       }
     }
     rows.sort((a, b) => new Date(b.closed_at || '2999') - new Date(a.closed_at || '2999'))
+
+    // Chart series — aggregated server-side over the caller's CLOSED slices.
+    // Skipped for the single-deal lookup (the deal page only wants one slice).
+    const range = resolveRange({
+      preset: req.query?.range,
+      from: req.query?.from,
+      to: req.query?.to,
+      bucket: req.query?.bucket,
+    })
+    const series = dealFilter
+      ? null
+      : { preset: range.preset, ...buildEarningsSeries(rows.filter(r => r.closed), range) }
 
     const capAmount = me.cap_amount != null ? Number(me.cap_amount) : null
     return res.status(200).json({
@@ -369,6 +406,7 @@ async function handleMyEarnings(req, res) {
       },
       ytd: { take: Math.round(ytdTake * 100) / 100, deals: ytdDeals },
       deals: rows,
+      series,
     })
   } catch (e) {
     console.error('[my-earnings]', e)

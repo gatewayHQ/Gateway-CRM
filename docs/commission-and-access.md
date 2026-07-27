@@ -28,8 +28,11 @@ src/lib/commission.js  ← pure engine, no I/O (shared by editor + reports)
 
 A transaction is two stacked concepts:
 
-- **Sides** — where commission comes from. `{ key, label, rate_pct, referral_pct,
-  referral_flat }`. One side for a normal deal; two when the brokerage double-ends
+- **Sides** — where commission comes from. `{ key, label, rate_pct, flat,
+  referral_pct, referral_flat }`. A side is priced **either** by rate **or** by a
+  flat fee (`flat > 0` wins) — flat-fee pricing is normal on commercial/BOV work
+  where the fee doesn't scale with price.
+  One side for a normal deal; two when the brokerage double-ends
   (listing + buyer). A referral lives on the side it actually applied to, which
   is the only correct way to model "the listing was referred in, the buyer side
   wasn't."
@@ -65,6 +68,34 @@ identically until re-saved. This keeps one row per deal (no schema churn) while
 being extensible — a `commission_splits` child table is the natural next step if
 per-participant reporting outgrows client-side aggregation.
 
+### Where the numbers come from — precedence
+
+Three layers, highest first:
+
+1. **The commissions row** an admin saved — sides, participants, splits,
+   referrals, overrides. Authoritative the moment it exists.
+2. **The agent's own entry on the deal** — `deals.agent_comp_type`
+   (`'rate' | 'flat'`) plus `agent_comp_rate_pct` **or** `agent_comp_flat`,
+   entered on the deal form at creation. This is the deal's default
+   compensation, so the office no longer has to open every transaction just to
+   record the agent's cut. Resolved by `dealCompensation(deal)`.
+3. **The firm default** — `DEFAULTS.GROSS_PCT` (3%) with the agent's stored
+   `default_split_pct`. What every pre-0024 deal still uses.
+
+`breakdownForDeal()` reports which layer priced a deal as
+`comp_source: 'admin' | 'agent' | 'default'`, and flags flat pricing as
+`is_flat` — the Back Office tracker uses both (an `AGENT-SET` tag, and `flat`
+instead of a meaningless percentage in the GC % column).
+
+**Who may write layer 2.** The agent sets it while creating the deal (or fills it
+in on a deal that predates the field); after that it is admin-only. Splits,
+overrides and every later change stay entirely with the office. This is enforced
+in the database by the `deals_guard_agent_comp` trigger (migration 0024), not
+just in the form — a co-listed agent or a sharing team peer who can otherwise
+edit the deal can never touch another agent's compensation, whatever client
+issues the write. The deal form mirrors the same rule: the fields are hidden from
+other agents and rendered read-only once locked.
+
 ### Worked example — 400 S Mulberry ($345,000)
 Listing 3% w/ 20% referral + buyer 2%; Nic keeps 100% of 60%, Daniel 40% @ his split.
 
@@ -76,6 +107,48 @@ Listing 3% w/ 20% referral + buyer 2%; Nic keeps 100% of 60%, Daniel 40% @ his s
 | Nic — 60% allocation, no split | **$9,108** |
 | Daniel — 40% allocation, his split − fee | his take |
 | Brokerage | the remainder |
+
+### Earnings chart — what it shows and how it's computed
+
+`src/components/EarningsChart.jsx` draws an agent's commission income over time
+on **My Earnings** (and, for admins, on Back Office → **Agent Earnings** for any
+agent or the firm). One bar per period, stacked into the two ways a deal can be
+priced: **% commission** (green) and **flat fee** (blue).
+
+- **What a bar is worth** — the sum of `agentSliceForDeal(...).take` for the
+  deals that CLOSED in that period, i.e. the agent's take after sides, referrals,
+  allocation, their brokerage split and transaction fees. It is the same function
+  My Earnings' table, the deal page and the brokerage report use, so admin
+  overrides and splits are already baked in. Open deals earn nothing and are not
+  charted (they still show in the table as projected).
+- **Rate vs flat** — `is_flat` from the resolved breakdown. A deal with any
+  flat-priced side counts as flat, matching how the tracker suppresses the
+  meaningless "%" reading for those deals.
+- **When a deal counts** — `deals.updated_at` (fall back: `created_at`) for a
+  deal in the `closed` stage. That is the same closing timestamp the cap tracker
+  and the monthly chart already use.
+- **Buckets** — `src/lib/earnings.js` (`resolveRange` + `buildEarningsSeries`).
+  Presets: last 30 days and last 3 months by Monday-based week, last 12 months
+  and this year by month, plus a custom range that picks weeks up to ~4 months and
+  months beyond. Empty periods are kept, so the timeline reads as time rather
+  than as a list of paydays.
+- **Where it's aggregated** — server-side for the agent
+  (`/api/portal?action=my-earnings&range=…` returns a ready-made `series`), so a
+  large book of business never ships row-by-row to a phone; in the browser for
+  the admin view, which already holds every deal and commission. Same pure
+  functions either way.
+- **Privacy** — the endpoint has no `agent_id` parameter: the caller's JWT
+  decides whose numbers come back, so one agent cannot request another's chart.
+  Only admins get the agent picker, and it runs on data the DB already lets them
+  read.
+- **Interaction** — hover or keyboard-focus a bar for a tooltip (period, total,
+  rate/flat split, top deals); click or press Enter to filter the deals table
+  below to that period. Bars are `role="button"` with a full aria-label, and the
+  same numbers are repeated in a visually-hidden table for screen readers.
+
+No charting dependency: it's one inline `<svg>` whose width is measured from its
+container (so labels stay 10px on a phone instead of being scaled into mush) and
+which scrolls horizontally only when bars would fall below 30px.
 
 ## 3. Admin access
 
@@ -113,3 +186,11 @@ needs no new column.
 `migrations/0005_commission_structured_admin.sql` — additive only, idempotent,
 safe to run anytime. Adds the jsonb columns, the per-agent split defaults, and
 `is_admin` (back-filled). Nothing about existing deals changes until edited.
+
+`migrations/0024_deal_agent_compensation.sql` — additive only, idempotent. Adds
+the three `deals.agent_comp_*` columns, their CHECK guards (rate 0–100, flat ≥ 0,
+and "the chosen type must carry its amount", which is what keeps rate and flat
+mutually exclusive at rest), and the `deals_guard_agent_comp` trigger. Existing
+deals have all three columns NULL, so every current number is unchanged until an
+agent sets a value. Until it is applied, the deal form saves without the
+compensation and says so, and `my-earnings` falls back to the pre-0024 columns.
