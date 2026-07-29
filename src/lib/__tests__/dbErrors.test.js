@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { friendlyDbError } from '../dbErrors.js'
+import { friendlyDbError, isUnknownColumnError } from '../dbErrors.js'
 
 describe('friendlyDbError', () => {
   it('returns null when there is no error', () => {
@@ -52,5 +52,32 @@ describe('friendlyDbError', () => {
 
   it('returns null for unrecognized errors so callers can fall back', () => {
     expect(friendlyDbError({ code: '42P01', message: 'relation does not exist' })).toBeNull()
+  })
+})
+
+describe('isUnknownColumnError — detecting an unapplied migration', () => {
+  it('matches 42703 undefined_column for the named column', () => {
+    const err = { code: '42703', message: 'column "co_agent_ids" of relation "deals" does not exist' }
+    expect(isUnknownColumnError(err, 'co_agent_ids')).toBe(true)
+  })
+
+  it("matches PostgREST's schema-cache shape (PGRST204)", () => {
+    const err = { code: 'PGRST204', message: "Could not find the 'co_agent_ids' column of 'deals' in the schema cache" }
+    expect(isUnknownColumnError(err, 'co_agent_ids')).toBe(true)
+  })
+
+  it('does not match a DIFFERENT unknown column', () => {
+    const err = { code: '42703', message: 'column "portal_token" does not exist' }
+    expect(isUnknownColumnError(err, 'co_agent_ids')).toBe(false)
+  })
+
+  it('matches any unknown column when none is named', () => {
+    expect(isUnknownColumnError({ code: '42703', message: 'column "x" does not exist' })).toBe(true)
+  })
+
+  it('does not match unrelated errors — a retry must not swallow a real failure', () => {
+    expect(isUnknownColumnError({ code: '23505', message: 'duplicate key value' }, 'co_agent_ids')).toBe(false)
+    expect(isUnknownColumnError({ code: '23503' })).toBe(false)
+    expect(isUnknownColumnError(null)).toBe(false)
   })
 })

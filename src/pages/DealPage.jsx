@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatCurrency, formatDate, formatPhone, STAGE_LABELS } from '../lib/helpers.js'
+import { dealRosterIds } from '../lib/agentRoster.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
 import { DealDrawer } from './Pipeline.jsx'
@@ -143,17 +144,19 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     return () => { alive = false }
   }, [dealId, isAdmin])
 
-  // Everyone on the deal: owner + legacy co-agents, deduped (participants are
-  // admin-only data, so non-admins see owner + co_agent_ids)
+  // Everyone on the deal: the roster (primary + co-agents, with the property
+  // fallback for deals converted before migration 0024) plus any commission
+  // participant not already on it. Participants are admin-only data, so a
+  // non-admin sees exactly the roster — which is now the same list the pipeline
+  // card and the paperwork use. See src/lib/agentRoster.js.
   const team = useMemo(() => {
     if (!deal) return []
     const ids = [
-      deal.agent_id,
-      ...(deal.co_agent_ids || []),
+      ...dealRosterIds(deal, property),
       ...((breakdown?.participants || []).map(p => p.agent_id)),
     ].filter(Boolean)
     return [...new Set(ids)].map(id => agents.find(a => a.id === id)).filter(Boolean)
-  }, [deal, breakdown, agents])
+  }, [deal, property, breakdown, agents])
   const myTake = useMemo(() => {
     if (isAdmin && breakdown && activeAgent) {
       return breakdown.participants.filter(p => p.agent_id === activeAgent.id).reduce((s, p) => s + p.agent_take, 0)

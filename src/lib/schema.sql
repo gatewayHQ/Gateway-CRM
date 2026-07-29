@@ -106,7 +106,13 @@ create table if not exists deals (
   title               text not null,
   contact_id          uuid references contacts(id) on delete set null,
   property_id         uuid references properties(id) on delete set null,
+  -- PRIMARY (listing) agent. co_agent_ids holds every additional agent on the
+  -- deal, so roster(deal) = [agent_id] + co_agent_ids — see src/lib/agentRoster.js.
+  -- Carried over automatically when a Property with two agents becomes a Deal.
   agent_id            uuid references agents(id) on delete set null,
+  co_agent_ids        uuid[] default '{}',
+  constraint deals_co_agents_exclude_primary
+    check (agent_id is null or not (agent_id = any(coalesce(co_agent_ids, '{}')))),
   -- stage tokens cover all three boards (src/lib/stages.js): shared/legacy,
   -- the commercial track, and the residential seller track (Milestone 1)
   stage               text check (stage in (
@@ -132,6 +138,9 @@ create table if not exists deals (
 );
 create unique index if not exists deals_portal_token_idx
   on deals(portal_token) where portal_token is not null;
+-- co-listed-deal lookups filter with co_agent_ids @> [agent]
+-- (src/lib/services/deals.js#fetchCoListedDealIds)
+create index if not exists idx_deals_co_agent_ids on deals using gin (co_agent_ids);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- ADDITIONAL CONTACTS  (multi-contact deals & properties — husband/wife,

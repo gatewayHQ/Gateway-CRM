@@ -33,11 +33,15 @@ async function selectInChunks(client, table, column, ids, order) {
 }
 
 // IDs of deals the agent is co-listed on, from both sources:
-//   1. structured commission participants (jsonb containment:
-//      participants @> [{"agent_id": "..."}]) — the canonical model, and
-//   2. the legacy deals.co_agent_ids uuid[] that exists only in the original
-//      production database (its query errors harmlessly where the column
-//      doesn't exist, e.g. fresh installs).
+//   1. deals.co_agent_ids uuid[] — the canonical deal-level agent roster (see
+//      src/lib/agentRoster.js and migration 0024). Its query errors harmlessly
+//      on a database that predates 0024.
+//   2. structured commission participants (jsonb containment:
+//      participants @> [{"agent_id": "..."}]) — who gets PAID, which can
+//      legitimately differ from the roster (a co-agent on a 0% split still
+//      belongs on the deal, and an agent can be paid on a deal they don't
+//      co-list).
+// Both are checked because either alone would hide deals from an agent.
 // Returns an error only when BOTH sources fail.
 export async function fetchCoListedDealIds(client, agentId) {
   if (!agentId) return { data: [], error: null }

@@ -38,6 +38,33 @@ describe('crmTokenValues + buildPrefill', () => {
     expect(vals.property_address).toBe('123 Main St')
   })
 
+  it('fills the dual-agent tokens from the deal roster', () => {
+    const vals = crmTokenValues({
+      ...ctx,
+      agent:    { id: 'a1', name: 'Alex Agent', email: 'alex@brokerage.com' },
+      coAgents: [{ id: 'a2', name: 'Sam Co-Agent', email: 'sam@brokerage.com' }],
+    })
+    expect(vals.agent_name).toBe('Alex Agent')          // primary unchanged
+    expect(vals.agent_2_name).toBe('Sam Co-Agent')
+    expect(vals.agent_2_email).toBe('sam@brokerage.com')
+    expect(vals.agent_names).toBe('Alex Agent & Sam Co-Agent')
+    expect(vals.agent_count).toBe('2')
+  })
+
+  it('leaves the second-agent tokens empty on a single-agent deal', () => {
+    const vals = crmTokenValues(ctx)
+    expect(vals.agent_2_name).toBe('')
+    expect(vals.agent_names).toBe('Alex Agent')
+    expect(vals.agent_count).toBe('1')
+  })
+
+  it('never repeats the primary as the second agent', () => {
+    const a = { id: 'a1', name: 'Alex Agent', email: 'alex@brokerage.com' }
+    const vals = crmTokenValues({ ...ctx, agent: a, coAgents: [a] })
+    expect(vals.agent_2_name).toBe('')
+    expect(vals.agent_names).toBe('Alex Agent')
+  })
+
   it('buildPrefill only includes known, non-empty tokens and locks them read-only', () => {
     const fields = buildPrefill(['property_address', 'agent_name', 'unknown_token'], ctx)
     expect(fields).toEqual([
@@ -116,5 +143,45 @@ describe('seedSignersFromDeal — auto-fill signer name/email from the deal', ()
     const out = seedSignersFromDeal({ roles, contact: null, activeAgent: agent })
     expect(out[1]).toEqual({ name: 'Alex Agent', email: 'alex@brokerage.com' })
     expect(out[2]).toEqual({ name: '', email: '' })
+  })
+
+  // ── Dual agent ─────────────────────────────────────────────────────────────
+  const primary = { id: 'a1', name: 'Alex Primary', email: 'alex@x.com' }
+  const coAgent = { id: 'a2', name: 'Sam Co-Agent', email: 'sam@x.com' }
+
+  it('fills a second agent role from the deal roster', () => {
+    const roles = [{ index: 1, name: 'Listing Agent' }, { index: 2, name: 'Co-Listing Agent' }]
+    const out = seedSignersFromDeal({ roles, contact: null, dealAgents: [primary, coAgent] })
+    expect(out[1]).toEqual({ name: 'Alex Primary', email: 'alex@x.com' })
+    expect(out[2]).toEqual({ name: 'Sam Co-Agent', email: 'sam@x.com' })
+  })
+
+  it('seeds agents from the roster, NOT from whoever is sending', () => {
+    // The sender is a third party (admin/TC) — the paperwork must still name the
+    // agents on the deal.
+    const roles = [{ index: 1, name: 'Agent 1' }, { index: 2, name: 'Agent 2' }]
+    const sender = { name: 'Tina TC', email: 'tina@x.com' }
+    const out = seedSignersFromDeal({ roles, contact: null, activeAgent: sender, dealAgents: [primary, coAgent] })
+    expect(out[1].name).toBe('Alex Primary')
+    expect(out[2].name).toBe('Sam Co-Agent')
+  })
+
+  it('leaves a second agent role on the template default when the deal has one agent', () => {
+    const roles = [{ index: 1, name: 'Agent' }, { index: 2, name: 'Co-Agent' }]
+    const out = seedSignersFromDeal({ roles, contact: null, dealAgents: [primary] })
+    expect(out[1]).toEqual({ name: 'Alex Primary', email: 'alex@x.com' })
+    expect(out[2]).toEqual({ name: '', email: '' })
+  })
+
+  it('fills agents and clients side by side on a dual-agent, dual-client packet', () => {
+    const roles = [
+      { index: 1, name: 'Seller 1' }, { index: 2, name: 'Seller 2' },
+      { index: 3, name: 'Listing Agent' }, { index: 4, name: 'Co-Listing Agent' },
+    ]
+    const out = seedSignersFromDeal({ roles, contact, dealAgents: [primary, coAgent] })
+    expect(out[1].name).toBe('Jane Seller')
+    expect(out[2].name).toBe('John Seller')      // spouse
+    expect(out[3].name).toBe('Alex Primary')
+    expect(out[4].name).toBe('Sam Co-Agent')
   })
 })

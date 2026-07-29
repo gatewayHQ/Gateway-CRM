@@ -7,6 +7,9 @@ import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
 import { findMatchingBuyers } from '../lib/matching.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
+import { friendlyDbError, isUnknownColumnError } from '../lib/dbErrors.js'
+import { dealAgentPayloadFromProperty, sameRoster, rosterNames } from '../lib/agentRoster.js'
+import { logAudit } from '../lib/audit.js'
 import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
 import OptionSelect from '../components/OptionSelect.jsx'
@@ -858,24 +861,84 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       : [...coAgentIds, agentId]
     set('details', { ...(form.details || {}), co_agent_ids: next })
   }
+  // Reassigning the property: the incoming primary must not linger in the
+  // co-agent list, or the roster would carry the same agent twice (and trip
+  // deals_co_agents_exclude_primary). The outgoing primary is NOT auto-added as
+  // a co-agent — dropping an agent from a property is a deliberate act.
+  const setPrimaryAgent = (agentId) => {
+    setForm(p => ({
+      ...p,
+      assigned_agent_id: agentId,
+      details: { ...(p.details || {}), co_agent_ids: (p.details?.co_agent_ids || []).filter(id => id !== agentId) },
+    }))
+  }
+  // What Start Deal will put on the pipeline card, resolved the same way the
+  // deal itself will resolve it.
+  const dealRosterPreview = rosterNames(
+    [form.assigned_agent_id || activeAgent?.id, ...coAgentIds.filter(id => id !== form.assigned_agent_id)],
+    agents,
+  )
 
   const startDeal = async () => {
     setStartingDeal(true)
+    // Every agent on the property comes with it. The property's own assignment
+    // is authoritative for the primary — NOT the acting user, who may be an
+    // admin or the co-agent (that was the old bug: whoever clicked became the
+    // deal's agent and the second agent was dropped entirely).
+    const roster = dealAgentPayloadFromProperty({ ...form, id: property.id }, { actingAgentId: activeAgent?.id })
     const dealPayload = {
       title:       form.address,
       property_id: property.id,
       contact_id:  form.linked_contact_id || null,
-      agent_id:    activeAgent?.id || form.assigned_agent_id || null,
+      agent_id:    roster.agent_id,
+      co_agent_ids: roster.co_agent_ids,
       stage:       'lead',
       value:       form.list_price ? Number(form.list_price) : null,
     }
-    const { data, error } = await supabase.from('deals').insert([dealPayload]).select().single()
+    let { data, error } = await supabase.from('deals').insert([dealPayload]).select().single()
+    // Databases that haven't had migration 0024 applied have no co_agent_ids
+    // column. Don't lose the deal over it — retry without the roster column and
+    // say so out loud, rather than reporting success on a half-transferred deal.
+    // (Reads still recover both agents via the property fallback in agentRoster.)
+    let migrationMissing = false
+    if (error && isUnknownColumnError(error, 'co_agent_ids')) {
+      migrationMissing = true
+      const { co_agent_ids, ...withoutRoster } = dealPayload
+      ;({ data, error } = await supabase.from('deals').insert([withoutRoster]).select().single())
+    }
     setStartingDeal(false)
-    if (error) { pushToast(error.message, 'error'); return }
+    if (error) { pushToast(friendlyDbError(error) || error.message, 'error'); return }
+
     // Carry the property's additional contacts onto the new deal.
     if (data?.id && additionalContactIds.length) await syncDealContactsFromProperty(data.id, additionalContactIds)
+
+    // Verify the roster actually landed. A silent partial transfer is the whole
+    // failure mode this feature exists to prevent, so it gets an audit line
+    // either way and a visible warning when it didn't match.
+    const landed = Array.isArray(data?.co_agent_ids) ? data.co_agent_ids : []
+    const transferred = sameRoster(landed, roster.co_agent_ids)
+    logAudit({
+      table_name: 'deals', record_id: data?.id, deal_id: data?.id,
+      actor_id: activeAgent?.id || null,
+      action: transferred ? 'roster_transfer' : 'roster_transfer_partial',
+      old_values: { property_id: property.id, ...roster },
+      new_values: { agent_id: data?.agent_id, co_agent_ids: landed, migration_missing: migrationMissing || undefined },
+      summary: transferred
+        ? `Deal created from property with ${1 + landed.length} agent(s): ${rosterNames([data?.agent_id, ...landed], agents).join(', ') || '—'}`
+        : migrationMissing
+          ? `Deal created from property but co-agents could not be stored — migration 0024 is not applied (expected ${roster.co_agent_ids.length} co-agent(s))`
+          : `Deal created from property but the agent roster did not transfer in full (expected ${roster.co_agent_ids.length} co-agent(s), saved ${landed.length})`,
+    })
+    if (!transferred && roster.co_agent_ids.length) {
+      pushToast(migrationMissing
+        ? 'Deal created, but co-agents could not be saved on it — ask an admin to apply migration 0024. The pipeline card still shows both agents from the property.'
+        : 'Heads up: the co-agent(s) may not have transferred to the deal — check the Team column on the pipeline card.', 'error')
+    }
+
     if (setDb) setDb(p => ({ ...p, deals: [data, ...(p.deals || [])] }))
-    pushToast('Deal created — opening Pipeline')
+    pushToast(roster.co_agent_ids.length && transferred
+      ? `Deal created with ${1 + landed.length} agents — opening Pipeline`
+      : 'Deal created — opening Pipeline')
     onClose()
     if (go) go('pipeline')
   }
@@ -1082,14 +1145,14 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
           <ContactMultiSelect contacts={contacts} selectedIds={additionalContactIds} onChange={setAdditionalContactIds} excludeId={form.linked_contact_id} placeholder="Add co-owner, spouse…" />
           <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Co-owners, husband &amp; wife — carried onto a new deal when you Start a Deal from this property.</div>
         </div>
-        <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.assigned_agent_id||''} onChange={e=>set('assigned_agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+        <div className="form-group"><label className="form-label">Assigned Agent<span style={{ fontWeight:400, color:'var(--gw-mist)', marginLeft:6, fontSize:11 }}>primary — becomes the deal owner</span></label><select className="form-control" value={form.assigned_agent_id||''} onChange={e=>setPrimaryAgent(e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
         {/* Co-Agents */}
         {agents.filter(a => a.id !== form.assigned_agent_id).length > 0 && (
           <div className="form-group">
             <label className="form-label">
               Co-Agents
               <span style={{ fontWeight: 400, color: 'var(--gw-mist)', marginLeft: 6, fontSize: 11 }}>
-                share commission on this property
+                share commission — carried onto the deal and its paperwork
               </span>
             </label>
             <div className="coagent-list">
@@ -1117,10 +1180,12 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
               className="btn btn--secondary"
               onClick={startDeal}
               disabled={startingDeal}
-              title="Create a deal in the Pipeline linked to this property"
+              title={dealRosterPreview.length
+                ? `Create a deal in the Pipeline linked to this property — agents carried over: ${dealRosterPreview.join(', ')}`
+                : 'Create a deal in the Pipeline linked to this property'}
             >
               <Icon name="pipeline" size={13} />
-              {startingDeal ? 'Creating…' : 'Start Deal'}
+              {startingDeal ? 'Creating…' : dealRosterPreview.length > 1 ? `Start Deal (${dealRosterPreview.length} agents)` : 'Start Deal'}
             </button>
             <button
               className="btn btn--ghost"

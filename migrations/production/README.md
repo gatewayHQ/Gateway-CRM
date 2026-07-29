@@ -44,16 +44,26 @@ applied to production and the findings, so the repo's history matches reality.
 | 2026-07-17 | `2026-07-17_boldsign_identity_default.sql` | **PENDING** — apply with the sender-identity management deploy. Adds `boldsign_sender_identities.is_default` (org-wide OnBehalfOf fallback) with a partial unique index. Idempotent. |
 | 2026-07-17 | `2026-07-17_multi_contacts.sql` | **PENDING** — apply with the multi-contact deploy. Adds `deal_contacts` + `property_contacts` junction tables (additional contacts on a deal/property). ⚠ Production already has a legacy `deal_contacts` of unknown shape — `create table if not exists` won't alter it, so verify it has `(deal_id, contact_id)` + a unique constraint before/after applying (see the file header). Idempotent. |
 | 2026-07-17 | `2026-07-17_form_packet_multi_file.sql` | **PENDING** — apply with the package-template deploy. Adds `form_packets.storage_paths` (jsonb) so a template can hold several source PDFs. Additive; the Form Library save degrades gracefully until it's applied. Idempotent. |
+| 2026-07-29 | `2026-07-29_deal_co_agents.sql` | **PENDING** — apply with the dual-agent deploy. Production already HAS `deals.co_agent_ids`; this normalizes nulls, adds `deals_co_agents_exclude_primary` + a GIN index, and backfills deals converted from a two-agent property before the carry-over fix. Additive; the app degrades gracefully (reads fall back to the property) until it's applied. Idempotent. |
 
 The bundle: creates `documents` (secure from day one), adds the missing
 `docusign_envelopes` columns, adds `activities.deal_id`, adds the deal value /
 probability guards, installs the visibility helpers and dormant scoped
 policies, and closes the anonymous-access holes. The production
-`app_visible_deal_ids()` includes a branch for the legacy `deals.co_agent_ids`
-array that the repo-schema version does not have (the column doesn't exist on
-fresh installs); the app reads both sources via
-`src/lib/services/deals.js#fetchCoListedDealIds`. Once Milestone 1 migrates
-`co_agent_ids` into `commissions.participants`, that branch can be dropped.
+`app_visible_deal_ids()` includes a branch for `deals.co_agent_ids` that the
+repo-schema version did not have; the app reads both that and
+`commissions.participants` via
+`src/lib/services/deals.js#fetchCoListedDealIds`.
+
+> **Superseded 2026-07-29.** An earlier version of this note said that once
+> Milestone 1 migrated `co_agent_ids` into `commissions.participants`, the
+> `app_visible_deal_ids()` branch could be dropped. **Do not do this.**
+> `deals.co_agent_ids` is now the canonical deal-level agent roster — it is what
+> carries both agents from a Property onto a Deal and onto generated paperwork
+> (`migrations/0024`, `src/lib/agentRoster.js`). `commissions.participants`
+> answers a different question: who gets *paid*, which is admin-only data and
+> can legitimately differ from who is *on* the deal (a co-agent with a 0% split
+> still signs the listing agreement). Both stay; the visibility branch stays.
 
 ## Phase B for PRODUCTION (the actual enforcement switch)
 

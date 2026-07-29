@@ -2,6 +2,8 @@ import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { fetchVisibleDeals } from '../lib/services/deals.js'
 import { formatCurrency, formatDate, STAGE_LABELS, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
+import { dealRoster, dealRosterIds } from '../lib/agentRoster.js'
+import { friendlyDbError, isUnknownColumnError } from '../lib/dbErrors.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import {
   weightedValue, daysInStage, isRotting, dealActivityState, nextKeyDate,
@@ -1309,7 +1311,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   )
 }
 
-function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeAgent }) {
+function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents = [], activeAgent }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
@@ -1586,7 +1588,7 @@ create policy "agent_notifications_policy" on agent_notifications
 
       {tplOpen && (
         <SendFromTemplateModal
-          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} templates={templates} activeAgent={activeAgent}
+          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} templates={templates} agents={agents} activeAgent={activeAgent}
           onClose={() => setTplOpen(false)}
           onSent={() => { setTplOpen(false); loadEnvelopes() }}
         />
@@ -1600,7 +1602,7 @@ create policy "agent_notifications_policy" on agent_notifications
 //    editable (CRM-prefilled) input per field, then sends via /api/boldsign.
 const prettyLabel = (id) => String(id || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 
-function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], templates, activeAgent, onClose, onSent }) {
+function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], templates, agents = [], activeAgent, onClose, onSent }) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
 
@@ -1636,8 +1638,13 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
         // Seed signer name/email from the deal's linked contact (+ spouse for a
         // second client role) and the acting agent. See seedSignersFromDeal.
-        const tokenVals = crmTokenValues({ deal, property, contact, agent: activeAgent })
-        setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent }))
+        // Paperwork names the agents ON THE DEAL, not whoever is sending it —
+        // roster[0] is the primary, the rest are co-agents.
+        const roster    = dealRoster(deal, agents, property)
+        const primary   = roster[0] || activeAgent
+        const coAgents  = roster.slice(1)
+        const tokenVals = crmTokenValues({ deal, property, contact, agent: primary, coAgents })
+        setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent, dealAgents: roster }))
 
         const seededValues = {}
         for (const f of fields) seededValues[f.id] = tokenVals[f.id] || ''
@@ -1895,7 +1902,7 @@ async function syncDealContacts(dealId, contactIds) {
 }
 
 export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, onSave, initialTab = 'details' }) {
-  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
+  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', co_agent_ids:[], stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
@@ -1904,13 +1911,22 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const [additionalContactIds, setAdditionalContactIds] = useState([])
 
   React.useEffect(() => {
-    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {} } : blank)
+    // A deal linked to a property but carrying no roster of its own predates the
+    // carry-over fix — seed the editor from the property so simply opening and
+    // saving the deal materializes the roster instead of silently blanking it.
+    const linkedProp = deal?.property_id ? properties.find(p => p.id === deal.property_id) : null
+    setForm(deal
+      ? { ...blank, ...deal,
+          co_agent_ids: dealRosterIds(deal, linkedProp).filter(id => id !== deal.agent_id),
+          expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '',
+          comp_data: deal.comp_data || {} }
+      : blank)
     setErrors({})
     setTab(deal?.id ? initialTab : 'details')
     setAdditionalContactIds(
       deal?.id ? (dealContacts || []).filter(dc => dc.deal_id === deal.id).map(dc => dc.contact_id) : []
     )
-  }, [deal, open, initialTab, dealContacts])
+  }, [deal, open, initialTab, dealContacts, properties])
 
   // Resolved additional-contact objects — used for the "Send from Template"
   // signer prefill on the Signatures tab (co-signers get their own rows).
@@ -1919,6 +1935,16 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const set  = (k, v) => setForm(p => ({...p, [k]: v}))
   const setCD = (k, v) => setForm(p => ({...p, comp_data: {...(p.comp_data||{}), [k]: v}}))
   const cd = form.comp_data || {}
+
+  const toggleDealCoAgent = (agentId) => setForm(p => {
+    const cur = p.co_agent_ids || []
+    return { ...p, co_agent_ids: cur.includes(agentId) ? cur.filter(id => id !== agentId) : [...cur, agentId] }
+  })
+  // Promoting a co-agent to primary must remove them from the co-agent list, or
+  // the roster would name them twice (and trip deals_co_agents_exclude_primary).
+  const setPrimaryAgent = (agentId) => setForm(p => ({
+    ...p, agent_id: agentId, co_agent_ids: (p.co_agent_ids || []).filter(id => id !== agentId),
+  }))
 
   // One unified stage list for every deal. Deals stored with an off-list token
   // (from the brief track-split era) display as the nearest column and are
@@ -1948,20 +1974,33 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         contact_id:          form.contact_id   || null,
         property_id:         form.property_id  || null,
         agent_id:            form.agent_id     || null,
+        // Additional agents on the deal. Filtered against the primary so the
+        // roster can't list the same agent twice.
+        co_agent_ids:        (form.co_agent_ids || []).filter(id => id && id !== form.agent_id),
         notes:               form.notes        || null,
         prop_category:       form.prop_category || null,
         prop_subtype:        form.prop_subtype  || null,
         comp_data:           form.comp_data     || null,
       }
-      let error, savedId = deal?.id
-      if (deal?.id) {
-        ;({ error } = await supabase.from('deals').update(payload).eq('id', deal.id))
-      } else {
-        let data
-        ;({ data, error } = await supabase.from('deals').insert([payload]).select('id').single())
-        savedId = data?.id
+      const write = async (body) => {
+        if (deal?.id) {
+          const { error } = await supabase.from('deals').update(body).eq('id', deal.id)
+          return { error, id: deal.id }
+        }
+        const { data, error } = await supabase.from('deals').insert([body]).select('id').single()
+        return { error, id: data?.id }
       }
-      if (error) { pushToast(error.message, 'error'); return }
+      let { error, id: savedId } = await write(payload)
+      // No co_agent_ids column yet (migration 0024 not applied) — save the rest
+      // rather than losing the edit, and be explicit that the roster didn't stick.
+      if (error && isUnknownColumnError(error, 'co_agent_ids')) {
+        const { co_agent_ids, ...withoutRoster } = payload
+        ;({ error, id: savedId } = await write(withoutRoster))
+        if (!error && co_agent_ids.length) {
+          pushToast('Saved, but co-agents need migration 0024 applied before they persist on the deal.', 'error')
+        }
+      }
+      if (error) { pushToast(friendlyDbError(error) || error.message, 'error'); return }
 
       // Sync additional contacts (best-effort — the deal itself is already saved).
       if (savedId) await syncDealContacts(savedId, additionalContactIds)
@@ -2059,7 +2098,30 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
               <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Husband &amp; wife, co-buyers, co-owners — these also pre-fill as signers when you Send from Template.</div>
             </div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
-            <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+            <div className="form-group"><label className="form-label">Assigned Agent<span style={{ fontWeight:400, color:'var(--gw-mist)', marginLeft:6, fontSize:11 }}>primary — signs first on paperwork</span></label><select className="form-control" value={form.agent_id||''} onChange={e=>setPrimaryAgent(e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+            {/* Co-Agents — the rest of the deal's roster. Seeded from the property
+                at conversion; editable here so a co-listing can change without
+                touching the property. */}
+            {agents.filter(a => a.id !== form.agent_id).length > 0 && (
+              <div className="form-group">
+                <label className="form-label">
+                  Co-Agents
+                  <span style={{ fontWeight:400, color:'var(--gw-mist)', marginLeft:6, fontSize:11 }}>
+                    appear on the pipeline card and generated paperwork
+                  </span>
+                </label>
+                <div className="coagent-list">
+                  {agents.filter(a => a.id !== form.agent_id).map(a => (
+                    <label key={a.id} className={`coagent-item${(form.co_agent_ids || []).includes(a.id) ? ' checked' : ''}`}>
+                      <input type="checkbox" checked={(form.co_agent_ids || []).includes(a.id)} onChange={() => toggleDealCoAgent(a.id)} />
+                      <Avatar agent={a} size={22} />
+                      <span>{a.name}</span>
+                      {a.role && <span style={{ fontSize:11, color:'var(--gw-mist)' }}>{a.role}</span>}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* ── Comp Data ─────────────────────────────────────── */}
             <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
@@ -2187,7 +2249,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
-        <SignaturesTab deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} activeAgent={activeAgent} />
+        <SignaturesTab deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} agents={agents} activeAgent={activeAgent} />
       )}
 
       {/* Client Portal tab */}
@@ -2604,10 +2666,9 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                     const contact    = contactMap[deal.contact_id]
                     const agent      = agentMap[deal.agent_id]
                     const dealProp   = deal.property_id ? propertyMap[deal.property_id] : null
-                    const coAgIds    = dealProp?.details?.co_agent_ids || []
-                    const allAgents  = [deal.agent_id, ...coAgIds].filter(Boolean)
-                      .map(id => agentMap[id]).filter(Boolean)
-                      .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
+                    // Roster = deal.agent_id + deal.co_agent_ids, falling back to
+                    // the property for deals converted before 0024. See agentRoster.js.
+                    const allAgents  = dealRoster(deal, agentMap, dealProp)
                     const overdue    = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
                     const urgency    = getKeyDateUrgency(deal)
                     const nearestKD  = urgency ? getNearestKeyDate(deal) : null
@@ -2710,9 +2771,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
               <tbody>
                 {listRows.map(({ deal, contact, weighted, dis, rotting, activity, keyDate }) => {
                   const col = boardStageFor(deal, resolvedTrack)
-                  const teamAgents = [deal.agent_id, ...((propertyMap[deal.property_id]?.details?.co_agent_ids) || [])]
-                    .filter(Boolean).map(id => agentMap[id]).filter(Boolean)
-                    .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
+                  const teamAgents = dealRoster(deal, agentMap, deal.property_id ? propertyMap[deal.property_id] : null)
                   const kdColor = keyDate == null ? 'var(--gw-mist)' : keyDate.daysUntil <= 2 ? '#dc2626' : keyDate.daysUntil <= 7 ? '#d97706' : 'var(--gw-ink)'
                   return (
                     <tr key={deal.id} onClick={() => go(`deal/${deal.id}`)}
