@@ -136,6 +136,26 @@ campaigns API runs on the service key and bypasses RLS.
 
 ---
 
+## `tools/` — maintenance scripts (not part of the apply-once chain)
+
+Data fixes you may need to run again someday. They touch rows, never schema, so
+they are not numbered.
+
+| File | What it does |
+|------|--------------|
+| `tools/make_admin.sql` | Promotes one agent (by email) to office admin — sets `agents.is_admin` |
+
+**Why `make_admin.sql` exists at all:** since 0023, the
+`agents_guard_privileged_trg` trigger reverts `is_admin` / `role` / commission
+columns on UPDATE unless the caller is the service key or an existing admin. The
+SQL Editor connects as `postgres` with no JWT, so it is neither — a bare
+`update agents set is_admin = true …` reports "UPDATE 1" and silently changes
+nothing. The script sets `request.jwt.claims` transaction-locally so the trigger
+recognizes a trusted service-role caller, which keeps the guard intact for every
+other session.
+
+---
+
 ## Known follow-ups (not yet written)
 
 These are deliberately deferred and documented so they aren't lost:
