@@ -24,6 +24,7 @@
 import { createClient } from '@supabase/supabase-js'
 import { boldsign } from './boldsign.js'
 import { OPERATING_STATES } from '../src/lib/constants.js'
+import { isTemplateIdConflictError, normalizeTemplateId } from '../src/lib/services/formPackets.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
@@ -604,31 +605,47 @@ async function runBoldsignTemplateSync(supabase) {
   } catch (e) {
     return { status: 200, body: { ok: false, error: `BoldSign template list failed: ${e.message}` } }
   }
-  const liveIds = new Set(liveTemplates.map(t => t.templateId || t.id).filter(Boolean))
+  const liveIds = new Set(liveTemplates.map(t => normalizeTemplateId(t.templateId || t.id)).filter(Boolean))
 
-  const { data: catalog } = await supabase
+  const { data: catalog, error: catalogErr } = await supabase
     .from('form_packets')
     .select('id, boldsign_template_id, active')
     .not('boldsign_template_id', 'is', null)
+  if (catalogErr) {
+    // Without the catalog we'd "discover" every live template as new and insert
+    // duplicates-by-title. Bail instead.
+    return { status: 200, body: { ok: false, error: `Form Library read failed: ${catalogErr.message}` } }
+  }
 
+  const failed = []
   let deactivated = 0
   for (const row of (catalog || [])) {
-    if (row.active && !liveIds.has(row.boldsign_template_id)) {
-      await supabase.from('form_packets').update({ active: false }).eq('id', row.id)
+    if (row.active && !liveIds.has(normalizeTemplateId(row.boldsign_template_id))) {
+      const { error } = await supabase.from('form_packets').update({ active: false }).eq('id', row.id)
+      if (error) {
+        console.error('[boldsign-sync] deactivate failed', row.id, error.message)
+        failed.push({ packetId: row.id, op: 'deactivate', error: error.message })
+        continue
+      }
       deactivated++
     }
   }
 
-  const knownIds = new Set((catalog || []).map(r => r.boldsign_template_id))
+  // Case-insensitively keyed: the catalog's ids come from admin paste as well as
+  // from this job, and a case-only difference is the same BoldSign template.
+  const knownIds = new Set(
+    (catalog || []).map(r => (normalizeTemplateId(r.boldsign_template_id) || '').toLowerCase()).filter(Boolean),
+  )
   let drafted = 0
+  let skippedExisting = 0
   const unmatched = []
   for (const t of liveTemplates) {
-    const tid = t.templateId || t.id
-    if (!tid || knownIds.has(tid)) continue
+    const tid = normalizeTemplateId(t.templateId || t.id)
+    if (!tid || knownIds.has(tid.toLowerCase())) continue
     const title = t.title || t.name || 'Untitled BoldSign template'
     const state = detectStateFromTitle(title)
     if (!state) { unmatched.push({ templateId: tid, title }); continue }
-    await supabase.from('form_packets').insert([{
+    const { error } = await supabase.from('form_packets').insert([{
       state,
       transaction_type: /buyer/i.test(title) ? 'buyer' : /lease/i.test(title) ? 'lease' : 'seller',
       name: title,
@@ -637,8 +654,26 @@ async function runBoldsignTemplateSync(supabase) {
       field_tokens: [],
       active: false,
     }])
+    // An admin linking this id between the catalog read and now is expected, not
+    // an error — the row exists either way, which is the whole point.
+    if (isTemplateIdConflictError(error)) { skippedExisting++; knownIds.add(tid.toLowerCase()); continue }
+    if (error) {
+      // Previously swallowed: a failed insert still counted as "drafted", so the
+      // job reported success while the catalog silently drifted.
+      console.error('[boldsign-sync] draft-register failed', tid, error.code, error.message)
+      failed.push({ templateId: tid, op: 'draft-register', error: error.message })
+      continue
+    }
+    knownIds.add(tid.toLowerCase())
     drafted++
   }
 
-  return { status: 200, body: { ok: true, live: liveTemplates.length, deactivated, drafted, unmatched } }
+  return {
+    status: 200,
+    body: {
+      ok: failed.length === 0,
+      live: liveTemplates.length,
+      deactivated, drafted, skippedExisting, unmatched, failed,
+    },
+  }
 }

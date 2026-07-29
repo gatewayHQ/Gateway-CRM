@@ -40,6 +40,12 @@ export function friendlyDbError(error) {
   // 23505 = unique_violation
   if (code === '23505' || /duplicate key value/i.test(msg)) {
     if (/email/i.test(msg)) return 'A contact with this email already exists.'
+    // One CRM form packet per BoldSign template (uq_form_packets_boldsign_tid).
+    // Form Library resolves the owning packet by name before it gets here; this
+    // is the fallback for every other caller.
+    if (/uq_form_packets_boldsign_tid/.test(msg) || /boldsign_template_id/.test(msg)) {
+      return 'That BoldSign template is already linked to another form packet. Find it in the Form Library (it may be an inactive, auto-discovered draft) and edit that packet instead of creating a second one.'
+    }
     return 'This record already exists.'
   }
 

@@ -3,6 +3,10 @@ import { supabase } from '../lib/supabase.js'
 import { Icon, pushToast, EmptyState, Modal } from '../components/UI.jsx'
 import { OPERATING_STATES } from '../lib/constants.js'
 import { templateEditorUrl } from '../lib/services/boldsign.js'
+import {
+  normalizeTemplateId, isTemplateIdConflictError, describeTemplateIdConflict, findPacketByTemplateId,
+} from '../lib/services/formPackets.js'
+import { friendlyDbError } from '../lib/dbErrors.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 
 const TRANSACTION_TYPES = [
@@ -20,6 +24,15 @@ const fileToBase64 = f => new Promise((res, rej) => {
   r.onerror = rej
   r.readAsDataURL(f)
 })
+
+/** Files already stored on a packet (multi-file, with single-file back-compat). */
+export function storedFilesOf(packet) {
+  if (Array.isArray(packet?.storage_paths) && packet.storage_paths.length) {
+    return packet.storage_paths.filter(f => f?.path)
+  }
+  if (packet?.storage_path) return [{ path: packet.storage_path, name: packet.storage_path.split('/').pop() }]
+  return []
+}
 
 function formatBytes(b) {
   if (!b) return ''
@@ -47,16 +60,25 @@ function UploadModal({ packet, onClose, onSaved }) {
   const [roles, setRoles] = useState([{ name: 'Seller' }, { name: 'Listing Agent' }])
   const fileRef = useRef()
   const savedFromEditorRef = useRef(false)   // guards against the editor firing "done" twice (message + redirect)
+  // Id of the row this modal session owns. Starts as the packet being edited and
+  // is filled in the moment an insert succeeds, so every later save in the same
+  // session is an UPDATE. Without this, a second save after an auto-save (or
+  // after a partially-failed one) re-INSERTED the same boldsign_template_id and
+  // tripped uq_form_packets_boldsign_tid.
+  const rowIdRef = useRef(packet?.id || null)
+  // True once a brand-new template has been claimed as a disabled draft, so an
+  // abandoned editor can say what state the packet was left in.
+  const claimedDraftRef = useRef(false)
 
   // Takes an ALREADY-materialized array — the caller must Array.from() the live
   // FileList before resetting the input's value, or the files vanish (the state
   // updater runs after value='' has cleared the FileList).
   const addFiles   = (picked) => setFiles(p => [...p, ...(picked || [])])
   const removeFile = (i) => setFiles(p => p.filter((_, j) => j !== i))
-  // Files already stored on an existing packet (multi-file, with single-file back-compat).
-  const existingFiles = (Array.isArray(packet?.storage_paths) && packet.storage_paths.length)
-    ? packet.storage_paths
-    : (packet?.storage_path ? [{ path: packet.storage_path, name: packet.storage_path.split('/').pop() }] : [])
+  // Files already persisted for this packet. Updated after every successful save
+  // so a second save in the same session doesn't re-upload the same PDFs under
+  // new timestamped paths.
+  const [existingFiles, setExistingFiles] = useState(() => storedFilesOf(packet))
 
   // BoldSign's embedded editor is told to return here when finished. It's a tiny
   // same-origin page (public/boldsign-return.html) so the iframe doesn't reload
@@ -82,7 +104,13 @@ function UploadModal({ packet, onClose, onSaved }) {
     setEditorBusy(true)
     try {
       if (rebuilding) {
-        const { url } = await templateEditorUrl({ templateId: form.boldsign_template_id, redirectUrl: editorReturnUrl })
+        // A hand-pasted id can belong to a different packet — opening its edit
+        // URL would silently edit that packet's template. Refuse, with the same
+        // message save() would give.
+        const tid = normalizeTemplateId(form.boldsign_template_id)
+        const { row: conflict } = await findPacketByTemplateId(supabase, tid, { excludeId: rowIdRef.current })
+        if (conflict) { pushToast(describeTemplateIdConflict(tid, conflict), 'error'); return }
+        const { url } = await templateEditorUrl({ templateId: tid, redirectUrl: editorReturnUrl })
         if (!url) { pushToast('BoldSign did not return an editor URL', 'error'); return }
         setEditorUrl(url)
         return
@@ -100,7 +128,20 @@ function UploadModal({ packet, onClose, onSaved }) {
         roles: roles.map(r => r.name.trim()).filter(Boolean).map(name => ({ name })),
       })
       if (!url) { pushToast('BoldSign did not return an editor URL', 'error'); return }
-      if (templateId) set('boldsign_template_id', templateId)
+      if (templateId) {
+        set('boldsign_template_id', templateId)
+        // Claim the new id in the CRM immediately, as a disabled draft.
+        // BoldSign has already minted the template at this point, so if the
+        // admin abandons the editor (closes the tab, browser reload, an error
+        // in the "done" handshake) the id exists in BoldSign with nothing
+        // pointing at it — and the nightly drift sync then draft-registers it
+        // as its own inactive row. Linking it here later hit
+        // uq_form_packets_boldsign_tid against that invisible row. Claiming up
+        // front means the CRM always owns the id it just created.
+        const claimed = await save({ templateIdOverride: templateId, asDraft: true, silent: true, keepOpen: true })
+        if (!claimed) { setEditorUrl(null); return }   // save() already explained why
+        claimedDraftRef.current = true
+      }
       setEditorUrl(url)
     } catch (e) { pushToast(e.message, 'error') } finally { setEditorBusy(false) }
   }
@@ -117,13 +158,41 @@ function UploadModal({ packet, onClose, onSaved }) {
   }
   const handleEditorError = () => {
     setEditorUrl(null)
-    pushToast('BoldSign editor closed without finishing — no changes were saved', 'info')
+    pushToast(
+      claimedDraftRef.current
+        ? 'BoldSign editor closed without finishing — the packet is saved as a disabled draft holding the new template id. Use "Rebuild in BoldSign" to finish it.'
+        : 'BoldSign editor closed without finishing — no changes were saved',
+      'info',
+    )
   }
 
-  const save = async () => {
-    if (!form.state.trim()) { pushToast('State is required', 'error'); return }
-    if (!form.name.trim())  { pushToast('Packet name is required', 'error'); return }
-    if (isNew && !files.length) { pushToast('Add at least one PDF file', 'error'); return }
+  /**
+   * Write the packet. Returns true on success, false on any handled failure
+   * (the caller decides what to do; the toast is already shown).
+   *
+   * @param templateIdOverride use this template id instead of form state (the
+   *        claim write runs before React has flushed the id into `form`)
+   * @param asDraft            force `active: false` (claim write — the template
+   *        isn't finished yet, so it must not be sendable)
+   * @param silent             suppress the success toast
+   * @param keepOpen           don't close the modal / refresh the list
+   */
+  const save = async ({ templateIdOverride, asDraft = false, silent = false, keepOpen = false } = {}) => {
+    if (!form.state.trim()) { pushToast('State is required', 'error'); return false }
+    if (!form.name.trim())  { pushToast('Packet name is required', 'error'); return false }
+    const rowId = rowIdRef.current
+    if (!rowId && !files.length && !existingFiles.length) { pushToast('Add at least one PDF file', 'error'); return false }
+    const templateId = normalizeTemplateId(
+      templateIdOverride !== undefined ? templateIdOverride : form.boldsign_template_id,
+    )
+    // Pre-flight: report a collision by name, before touching storage. The
+    // unique index is still the backstop (see the 23505 branch below) — this is
+    // purely so the admin gets "already linked to X", not a Postgres string.
+    if (templateId) {
+      const { row: conflict, error: lookupErr } = await findPacketByTemplateId(supabase, templateId, { excludeId: rowId })
+      if (lookupErr) console.warn('[FormLibrary] template-id pre-flight lookup failed:', lookupErr.message)
+      if (conflict) { pushToast(describeTemplateIdConflict(templateId, conflict), 'error'); return false }
+    }
     setSaving(true)
     try {
       // Newly selected files replace the package; otherwise keep what's on file.
@@ -134,7 +203,7 @@ function UploadModal({ packet, onClose, onSaved }) {
           const f = files[i]
           const path = `${form.state.trim().toUpperCase()}/${form.transaction_type}/${Date.now()}-${i}-${f.name}`
           const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, f, { upsert: true })
-          if (upErr) { pushToast(upErr.message, 'error'); setSaving(false); return }
+          if (upErr) { pushToast(upErr.message, 'error'); setSaving(false); return false }
           uploaded.push({ path, name: f.name })
         }
         storagePaths = uploaded
@@ -147,31 +216,50 @@ function UploadModal({ packet, onClose, onSaved }) {
         description: form.description || null,
         storage_path:  storagePaths[0]?.path || null,   // primary/first (back-compat)
         storage_paths: storagePaths,
-        // null-safe: a packet created without a doc_type / template id stores null,
-        // and null.trim() would throw and silently abort the whole save.
-        boldsign_template_id: (form.boldsign_template_id || '').trim() || null,
+        // null-safe: a packet created without a doc_type / template id stores
+        // null. An empty string must never be written — '' is a value, so under
+        // the partial unique index the second blank packet would collide.
+        boldsign_template_id: templateId,
         doc_type: (form.doc_type || '').trim() || null,
         field_tokens,
-        active: form.active,
+        active: asDraft ? false : form.active,
       }
-      const upsert = (p) => packet?.id
-        ? supabase.from('form_packets').update(p).eq('id', packet.id).select()
+      const write = (p) => rowId
+        ? supabase.from('form_packets').update(p).eq('id', rowId).select()
         : supabase.from('form_packets').insert([p]).select()
-      let { data, error } = await upsert(payload)
+      let { data, error } = await write(payload)
       // Graceful fallback if migration 0022 (storage_paths) hasn't been applied yet.
       if (error && (error.code === '42703' || error.code === 'PGRST204' || /storage_paths/.test(error.message || ''))) {
         const { storage_paths, ...legacy } = payload
-        ;({ data, error } = await upsert(legacy))
+        ;({ data, error } = await write(legacy))
       }
-      if (error) { pushToast(`Couldn't save: ${error.message}`, 'error'); return }
-      if (packet?.id && Array.isArray(data) && data.length === 0) {
-        pushToast('Nothing was updated — the change did not persist.', 'error'); return
+      // Lost the pre-flight race (concurrent admin, or the nightly sync running
+      // right now): translate the constraint into the same actionable message.
+      if (isTemplateIdConflictError(error)) {
+        const { row } = await findPacketByTemplateId(supabase, templateId, { excludeId: rowId })
+        console.error('[FormLibrary] boldsign template id conflict:', templateId, row?.id)
+        pushToast(describeTemplateIdConflict(templateId, row), 'error')
+        return false
       }
-      pushToast(isNew ? 'Form packet added' : 'Packet updated')
-      onSaved()
+      if (error) {
+        console.error('[FormLibrary] save failed:', error.code, error.message)
+        pushToast(`Couldn't save: ${friendlyDbError(error) || error.message}`, 'error'); return false
+      }
+      if (rowId && Array.isArray(data) && data.length === 0) {
+        pushToast('Nothing was updated — the change did not persist.', 'error'); return false
+      }
+      // Own the row from here on, so any later save in this session updates it.
+      const savedId = Array.isArray(data) ? data[0]?.id : data?.id
+      if (savedId) rowIdRef.current = savedId
+      // Uploaded files are persisted now — stop treating them as pending.
+      if (files.length) { setExistingFiles(storagePaths); setFiles([]) }
+      if (!silent) pushToast(rowId ? 'Packet updated' : 'Form packet added')
+      if (!keepOpen) onSaved()
+      return true
     } catch (e) {
       console.error('[FormLibrary] save error:', e)
       pushToast(`Couldn't save: ${e.message}`, 'error')
+      return false
     } finally {
       setSaving(false)
     }
@@ -499,7 +587,7 @@ create unique index if not exists uq_form_packets_boldsign_tid
                   <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--gw-ink)', display: 'flex', alignItems: 'center', gap: 8 }}>
                     {packet.name}
                     {packet.boldsign_template_id && (
-                      <span style={{ padding: '1px 7px', borderRadius: 8, fontSize: 10, fontWeight: 700, background: packet.active ? 'var(--gw-green-light)' : 'var(--gw-bone)', color: packet.active ? 'var(--gw-green)' : 'var(--gw-mist)' }}>
+                      <span title={`BoldSign template ${packet.boldsign_template_id}`} style={{ padding: '1px 7px', borderRadius: 8, fontSize: 10, fontWeight: 700, background: packet.active ? 'var(--gw-green-light)' : 'var(--gw-bone)', color: packet.active ? 'var(--gw-green)' : 'var(--gw-mist)' }}>
                         {packet.active ? 'Sendable' : 'Sendable (disabled)'}
                       </span>
                     )}

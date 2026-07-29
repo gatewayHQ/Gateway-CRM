@@ -35,6 +35,15 @@ describe('friendlyDbError', () => {
     expect(msg).toMatch(/email already exists/i)
   })
 
+  it('explains a duplicate BoldSign template link instead of leaking the constraint name', () => {
+    const msg = friendlyDbError({
+      code: '23505',
+      message: 'duplicate key value violates unique constraint "uq_form_packets_boldsign_tid"',
+    })
+    expect(msg).toMatch(/already linked to another form packet/i)
+    expect(msg).not.toMatch(/uq_form_packets/)
+  })
+
   it('handles foreign-key and not-null violations', () => {
     expect(friendlyDbError({ code: '23503' })).toMatch(/linked record/i)
     expect(friendlyDbError({ code: '23502', message: 'null value in column "first_name"' }))
