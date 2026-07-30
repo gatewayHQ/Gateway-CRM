@@ -70,6 +70,9 @@ export function sendableTemplates(rows = []) {
       name:         r.name || r.template_name || 'Untitled template',
       state:        r.state || '',
       doc_type:     r.doc_type || '',
+      // Which side the packet is written for ('buyer' | 'seller' | 'lease' |
+      // 'general') — used to warn when it doesn't match the deal's side.
+      tx_type:      String(r.transaction_type || '').toLowerCase(),
       field_tokens: Array.isArray(r.field_tokens) ? r.field_tokens : [],
       source:       'library',
     }))

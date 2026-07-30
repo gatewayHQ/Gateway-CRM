@@ -813,9 +813,6 @@ export default async function handler(req, res) {
       const templateRoles = await fetchTemplateRoles(templateId)
       const norm = normalizeRolePayload({ roles, templateRoles, roleRemovalIndices })
       if (!norm.roles.length) return res.status(400).json({ error: 'Every signer needs a name and a valid email' })
-      if (norm.unfilled.length) {
-        return res.status(400).json(incompleteRolesError(norm.unfilled, norm.roles.length + norm.unfilled.length))
-      }
 
       const svc        = getServiceClient()
       const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
@@ -830,7 +827,15 @@ export default async function handler(req, res) {
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),   // BoldSign tags
         ...(onBehalfOf ? { onBehalfOf } : {}),
       }
-      const data = await boldsign(`/template/send?templateId=${encodeURIComponent(templateId)}`, { method: 'POST', json: payload })
+      let data
+      try {
+        data = await boldsign(`/template/send?templateId=${encodeURIComponent(templateId)}`, { method: 'POST', json: payload })
+      } catch (e) {
+        if (norm.unfilled.length && ROLES_REJECTED_RE.test(e.message || '')) {
+          return res.status(400).json(unremovableRolesError(norm.unfilled, e.message))
+        }
+        throw e
+      }
 
       if (deal_id) {
         await svc.from('boldsign_documents').insert([{
@@ -861,9 +866,6 @@ export default async function handler(req, res) {
       const templateRoles = await fetchTemplateRoles(templateId)
       const norm = normalizeRolePayload({ roles, templateRoles, roleRemovalIndices })
       if (!norm.roles.length) return res.status(400).json({ error: 'Every signer needs a name and a valid email' })
-      if (norm.unfilled.length) {
-        return res.status(400).json(incompleteRolesError(norm.unfilled, norm.roles.length + norm.unfilled.length))
-      }
 
       const svc        = getServiceClient()
       const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
@@ -881,7 +883,15 @@ export default async function handler(req, res) {
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),
         ...(onBehalfOf ? { onBehalfOf } : {}),
       }
-      const data = await boldsign(`/template/createEmbeddedRequestUrl?templateId=${encodeURIComponent(templateId)}`, { method: 'POST', json: payload })
+      let data
+      try {
+        data = await boldsign(`/template/createEmbeddedRequestUrl?templateId=${encodeURIComponent(templateId)}`, { method: 'POST', json: payload })
+      } catch (e) {
+        if (norm.unfilled.length && ROLES_REJECTED_RE.test(e.message || '')) {
+          return res.status(400).json(unremovableRolesError(norm.unfilled, e.message))
+        }
+        throw e
+      }
 
       // A draft document may be created immediately; track it so status updates
       // land when the agent finishes and BoldSign fires the Sent webhook.
@@ -925,16 +935,28 @@ async function fetchTemplateRoles(templateId) {
   }
 }
 
-// Turn an incomplete role set into a CRM-authored 400 the agent can act on, so
-// BoldSign's "SignerName or SignerEmail is missing in roles" can never surface.
-function incompleteRolesError(unfilled, total) {
+// Sending a SUBSET of a template's roles is normal and supported: the roles the
+// deal has nobody for go in roleRemovalIndices and BoldSign drops them. That is
+// how a listing packet has always gone out with just Seller + Listing agent.
+//
+// BoldSign will refuse to drop a role that owns fields on the document, though —
+// you cannot remove the Buyer from a purchase agreement that has buyer signature
+// blocks — and the refusal comes back as the generic "SignerName or SignerEmail
+// is missing in roles". This turns that into something the agent can act on by
+// naming the roles that were left blank. Almost always the packet is for the
+// other side of the transaction, or the other side's people genuinely need typing
+// in (a purchase agreement needs the buyer even when we only list the seller).
+function unremovableRolesError(unfilled, vendorMessage) {
   const names = unfilled.map(u => u.name).join(', ')
   return {
-    error: `This template has ${total} signer role${total === 1 ? '' : 's'} and BoldSign needs a name and email for every one of them. `
-         + `Still empty: ${names}. Fill them in under "Add another signer", or register a template whose roles match this transaction.`,
+    error: `BoldSign wouldn't drop these roles because the document has fields for them: ${names}. `
+         + `Fill them in under "Add another signer" — or pick a packet for this side of the transaction, `
+         + `if that's what happened.`,
     unfilled,
+    boldsign: vendorMessage,
   }
 }
+const ROLES_REJECTED_RE = /signername|signeremail|roles/i
 
 // ─── BoldSign webhook handler ──────────────────────────────────────────────────
 // BoldSign POSTs document lifecycle events (Sent, Viewed, Signed, Completed,

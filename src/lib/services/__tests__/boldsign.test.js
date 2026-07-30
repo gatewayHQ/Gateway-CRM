@@ -336,3 +336,16 @@ describe('commissionRate — the commission_pct prefill token', () => {
     expect(crmTokenValues({ deal: {} }).commission_pct).toBe('')
   })
 })
+
+describe('sendableTemplates — packet side', () => {
+  it('carries transaction_type through so the picker can flag a mismatch', () => {
+    const out = sendableTemplates([
+      { name: 'Buyer Agreement/IA Agency Packet', boldsign_template_id: 't1', state: 'IA', transaction_type: 'buyer' },
+      { name: 'Listing Agreement/Iowa Agency Packet', boldsign_template_id: 't2', state: 'IA', transaction_type: 'seller' },
+    ])
+    expect(out.map(t => t.tx_type)).toEqual(['buyer', 'seller'])
+  })
+  it('is an empty string when the packet has no type', () => {
+    expect(sendableTemplates([{ name: 'X', boldsign_template_id: 't' }])[0].tx_type).toBe('')
+  })
+})

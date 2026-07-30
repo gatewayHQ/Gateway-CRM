@@ -172,15 +172,22 @@ Nothing about the parties is typed by hand. Everyone is resolved from data the d
 **Missing email:** a party with a name but no email is seeded as a name-only row, flagged inline (*"No email on file for this person"*) — BoldSign requires an email per signer, so that row is dropped from the send unless one is added. In the ad-hoc **Send for Signature** flow the same people are named under the signer list instead of becoming a blank blocking row. Either way nobody is silently omitted.
 
 ## "SignerName or SignerEmail is missing in roles"
-BoldSign validates a template send against the **template's own** role list: every role it is asked to keep must carry a `signerName` **and** a `signerEmail`, or the entire request is rejected with that message. `roleRemovalIndices` is the documented way to drop unused roles, but it is **not honored on `createEmbeddedRequestUrl`** — on an 8-role packet with 3 rows filled from the deal, the other 5 survived into validation and blocked the send even though every field on screen was populated. Unknown JSON properties are ignored by BoldSign's deserializer, so the failure was silent.
+**Sending a subset of a template's roles is normal and supported.** Roles the deal has nobody for go into `roleRemovalIndices` and BoldSign drops them — that is how a listing packet has always gone out with just Seller + Listing agent, and it has to stay that way: on a purchase agreement where the brokerage represents one side, the other side's rows are legitimately empty in the picker.
 
-Correctness no longer depends on removal working:
-- `normalizeRolePayload()` (`api/boldsign.js`, unit-tested) reconciles the caller's roles against the template's live roles from `/template/properties` — matched by index, then by role **name**, so a stale browser-side index can't address the wrong role. It drops rows whose name or email is missing/malformed (that *is* the error condition), dedupes roles claiming the same index, strips prefill fields with no id or empty value, and renumbers `signerOrder` 1..N (template indices aren't contiguous).
-- Both `template-send` and `template-embed-url` refuse an incomplete set with a **CRM-authored 400** naming the unfilled roles, so BoldSign's message can never reach an agent.
-- The picker pre-flights the same rule before any API call: it expands the hidden rows, names the empty roles inline, and points at the real fix — a template whose roles match the transaction (the 2-role Seller / Listing Agent convention, or Seller / Listing agent / Co-listing agent for a co-listed deal).
-- If `/template/properties` is unreachable the send is not blocked — it degrades to the caller's own removal list.
+BoldSign **will** refuse to drop a role that owns fields on the document — you cannot remove the Buyer from a purchase agreement that has buyer signature blocks — and that refusal comes back as this same generic message. The observed failure was a **buyer**-side agency packet chosen on a **seller**-side deal: the roles the document has fields for were exactly the ones being removed.
 
-**Template design rule:** a template's role set should match one side of one transaction. An 8-role packet carrying both sides needs 8 real signers on every send; that's a template problem the CRM can only surface, not fix.
+> An earlier revision of this file claimed `roleRemovalIndices` is not honored on `createEmbeddedRequestUrl`, and the CRM was changed to demand a signer for every role. That was wrong — subset sends demonstrably work (the Purchase Agreement Packet drafts on 2212 Okoboji went out with two of eight roles filled) — and the hard block has been removed.
+
+What the send path does:
+- attempts the send with whoever is on the deal, as it always did;
+- on a roles rejection, returns a CRM-authored 400 naming the roles BoldSign kept (`unremovableRolesError()`), with the vendor text alongside for the log. The picker expands those rows and shows the message inline instead of relaying "SignerName or SignerEmail is missing in roles";
+- warns at selection time when the packet's `transaction_type` doesn't match the deal's side (`comp_data.transaction_type`) — that mismatch is what causes this.
+
+The payload is normalized on the way out either way:
+- `normalizeRolePayload()` (unit-tested) reconciles the caller's roles against the template's live roles from `/template/properties` — matched by index, then by role **name**, so a stale browser-side index can't address the wrong role. It drops rows whose name or email is missing/malformed, dedupes roles claiming the same index, strips prefill fields with no id or empty value, and renumbers `signerOrder` 1..N (template indices aren't contiguous — we were sending 5, 7, 8).
+- If `/template/properties` is unreachable, nothing is blocked: it degrades to the caller's own removal list.
+
+**Template design rule:** a packet's roles should be the signature blocks the paper actually has, for one side of one transaction. A role declared in BoldSign with no field on the document is a role that can be dropped but never usefully filled.
 
 ## Removing a document from the Signatures tab
 `action: 'document-delete'` — the sender or an **admin** may remove any non-`completed` document; a completed one is the signed legal record and is refused outright.

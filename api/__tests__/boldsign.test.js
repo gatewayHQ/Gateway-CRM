@@ -296,3 +296,23 @@ describe('normalizeRolePayload — "SignerName or SignerEmail is missing in role
     expect(normalizeRolePayload({ roles: [null, {}] }).roles).toEqual([])
   })
 })
+
+describe('normalizeRolePayload — a subset send stays legal', () => {
+  it('reports leftovers without implying the send must be blocked', () => {
+    // Listing packet on a listing deal: buyer-side rows are legitimately empty
+    // and go into roleRemovalIndices, which is how this has always worked.
+    const out = normalizeRolePayload({
+      roles: [
+        { roleIndex: 5, roleName: 'Seller', signerName: 'Jean Irwin', signerEmail: 'j@x.com' },
+        { roleIndex: 7, roleName: 'Listing agent', signerName: 'Daniel', signerEmail: 'd@g.com' },
+      ],
+      templateRoles: [
+        { index: 1, name: 'Buyer' }, { index: 5, name: 'Seller' },
+        { index: 7, name: 'Listing agent' },
+      ],
+    })
+    expect(out.roles).toHaveLength(2)
+    expect(out.roleRemovalIndices).toEqual([1])
+    expect(out.unfilled.map(u => u.name)).toEqual(['Buyer'])
+  })
+})

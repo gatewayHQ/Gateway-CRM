@@ -1783,23 +1783,16 @@ function SendFromTemplateModal({
     const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && EMAIL_RE.test((signers[r.index]?.email || '').trim()))
     if (!filled.length) { pushToast('At least one signer needs a name and email', 'error'); return }
 
-    // Pre-flight. BoldSign validates a template send against the template's own
-    // role list and rejects the whole request — "SignerName or SignerEmail is
-    // missing in roles" — for any role it's asked to keep without a name and
-    // email. Asking it to drop the unused ones (roleRemovalIndices) is not
-    // honored on this endpoint, so an 8-role packet with 3 filled rows failed
-    // even though every field on screen was populated. Catch it here: show the
-    // empty rows, say exactly which ones, and never send an incomplete set.
+    // Send whoever is on the deal. Roles the deal has nobody for go in
+    // roleRemovalIndices and BoldSign drops them — that's how a listing packet
+    // has always gone out with just Seller + Listing agent, and it must stay
+    // that way: on a purchase agreement where we only represent one side, the
+    // other side's rows are legitimately empty here.
+    //
+    // BoldSign refuses to drop a role that owns fields on the document, and says
+    // so with a generic "SignerName or SignerEmail is missing in roles". That is
+    // handled on the way back (see the catch), not by blocking the attempt.
     const unfilled = roleList.filter(r => !filled.includes(r))
-    if (unfilled.length) {
-      setShowAllRoles(true)
-      setRoleError(
-        `This template has ${roleList.length} signer roles and BoldSign needs a name and email for every one. `
-        + `Still empty: ${unfilled.map(r => r.name).join(', ')}.`
-      )
-      pushToast(`${unfilled.length} signer role${unfilled.length === 1 ? '' : 's'} still need a name and email`, 'error')
-      return
-    }
     setRoleError('')
     setSending(true)
 
@@ -1834,7 +1827,15 @@ function SendFromTemplateModal({
       if (!url) { pushToast('BoldSign did not return a send URL', 'error'); return }
       setEmbedUrl(url)
     } catch (err) {
-      pushToast(err.message, 'error')
+      // BoldSign kept roles it wouldn't drop (the document has fields for them).
+      // Show those rows and name them, rather than relaying the vendor's text.
+      if (unfilled.length && /signername|signeremail|roles/i.test(err.message || '')) {
+        setShowAllRoles(true)
+        setRoleError(err.message)
+        pushToast(`${unfilled.length} role${unfilled.length === 1 ? '' : 's'} still need a signer`, 'error')
+      } else {
+        pushToast(err.message, 'error')
+      }
     } finally {
       setSending(false)
     }
@@ -1923,6 +1924,15 @@ function SendFromTemplateModal({
           {details?.roles?.length > autoFilled.length && (
             <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
               {details.roles.length} signer roles on this template · {autoFilled.length} filled from this deal
+            </div>
+          )}
+          {/* The mismatch that actually bites: a buyer packet on a listing (or
+              the reverse). The roles the document has fields for then belong to
+              the side this deal has nobody for, and BoldSign won't drop them. */}
+          {side && tpl?.tx_type && ['buyer','seller'].includes(tpl.tx_type) && tpl.tx_type !== side && (
+            <div style={{ fontSize:11, color:'#8a6100', marginTop:6, fontWeight:600 }}>
+              This is a {tpl.tx_type}-side packet on a {side}-side deal — the {tpl.tx_type}'s rows
+              will be empty and BoldSign may refuse to drop them.
             </div>
           )}
           {/* Compliance guard: state-specific forms are not interchangeable. */}
