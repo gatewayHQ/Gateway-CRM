@@ -163,41 +163,123 @@ export function buildPrefill(fieldTokens = [], ctx = {}) {
 
 // Role names that should be filled with the deal's client(s) rather than the
 // agent. Broad on purpose so generic template roles ("Signer 1") still seed.
-const CLIENT_ROLE_RE = /(seller|buyer|client|owner|purchaser|grantor|grantee|landlord|tenant|lessor|lessee|borrower|customer|signer)/
+const CLIENT_ROLE_RE = /(seller|buyer|client|owner|purchaser|grantor|grantee|landlord|tenant|lessor|lessee|borrower|customer|signer|party)/
 
-// Pre-fill a template's signer rows from the deal's people:
-//   • a role mentioning "agent" → the acting agent (first such role only)
-//   • client-type roles → the deal's linked contact, then that contact's
-//     spouse for a second client role (co-buyers / husband & wife)
-//   • anything else keeps the template's own placeholder (r.defaultName/Email)
-// Returns { [roleIndex]: { name, email } }. Pure — the agent can still edit any
-// field before sending. Requires the deal to have a linked contact; with none,
-// client roles fall back to the template placeholder (usually blank).
-export function seedSignersFromDeal({ roles = [], contact = null, additionalContacts = [], activeAgent = null } = {}) {
+// Which side of the transaction a role belongs to, and whether it's a licensee
+// row or a client row. "Broker" is deliberately NOT an agent keyword — that row
+// is usually the broker of record, not the agent working the deal.
+const BUYER_SIDE_RE  = /(buyer|purchaser|grantee|tenant|lessee|borrower)/
+const SELLER_SIDE_RE = /(seller|owner|grantor|landlord|lessor)/
+const AGENT_ROLE_RE  = /(agent|realtor)/
+
+// party: 'agent' | 'client' | 'other'   side: 'buyer' | 'seller' | '' (either)
+export function roleKind(name) {
+  const n    = String(name || '').toLowerCase()
+  const side = BUYER_SIDE_RE.test(n) ? 'buyer' : SELLER_SIDE_RE.test(n) ? 'seller' : ''
+  if (AGENT_ROLE_RE.test(n))            return { party: 'agent',  side }
+  if (side || CLIENT_ROLE_RE.test(n))   return { party: 'client', side }
+  return { party: 'other', side: '' }
+}
+
+// Every licensee on the deal, in signing order: the deal's own agent first, then
+// co-agents. Co-agents live on the linked property (`details.co_agent_ids`,
+// set by the Properties drawer) — a deal-level `co_agent_ids` array is also
+// honored for legacy rows. `activeAgent` is only a fallback for a deal with no
+// agent set, so an admin opening someone else's deal doesn't replace the agent
+// of record on the paperwork.
+//
+// Pure: resolves ids against the `agents` roster already loaded by the page —
+// no extra query, so the co-agent simply appears with no UI to fill in.
+export function resolveDealAgents({ deal = null, property = null, agents = [], activeAgent = null } = {}) {
+  const byId = new Map((agents || []).filter(a => a?.id).map(a => [a.id, a]))
+  const ids  = [
+    deal?.agent_id,
+    ...(property?.details?.co_agent_ids || []),
+    ...(deal?.co_agent_ids || []),
+  ].filter(Boolean)
+
+  const out  = []
+  const seen = new Set()
+  const push = (a) => {
+    if (!a) return
+    const key = (a.email || a.name || '').toLowerCase()
+    if (!key || seen.has(key)) return
+    seen.add(key)
+    out.push({ id: a.id, name: a.name || '', email: a.email || '' })
+  }
+  for (const id of [...new Set(ids)]) push(byId.get(id))
+  if (!out.length) push(activeAgent)
+  return out
+}
+
+// The deal's side of the transaction, used to route people to the matching
+// template roles. Set on the Details tab (comp_data.transaction_type).
+export const dealSide = (deal) => {
+  const t = String(deal?.comp_data?.transaction_type || '').toLowerCase()
+  return t === 'buyer' || t === 'seller' ? t : ''
+}
+
+// The deal's client-side signers in order: primary contact, linked additional
+// contacts (co-buyers / spouses, each with their own email), then the primary's
+// stored spouse_name as a last resort (name only — no email on file).
+export function dealClientSigners({ contact = null, additionalContacts = [] } = {}) {
   const toPerson = c => ({ name: `${c?.first_name || ''} ${c?.last_name || ''}`.trim(), email: c?.email || '' })
   const people = []
-  if (contact && (contact.first_name || contact.last_name || contact.email)) people.push(toPerson(contact))
-  // Real linked additional contacts (co-buyers / spouses) come next, in order —
-  // these carry their own email, unlike the stored spouse_name below.
-  for (const c of (additionalContacts || [])) {
-    const p = toPerson(c)
-    if (p.name || p.email) people.push(p)
+  const seen   = new Set()
+  const push = (p) => {
+    if (!p.name && !p.email) return
+    const key = (p.email || p.name).toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    people.push(p)
   }
-  // Fall back to the primary contact's stored spouse name (no email on file)
-  // only when no real additional contacts are linked to the deal.
-  if (!(additionalContacts || []).length && contact?.spouse_name) people.push({ name: contact.spouse_name, email: '' })
-  const out = {}
-  let usedAgent = false, personIdx = 0
-  for (const r of roles) {
-    const n = String(r?.name || '').toLowerCase()
-    if (!usedAgent && /agent/.test(n) && activeAgent?.email) {
-      out[r.index] = { name: activeAgent.name || '', email: activeAgent.email || '' }
-      usedAgent = true
-    } else if (CLIENT_ROLE_RE.test(n) && personIdx < people.length) {
-      out[r.index] = { ...people[personIdx++] }
-    } else {
-      out[r.index] = { name: r?.defaultName || '', email: r?.defaultEmail || '' }
+  if (contact) push(toPerson(contact))
+  for (const c of (additionalContacts || [])) push(toPerson(c))
+  if (!(additionalContacts || []).length && contact?.spouse_name) push({ name: contact.spouse_name, email: '' })
+  return people
+}
+
+// Pre-fill a template's signer rows from everyone the CRM already knows about:
+//   • agent-type roles → the deal's agent, then each co-agent, in order
+//   • client-type roles → the primary contact, then each additional contact
+//     (co-buyer / spouse), in order
+//   • anything else keeps the template's own placeholder (r.defaultName/Email)
+//
+// When the deal's side is known (`side` — comp_data.transaction_type), people
+// fill the roles on THEIR side first and generic roles second, and never the
+// opposite side: a buyer-side deal must not drop the buyer into the template's
+// Seller row. With no side on the deal, every client/agent role is eligible in
+// template order (the pre-side behavior).
+//
+// Returns { [roleIndex]: { name, email } }. Pure — the agent can still edit any
+// row before sending, and rows left blank are removed from the send.
+export function seedSignersFromDeal({
+  roles = [], contact = null, additionalContacts = [],
+  activeAgent = null, agents = [], side = '',
+} = {}) {
+  const clients = dealClientSigners({ contact, additionalContacts })
+  const licensees = ((agents || []).length ? agents : (activeAgent ? [activeAgent] : []))
+    .filter(Boolean)
+    .map(a => ({ name: a.name || '', email: a.email || '' }))
+    .filter(a => a.name || a.email)
+
+  const kinds = roles.map(r => ({ r, ...roleKind(r?.name) }))
+  const out   = {}
+  for (const { r } of kinds) out[r.index] = { name: r?.defaultName || '', email: r?.defaultEmail || '' }
+
+  const fill = (party, queue) => {
+    // Our side first, then side-agnostic roles ("Signer 1", "Listing Agent" on a
+    // buyer deal); opposite-side roles are never auto-filled when we know the side.
+    const eligible = side
+      ? [...kinds.filter(k => k.party === party && k.side === side),
+         ...kinds.filter(k => k.party === party && !k.side)]
+      : kinds.filter(k => k.party === party)
+    for (const k of eligible) {
+      if (!queue.length) return
+      out[k.r.index] = queue.shift()
     }
   }
+  fill('agent',  [...licensees])
+  fill('client', [...clients])
   return out
 }

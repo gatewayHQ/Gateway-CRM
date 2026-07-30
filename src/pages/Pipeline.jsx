@@ -9,7 +9,7 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, templateEmbedUrl, templateDetails, listBoldsignTemplates, sendableTemplates, normalizeBoldsignTemplates, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, templateEmbedUrl, templateDetails, listBoldsignTemplates, sendableTemplates, normalizeBoldsignTemplates, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, resolveDealAgents, dealClientSigners, dealSide } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
@@ -1066,7 +1066,7 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
 //      signature + date field per signer and sends immediately via BoldSign
 //   3. BoldSign emails each signer; they sign in their browser
 //   4. BoldSign webhook hits /api/boldsign → status flips sent → completed
-function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent, onClose, onSent }) {
+function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent, clientSigners = [], dealAgents = [], onClose, onSent }) {
   // Primary signer: contact linked directly to the deal
   const contact      = contacts?.find(c => c.id === deal?.contact_id)
   const defaultName  = `${contact?.first_name || ''} ${contact?.last_name || ''}`.trim()
@@ -1091,32 +1091,46 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const [useTextTags, setUseTextTags] = React.useState(false)   // PDF already has {{...}} text tags baked in
   const fileRef = React.useRef()
 
+  // Every client-side signer the deal knows about — primary contact, then each
+  // additional contact (co-buyer / husband & wife), then the property owner if
+  // they're someone else. Only people with an email get a row: every signer needs
+  // one, so a row without it would just block the send. Anyone skipped is named
+  // under the list instead of silently dropped.
   const [signers, setSigners] = React.useState(() => {
-    // Signer 1: deal contact. If they have no email, fall back to property owner.
-    let s1Name  = defaultName
-    let s1Email = defaultEmail
-    if (!s1Email && ownerContact?.email) {
-      s1Name  = ownerName
-      s1Email = ownerContact.email
+    const rows = []
+    const seen = new Set()
+    const add  = (name, email) => {
+      const key = (email || '').toLowerCase()
+      if (!email || seen.has(key)) return
+      seen.add(key)
+      rows.push({ id: rows.length + 1, name, email })
     }
-    const base = [{ id: 1, name: s1Name, email: s1Email }]
-    if (ownerIsDifferent && ownerEmail && ownerEmail !== s1Email) {
-      base.push({ id: 2, name: ownerName, email: ownerEmail })
-    }
-    return base
+    for (const p of clientSigners) add(p.name, p.email)
+    if (ownerIsDifferent && ownerEmail) add(ownerName, ownerEmail)
+    return rows.length ? rows : [{ id: 1, name: defaultName, email: defaultEmail }]
   })
+
+  // Named on the deal but unreachable — surfaced so nobody assumes they were sent.
+  const noEmailParties = clientSigners.filter(p => p.name && !p.email).map(p => p.name)
 
   const addSigner    = () => setSigners(p => [...p, { id: Date.now(), name:'', email:'' }])
   const removeSigner = (id) => setSigners(p => p.filter(s => s.id !== id))
   const updateSigner = (id, k, v) => setSigners(p => p.map(s => s.id===id ? {...s,[k]:v} : s))
 
+  // Licensees who sign after the clients: the deal's agent AND any co-agent on
+  // the property — the co-agent comes along automatically, nothing to type.
+  const signingAgents = (dealAgents.length ? dealAgents : (activeAgent ? [activeAgent] : []))
+    .filter(a => a?.email)
+
   const allSigners = React.useMemo(() => {
     const clients = signers.map(s => ({ ...s, routingOrder: 1 }))
-    if (agentSigns && activeAgent) {
-      clients.push({ id:'agent', name: activeAgent.name, email: activeAgent.email, routingOrder: 2 })
+    if (agentSigns) {
+      signingAgents.forEach((a, i) => clients.push({
+        id: `agent-${a.id || i}`, name: a.name, email: a.email, routingOrder: 2,
+      }))
     }
     return clients
-  }, [signers, agentSigns, activeAgent])
+  }, [signers, agentSigns, dealAgents, activeAgent])
 
   const toBase64 = f => new Promise((res, rej) => {
     const r = new FileReader(); r.onload = e => res(e.target.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(f)
@@ -1239,16 +1253,24 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
             </div>
           ))}
           <button className="btn btn--secondary btn--sm" onClick={addSigner} style={{marginTop:2}}>+ Add another signer</button>
+          {noEmailParties.length > 0 && (
+            <div style={{ fontSize:11, color:'#8a6100', marginTop:8 }}>
+              {noEmailParties.join(', ')} {noEmailParties.length === 1 ? 'is' : 'are'} on this deal but {noEmailParties.length === 1 ? 'has' : 'have'} no
+              email on file — add one on the contact to include {noEmailParties.length === 1 ? 'them' : 'each of them'}.
+            </div>
+          )}
         </div>
 
-        {/* Agent signs last */}
-        {activeAgent && (
+        {/* Agents sign last — the deal's agent plus any co-agent, together */}
+        {signingAgents.length > 0 && (
           <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:16, background:'var(--gw-bone)' }}>
             <input type="checkbox" id="agentSigns" checked={agentSigns} onChange={e=>setAgentSigns(e.target.checked)} style={{width:15,height:15,cursor:'pointer'}}/>
             <label htmlFor="agentSigns" style={{ fontSize:13, cursor:'pointer', flex:1 }}>
-              <strong>I need to sign as well</strong> — {activeAgent.name} signs <em>after</em> the client{signers.length>1?'s':''}
+              <strong>{signingAgents.length > 1 ? 'We need to sign as well' : 'I need to sign as well'}</strong> — {signingAgents.map(a => a.name).join(' and ')} sign{signingAgents.length > 1 ? '' : 's'} <em>after</em> the client{signers.length>1?'s':''}
             </label>
-            {agentSigns && <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[signers.length]||'#6b7280', display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700 }}>{signers.length+1}</div>}
+            {agentSigns && signingAgents.map((a, i) => (
+              <div key={a.id || i} style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[signers.length+i]||'#6b7280', display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700 }}>{signers.length+1+i}</div>
+            ))}
           </div>
         )}
 
@@ -1309,7 +1331,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   )
 }
 
-function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeAgent }) {
+function SignaturesTab({ deal, contacts, properties, agents = [], extraContacts = [], activeAgent }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
@@ -1471,6 +1493,22 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeA
     }
   }
 
+  // Everyone who signs on our side, resolved once here so both send flows get
+  // the same list with no extra query and nothing for the agent to fill in:
+  // the deal's agent + any co-agent on the linked property, and the primary
+  // contact + any additional contacts (co-buyer / spouse).
+  const dealProperty = properties?.find(p => p.id === deal?.property_id) || null
+  const dealAgents   = React.useMemo(
+    () => resolveDealAgents({ deal, property: dealProperty, agents, activeAgent }),
+    [deal?.id, deal?.agent_id, dealProperty?.id, agents, activeAgent],
+  )
+  const primaryContact = contacts?.find(c => c.id === deal?.contact_id) || null
+  const clientSigners  = React.useMemo(
+    () => dealClientSigners({ contact: primaryContact, additionalContacts: extraContacts }),
+    [primaryContact?.id, extraContacts],
+  )
+  const side = dealSide(deal)
+
   const visibleEnvelopes = envelopes.filter(env => {
     if (statusFilter === 'all')       return true
     if (statusFilter === 'completed') return env.status === 'completed'
@@ -1611,6 +1649,7 @@ create policy "agent_notifications_policy" on agent_notifications
       {sendOpen && (
         <SendSignatureModal
           deal={deal} contacts={contacts} properties={properties} dealFiles={dealFiles} activeAgent={activeAgent}
+          clientSigners={clientSigners} dealAgents={dealAgents}
           onClose={() => setSendOpen(false)}
           onSent={() => { setSendOpen(false); loadEnvelopes() }}
         />
@@ -1620,7 +1659,7 @@ create policy "agent_notifications_policy" on agent_notifications
         <SendFromTemplateModal
           deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts}
           templates={templates} tplLoading={tplLoading} tplError={tplError} onRetryTemplates={loadTemplates}
-          activeAgent={activeAgent}
+          activeAgent={activeAgent} dealAgents={dealAgents} side={side}
           onClose={() => setTplOpen(false)}
           onSent={() => { setTplOpen(false); loadEnvelopes() }}
         />
@@ -1636,7 +1675,7 @@ const prettyLabel = (id) => String(id || '').replace(/[_-]+/g, ' ').replace(/\b\
 
 function SendFromTemplateModal({
   deal, contacts, properties, extraContacts = [], templates, activeAgent, onClose, onSent,
-  tplLoading = false, tplError = '', onRetryTemplates,
+  tplLoading = false, tplError = '', onRetryTemplates, dealAgents = [], side = '',
 }) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
@@ -1655,6 +1694,8 @@ function SendFromTemplateModal({
   const [loadingDet, setLoadingDet] = React.useState(false)
   const [signers,    setSigners]    = React.useState({})     // roleIndex → { name, email }
   const [values,     setValues]     = React.useState({})     // fieldId → value
+  const [autoFilled, setAutoFilled] = React.useState([])     // role indices the CRM filled in
+  const [showAllRoles, setShowAllRoles] = React.useState(false)
 
   const tpl = templates.find(t => t.template_id === templateId)
 
@@ -1677,10 +1718,18 @@ function SendFromTemplateModal({
         const fields = (det.fields || []).filter(f => isFillableField(f.type))
         setDetails({ roles, fields })
 
-        // Seed signer name/email from the deal's linked contact (+ spouse for a
-        // second client role) and the acting agent. See seedSignersFromDeal.
-        const tokenVals = crmTokenValues({ deal, property, contact, agent: activeAgent })
-        setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent }))
+        // Seed every signer row the CRM can fill: the deal's agent and each
+        // co-agent into the agent roles, the primary contact and each additional
+        // contact into the client roles on the deal's side. Nothing to fill in
+        // by hand — see seedSignersFromDeal.
+        const tokenVals = crmTokenValues({ deal, property, contact, agent: dealAgents[0] || activeAgent })
+        const seeded    = seedSignersFromDeal({
+          roles, contact, additionalContacts: extraContacts,
+          activeAgent, agents: dealAgents, side,
+        })
+        setSigners(seeded)
+        setAutoFilled(roles.filter(r => seeded[r.index]?.name || seeded[r.index]?.email).map(r => r.index))
+        setShowAllRoles(false)
 
         const seededValues = {}
         for (const f of fields) seededValues[f.id] = tokenVals[f.id] || ''
@@ -1735,6 +1784,15 @@ function SendFromTemplateModal({
   }
 
   const fields = details?.fields || []
+
+  // Which signer rows to render. Default: just the ones the CRM auto-filled
+  // (keeping each role's original index/colour). If nothing could be seeded —
+  // no contact on the deal — show them all rather than an empty Signers block.
+  const allRoles   = (details?.roles || []).map((role, i) => ({ role, i }))
+  const shownRoles = (showAllRoles || !autoFilled.length)
+    ? allRoles
+    : allRoles.filter(({ role }) => autoFilled.includes(role.index))
+  const hiddenRoleCount = allRoles.length - shownRoles.length
 
   // Step 2 — BoldSign's embedded prepare/send UI (replaces our own send popup).
   if (embedUrl) {
@@ -1803,6 +1861,12 @@ function SendFromTemplateModal({
               Showing templates for {dealState}{matched.length ? '' : ' — none registered for this state yet, showing all'}.
             </div>
           )}
+          {/* Compliance guard: state-specific forms are not interchangeable. */}
+          {dealState && tpl?.state && normalizeState(tpl.state) !== dealState && (
+            <div style={{ fontSize:11, color:'#8a6100', marginTop:6, fontWeight:600 }}>
+              This is a {normalizeState(tpl.state)} form on an {dealState} deal — confirm it's the right one before sending.
+            </div>
+          )}
           {tpl?.source === 'boldsign' && (
             <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
               Listed straight from your BoldSign account — not registered in Form Library yet,
@@ -1820,22 +1884,40 @@ function SendFromTemplateModal({
 
         {!loadingDet && details && (
           <>
-            {/* One signer input per template role; leave a role blank to omit it. */}
+            {/* Only the rows the CRM filled are shown — a purchase-agreement
+                template carries every role for both sides, and rendering five
+                empty rows made agents think they had something to fill in. The
+                rest stay one click away and are dropped from the send if blank. */}
             <div className="form-group">
               <label className="form-label required">Signers</label>
-              {details.roles.map((r, i) => (
-                <div key={r.index} style={{ marginBottom:10 }}>
-                  <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:4 }}>
-                    <span style={{ display:'inline-flex', width:18, height:18, borderRadius:'50%', background:SIGNER_COLORS[i]||'#6b7280', color:'#fff', alignItems:'center', justifyContent:'center', fontSize:10, marginRight:6 }}>{r.index}</span>
-                    {r.name}
+              {shownRoles.map(({ role: r, i }) => {
+                const missingEmail = (signers[r.index]?.name || '').trim() && !(signers[r.index]?.email || '').trim()
+                return (
+                  <div key={r.index} style={{ marginBottom:10 }}>
+                    <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:4 }}>
+                      <span style={{ display:'inline-flex', width:18, height:18, borderRadius:'50%', background:SIGNER_COLORS[i]||'#6b7280', color:'#fff', alignItems:'center', justifyContent:'center', fontSize:10, marginRight:6 }}>{r.index}</span>
+                      {r.name}
+                    </div>
+                    <div style={{ display:'flex', gap:8 }}>
+                      <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={signers[r.index]?.name || ''} onChange={e => setSigner(r.index, 'name', e.target.value)}/>
+                      <input className="form-control" style={{ flex:1, ...(missingEmail ? { borderColor:'var(--gw-amber)' } : {}) }} placeholder="Email" type="email" value={signers[r.index]?.email || ''} onChange={e => setSigner(r.index, 'email', e.target.value)}/>
+                    </div>
+                    {missingEmail && (
+                      <div style={{ fontSize:11, color:'#8a6100', marginTop:4 }}>
+                        No email on file for this person — add one to include them in this send.
+                      </div>
+                    )}
                   </div>
-                  <div style={{ display:'flex', gap:8 }}>
-                    <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={signers[r.index]?.name || ''} onChange={e => setSigner(r.index, 'name', e.target.value)}/>
-                    <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={signers[r.index]?.email || ''} onChange={e => setSigner(r.index, 'email', e.target.value)}/>
-                  </div>
-                </div>
-              ))}
-              <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Roles left blank are removed from this send.</div>
+                )
+              })}
+              {hiddenRoleCount > 0 && (
+                <button className="btn btn--ghost btn--sm" style={{ padding:'2px 4px', fontSize:12 }} onClick={() => setShowAllRoles(true)}>
+                  + Add another signer ({hiddenRoleCount} more role{hiddenRoleCount === 1 ? '' : 's'} on this template)
+                </button>
+              )}
+              {showAllRoles && (
+                <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Roles left blank are removed from this send.</div>
+              )}
             </div>
 
             {/* Editable, CRM-prefilled detail fields the sellers see filled in. */}
@@ -2263,7 +2345,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
-        <SignaturesTab deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} activeAgent={activeAgent} />
+        <SignaturesTab deal={deal} contacts={contacts} properties={properties} agents={agents} extraContacts={extraContacts} activeAgent={activeAgent} />
       )}
 
       {/* Client Portal tab */}

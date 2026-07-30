@@ -152,14 +152,25 @@ Two bugs made this flow unusable/unreliable, both fixed in `src/pages/FormLibrar
 - `loadTemplates()` reads whole `form_packets` rows and filters with `sendableTemplates()` (unit-tested) instead of naming `boldsign_template_id`/`doc_type`/`field_tokens`/`active` in the select — the named select fails with `42703` on a database that hasn't run migration 0019 and silently empties the list. `active` counts as true unless it's explicitly `false`, so a row predating the column still shows.
 - Two fallbacks: a read error retries against the retired `boldsign_templates` registry, and an empty catalog falls back to `template-list` (the BoldSign account's own templates, normalized by `normalizeBoldsignTemplates()`) so an agent can still send while an admin fixes the catalog. Templates from that fallback are labelled in the picker — they carry no state or field tokens.
 
-## Signer auto-fill (Send from Template)
-When an agent picks a template on a deal's Signatures tab, the signer name/email rows are pre-filled by `seedSignersFromDeal()` (`src/lib/services/boldsign.js`, unit-tested):
-- A role whose name mentions **agent** → the acting agent.
-- **Client-type roles** (seller/buyer/client/owner/purchaser/grantor/grantee/landlord/tenant/lessor/lessee/borrower/customer/signer) → the deal's people, in order: the **primary contact** (`deals.contact_id`), then any **Additional Contacts** linked to the deal (`deal_contacts` — migration 0021), so a template with two signer roles gets the primary and the co-buyer/spouse, each with their own email.
-- If no additional contacts are linked but the primary contact has a stored **spouse name**, that fills a second client role (name only — spouse email isn't stored).
-- Any other role (e.g. Witness) keeps the template's placeholder.
+## Signer auto-fill (both send flows)
+Nothing about the parties is typed by hand. Everyone is resolved from data the deal drawer has already loaded — no extra query, so a co-agent simply appears in the recipient list with no field to fill in.
 
-The agent can edit every field before sending. **Prerequisite:** the deal must have a linked Contact (`deals.contact_id`) with an email — if a deal has no contact, client rows fall back to the template placeholder (usually blank). Link co-signers via the deal drawer's **Additional Contacts** picker so they seed with real emails.
+**Who is on the deal** (`src/lib/services/boldsign.js`, all unit-tested and pure):
+- `resolveDealAgents({ deal, property, agents, activeAgent })` → licensees in signing order: `deals.agent_id` first, then co-agents from the linked property's **`properties.details.co_agent_ids`** (set in the Properties drawer), then a legacy deal-level `co_agent_ids` if present. Deduped by email. `activeAgent` is only a fallback for a deal with no agent — an admin opening someone else's deal never replaces the agent of record on the paperwork.
+- `dealClientSigners({ contact, additionalContacts })` → clients in order: the **primary contact** (`deals.contact_id`), then each **Additional Contact** linked to the deal (`deal_contacts`, migration 0021), then the primary's stored **`spouse_name`** as a last resort (name only — no email on file). Deduped by lower-cased email.
+- `dealSide(deal)` → `'buyer' | 'seller' | ''` from **`deals.comp_data.transaction_type`** (the Details tab's side toggle).
+
+**How rows are matched** — `roleKind(name)` classifies each template role as `{ party: 'agent' | 'client' | 'other', side: 'buyer' | 'seller' | '' }`. "Broker" is deliberately *not* an agent keyword (that row is the broker of record). `seedSignersFromDeal()` then fills:
+- agent roles ← the agent list, in order (two agents fill *both* the Buyer Agent and Co-buyer agent rows);
+- client roles ← the client list, in order (two buyers fill Buyer and Co-buyer);
+- **our side first, side-agnostic roles second, and never the opposite side** when `side` is known — a buyer-side deal cannot drop the buyer into the template's Seller row. With no side on the deal, every client/agent role is eligible in template order (the pre-side behavior).
+- Anything else (Witness, Notary) keeps the template's own placeholder.
+
+**In the picker**, only the rows the CRM filled are rendered; the remaining roles sit behind **"+ Add another signer (N more roles on this template)"**. A 7-role purchase-agreement packet used to render five empty rows, which read as "these are mine to fill in". Blank roles are still removed from the send (`roleRemovalIndices`).
+
+**Missing email:** a party with a name but no email is seeded as a name-only row, flagged inline (*"No email on file for this person"*) — BoldSign requires an email per signer, so that row is dropped from the send unless one is added. In the ad-hoc **Send for Signature** flow the same people are named under the signer list instead of becoming a blank blocking row. Either way nobody is silently omitted.
+
+**Ad-hoc flow parity:** *Send for Signature* seeds one row per client-side signer (primary + additional contacts + the property owner when different), and the *"I need to sign as well"* box adds the deal agent **and** every co-agent at routing order 2.
 
 ## CRM prefill tokens
 `property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `broker_name` · `agent_name` · `agent_email` · `list_price` · `commission_pct` · `listing_start_date` · `listing_end_date` · `close_date`
