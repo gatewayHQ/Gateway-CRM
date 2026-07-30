@@ -27,6 +27,9 @@
 --   -- update deals d set co_agent_ids = '{}' where d.property_id is not null;
 -- ═════════════════════════════════════════════════════════════════════════════
 
+-- Runs in one transaction, so a failure anywhere leaves the database untouched.
+begin;
+
 -- 0. Create it if this is somehow a database that lacks it (fresh replica).
 alter table deals add column if not exists co_agent_ids uuid[] default '{}';
 
@@ -54,21 +57,24 @@ create index if not exists idx_deals_co_agent_ids on deals using gin (co_agent_i
 
 -- 4. Backfill from the linked property for deals that never got a roster.
 --    Only fills EMPTY rosters, so an explicitly-edited deal is never overwritten.
+--    The regex guard skips a malformed id in the jsonb rather than aborting the
+--    whole migration on a cast error.
 update deals d
 set co_agent_ids = sub.ids
 from (
   select p.id as property_id,
-         array_agg(distinct x.agent_id) as ids
+         array_agg(distinct x.aid) as ids
   from properties p
   cross join lateral (
-    select (jsonb_array_elements_text(p.details -> 'co_agent_ids'))::uuid as agent_id
+    select e::uuid as aid
+    from jsonb_array_elements_text(p.details -> 'co_agent_ids') e
+    where e ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
   ) x
   where jsonb_typeof(p.details -> 'co_agent_ids') = 'array'
   group by p.id
 ) sub
 where d.property_id = sub.property_id
-  and coalesce(array_length(d.co_agent_ids, 1), 0) = 0
-  and exists (select 1 from unnest(sub.ids) i where d.agent_id is null or i <> d.agent_id);
+  and coalesce(array_length(d.co_agent_ids, 1), 0) = 0;
 
 -- Re-strip the primary in case the backfill copied it in.
 update deals
@@ -86,6 +92,8 @@ where exists (
   select 1 from unnest(d.co_agent_ids) i
   where not exists (select 1 from agents a where a.id = i)
 );
+
+commit;
 
 -- ── Verification (run after applying) ────────────────────────────────────────
 -- Deals carrying a co-agent:

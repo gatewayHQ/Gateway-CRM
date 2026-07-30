@@ -48,24 +48,27 @@ end $$;
 create index if not exists idx_deals_co_agent_ids on deals using gin (co_agent_ids);
 
 -- ── Backfill: recover co-agents for deals converted before this fix ──────────
--- Only touches deals that (a) still have an empty roster, (b) are linked to a
--- property that carries co-agents, and (c) whose primary agent is excluded from
--- the copied list. Idempotent — re-running changes nothing once populated.
+-- Only touches deals that still have an empty roster and are linked to a
+-- property carrying co-agents, so an explicitly-edited deal is never
+-- overwritten. Idempotent — re-running changes nothing once populated. The
+-- regex guard skips a malformed id in the jsonb rather than aborting the whole
+-- migration on a cast error.
 update deals d
 set co_agent_ids = sub.ids
 from (
   select p.id as property_id,
-         array_agg(distinct x.agent_id) as ids
+         array_agg(distinct x.aid) as ids
   from properties p
   cross join lateral (
-    select (jsonb_array_elements_text(p.details -> 'co_agent_ids'))::uuid as agent_id
+    select e::uuid as aid
+    from jsonb_array_elements_text(p.details -> 'co_agent_ids') e
+    where e ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
   ) x
   where jsonb_typeof(p.details -> 'co_agent_ids') = 'array'
   group by p.id
 ) sub
 where d.property_id = sub.property_id
-  and coalesce(array_length(d.co_agent_ids, 1), 0) = 0
-  and exists (select 1 from unnest(sub.ids) i where d.agent_id is null or i <> d.agent_id);
+  and coalesce(array_length(d.co_agent_ids, 1), 0) = 0;
 
 -- Strip the primary out of anything the backfill copied in, so the check
 -- constraint above can never be tripped by our own backfill.
