@@ -34,8 +34,8 @@ async function selectInChunks(client, table, column, ids, order) {
 
 // IDs of deals the agent is co-listed on, from both sources:
 //   1. deals.co_agent_ids uuid[] — the canonical deal-level agent roster (see
-//      src/lib/agentRoster.js and migration 0024). Its query errors harmlessly
-//      on a database that predates 0024.
+//      src/lib/agentRoster.js and migration 0025). Its query errors harmlessly
+//      on a database that predates 0025.
 //   2. structured commission participants (jsonb containment:
 //      participants @> [{"agent_id": "..."}]) — who gets PAID, which can
 //      legitimately differ from the roster (a co-agent on a 0% split still

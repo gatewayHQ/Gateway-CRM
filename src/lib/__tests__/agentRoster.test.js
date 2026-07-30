@@ -26,7 +26,7 @@ describe('reading co-agents off each record', () => {
   })
   it('reads a deal co-agent list out of the uuid[] column', () => {
     expect(dealCoAgentIds({ co_agent_ids: ['a2', 'a3'] })).toEqual(['a2', 'a3'])
-    expect(dealCoAgentIds({})).toEqual([])           // column missing (pre-0024)
+    expect(dealCoAgentIds({})).toEqual([])           // column missing (pre-0025)
     expect(dealCoAgentIds({ co_agent_ids: null })).toEqual([])
   })
   it('puts the primary first on a property roster', () => {

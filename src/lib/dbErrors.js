@@ -67,7 +67,7 @@ export function friendlyDbError(error) {
 /**
  * True when `error` says the database doesn't have `column` — i.e. a migration
  * hasn't been applied yet. Lets a write retry without the new column instead of
- * failing outright (see Properties → Start Deal and migration 0024).
+ * failing outright (see Properties → Start Deal and migration 0025).
  *
  * Covers both shapes PostgREST produces:
  *   • 42703 undefined_column — `column "co_agent_ids" of relation "deals" does not exist`

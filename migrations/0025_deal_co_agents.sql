@@ -1,5 +1,5 @@
 -- ═════════════════════════════════════════════════════════════════════════════
--- 0024 — Dual-agent deals: deals.co_agent_ids
+-- 0025 — Dual-agent deals: deals.co_agent_ids
 --
 -- A property can be assigned to two agents (properties.details.co_agent_ids),
 -- but the deal created from it had nowhere to put the second one, so the

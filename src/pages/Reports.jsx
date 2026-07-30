@@ -1,8 +1,9 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useCallback } from 'react'
 import { formatCurrency, formatDate } from '../lib/helpers.js'
 import { CONTACT_SOURCES as SOURCES } from '../lib/enums.js'
 import { daysInStage, isRotting, daysBetween } from '../lib/pipeline.js'
 import { isOpenStage } from '../lib/stages.js'
+import { breakdownForDeal } from '../lib/commission.js'
 import { Avatar, Badge } from '../components/UI.jsx'
 
 const STAGE_LABELS = { lead:'Lead', qualified:'Qualified', showing:'Showing', offer:'Offer Made', 'under-contract':'Under Contract', closed:'Closed' }
@@ -26,6 +27,15 @@ export default function ReportsPage({ db, go }) {
   const commissions = db.commissions || []
   const agents      = db.agents      || []
 
+  // Agent earnings per closed deal come from the commission engine, so a deal
+  // priced with a flat fee (or the agent's own rate) rolls up correctly instead
+  // of being guessed at a blended percentage of value.
+  const commByDeal = useMemo(() => new Map(commissions.map(c => [c.deal_id, c])), [commissions])
+  const earningsFor = useCallback(
+    (deal) => breakdownForDeal(deal, commByDeal.get(deal.id), agents).agent_total,
+    [commByDeal, agents],
+  )
+
   const sourceStats = useMemo(() => {
     return SOURCES.map(source => {
       const sc = contacts.filter(c => (c.source || 'other') === source)
@@ -33,14 +43,11 @@ export default function ReportsPage({ db, go }) {
       const sd = deals.filter(d => ids.has(d.contact_id))
       const closed = sd.filter(d => d.stage === 'closed')
       const closedValue = closed.reduce((s, d) => s + (d.value || 0), 0)
-      const closedIds = new Set(closed.map(d => d.id))
-      const agentEarnings = commissions
-        .filter(c => closedIds.has(c.deal_id))
-        .reduce((s, c) => s + (c.agent_take || 0), 0) || closedValue * 0.021
+      const agentEarnings = closed.reduce((s, d) => s + earningsFor(d), 0)
       const convRate = sc.length > 0 ? Math.round(closed.length / sc.length * 100) : 0
       return { source, count: sc.length, closedCount: closed.length, closedValue, agentEarnings, convRate }
     }).filter(s => s.count > 0)
-  }, [contacts, deals, commissions])
+  }, [contacts, deals, earningsFor])
 
   const totalContacts  = contacts.length
   const closedDeals    = deals.filter(d => d.stage === 'closed')
@@ -316,7 +323,7 @@ export default function ReportsPage({ db, go }) {
       <div className="card" style={{ marginBottom: 24, padding: 0, overflow: 'hidden' }}>
         <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--gw-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ fontWeight: 600, fontSize: 14 }}>Lead Source ROI</div>
-          <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>Est. agent earnings = closed value × 2.1% (or commission records)</div>
+          <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>Agent earnings from each deal's commission — the office's split, or the agent's rate / flat fee</div>
         </div>
         {sourceStats.length === 0 ? (
           <div style={{ padding: '40px 24px', textAlign: 'center', color: 'var(--gw-mist)' }}>

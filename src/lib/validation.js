@@ -19,6 +19,40 @@ export function validateRequired(value, label = 'This field') {
 }
 
 /**
+ * The agent-set compensation on a deal: EITHER a commission rate (%) OR a flat
+ * fee ($) — never both. `type` decides which amount is read, so the other one
+ * is ignored entirely (that's what makes the two options mutually exclusive).
+ *
+ *   validateAgentComp({ type: 'rate', rate_pct: '3' })      → valid
+ *   validateAgentComp({ type: 'flat', flat: '' })           → "Flat fee is required"
+ *   validateAgentComp({ type: 'rate', rate_pct: '120' })    → out of range
+ *
+ * `required: false` accepts a completely empty entry (legacy deals that predate
+ * the field, where the office still prices the transaction by hand).
+ */
+export function validateAgentComp({ type, rate_pct, flat } = {}, { required = true } = {}) {
+  const raw   = type === 'flat' ? flat : rate_pct
+  const empty = raw === '' || raw === null || raw === undefined
+  const label = type === 'flat' ? 'Flat fee' : 'Commission rate'
+
+  if (empty) {
+    return required
+      ? { valid: false, error: `${label} is required` }
+      : { valid: true, error: null }
+  }
+  if (type !== 'rate' && type !== 'flat') {
+    return { valid: false, error: 'Choose a commission rate or a flat fee' }
+  }
+
+  const n = Number(raw)
+  if (!Number.isFinite(n))       return { valid: false, error: `${label} must be a number` }
+  if (n <= 0)                    return { valid: false, error: `${label} must be greater than 0` }
+  if (type === 'rate' && n > 100) return { valid: false, error: 'Commission rate must be between 0 and 100%' }
+
+  return { valid: true, error: null }
+}
+
+/**
  * Run multiple validators, return { valid, errors: Record<field, error> }.
  *   const result = validateForm(form, {
  *     first_name: [v => validateRequired(v, 'First name')],

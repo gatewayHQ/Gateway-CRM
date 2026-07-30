@@ -44,6 +44,7 @@ applied to production and the findings, so the repo's history matches reality.
 | 2026-07-17 | `2026-07-17_boldsign_identity_default.sql` | **PENDING** — apply with the sender-identity management deploy. Adds `boldsign_sender_identities.is_default` (org-wide OnBehalfOf fallback) with a partial unique index. Idempotent. |
 | 2026-07-17 | `2026-07-17_multi_contacts.sql` | **PENDING** — apply with the multi-contact deploy. Adds `deal_contacts` + `property_contacts` junction tables (additional contacts on a deal/property). ⚠ Production already has a legacy `deal_contacts` of unknown shape — `create table if not exists` won't alter it, so verify it has `(deal_id, contact_id)` + a unique constraint before/after applying (see the file header). Idempotent. |
 | 2026-07-17 | `2026-07-17_form_packet_multi_file.sql` | **PENDING** — apply with the package-template deploy. Adds `form_packets.storage_paths` (jsonb) so a template can hold several source PDFs. Additive; the Form Library save degrades gracefully until it's applied. Idempotent. |
+| 2026-07-27 | `2026-07-27_deal_agent_compensation.sql` | **PENDING** — apply with the agent-compensation deploy. Adds `deals.agent_comp_type` / `agent_comp_rate_pct` / `agent_comp_flat` + CHECK guards, and the `deals_guard_agent_comp` trigger (write-once for agents; admins and the service key keep full control). Additive — every existing deal keeps the firm default rate until an agent sets a value, and admin-saved commission rows always win. The deal form degrades to "office prices it" until applied. Idempotent. |
 | 2026-07-29 | `2026-07-29_deal_co_agents.sql` | **PENDING** — apply with the dual-agent deploy. Production already HAS `deals.co_agent_ids`; this normalizes nulls, adds `deals_co_agents_exclude_primary` + a GIN index, and backfills deals converted from a two-agent property before the carry-over fix. Additive; the app degrades gracefully (reads fall back to the property) until it's applied. Idempotent. |
 
 The bundle: creates `documents` (secure from day one), adds the missing
@@ -60,7 +61,7 @@ repo-schema version did not have; the app reads both that and
 > `app_visible_deal_ids()` branch could be dropped. **Do not do this.**
 > `deals.co_agent_ids` is now the canonical deal-level agent roster — it is what
 > carries both agents from a Property onto a Deal and onto generated paperwork
-> (`migrations/0024`, `src/lib/agentRoster.js`). `commissions.participants`
+> (`migrations/0025`, `src/lib/agentRoster.js`). `commissions.participants`
 > answers a different question: who gets *paid*, which is admin-only data and
 > can legitimately differ from who is *on* the deal (a co-agent with a 0% split
 > still signs the listing agreement). Both stay; the visibility branch stays.

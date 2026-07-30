@@ -11,6 +11,8 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
+import { DEFAULTS as COMM_DEFAULTS, dealCompPayload, DEAL_COMP_COLUMNS } from '../lib/commission.js'
+import { validateAgentComp } from '../lib/validation.js'
 import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -1964,8 +1966,14 @@ async function syncDealContacts(dealId, contactIds) {
   } catch (e) { console.error('[syncDealContacts]', e) }
 }
 
-export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, onSave, initialTab = 'details' }) {
-  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', co_agent_ids:[], stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
+export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, isAdmin = false, onSave, initialTab = 'details' }) {
+  const blank = {
+    title:'', contact_id:'', property_id:'', agent_id:'', co_agent_ids:[], stage:'lead', value:'', probability:0,
+    expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{},
+    // The agent's own compensation on this deal — a rate by default, pre-filled
+    // with the firm's typical one-side rate so the common case needs no typing.
+    agent_comp_type: 'rate', agent_comp_rate_pct: COMM_DEFAULTS.GROSS_PCT, agent_comp_flat: '',
+  }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
@@ -1978,12 +1986,17 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
     // carry-over fix — seed the editor from the property so simply opening and
     // saving the deal materializes the roster instead of silently blanking it.
     const linkedProp = deal?.property_id ? properties.find(p => p.id === deal.property_id) : null
-    setForm(deal
-      ? { ...blank, ...deal,
-          co_agent_ids: dealRosterIds(deal, linkedProp).filter(id => id !== deal.agent_id),
-          expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '',
-          comp_data: deal.comp_data || {} }
-      : blank)
+    setForm(deal ? {
+      ...blank, ...deal,
+      co_agent_ids: dealRosterIds(deal, linkedProp).filter(id => id !== deal.agent_id),
+      expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '',
+      comp_data: deal.comp_data || {},
+      // Never pre-fill a rate onto a saved deal that has none — an untouched
+      // save must leave its compensation exactly as the office left it.
+      agent_comp_type:     deal.agent_comp_type || 'rate',
+      agent_comp_rate_pct: deal.agent_comp_rate_pct ?? '',
+      agent_comp_flat:     deal.agent_comp_flat ?? '',
+    } : blank)
     setErrors({})
     setTab(deal?.id ? initialTab : 'details')
     setAdditionalContactIds(
@@ -2016,9 +2029,39 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
   const COMM_SUBTYPES = ['multifamily','office','land','retail','industrial','mixed-use']
 
+  const isExisting = !!deal?.id
+  const isNew      = !isExisting
+  // ── Who may touch the agent's compensation on this deal ───────────────────
+  // Mirrors the database trigger from migration 0024: the deal's own agent sets
+  // it at creation (or fills it in on a pre-0024 deal), admins keep full
+  // control forever, and nobody else — a co-listed agent or a sharing team peer
+  // who can otherwise edit this deal — sees or changes another agent's cut.
+  const ownsDeal    = isNew || (!!activeAgent?.id && deal?.agent_id === activeAgent.id)
+  const canSeeComp  = isAdmin || ownsDeal
+  const canEditComp = isAdmin || isNew || (ownsDeal && !deal?.agent_comp_type)
+  const compIsFlat  = form.agent_comp_type === 'flat'
+  // Live "what this is worth" preview — a flat fee is the number itself; a rate
+  // needs a deal value to mean anything.
+  const compEstimate = (() => {
+    const amt = Number(compIsFlat ? form.agent_comp_flat : form.agent_comp_rate_pct)
+    if (!Number.isFinite(amt) || amt <= 0) return 0
+    if (compIsFlat) return amt
+    const val = Number(form.value)
+    return Number.isFinite(val) && val > 0 ? val * amt / 100 : 0
+  })()
+
   const save = async () => {
     const e = {}
     if (!form.title.trim()) e.title = true
+    // Compensation is required on a new deal; on an existing one an empty value
+    // is left alone (legacy deals the office still prices by hand).
+    if (canEditComp) {
+      const comp = validateAgentComp(
+        { type: form.agent_comp_type, rate_pct: form.agent_comp_rate_pct, flat: form.agent_comp_flat },
+        { required: isNew },
+      )
+      if (!comp.valid) e.agent_comp = comp.error
+    }
     setErrors(e)
     if (Object.keys(e).length > 0) return
     setSaving(true)
@@ -2040,6 +2083,9 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         prop_category:       form.prop_category || null,
         prop_subtype:        form.prop_subtype  || null,
         comp_data:           form.comp_data     || null,
+        // Agent-set compensation (rate OR flat, never both). Sent on every save
+        // so admin edits land too; the DB trigger freezes it for everyone else.
+        ...dealCompPayload(form),
       }
       const write = async (body) => {
         if (deal?.id) {
@@ -2050,13 +2096,29 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         return { error, id: data?.id }
       }
       let { error, id: savedId } = await write(payload)
-      // No co_agent_ids column yet (migration 0024 not applied) — save the rest
-      // rather than losing the edit, and be explicit that the roster didn't stick.
-      if (error && isUnknownColumnError(error, 'co_agent_ids')) {
-        const { co_agent_ids, ...withoutRoster } = payload
-        ;({ error, id: savedId } = await write(withoutRoster))
-        if (!error && co_agent_ids.length) {
-          pushToast('Saved, but co-agents need migration 0024 applied before they persist on the deal.', 'error')
+
+      // Two independent migrations add columns this form writes: 0024 (agent
+      // compensation) and 0025 (co-agent roster). A database missing either must
+      // not cost the agent their edit. Postgres names ONE unknown column per
+      // error, so strip what it names and retry until it saves or fails for some
+      // other reason — otherwise a database missing both would still error.
+      const dropped = new Set()
+      for (let attempt = 0; error && attempt < 3; attempt++) {
+        const msg = `${error.message || ''} ${error.details || ''}`
+        if (isUnknownColumnError(error, 'co_agent_ids')) dropped.add('co_agent_ids')
+        else if (isUnknownColumnError(error) && /agent_comp/i.test(msg)) {
+          for (const col of DEAL_COMP_COLUMNS) dropped.add(col)
+        } else break
+        const bare = { ...payload }
+        for (const col of dropped) delete bare[col]
+        ;({ error, id: savedId } = await write(bare))
+      }
+      if (!error && dropped.size) {
+        if (dropped.has('co_agent_ids') && (payload.co_agent_ids || []).length) {
+          pushToast('Saved, but co-agents need migration 0025 applied before they persist on the deal.', 'error')
+        }
+        if (DEAL_COMP_COLUMNS.some(col => dropped.has(col))) {
+          pushToast('Saved — ask an admin to apply migration 0024 to store your commission', 'error')
         }
       }
       if (error) { pushToast(friendlyDbError(error) || error.message, 'error'); return }
@@ -2074,8 +2136,6 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       setSaving(false)
     }
   }
-
-  const isExisting = !!deal?.id
 
   return (
     <Drawer open={open} onClose={onClose} title={deal?.id ? (form.title || 'Edit Deal') : 'Add Deal'} width={500}>
@@ -2168,6 +2228,68 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
               value={form.co_agent_ids || []}
               onChange={ids => set('co_agent_ids', ids)}
             />
+
+            {/* ── My Compensation ───────────────────────────────────
+                Set once by the agent creating the deal: EITHER a commission
+                rate OR a flat fee. It becomes the default the commission engine
+                uses — the office no longer has to open the transaction just to
+                record the cut. Splits, overrides and any later change stay with
+                the admins (Back Office → Commission). */}
+            {canSeeComp && (
+              <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
+                <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:12 }}>
+                  {isAdmin && !ownsDeal ? 'Agent Compensation' : 'My Compensation'}
+                </div>
+
+                {/* Rate vs flat fee — mutually exclusive by construction */}
+                <div className="form-group">
+                  <label className="form-label required">How am I paid on this deal?</label>
+                  <div role="radiogroup" aria-label="Compensation type" style={{ display:'flex', gap:0, border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
+                    {[['rate','Commission rate (%)'],['flat','Flat fee ($)']].map(([type, label]) => (
+                      <button key={type} type="button" role="radio" aria-checked={form.agent_comp_type === type}
+                        disabled={!canEditComp}
+                        onClick={() => setForm(p => ({ ...p, agent_comp_type: type }))}
+                        style={{ flex:1, padding:'7px 0', border:'none', cursor: canEditComp ? 'pointer' : 'default', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, transition:'all 150ms',
+                          background: form.agent_comp_type === type ? 'var(--gw-slate)' : '#fff',
+                          color:      form.agent_comp_type === type ? '#fff'            : 'var(--gw-mist)',
+                          opacity:    canEditComp || form.agent_comp_type === type ? 1 : 0.6 }}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Only the chosen field is rendered — there is never a stale
+                    value from the other option sitting on screen. */}
+                <div className="form-group">
+                  <label className="form-label required">{compIsFlat ? 'Flat fee (USD)' : 'Commission rate (%)'}</label>
+                  <input
+                    className={`form-control${errors.agent_comp ? ' error' : ''}`}
+                    type="number" min="0" step={compIsFlat ? '100' : '0.1'} {...(compIsFlat ? {} : { max: '100' })}
+                    disabled={!canEditComp}
+                    value={compIsFlat ? (form.agent_comp_flat ?? '') : (form.agent_comp_rate_pct ?? '')}
+                    onChange={e => set(compIsFlat ? 'agent_comp_flat' : 'agent_comp_rate_pct', e.target.value)}
+                    placeholder={compIsFlat ? '2500' : String(COMM_DEFAULTS.GROSS_PCT)}
+                  />
+                  {errors.agent_comp && <div style={{ fontSize:11, color:'var(--gw-red)', marginTop:4 }}>{errors.agent_comp}</div>}
+                  {!errors.agent_comp && (
+                    <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>
+                      {compEstimate
+                        ? <>Gross commission on this deal: <strong>{formatCurrency(compEstimate)}</strong>{!compIsFlat && Number(form.value) > 0 && <> ({form.agent_comp_rate_pct}% of {formatCurrency(Number(form.value))})</>}</>
+                        : canEditComp
+                          ? 'Your cut on this deal — the office can still adjust or split it later.'
+                          : 'Set when this deal was created. Ask the office to change it.'}
+                    </div>
+                  )}
+                </div>
+
+                {!canEditComp && (
+                  <div style={{ fontSize:11, color:'var(--gw-mist)', background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'7px 10px', marginTop:-4 }}>
+                    Locked — commission changes, splits and overrides are handled by the office.
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* ── Comp Data ─────────────────────────────────────── */}
             <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
@@ -2713,7 +2835,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                     const agent      = agentMap[deal.agent_id]
                     const dealProp   = deal.property_id ? propertyMap[deal.property_id] : null
                     // Roster = deal.agent_id + deal.co_agent_ids, falling back to
-                    // the property for deals converted before 0024. See agentRoster.js.
+                    // the property for deals converted before 0025. See agentRoster.js.
                     const allAgents  = dealRoster(deal, agentMap, dealProp)
                     const overdue    = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
                     const urgency    = getKeyDateUrgency(deal)
@@ -2941,7 +3063,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
       <DealDrawer open={drawer} onClose={() => setDrawer(false)}
         deal={editing ? editing : { stage: defaultStage }}
-        agents={agents} contacts={contacts} properties={properties} dealContacts={dealContacts} activeAgent={activeAgent} onSave={reload} />
+        agents={agents} contacts={contacts} properties={properties} dealContacts={dealContacts} activeAgent={activeAgent} isAdmin={isAdmin} onSave={reload} />
       {confirm && <ConfirmDialog message="This will permanently delete this deal." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {confirmProp && <ConfirmDialog message="Remove this listing from the pipeline? Any linked deals are kept but will be unlinked from the property." onConfirm={() => delProperty(confirmProp)} onCancel={() => setConfirmProp(null)} />}
     </div>

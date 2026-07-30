@@ -9,7 +9,7 @@
 //     modal's co-agent picker. Lives in `details` because properties predate the
 //     co-listing feature; it holds live production data, so it stays.
 //   • deals.co_agent_ids (uuid[])                    — the deal-level roster.
-//     Legacy in production, added to the repo schema by migration 0024.
+//     Legacy in production, added to the repo schema by migration 0025.
 //   • commissions.participants (jsonb)               — who gets PAID. Admin-only
 //     data and driven by commission math, so it is deliberately NOT an input
 //     here; it is a downstream consequence of the roster, not its definition.
@@ -48,7 +48,7 @@ export function propertyRosterIds(property) {
  *
  * The deal's own co_agent_ids win outright. Only when the deal carries none do
  * we fall back to the linked property — that covers deals created before this
- * fix (and before migration 0024 reached the database), so nothing silently
+ * fix (and before migration 0025 reached the database), so nothing silently
  * loses its second agent. Once a deal has its own roster, removing an agent
  * from the property no longer rewrites deal history.
  */

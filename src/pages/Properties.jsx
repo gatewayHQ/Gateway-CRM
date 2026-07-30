@@ -891,7 +891,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       value:       form.list_price ? Number(form.list_price) : null,
     }
     let { data, error } = await supabase.from('deals').insert([dealPayload]).select().single()
-    // Databases that haven't had migration 0024 applied have no co_agent_ids
+    // Databases that haven't had migration 0025 applied have no co_agent_ids
     // column. Don't lose the deal over it — retry without the roster column and
     // say so out loud, rather than reporting success on a half-transferred deal.
     // (Reads still recover both agents via the property fallback in agentRoster.)
@@ -921,12 +921,12 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       summary: transferred
         ? `Deal created from property with ${1 + landed.length} agent(s): ${rosterNames([data?.agent_id, ...landed], agents).join(', ') || '—'}`
         : migrationMissing
-          ? `Deal created from property but co-agents could not be stored — migration 0024 is not applied (expected ${roster.co_agent_ids.length} co-agent(s))`
+          ? `Deal created from property but co-agents could not be stored — migration 0025 is not applied (expected ${roster.co_agent_ids.length} co-agent(s))`
           : `Deal created from property but the agent roster did not transfer in full (expected ${roster.co_agent_ids.length} co-agent(s), saved ${landed.length})`,
     })
     if (!transferred && roster.co_agent_ids.length) {
       pushToast(migrationMissing
-        ? 'Deal created, but co-agents could not be saved on it — ask an admin to apply migration 0024. The pipeline card still shows both agents from the property.'
+        ? 'Deal created, but co-agents could not be saved on it — ask an admin to apply migration 0025. The pipeline card still shows both agents from the property.'
         : 'Heads up: the co-agent(s) may not have transferred to the deal — check the Team column on the pipeline card.', 'error')
     }
 
@@ -961,7 +961,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     // The primary is resolved BEFORE the co-agent list is cleaned, because it can
     // fall back to the acting agent — who may already be sitting in co_agent_ids.
     // Leaving them in both places is what produced the legacy rows that tripped
-    // deals_co_agents_exclude_primary during the 0024 backfill, so strip the
+    // deals_co_agents_exclude_primary during the 0025 backfill, so strip the
     // primary out of the co-agent list on every write.
     const resolvedAgentId = form.assigned_agent_id || activeAgent?.id || null
     const payload = {

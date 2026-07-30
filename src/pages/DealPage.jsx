@@ -5,7 +5,7 @@ import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx
 import { formatCurrency, formatDate, formatPhone, STAGE_LABELS } from '../lib/helpers.js'
 import { dealRosterIds } from '../lib/agentRoster.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
-import { breakdownForDeal } from '../lib/commission.js'
+import { breakdownForDeal, dealCompensation } from '../lib/commission.js'
 import { DealDrawer } from './Pipeline.jsx'
 import { getClosingGate, gateBadge } from '../lib/compliance.js'
 import { audit, useDealAudit } from '../lib/audit.js'
@@ -145,7 +145,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   }, [dealId, isAdmin])
 
   // Everyone on the deal: the roster (primary + co-agents, with the property
-  // fallback for deals converted before migration 0024) plus any commission
+  // fallback for deals converted before migration 0025) plus any commission
   // participant not already on it. Participants are admin-only data, so a
   // non-admin sees exactly the roster — which is now the same list the pipeline
   // card and the paperwork use. See src/lib/agentRoster.js.
@@ -157,6 +157,12 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     ].filter(Boolean)
     return [...new Set(ids)].map(id => agents.find(a => a.id === id)).filter(Boolean)
   }, [deal, property, breakdown, agents])
+
+  // The agent's own entry on the deal (rate or flat fee). Visible to the deal's
+  // agent and to admins — never to another agent looking at a shared deal.
+  const agentComp   = deal ? dealCompensation(deal) : null
+  const canSeeComp  = isAdmin || (!!activeAgent?.id && deal?.agent_id === activeAgent.id)
+
   const myTake = useMemo(() => {
     if (isAdmin && breakdown && activeAgent) {
       return breakdown.participants.filter(p => p.agent_id === activeAgent.id).reduce((s, p) => s + p.agent_take, 0)
@@ -505,9 +511,17 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
                 {!team.length && !agent && <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>Unassigned</div>}
               </div>
             </div>
-            {isAdmin && breakdown && (deal.value > 0) && (
+            {isAdmin && breakdown && (deal.value > 0 || breakdown.gross_total > 0) && (
               <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8, display: 'flex', gap: 16, fontSize: 12 }}>
                 <span>Gross comm: <strong>{formatCurrency(breakdown.gross_total)}</strong></span>
+                {breakdown.is_flat && <span style={{ color: 'var(--gw-mist)' }}>flat fee</span>}
+              </div>
+            )}
+            {canSeeComp && agentComp && (
+              <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8, fontSize: 12 }}>
+                {isAdmin && deal.agent_id !== activeAgent?.id ? 'Agent set' : 'My compensation'}:{' '}
+                <strong>{agentComp.type === 'flat' ? `${formatCurrency(agentComp.flat)} flat fee` : `${agentComp.rate_pct}% commission`}</strong>
+                {breakdown?.comp_source === 'admin' && <span style={{ color: 'var(--gw-mist)' }}> · the office's saved commission applies</span>}
               </div>
             )}
             {!isAdmin && myTake > 0 && (
@@ -757,7 +771,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
       </div>
 
       <DealDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} deal={deal} initialTab={drawerTab}
-        agents={agents} contacts={contacts} properties={properties} dealContacts={db.dealContacts || []} activeAgent={activeAgent} onSave={refreshDeal} />
+        agents={agents} contacts={contacts} properties={properties} dealContacts={db.dealContacts || []} activeAgent={activeAgent} isAdmin={isAdmin} onSave={refreshDeal} />
     </div>
   )
 }
