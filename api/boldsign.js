@@ -822,7 +822,10 @@ export default async function handler(req, res) {
         title:   documentName || emailSubject || 'Please sign this document',
         message: message || 'Please review and sign.',
         roles:   norm.roles,
-        ...(norm.roleRemovalIndices.length ? { roleRemovalIndices: norm.roleRemovalIndices } : {}),
+        // Both spellings — see the note on the embedded path above.
+        ...(norm.roleRemovalIndices.length
+          ? { roleRemovalIndices: norm.roleRemovalIndices, RoleRemovalIndices: norm.roleRemovalIndices }
+          : {}),
         ...(cc ? { cc } : {}),
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),   // BoldSign tags
         ...(onBehalfOf ? { onBehalfOf } : {}),
@@ -876,9 +879,15 @@ export default async function handler(req, res) {
         sendViewOption: 'PreparePage',   // land on the field-placement editor
         showToolbar:    true,
         redirectUrl:    redirectUrl || '',
-        // Kept for the endpoints that honor it; correctness no longer depends on
-        // it, since an unfilled role never reaches this point.
-        ...(norm.roleRemovalIndices.length ? { roleRemovalIndices: norm.roleRemovalIndices } : {}),
+        // Sent under BOTH spellings on purpose. BoldSign's docs show
+        // "RoleRemovalIndices" (PascalCase); we were sending only camelCase. A
+        // case-sensitive model binder silently ignores an unknown property, which
+        // would leave every unused role in place and produce exactly the
+        // "SignerName or SignerEmail is missing in roles" rejection. Whichever
+        // spelling the endpoint binds, one of these matches; the other is ignored.
+        ...(norm.roleRemovalIndices.length
+          ? { roleRemovalIndices: norm.roleRemovalIndices, RoleRemovalIndices: norm.roleRemovalIndices }
+          : {}),
         ...(cc ? { cc } : {}),
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),
         ...(onBehalfOf ? { onBehalfOf } : {}),

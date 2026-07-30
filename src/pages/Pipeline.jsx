@@ -1796,15 +1796,18 @@ function SendFromTemplateModal({
     setRoleError('')
     setSending(true)
 
-    // Attach each filled field value to the role that owns it (or the first
-    // filled role if the field isn't role-scoped). CRM-entered values are locked.
+    // Attach each filled field value to the role that owns it. A field owned by a
+    // role we're REMOVING is skipped entirely — it used to be re-attached to the
+    // first filled role, which meant sending (say) a Buyer-owned field as the
+    // Seller's, on a role whose fields are about to be dropped. Only unscoped
+    // fields fall back to the first signer.
     const firstIdx = filled[0].index
     const byRole = {}
     for (const f of (details.fields || [])) {
       const v = (values[f.id] || '').trim()
       if (!v) continue
-      const idx = (f.roleIndex && filled.some(r => r.index === f.roleIndex)) ? f.roleIndex : firstIdx
-      ;(byRole[idx] ||= []).push({ id: f.id, value: v, isReadOnly: true })
+      if (f.roleIndex && !filled.some(r => r.index === f.roleIndex)) continue   // owner is being removed
+      ;(byRole[f.roleIndex || firstIdx] ||= []).push({ id: f.id, value: v, isReadOnly: true })
     }
     // roleName travels with each row so the API can re-resolve a stale index
     // against the template's live role list. signerOrder is assigned server-side

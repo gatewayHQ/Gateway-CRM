@@ -316,3 +316,20 @@ describe('normalizeRolePayload — a subset send stays legal', () => {
     expect(out.unfilled.map(u => u.name)).toEqual(['Buyer'])
   })
 })
+
+describe('removal payload casing', () => {
+  it('normalizeRolePayload returns the indices the caller must send under both spellings', () => {
+    // The handler spreads these as roleRemovalIndices AND RoleRemovalIndices:
+    // BoldSign documents PascalCase, and a case-sensitive binder silently drops
+    // an unknown property, leaving every unused role in the send.
+    const out = normalizeRolePayload({
+      roles: [{ roleIndex: 1, roleName: 'Seller', signerName: 'Jean', signerEmail: 'j@x.com' }],
+      templateRoles: [
+        { index: 1, name: 'Seller' }, { index: 3, name: 'Co-seller' },
+        { index: 5, name: 'Buyer' },
+      ],
+    })
+    expect(out.roleRemovalIndices).toEqual([3, 5])
+    expect(out.unfilled.map(u => u.name)).toEqual(['Co-seller', 'Buyer'])
+  })
+})

@@ -178,6 +178,10 @@ BoldSign **will** refuse to drop a role that owns fields on the document — you
 
 > An earlier revision of this file claimed `roleRemovalIndices` is not honored on `createEmbeddedRequestUrl`, and the CRM was changed to demand a signer for every role. That was wrong — subset sends demonstrably work (the Purchase Agreement Packet drafts on 2212 Okoboji went out with two of eight roles filled) — and the hard block has been removed.
 
+**Property casing matters.** BoldSign documents this as `RoleRemovalIndices` (PascalCase). The CRM sends the array under **both** `roleRemovalIndices` and `RoleRemovalIndices` in the same payload: a case-sensitive model binder silently ignores an unknown property, and a silently-ignored removal list leaves every unused role in the send — producing exactly this error on every one-sided send while looking like a permissions problem. Duplicate-but-equal keys are last-wins for the usual JSON deserializers, so sending both is safe.
+
+**Prefill fields follow their owner.** A field owned by a role being removed is dropped from `existingFormFields` rather than re-attached to the first filled signer (which is what the code used to do — sending a Buyer-owned field as the Seller's).
+
 What the send path does:
 - attempts the send with whoever is on the deal, as it always did;
 - on a roles rejection, returns a CRM-authored 400 naming the roles BoldSign kept (`unremovableRolesError()`), with the vendor text alongside for the log. The picker expands those rows and shows the message inline instead of relaying "SignerName or SignerEmail is missing in roles";
