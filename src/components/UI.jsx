@@ -80,7 +80,29 @@ export function Badge({ variant, children }) {
 }
 
 // ─── MODAL ────────────────────────────────────────────────────────────────────
+// While any Drawer or Modal is open, flag it on <body> so the global Quick Add
+// FAB can get out of the way. The FAB is fixed bottom-right at z-index 500 —
+// above the drawer (151) and modal (200) — which is exactly where a footer puts
+// its primary action, so it sat on top of "Save Deal".
+//
+// Counted, not a boolean: a Modal can open from inside a Drawer (Send from
+// Template on the Signatures tab), and closing the inner one must not unhide the
+// FAB while the drawer is still up.
+let overlayCount = 0
+function useHideFabWhileOpen(open) {
+  useEffect(() => {
+    if (!open) return
+    overlayCount += 1
+    document.body.classList.add('gw-overlay-open')
+    return () => {
+      overlayCount = Math.max(0, overlayCount - 1)
+      if (overlayCount === 0) document.body.classList.remove('gw-overlay-open')
+    }
+  }, [open])
+}
+
 export function Modal({ open, onClose, children, width = 520 }) {
+  useHideFabWhileOpen(open)
   useEffect(() => {
     const handler = (e) => { if (e.key === 'Escape') onClose() }
     if (open) window.addEventListener('keydown', handler)
@@ -99,6 +121,7 @@ export function Modal({ open, onClose, children, width = 520 }) {
 
 // ─── DRAWER ───────────────────────────────────────────────────────────────────
 export function Drawer({ open, onClose, title, children, width = 480 }) {
+  useHideFabWhileOpen(open)
   useEffect(() => {
     const handler = (e) => { if (e.key === 'Escape') onClose() }
     if (open) window.addEventListener('keydown', handler)

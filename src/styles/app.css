@@ -627,6 +627,21 @@ select.form-control { cursor: pointer; }
   box-shadow: 0 3px 12px rgba(0,0,0,0.2); transition: transform 150ms;
 }
 .fab-option:hover { transform: translateX(-3px); }
+
+/* Quick Add is a whole-app shortcut, so it has no business floating over a
+   drawer or modal — and at z-index 500 it covered their footer buttons
+   ("Save Deal"). UI.jsx sets .gw-overlay-open on <body> while either is open.
+   Faded out rather than display:none so it doesn't pop when the overlay closes,
+   and pointer-events dropped so it can't be clicked through the backdrop. */
+body.gw-overlay-open .fab-wrap {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px) scale(0.9);
+}
+.fab-wrap {
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
 @media (max-width: 768px) {
   .fab-wrap { bottom: 82px; right: 20px; }
 }
