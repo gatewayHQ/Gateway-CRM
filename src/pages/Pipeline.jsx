@@ -1068,6 +1068,35 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
 //      signature + date field per signer and sends immediately via BoldSign
 //   3. BoldSign emails each signer; they sign in their browser
 //   4. BoldSign webhook hits /api/boldsign → status flips sent → completed
+// Same-origin landing page BoldSign redirects the iframe to when a flow ends.
+// Without this the iframe redirects to the deal URL and boots a nested copy of
+// the whole CRM inside itself. Mirrors FormLibrary's editor return URL.
+const BOLDSIGN_RETURN_URL = () => `${window.location.origin}/boldsign-return.html`
+
+// Never tell an agent a document was "Sent" without confirming it with BoldSign.
+// The embedded wizard can legitimately finish as a Draft (the agent saved instead
+// of sending), and reporting that as sent is how paperwork silently doesn't go
+// out. Reconciles the row to the real status and words the toast to match.
+async function reportBoldSignOutcome(documentId) {
+  if (!documentId) {
+    pushToast('Finished in BoldSign — use Refresh on the document to confirm its status', 'info')
+    return null
+  }
+  let status = null
+  try { ({ status } = await getDocStatus(documentId)) }
+  catch { /* status lookup is best-effort; fall through to the neutral message */ }
+
+  if (status && status !== 'draft' && status !== 'none') {
+    await supabase.from('boldsign_documents').update({ status }).eq('document_id', documentId)
+    pushToast('Sent for signature', 'success')
+  } else if (status === 'draft' || status === 'none') {
+    pushToast('Saved as a draft in BoldSign — it was NOT sent. Reopen it from this tab to finish sending.', 'info')
+  } else {
+    pushToast('Finished in BoldSign — use Refresh on the document to confirm its status', 'info')
+  }
+  return status
+}
+
 function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent, onClose, onSent }) {
   // Primary signer: contact linked directly to the deal
   const contact      = contacts?.find(c => c.id === deal?.contact_id)
@@ -1090,6 +1119,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const [sending,    setSending]   = React.useState(false)
   const [dragOver,   setDragOver]  = React.useState(false)
   const [embedUrl,   setEmbedUrl]  = React.useState(null)   // BoldSign prepare/send iframe URL
+  const docIdRef = React.useRef(null)                       // BoldSign documentId for the draft it just minted
   const [useTextTags, setUseTextTags] = React.useState(false)   // PDF already has {{...}} text tags baked in
   const fileRef = React.useRef()
 
@@ -1165,7 +1195,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
         documentBase64: base64,
         documentName:   finalDocName,
         signers:        signerPayload,
-        redirectUrl:    window.location.href,
+        redirectUrl:    BOLDSIGN_RETURN_URL(),
         useTextTags,
       })
     } catch (err) {
@@ -1188,6 +1218,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
         status:        'draft',
       }])
     }
+    docIdRef.current = data.documentId || null
     setEmbedUrl(data.url)
   }
 
@@ -1205,7 +1236,10 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
         <div className="modal__body" style={{ padding: 0 }}>
           <BoldSignFrame
             url={embedUrl}
-            onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
+            flow="document"
+            returnUrlMarker="boldsign-return"
+            onDone={() => reportBoldSignOutcome(docIdRef.current).finally(onSent)}
+            onDraft={() => pushToast('Draft saved — finish in the BoldSign window above to send it', 'info')}
             onError={() => pushToast('Send was cancelled in BoldSign', 'info')}
           />
         </div>
@@ -1266,7 +1300,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
                 return (
                   <div key={f.name} onClick={()=>{ setPickedFile(picked?'':f.name); if(!picked){setFile(null)} }}
                     style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', border:`1px solid ${picked?'var(--gw-azure)':'var(--gw-border)'}`, borderRadius:'var(--radius)', marginBottom:4, cursor:'pointer', background:picked?'var(--gw-sky)':'#fff' }}>
-                    <Icon name="file" size={13} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
+                    <Icon name="document" size={13} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
                     <span style={{ fontSize:12, flex:1, fontWeight:picked?700:400 }}>{name}</span>
                     {picked && <Icon name="check" size={13} style={{ color:'var(--gw-azure)' }}/>}
                   </div>
@@ -1509,7 +1543,7 @@ create policy "agent_notifications_policy" on agent_notifications
         <div style={{ display:'flex', gap:8 }}>
           {templates.length > 0 && (
             <button className="btn btn--secondary btn--sm" onClick={() => setTplOpen(true)}>
-              <Icon name="file" size={13}/> Send from Template
+              <Icon name="document" size={13}/> Send from Template
             </button>
           )}
           <button className="btn btn--primary btn--sm" onClick={() => setSendOpen(true)}>
@@ -1530,7 +1564,7 @@ create policy "agent_notifications_policy" on agent_notifications
               return (
                 <div key={env.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:8, background:'#fff', overflow:'hidden' }}>
                   <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px' }}>
-                    <Icon name="file" size={18} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
+                    <Icon name="document" size={18} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
                     <div style={{ flex:1, minWidth:0 }}>
                       <div style={{ fontSize:13, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{env.document_name || 'Document'}</div>
                       <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>
@@ -1615,6 +1649,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [templateId, setTemplateId] = React.useState(visible[0]?.template_id || '')
   const [subject,    setSubject]    = React.useState(`Please sign: ${deal?.title || 'Document'}`)
   const [embedUrl,   setEmbedUrl]   = React.useState(null)   // BoldSign prepare/send iframe URL
+  const docIdRef = React.useRef(null)                        // BoldSign documentId for the draft it just minted
   const [sending,    setSending]    = React.useState(false)
   const [details,    setDetails]    = React.useState(null)   // { roles, fields }
   const [loadingDet, setLoadingDet] = React.useState(false)
@@ -1688,8 +1723,9 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     try {
       // Open BoldSign's embedded prepare/send UI in-frame with the signers +
       // prefilled values passed through; the agent reviews and sends there.
-      const { url } = await templateEmbedUrl({ ...args, redirectUrl: window.location.href })
+      const { url, documentId } = await templateEmbedUrl({ ...args, redirectUrl: BOLDSIGN_RETURN_URL() })
       if (!url) { pushToast('BoldSign did not return a send URL', 'error'); return }
+      docIdRef.current = documentId || null
       setEmbedUrl(url)
     } catch (err) {
       pushToast(err.message, 'error')
@@ -1714,7 +1750,10 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         <div className="modal__body" style={{ padding: 0 }}>
           <BoldSignFrame
             url={embedUrl}
-            onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
+            flow="document"
+            returnUrlMarker="boldsign-return"
+            onDone={() => reportBoldSignOutcome(docIdRef.current).finally(onSent)}
+            onDraft={() => pushToast('Draft saved — finish in the BoldSign window above to send it', 'info')}
             onError={() => pushToast('Send was cancelled in BoldSign', 'info')}
           />
         </div>
