@@ -2025,6 +2025,143 @@ function SendFromTemplateModal({
   )
 }
 
+// ── Commission tab — where the deal's commission actually gets entered ────────
+// The compliance gate blocks closing on "Commission not entered" and its Fix
+// button pointed at a `commission` tab that didn't exist, so there was nowhere on
+// the deal to enter it — only the office-wide Commission page.
+//
+// Splits and participants stay back-office data: `commissions` is admin-only at
+// the RLS level (commissions_admin_only, 2026-06-12), and that policy is what
+// stops one agent reading another's pay. So this tab writes to whichever place
+// the caller is allowed to write:
+//   • admin  → the real commissions row (gross_pct clears the closing gate; the
+//              Commission page still owns splits/participants)
+//   • agent  → deals.comp_data.commission_pct, the rate they negotiated, for the
+//              office to confirm. No schema change and no privacy hole.
+function CommissionTab({ deal, isAdmin, onSaved }) {
+  const [pct,     setPct]     = React.useState('')
+  const [fee,     setFee]     = React.useState('')
+  const [notes,   setNotes]   = React.useState('')
+  const [rowId,   setRowId]   = React.useState(null)
+  const [loading, setLoading] = React.useState(true)
+  const [saving,  setSaving]  = React.useState(false)
+
+  React.useEffect(() => {
+    if (!deal?.id) return
+    let alive = true
+    ;(async () => {
+      setLoading(true)
+      const proposed = deal.comp_data?.commission_pct
+      if (isAdmin) {
+        const { data } = await supabase.from('commissions').select('*').eq('deal_id', deal.id).maybeSingle()
+        if (!alive) return
+        setRowId(data?.id || null)
+        // Seed from the agent's proposed rate when the office hasn't entered one.
+        setPct(String(data?.gross_pct ?? proposed ?? ''))
+        setFee(String(data?.transaction_fee ?? ''))
+        setNotes(data?.notes || '')
+      } else {
+        if (!alive) return
+        setPct(String(proposed ?? ''))
+      }
+      if (alive) setLoading(false)
+    })()
+    return () => { alive = false }
+  }, [deal?.id, isAdmin])
+
+  const rate  = Number(pct) || 0
+  const value = Number(deal?.value) || 0
+  const gross = value * rate / 100
+
+  const save = async () => {
+    if (rate <= 0)  { pushToast('Enter a commission rate above 0', 'error'); return }
+    if (rate > 100) { pushToast('A commission rate over 100% is not valid', 'error'); return }
+    setSaving(true)
+    try {
+      if (isAdmin) {
+        const payload = {
+          deal_id: deal.id, gross_pct: rate,
+          transaction_fee: Number(fee) || 0,
+          notes: notes.trim() || null,
+          updated_at: new Date().toISOString(),
+        }
+        const q = rowId
+          ? supabase.from('commissions').update(payload).eq('id', rowId).select('id')
+          : supabase.from('commissions').insert([payload]).select('id')
+        const { data, error } = await q
+        if (error) { pushToast(`Couldn't save: ${error.message}`, 'error'); return }
+        if (data?.[0]?.id) setRowId(data[0].id)
+        pushToast('Commission saved', 'success')
+      } else {
+        const comp = { ...(deal.comp_data || {}), commission_pct: rate }
+        const { error } = await supabase.from('deals').update({ comp_data: comp }).eq('id', deal.id)
+        if (error) { pushToast(`Couldn't save: ${error.message}`, 'error'); return }
+        pushToast('Commission rate recorded — the office finalizes the splits', 'success')
+      }
+      onSaved?.()
+    } finally { setSaving(false) }
+  }
+
+  if (loading) return <div style={{ padding:24, color:'var(--gw-mist)', fontSize:13 }}>Loading…</div>
+
+  return (
+    <div style={{ padding:16, overflowY:'auto', flex:1 }}>
+      <div className="form-row">
+        <div className="form-group">
+          <label className="form-label required">Gross Commission %</label>
+          <input className="form-control" type="number" step="0.01" min="0" max="100"
+            value={pct} onChange={e => setPct(e.target.value)} placeholder="3.0"/>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Gross Commission $</label>
+          <input className="form-control" readOnly value={gross ? formatCurrency(gross) : '—'}
+            style={{ background:'var(--gw-bone)' }}/>
+        </div>
+      </div>
+      <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:-6, marginBottom:14 }}>
+        {value > 0
+          ? <>Calculated on the deal value of {formatCurrency(value)}. Change that on the Details tab.</>
+          : <>Set a deal value on the Details tab and the dollar amount fills in here.</>}
+      </div>
+
+      {isAdmin && (
+        <>
+          <div className="form-group">
+            <label className="form-label">Transaction Fee $</label>
+            <input className="form-control" type="number" step="1" min="0" value={fee}
+              onChange={e => setFee(e.target.value)} placeholder="0"/>
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>
+              Flat brokerage fee for this deal, split across the agents on it and charged on top of cap.
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Notes</label>
+            <textarea className="form-control" rows={3} value={notes} onChange={e => setNotes(e.target.value)}
+              placeholder="Referral, rebate, anything the office needs to know…"/>
+          </div>
+          <div style={{ fontSize:12, color:'var(--gw-mist)', lineHeight:1.6, borderTop:'1px solid var(--gw-border)', paddingTop:12 }}>
+            Saving a rate above 0 clears the <strong>Commission not entered</strong> closing blocker.
+            Per-agent splits, participants and payouts stay on the <strong>Commission</strong> page.
+          </div>
+        </>
+      )}
+
+      {!isAdmin && (
+        <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, color:'var(--gw-mist)', lineHeight:1.6 }}>
+          Record the rate you negotiated. The office confirms it and works out the splits —
+          payout numbers stay with the admin.
+        </div>
+      )}
+
+      <div style={{ marginTop:16 }}>
+        <button className="btn btn--primary" onClick={save} disabled={saving}>
+          {saving ? 'Saving…' : 'Save Commission'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── Client Portal tab — enable a shareable read-only link for the client ──────
 function PortalTab({ deal }) {
   const [enabled, setEnabled] = React.useState(false)
@@ -2224,7 +2361,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       {/* Tab bar — only for existing deals */}
       {isExisting && (
         <div className="drawer-tabs">
-          {[['details','Details'],['dates','Key Dates'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
+          {[['details','Details'],['dates','Key Dates'],['checklist','Checklist'],['commission','Commission'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
             <button key={id} className={`drawer-tab${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}>
               {label}
             </button>
@@ -2454,6 +2591,11 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
         <SignaturesTab deal={deal} contacts={contacts} properties={properties} agents={agents} extraContacts={extraContacts} activeAgent={activeAgent} isAdmin={isAdmin} />
+      )}
+
+      {/* Commission tab — the closing gate's "Fix" button lands here */}
+      {tab === 'commission' && isExisting && (
+        <CommissionTab deal={deal} isAdmin={isAdmin} onSaved={onSave} />
       )}
 
       {/* Client Portal tab */}

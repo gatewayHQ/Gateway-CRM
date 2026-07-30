@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, seedSignersFromDeal, sendableTemplates, normalizeBoldsignTemplates, resolveDealAgents, dealClientSigners, dealSide, roleKind } from '../boldsign.js'
+import { buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, seedSignersFromDeal, sendableTemplates, normalizeBoldsignTemplates, resolveDealAgents, dealClientSigners, dealSide, roleKind, commissionRate } from '../boldsign.js'
 
 describe('buildTextTag', () => {
   it('builds the {{fieldType|signerIndex|required|label|fieldId}} syntax', () => {
@@ -316,5 +316,23 @@ describe('normalizeBoldsignTemplates — fallback list straight from BoldSign', 
   it('skips entries with no id and tolerates junk', () => {
     expect(normalizeBoldsignTemplates([{ templateName: 'No id' }])).toEqual([])
     expect(normalizeBoldsignTemplates()).toEqual([])
+  })
+})
+
+describe('commissionRate — the commission_pct prefill token', () => {
+  it('prefers the admin commissions row, then the agent entry, then the legacy column', () => {
+    expect(commissionRate({ commission: { gross_pct: 3 }, comp_data: { commission_pct: 2.5 } })).toBe(3)
+    expect(commissionRate({ comp_data: { commission_pct: 2.5 } })).toBe(2.5)
+    expect(commissionRate({ commission_pct: 6 })).toBe(6)
+  })
+  it('is null when nothing usable is entered — the token stays blank', () => {
+    expect(commissionRate({})).toBeNull()
+    expect(commissionRate({ comp_data: { commission_pct: 0 } })).toBeNull()
+    expect(commissionRate({ comp_data: { commission_pct: 'abc' } })).toBeNull()
+    expect(commissionRate()).toBeNull()
+  })
+  it('fills the token once a rate exists', () => {
+    expect(crmTokenValues({ deal: { comp_data: { commission_pct: 3 } } }).commission_pct).toBe('3%')
+    expect(crmTokenValues({ deal: {} }).commission_pct).toBe('')
   })
 })

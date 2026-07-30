@@ -131,6 +131,18 @@ export function normalizeState(s) {
 // and primary contact. Only tokens the template actually declares get sent.
 // The canonical token → value map from a deal's context. Field IDs on a
 // template that match one of these keys get auto-filled.
+// The deal's gross commission rate, wherever it was entered: the admin's
+// commissions row (passed in as deal.commission), the agent's own entry in
+// comp_data, or a legacy column on the deal.
+export function commissionRate(deal) {
+  const candidates = [deal?.commission?.gross_pct, deal?.comp_data?.commission_pct, deal?.commission_pct]
+  for (const c of candidates) {
+    const n = Number(c)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return null
+}
+
 export function crmTokenValues({ deal, property, contact, agent } = {}) {
   const money = (n) => (n != null && n !== '' ? `$${Number(n).toLocaleString()}` : '')
   const fullAddr = [property?.address, property?.city, property?.state, property?.zip].filter(Boolean).join(', ')
@@ -141,7 +153,10 @@ export function crmTokenValues({ deal, property, contact, agent } = {}) {
     property_state:     property?.state || '',
     property_zip:       property?.zip || '',
     list_price:         money(property?.price ?? deal?.value),
-    commission_pct:     deal?.commission_pct != null ? `${deal.commission_pct}%` : '',
+    // There is no deals.commission_pct column — the rate lives on the admin's
+    // commissions row (back-office) or, when an agent entered it, in comp_data.
+    // Reading only the column meant this token always came out blank.
+    commission_pct:     commissionRate(deal) != null ? `${commissionRate(deal)}%` : '',
     listing_start_date: deal?.comp_data?.listing_start || '',
     listing_end_date:   deal?.comp_data?.listing_end || deal?.expected_close_date || '',
     seller_name:        [contact?.first_name, contact?.last_name].filter(Boolean).join(' '),
