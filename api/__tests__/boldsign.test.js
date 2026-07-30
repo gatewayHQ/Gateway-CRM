@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, cleanupFailureAction, normalizeRolePayload } from '../boldsign.js'
+import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, cleanupFailureAction, normalizeRolePayload, unremovableRolesError } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -292,7 +292,7 @@ describe('normalizeRolePayload — "SignerName or SignerEmail is missing in role
   })
 
   it('tolerates junk input', () => {
-    expect(normalizeRolePayload()).toEqual({ roles: [], roleRemovalIndices: [], unfilled: [] })
+    expect(normalizeRolePayload()).toEqual({ roles: [], roleRemovalIndices: [], removeFormFields: [], unfilled: [] })
     expect(normalizeRolePayload({ roles: [null, {}] }).roles).toEqual([])
   })
 })
@@ -331,5 +331,102 @@ describe('removal payload casing', () => {
     })
     expect(out.roleRemovalIndices).toEqual([3, 5])
     expect(out.unfilled.map(u => u.name)).toEqual(['Co-seller', 'Buyer'])
+  })
+})
+
+describe('normalizeRolePayload — removeFormFields (KB 21039)', () => {
+  // The scenario from the live report: roleRemovalIndices alone kept failing
+  // with "SignerName or SignerEmail is missing in roles" even though the CRM's
+  // own bookkeeping was correct (the error named exactly the roles that were
+  // supposed to be removed). The remaining explanation: the document's
+  // Signature/Initial fields were still physically bound to those role indices,
+  // so BoldSign saw fields with no signer behind them — the same error, a
+  // different cause. removeFormFields is BoldSign's own mechanism for dropping
+  // those fields, orthogonal to (and required alongside) role removal.
+  const TEMPLATE_ROLES = [
+    { index: 1, name: 'Seller' }, { index: 2, name: 'Listing agent' },
+    { index: 3, name: 'Co-seller' }, { index: 4, name: 'Co-listing agent' },
+    { index: 5, name: 'Buyer' }, { index: 6, name: 'Co-buyer' },
+    { index: 7, name: 'Buyer agent' }, { index: 8, name: 'Co-buyer agent' },
+  ]
+  const TEMPLATE_FIELDS = [
+    { id: 'f-seller-sig',    roleIndex: 1 },
+    { id: 'f-agent-sig',     roleIndex: 2 },
+    { id: 'f-coseller-sig',  roleIndex: 3 },
+    { id: 'f-coagent-sig',   roleIndex: 4 },
+    { id: 'f-buyer-sig',     roleIndex: 5 },
+    { id: 'f-cobuyer-sig',   roleIndex: 6 },
+    { id: 'f-buyeragent-sig',   roleIndex: 7 },
+    { id: 'f-cobuyeragent-sig', roleIndex: 8 },
+    { id: 'f-doc-date', roleIndex: null },   // unscoped — never removed
+  ]
+  const KEPT = [
+    { roleIndex: 1, roleName: 'Seller',        signerName: 'Jean Irwin',      signerEmail: 'irwinfam@tcaexpress.net' },
+    { roleIndex: 2, roleName: 'Listing agent', signerName: 'Daniel Stillson', signerEmail: 'daniel@gatewayreadvisors.com' },
+    { roleIndex: 4, roleName: 'Co-listing agent', signerName: 'Nic Madsen',   signerEmail: 'nic@gatewayreadvisors.com' },
+  ]
+
+  it('collects the field ids owned by every removed role, and only those', () => {
+    const out = normalizeRolePayload({ roles: KEPT, templateRoles: TEMPLATE_ROLES, templateFields: TEMPLATE_FIELDS })
+    expect(out.roleRemovalIndices).toEqual([3, 5, 6, 7, 8])
+    expect(out.removeFormFields.sort()).toEqual(
+      ['f-coseller-sig', 'f-buyer-sig', 'f-cobuyer-sig', 'f-buyeragent-sig', 'f-cobuyeragent-sig'].sort()
+    )
+    // Fields belonging to KEPT roles, and unscoped fields, are never touched.
+    expect(out.removeFormFields).not.toContain('f-seller-sig')
+    expect(out.removeFormFields).not.toContain('f-agent-sig')
+    expect(out.removeFormFields).not.toContain('f-coagent-sig')
+    expect(out.removeFormFields).not.toContain('f-doc-date')
+  })
+
+  it('is empty when nothing is being removed', () => {
+    const allRoles = TEMPLATE_ROLES.map(t => ({
+      roleIndex: t.index, roleName: t.name, signerName: 'X', signerEmail: 'x@y.com',
+    }))
+    const out = normalizeRolePayload({ roles: allRoles, templateRoles: TEMPLATE_ROLES, templateFields: TEMPLATE_FIELDS })
+    expect(out.unfilled).toEqual([])
+    expect(out.removeFormFields).toEqual([])
+  })
+
+  it('is empty (not blocking) when templateFields is not supplied at all', () => {
+    // fetchTemplateShape degrades to {roles:[], fields:[]} on a failed lookup —
+    // this must never throw or block the send, only skip the extra safety net.
+    const out = normalizeRolePayload({ roles: KEPT, templateRoles: TEMPLATE_ROLES })
+    expect(out.roleRemovalIndices).toEqual([3, 5, 6, 7, 8])
+    expect(out.removeFormFields).toEqual([])
+  })
+
+  it('ignores a field with no id and tolerates junk field entries', () => {
+    const out = normalizeRolePayload({
+      roles: KEPT, templateRoles: TEMPLATE_ROLES,
+      templateFields: [{ roleIndex: 5 }, null, {}, { id: 'f-buyer-sig', roleIndex: 5 }],
+    })
+    expect(out.removeFormFields).toEqual(['f-buyer-sig'])
+  })
+})
+
+describe('unremovableRolesError — the agent-facing message', () => {
+  const unfilled = [{ index: 5, name: 'Buyer' }, { index: 7, name: 'Buyer Agent' }]
+
+  it('names the refused roles and points at the template permission', () => {
+    const out = unremovableRolesError(unfilled, 'SignerName or SignerEmail is missing in roles.')
+    expect(out.error).toMatch(/Buyer, Buyer Agent/)
+    expect(out.error).toMatch(/Delete this recipient/)
+    expect(out.boldsign).toBe('SignerName or SignerEmail is missing in roles.')
+    expect(out.unfilled).toBe(unfilled)
+    expect(out.attempted).toBeUndefined()
+  })
+
+  it('notes that field removal was ALSO tried once norm is supplied with removeFormFields', () => {
+    const norm = { roleRemovalIndices: [5, 7], removeFormFields: ['f-buyer-sig', 'f-buyeragent-sig'] }
+    const out = unremovableRolesError(unfilled, 'boom', norm)
+    expect(out.error).toMatch(/recipient AND its document fields/)
+    expect(out.attempted).toEqual({ roleRemovalIndices: [5, 7], removeFormFields: ['f-buyer-sig', 'f-buyeragent-sig'] })
+  })
+
+  it('does not claim field removal was tried when removeFormFields came back empty', () => {
+    const norm = { roleRemovalIndices: [5, 7], removeFormFields: [] }
+    const out = unremovableRolesError(unfilled, 'boom', norm)
+    expect(out.error).not.toMatch(/document fields/)
   })
 })

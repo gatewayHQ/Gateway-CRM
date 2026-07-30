@@ -178,6 +178,10 @@ BoldSign **will** refuse to drop a role that owns fields on the document — you
 
 > An earlier revision of this file claimed `roleRemovalIndices` is not honored on `createEmbeddedRequestUrl`, and the CRM was changed to demand a signer for every role. That was wrong — subset sends demonstrably work (the Purchase Agreement Packet drafts on 2212 Okoboji went out with two of eight roles filled) — and the hard block has been removed.
 
+**Two separate removals are required, not one.** `roleRemovalIndices` drops the RECIPIENT entry for a role. It does **not** remove the Signature/Initial/etc. fields still physically placed on the document pointing at that role's index — those are a template-authoring-time concept, separate from the send-time recipient list. If they aren't also removed, BoldSign finds fields with no signer behind them and reports it with the **exact same generic message**, so a send that correctly computed and sent `roleRemovalIndices` (confirmed on a live send: the error named precisely the roles that were supposed to be removed, no more no less) can still fail for a second, unrelated reason.
+
+The companion mechanism is `removeFormFields` — an array of field ID strings, e.g. `"removeFormFields": ["Label1","CheckBox1"]` ([BoldSign KB 21039](https://support.boldsign.com/kb/article/21039/how-to-remove-specific-fields-from-a-template-when-sending-a-signature-request-via-api)). `fetchTemplateShape()` reads the template's fields (not just roles) from `/template/properties` in the same call already used for role reconciliation; `normalizeRolePayload()` computes which field IDs belong to a role being removed and returns them as `removeFormFields`. Both `template-send` and `template-embed-url` send it alongside `roleRemovalIndices`/`RoleRemovalIndices`. An unscoped field (no `roleIndex` — e.g. today's date, a document-level checkbox) is never touched.
+
 **Property casing matters.** BoldSign documents this as `RoleRemovalIndices` (PascalCase). The CRM sends the array under **both** `roleRemovalIndices` and `RoleRemovalIndices` in the same payload: a case-sensitive model binder silently ignores an unknown property, and a silently-ignored removal list leaves every unused role in the send — producing exactly this error on every one-sided send while looking like a permissions problem. Duplicate-but-equal keys are last-wins for the usual JSON deserializers, so sending both is safe.
 
 **Prefill fields follow their owner.** A field owned by a role being removed is dropped from `existingFormFields` rather than re-attached to the first filled signer (which is what the code used to do — sending a Buyer-owned field as the Seller's).
@@ -200,6 +204,8 @@ Every role must be **deletable**, or a one-sided send is rejected:
 3. Save.
 
 If that permission is off, `RoleRemovalIndices` fails and the send comes back as "SignerName or SignerEmail is missing in roles". The API surfaces that as a message naming the roles *and* the setting to turn on — it is not a code problem.
+
+The CRM now sends `removeFormFields` alongside `RoleRemovalIndices` on every send (see "SignerName or SignerEmail is missing in roles" above), so a role's fields no longer need "Allow sender to edit/delete form fields" to be removed. **"Delete this recipient" is still the one setting the CRM cannot substitute for** — if the same 5 roles are refused again after this change, that permission is the remaining thing to check per role, per template.
 
 ### Role name → CRM party (`ROLE_ALIASES`)
 Role matching drives who gets dropped, so it is an explicit table (`src/lib/services/boldsign.js`), with heuristics only as a fallback for names it doesn't carry. Names match case-insensitively with punctuation and spacing normalized (`normalizeRoleName`), so `Buyer's Agent`, `buyers agent` and `BUYER  AGENT` are one entry.

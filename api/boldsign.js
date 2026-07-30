@@ -230,15 +230,25 @@ export function requiresExplicitFieldPlacement(signers, useTextTags) {
 // BoldSign validates a template send against the template's OWN role list: every
 // role it is asked to keep must carry a signerName AND a signerEmail, or the
 // whole request is rejected with "SignerName or SignerEmail is missing in roles".
-// `roleRemovalIndices` is the documented way to drop the roles you aren't using,
-// but it is NOT honored on every endpoint — on an 8-role packet where the CRM
-// filled 3 roles, the other 5 survived into validation and blocked the send even
-// though every visible field on screen was populated.
+//
+// TWO separate things have to happen to drop a role cleanly, and shipping only
+// the first one is what kept failing here:
+//   1. `roleRemovalIndices` removes the RECIPIENT entry for that role.
+//   2. `removeFormFields` removes the actual Signature/Initial/etc. FIELDS still
+//      physically placed on the document pointing at that role's index.
+// Skip #2 and the fields survive pointing at a role that no longer has a
+// signer — which BoldSign reports with the exact same generic message, so a
+// send that correctly computed and sent roleRemovalIndices (confirmed: the
+// error named precisely the roles that were supposed to be removed, no more
+// no less) can still fail. This is BoldSign's own documented mechanism for it:
+// https://support.boldsign.com/kb/article/21039 — `"removeFormFields": ["Label1","CheckBox1"]`,
+// an array of field IDs, orthogonal to role removal.
 //
 // So this never depends on removal working. It reconciles what the caller sent
-// against the template's real roles and reports exactly which roles are still
-// unfilled; the caller refuses the send with a CRM-authored, actionable message
-// instead of letting BoldSign reject a payload we already knew was incomplete.
+// against the template's real roles AND fields and reports exactly which roles
+// are still unfilled; the caller refuses the send with a CRM-authored,
+// actionable message instead of letting BoldSign reject a payload we already
+// knew was incomplete.
 //
 // Also normalizes the parts BoldSign is fussy about:
 //   • roleIndex must be a real template index — matched by index, else by name,
@@ -248,7 +258,7 @@ export function requiresExplicitFieldPlacement(signers, useTextTags) {
 //   • removal indices are deduped and never overlap the roles being sent.
 // Same email rule the ad-hoc signer validation uses (EMAIL_RE, defined below).
 const ROLE_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
-export function normalizeRolePayload({ roles = [], templateRoles = [], roleRemovalIndices = [] } = {}) {
+export function normalizeRolePayload({ roles = [], templateRoles = [], templateFields = [], roleRemovalIndices = [] } = {}) {
   const byIndex = new Map()
   const byName  = new Map()
   for (const t of (templateRoles || [])) {
@@ -298,8 +308,16 @@ export function normalizeRolePayload({ roles = [], templateRoles = [], roleRemov
     : [...new Set((roleRemovalIndices || []).map(Number).filter(Number.isFinite))]
         .filter(i => !claimed.has(i))
         .map(i => ({ index: i, name: `Role ${i}` }))
+  const unfilledIdx = new Set(unfilled.map(u => u.index))
 
-  return { roles: out, roleRemovalIndices: unfilled.map(u => u.index), unfilled }
+  // Every field still physically bound to a role we're dropping — these are
+  // what removeFormFields exists for. A field with no roleIndex (unscoped /
+  // document-level) is never touched here.
+  const removeFormFields = (templateFields || [])
+    .filter(f => f?.id && f.roleIndex != null && unfilledIdx.has(Number(f.roleIndex)))
+    .map(f => f.id)
+
+  return { roles: out, roleRemovalIndices: unfilled.map(u => u.index), removeFormFields, unfilled }
 }
 
 // What to do when BoldSign refuses a revoke/delete while we're removing a
@@ -810,8 +828,8 @@ export default async function handler(req, res) {
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
-      const templateRoles = await fetchTemplateRoles(templateId)
-      const norm = normalizeRolePayload({ roles, templateRoles, roleRemovalIndices })
+      const { roles: templateRoles, fields: templateFields } = await fetchTemplateShape(templateId)
+      const norm = normalizeRolePayload({ roles, templateRoles, templateFields, roleRemovalIndices })
       if (!norm.roles.length) return res.status(400).json({ error: 'Every signer needs a name and a valid email' })
 
       const svc        = getServiceClient()
@@ -822,10 +840,13 @@ export default async function handler(req, res) {
         title:   documentName || emailSubject || 'Please sign this document',
         message: message || 'Please review and sign.',
         roles:   norm.roles,
-        // Both spellings — see the note on the embedded path above.
+        // Both spellings — see the note on the embedded path above. Field removal
+        // rides alongside role removal so a dropped role's Signature/Initial
+        // fields don't survive pointing at a role with no signer.
         ...(norm.roleRemovalIndices.length
           ? { roleRemovalIndices: norm.roleRemovalIndices, RoleRemovalIndices: norm.roleRemovalIndices }
           : {}),
+        ...(norm.removeFormFields.length ? { removeFormFields: norm.removeFormFields } : {}),
         ...(cc ? { cc } : {}),
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),   // BoldSign tags
         ...(onBehalfOf ? { onBehalfOf } : {}),
@@ -835,7 +856,11 @@ export default async function handler(req, res) {
         data = await boldsign(`/template/send?templateId=${encodeURIComponent(templateId)}`, { method: 'POST', json: payload })
       } catch (e) {
         if (norm.unfilled.length && ROLES_REJECTED_RE.test(e.message || '')) {
-          return res.status(400).json(unremovableRolesError(norm.unfilled, e.message))
+          console.error(`[boldsign] roles rejected on template-send ${templateId}:`, e.message, JSON.stringify({
+            sentRoles: norm.roles.map(r => r.roleIndex), roleRemovalIndices: norm.roleRemovalIndices,
+            removeFormFields: norm.removeFormFields, unfilled: norm.unfilled,
+          }))
+          return res.status(400).json(unremovableRolesError(norm.unfilled, e.message, norm))
         }
         throw e
       }
@@ -864,10 +889,11 @@ export default async function handler(req, res) {
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
-      // Reconcile against the template's real roles and refuse an incomplete set
-      // here, rather than shipping it to BoldSign and relaying its error.
-      const templateRoles = await fetchTemplateRoles(templateId)
-      const norm = normalizeRolePayload({ roles, templateRoles, roleRemovalIndices })
+      // Reconcile against the template's real roles/fields and refuse an
+      // incomplete set here, rather than shipping it to BoldSign and relaying
+      // its error.
+      const { roles: templateRoles, fields: templateFields } = await fetchTemplateShape(templateId)
+      const norm = normalizeRolePayload({ roles, templateRoles, templateFields, roleRemovalIndices })
       if (!norm.roles.length) return res.status(400).json({ error: 'Every signer needs a name and a valid email' })
 
       const svc        = getServiceClient()
@@ -888,6 +914,11 @@ export default async function handler(req, res) {
         ...(norm.roleRemovalIndices.length
           ? { roleRemovalIndices: norm.roleRemovalIndices, RoleRemovalIndices: norm.roleRemovalIndices }
           : {}),
+        // removeFormFields (KB 21039): the Signature/Initial/etc. fields still
+        // physically bound to a role we're removing. Removing the recipient
+        // without this leaves orphaned fields pointing at a role with no
+        // signer — the same rejection, for a different reason.
+        ...(norm.removeFormFields.length ? { removeFormFields: norm.removeFormFields } : {}),
         ...(cc ? { cc } : {}),
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),
         ...(onBehalfOf ? { onBehalfOf } : {}),
@@ -897,7 +928,14 @@ export default async function handler(req, res) {
         data = await boldsign(`/template/createEmbeddedRequestUrl?templateId=${encodeURIComponent(templateId)}`, { method: 'POST', json: payload })
       } catch (e) {
         if (norm.unfilled.length && ROLES_REJECTED_RE.test(e.message || '')) {
-          return res.status(400).json(unremovableRolesError(norm.unfilled, e.message))
+          // Logged so a real rejection is forensic-ready in one round trip: what
+          // was kept, what was marked for role removal, what fields were marked
+          // for removal, and BoldSign's own text — instead of another screenshot.
+          console.error(`[boldsign] roles rejected on template-embed-url ${templateId}:`, e.message, JSON.stringify({
+            sentRoles: norm.roles.map(r => r.roleIndex), roleRemovalIndices: norm.roleRemovalIndices,
+            removeFormFields: norm.removeFormFields, unfilled: norm.unfilled,
+          }))
+          return res.status(400).json(unremovableRolesError(norm.unfilled, e.message, norm))
         }
         throw e
       }
@@ -926,21 +964,28 @@ export default async function handler(req, res) {
   }
 }
 
-// The template's real signer roles, straight from BoldSign, so a send is
-// reconciled against what the template actually has rather than what the browser
-// believed when the modal opened. Best-effort: a failure here degrades to the
-// caller's own indices rather than blocking the send.
-async function fetchTemplateRoles(templateId) {
+// The template's real roles AND fields, straight from BoldSign, in one call —
+// so a send is reconciled against what the template actually has rather than
+// what the browser believed when the modal opened, and dropped roles take their
+// physical fields with them (see normalizeRolePayload). Best-effort: a failure
+// here degrades to the caller's own removal indices rather than blocking the send.
+async function fetchTemplateShape(templateId) {
   try {
     const data = await boldsign(`/template/properties?templateId=${encodeURIComponent(templateId)}`)
-    const raw  = data.roles || data.signerRoles || data.templateRoles || []
-    return raw.map((r, i) => ({
+    const rawRoles  = data.roles || data.signerRoles || data.templateRoles || []
+    const roles = rawRoles.map((r, i) => ({
       index: Number(r.roleIndex ?? r.index ?? i + 1),
       name:  r.roleName || r.name || r.signerRole || `Role ${i + 1}`,
     })).filter(r => Number.isFinite(r.index))
+    const rawFields = data.formFields || data.fields || []
+    const fields = rawFields.map(f => ({
+      id:        f.id || f.fieldId || f.name,
+      roleIndex: f.roleIndex != null ? Number(f.roleIndex) : (f.signerIndex != null ? Number(f.signerIndex) : null),
+    })).filter(f => f.id)
+    return { roles, fields }
   } catch (e) {
     console.warn(`[boldsign] template/properties failed for ${templateId}: ${e.message}`)
-    return []
+    return { roles: [], fields: [] }
   }
 }
 
@@ -955,15 +1000,22 @@ async function fetchTemplateRoles(templateId) {
 // naming the roles that were left blank. Almost always the packet is for the
 // other side of the transaction, or the other side's people genuinely need typing
 // in (a purchase agreement needs the buyer even when we only list the seller).
-function unremovableRolesError(unfilled, vendorMessage) {
+export function unremovableRolesError(unfilled, vendorMessage, norm = null) {
   const names = unfilled.map(u => u.name).join(', ')
+  // norm is present once we've already tried BOTH removal mechanisms (role +
+  // field), so the message doesn't point at a fix that's already been tried.
+  const triedFields = norm && norm.removeFormFields.length > 0
   return {
     error: `BoldSign refused to drop these roles: ${names}. `
+         + (triedFields
+            ? `Both the recipient AND its document fields were sent for removal, and it was still refused. `
+            : ``)
          + `Open the template in BoldSign and turn on "Delete this recipient" for each of them — `
          + `that permission is what allows a one-sided send. Until then, fill them in under `
          + `"Add another signer", or pick a packet for this side of the transaction.`,
     unfilled,
     boldsign: vendorMessage,
+    ...(norm ? { attempted: { roleRemovalIndices: norm.roleRemovalIndices, removeFormFields: norm.removeFormFields } } : {}),
   }
 }
 const ROLES_REJECTED_RE = /signername|signeremail|roles/i
