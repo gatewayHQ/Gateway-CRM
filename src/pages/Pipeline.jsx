@@ -1331,7 +1331,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   )
 }
 
-function SignaturesTab({ deal, contacts, properties, agents = [], extraContacts = [], activeAgent }) {
+function SignaturesTab({ deal, contacts, properties, agents = [], extraContacts = [], activeAgent, isAdmin = false }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
@@ -1343,6 +1343,7 @@ function SignaturesTab({ deal, contacts, properties, agents = [], extraContacts 
   const [dealFiles,   setDealFiles]   = React.useState([])
   const [downloading, setDownloading] = React.useState({})
   const [deleting,    setDeleting]    = React.useState({})
+  const [bulkDeleting, setBulkDeleting] = React.useState(false)
   const [statusFilter, setStatusFilter] = React.useState('active')   // active | drafts | completed | all
 
   React.useEffect(() => {
@@ -1483,13 +1484,36 @@ function SignaturesTab({ deal, contacts, properties, agents = [], extraContacts 
     if (!window.confirm(`Remove "${env.document_name || 'this document'}"? This cannot be undone.`)) return
     setDeleting(p => ({ ...p, [env.id]: true }))
     try {
-      await apiDeleteDocument(env.document_id)
+      const r = await apiDeleteDocument(env.document_id)
       setEnvelopes(prev => prev.filter(e => e.id !== env.id))
-      pushToast('Document removed', 'info')
+      pushToast(r?.boldsign ? `Document removed — ${r.boldsign}` : 'Document removed', 'info')
     } catch (err) {
       pushToast(err.message, 'error')
     } finally {
       setDeleting(p => ({ ...p, [env.id]: false }))
+    }
+  }
+
+  // Admin housekeeping: clear out abandoned drafts in one pass. Drafts were
+  // never sent, so there's nothing for a client to act on and nothing signed to
+  // preserve — the alternative is confirming a dialog once per row.
+  const drafts = envelopes.filter(e => e.status === 'draft')
+  const deleteAllDrafts = async () => {
+    if (!drafts.length) return
+    if (!window.confirm(`Remove all ${drafts.length} draft document${drafts.length === 1 ? '' : 's'} on this deal? Drafts were never sent. This cannot be undone.`)) return
+    setBulkDeleting(true)
+    let removed = 0
+    const failures = []
+    for (const env of drafts) {
+      try { await apiDeleteDocument(env.document_id); removed++ }
+      catch (err) { failures.push(`${env.document_name || 'Document'}: ${err.message}`) }
+    }
+    setBulkDeleting(false)
+    await loadEnvelopes()
+    if (removed) pushToast(`${removed} draft${removed === 1 ? '' : 's'} removed`, 'success')
+    if (failures.length) {
+      console.error('[Signatures] draft delete failures:', failures)
+      pushToast(`${failures.length} couldn't be removed — ${failures[0]}`, 'error')
     }
   }
 
@@ -1574,6 +1598,12 @@ create policy "agent_notifications_policy" on agent_notifications
           </select>
         </div>
         <div style={{ display:'flex', gap:8 }}>
+          {/* Admin housekeeping — only while there are drafts to clear. */}
+          {isAdmin && drafts.length > 1 && (
+            <button className="btn btn--ghost btn--sm" onClick={deleteAllDrafts} disabled={bulkDeleting} style={{ color:'var(--gw-red)' }}>
+              <Icon name="trash" size={13}/> {bulkDeleting ? 'Removing…' : `Delete ${drafts.length} drafts`}
+            </button>
+          )}
           {/* Always shown. It used to be hidden whenever the template list came
               back empty, so a failed/unmigrated catalog read looked like the
               feature had been removed. The modal explains an empty list. */}
@@ -2052,7 +2082,7 @@ async function syncDealContacts(dealId, contactIds) {
   } catch (e) { console.error('[syncDealContacts]', e) }
 }
 
-export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, onSave, initialTab = 'details' }) {
+export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, isAdmin = false, onSave, initialTab = 'details' }) {
   const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
@@ -2345,7 +2375,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
-        <SignaturesTab deal={deal} contacts={contacts} properties={properties} agents={agents} extraContacts={extraContacts} activeAgent={activeAgent} />
+        <SignaturesTab deal={deal} contacts={contacts} properties={properties} agents={agents} extraContacts={extraContacts} activeAgent={activeAgent} isAdmin={isAdmin} />
       )}
 
       {/* Client Portal tab */}
@@ -2994,7 +3024,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
       <DealDrawer open={drawer} onClose={() => setDrawer(false)}
         deal={editing ? editing : { stage: defaultStage }}
-        agents={agents} contacts={contacts} properties={properties} dealContacts={dealContacts} activeAgent={activeAgent} onSave={reload} />
+        agents={agents} contacts={contacts} properties={properties} dealContacts={dealContacts} activeAgent={activeAgent} isAdmin={isAdmin} onSave={reload} />
       {confirm && <ConfirmDialog message="This will permanently delete this deal." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {confirmProp && <ConfirmDialog message="Remove this listing from the pipeline? Any linked deals are kept but will be unlinked from the property." onConfirm={() => delProperty(confirmProp)} onCancel={() => setConfirmProp(null)} />}
     </div>

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf } from '../boldsign.js'
+import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, cleanupFailureAction } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -161,5 +161,26 @@ describe('resolveOnBehalfOf — agent identity with org-default fallback', () =>
   it('returns null with no agentId and no default set', async () => {
     const svc = fakeSupabase({})
     expect(await resolveOnBehalfOf(svc, null)).toBeNull()
+  })
+})
+
+describe('cleanupFailureAction — deleting a document from the Signatures tab', () => {
+  it('lets a draft be removed no matter what BoldSign says', () => {
+    // BoldSign rejects revoke on a never-sent document and delete on a draft,
+    // so any failure has to be skippable or the row is undeletable.
+    for (const status of [400, 401, 403, 404, 409, 500, undefined]) {
+      expect(cleanupFailureAction(status, true)).toBe('skip')
+    }
+  })
+
+  it('for an in-flight document, only skips "already gone / not in progress"', () => {
+    expect(cleanupFailureAction(400, false)).toBe('skip')
+    expect(cleanupFailureAction(404, false)).toBe('skip')
+  })
+
+  it('aborts an in-flight removal on any other error, so a live request is not forgotten', () => {
+    expect(cleanupFailureAction(401, false)).toBe('throw')
+    expect(cleanupFailureAction(500, false)).toBe('throw')
+    expect(cleanupFailureAction(undefined, false)).toBe('throw')
   })
 })

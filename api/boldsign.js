@@ -226,6 +226,19 @@ export function requiresExplicitFieldPlacement(signers, useTextTags) {
 // to a Seller/Listing-Agent pair matching our template convention (role 1 =
 // client, role 2 = agent) if the caller doesn't specify roles; always produces
 // a 1-based index per role.
+// What to do when BoldSign refuses a revoke/delete while we're removing a
+// document from the CRM ('skip' = carry on and drop the CRM row, 'throw' = abort).
+//
+// A DRAFT was never sent: no signer is waiting on it, nothing is signed, and
+// BoldSign rejects both revoke (never sent) and delete (still a draft) on one —
+// so every failure is skippable, otherwise the row can never be removed. For a
+// document that IS in flight, only "already gone / not in progress" is skippable;
+// anything else must abort so the CRM doesn't forget a live signature request.
+export function cleanupFailureAction(status, isDraft) {
+  if (isDraft) return 'skip'
+  return (status === 400 || status === 404) ? 'skip' : 'throw'
+}
+
 export function normalizeTemplateRoles(roles) {
   const base = (Array.isArray(roles) && roles.length) ? roles : [{ name: 'Seller' }, { name: 'Listing Agent' }]
   return base.map((r, i) => ({ name: (r?.name || `Signer ${i + 1}`).trim(), index: Number(r?.index) || i + 1 }))
@@ -510,20 +523,38 @@ export default async function handler(req, res) {
         return res.status(403).json({ error: 'Only the sender or an admin can delete this document' })
       }
 
-      if (!['revoked', 'voided', 'declined'].includes(record.status)) {
-        try { await boldsign(`/document/revoke?documentId=${encodeURIComponent(id)}`, { method: 'POST', json: { message: 'Removed from Gateway CRM' } }) }
-        catch (e) { if (e.status !== 400) throw e }   // 400 here typically means "already not in progress" — fine
+      // A draft was never sent: there's no signer waiting on it and no legal
+      // record to preserve, so BoldSign's copy is cleaned up best-effort and the
+      // CRM row goes regardless. Drafts used to be undeletable in practice —
+      // BoldSign rejects revoke on a document that was never sent, and rejects
+      // delete on one still in draft, and either non-404 error aborted the whole
+      // request, so the trash icon just raised a toast and the row stayed.
+      // In-progress documents keep the strict path: revoke must work before the
+      // CRM forgets about a request a client can still act on.
+      const isDraft = record.status === 'draft'
+      let boldsignNote = null
+      const cleanup = async (label, fn) => {
+        try { await fn(); return true }
+        catch (e) {
+          if (cleanupFailureAction(e.status, isDraft) === 'throw') throw e
+          if (isDraft) boldsignNote = `${label} skipped: ${e.message}`
+          return false
+        }
       }
-      try { await boldsign(`/document/delete?documentId=${encodeURIComponent(id)}&deletePermanently=false`, { method: 'DELETE' }) }
-      catch (e) { if (e.status !== 404) throw e }
+
+      if (!['revoked', 'voided', 'declined'].includes(record.status)) {
+        await cleanup('revoke', () => boldsign(`/document/revoke?documentId=${encodeURIComponent(id)}`, { method: 'POST', json: { message: 'Removed from Gateway CRM' } }))
+      }
+      await cleanup('delete', () => boldsign(`/document/delete?documentId=${encodeURIComponent(id)}&deletePermanently=false`, { method: 'DELETE' }))
 
       await svc.from('audit_log').insert([{
         table_name: 'boldsign_documents', record_id: record.id, deal_id: record.deal_id, actor_id: actor.agent.id,
         action: 'delete', old_values: { document_name: record.document_name, status: record.status },
-        summary: `Removed unsigned document "${record.document_name || 'Document'}"`,
+        summary: `Removed ${record.status === 'draft' ? 'draft' : 'unsigned'} document "${record.document_name || 'Document'}"`
+          + (boldsignNote ? ` (${boldsignNote})` : ''),
       }])
       await svc.from('boldsign_documents').delete().eq('id', record.id)
-      return res.json({ ok: true })
+      return res.json({ ok: true, ...(boldsignNote ? { boldsign: boldsignNote } : {}) })
     }
 
     // ─── Phase 1: Sender identities (admin only) ──────────────────────────────

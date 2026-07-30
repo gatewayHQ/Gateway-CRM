@@ -171,6 +171,12 @@ Nothing about the parties is typed by hand. Everyone is resolved from data the d
 
 **Missing email:** a party with a name but no email is seeded as a name-only row, flagged inline (*"No email on file for this person"*) — BoldSign requires an email per signer, so that row is dropped from the send unless one is added. In the ad-hoc **Send for Signature** flow the same people are named under the signer list instead of becoming a blank blocking row. Either way nobody is silently omitted.
 
+## Removing a document from the Signatures tab
+`action: 'document-delete'` — the sender or an **admin** may remove any non-`completed` document; a completed one is the signed legal record and is refused outright.
+- **Drafts** (never sent) are always removable. BoldSign rejects `revoke` on a document that was never sent *and* `delete` on one still in draft, and the old code aborted the whole request on any non-404 error — so the trash icon on a draft only ever raised a toast. Cleanup of BoldSign's copy is now best-effort (`cleanupFailureAction()`, unit-tested), the CRM row goes regardless, and whatever BoldSign said is recorded in `audit_log` and returned as `boldsign` for the toast.
+- **In-flight** documents keep the strict path: only "already gone / not in progress" (400/404) is skippable — anything else aborts, so the CRM never forgets a signature request a client can still act on.
+- Admins get a **"Delete N drafts"** button in the tab header when a deal has more than one draft (abandoned prepare-and-send attempts pile up fast), instead of confirming a dialog per row.
+
 **Ad-hoc flow parity:** *Send for Signature* seeds one row per client-side signer (primary + additional contacts + the property owner when different), and the *"I need to sign as well"* box adds the deal agent **and** every co-agent at routing order 2.
 
 ## CRM prefill tokens
