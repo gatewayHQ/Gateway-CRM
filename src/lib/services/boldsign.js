@@ -51,6 +51,52 @@ export const templateDetails       = (templateId) => call({ action: 'template-de
 export const sendFromTemplate      = (p) => call({ action: 'template-send', ...p })
 export const templateEmbedUrl      = (p) => call({ action: 'template-embed-url', ...p })
 
+// Which Form Library rows are actually sendable for e-signature: an entry
+// qualifies once it carries a BoldSign template id and hasn't been deactivated.
+//
+// Callers pass raw `select('*')` rows on purpose. Naming the post-unification
+// columns (boldsign_template_id / doc_type / field_tokens / active) in the
+// select makes the whole query fail with 42703 on an install that hasn't run
+// migration 0019 yet — which silently emptied the template list and hid the
+// Send-from-Template button. Reading everything and filtering here can't fail
+// that way. `active` is treated as true when the column/value is missing so a
+// pre-0019 row still shows up. Also accepts rows from the retired
+// `boldsign_templates` registry, which named the column `template_id`.
+export function sendableTemplates(rows = []) {
+  return (rows || [])
+    .filter(r => r && r.active !== false && String(r.boldsign_template_id || r.template_id || '').trim())
+    .map(r => ({
+      template_id:  String(r.boldsign_template_id || r.template_id).trim(),
+      name:         r.name || r.template_name || 'Untitled template',
+      state:        r.state || '',
+      doc_type:     r.doc_type || '',
+      field_tokens: Array.isArray(r.field_tokens) ? r.field_tokens : [],
+      source:       'library',
+    }))
+    .filter((t, i, all) => all.findIndex(o => o.template_id === t.template_id) === i)
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+// Same shape, built from a raw BoldSign `/template/list` payload. Used as a
+// fallback when the CRM catalog has nothing registered, so an agent can still
+// send from a template that exists in BoldSign. Field names vary across BoldSign
+// responses (templateId/documentId, templateName/documentName), hence the
+// tolerant reads. No state/doc_type — those live only in the CRM catalog.
+export function normalizeBoldsignTemplates(items = []) {
+  return (items || [])
+    .map(t => ({
+      template_id:  String(t?.templateId || t?.documentId || t?.id || '').trim(),
+      name:         t?.templateName || t?.documentName || t?.messageTitle || t?.name || 'Untitled template',
+      state:        '',
+      doc_type:     '',
+      field_tokens: [],
+      source:       'boldsign',
+    }))
+    .filter(t => t.template_id)
+    .filter((t, i, all) => all.findIndex(o => o.template_id === t.template_id) === i)
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
 // ── Text tags ─────────────────────────────────────────────────────────────────
 // BoldSign auto-places a field when it finds `{{fieldType|signerIndex|required|
 // label|fieldId}}` in the document text. Setting fieldId to a CRM token (see

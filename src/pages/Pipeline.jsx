@@ -9,7 +9,7 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, templateEmbedUrl, templateDetails, listBoldsignTemplates, sendableTemplates, normalizeBoldsignTemplates, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
@@ -1316,6 +1316,8 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeA
   const [sendOpen,    setSendOpen]    = React.useState(false)
   const [tplOpen,     setTplOpen]     = React.useState(false)
   const [templates,   setTemplates]   = React.useState([])
+  const [tplLoading,  setTplLoading]  = React.useState(true)
+  const [tplError,    setTplError]    = React.useState('')
   const [dealFiles,   setDealFiles]   = React.useState([])
   const [downloading, setDownloading] = React.useState({})
   const [deleting,    setDeleting]    = React.useState({})
@@ -1352,18 +1354,47 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeA
     setLoading(false)
   }
 
+  // Form Library is the e-sign template catalog — an entry is sendable once it
+  // carries a boldsign_template_id. Read whole rows and filter in JS
+  // (sendableTemplates) rather than naming the post-unification columns in the
+  // select: on a database that hasn't run migration 0019 the named select fails
+  // with 42703 and the list comes back empty, which is what made the
+  // "Send from Template" button disappear. Errors now surface instead of
+  // silently hiding the feature, and there are two fallbacks.
   const loadTemplates = async () => {
-    // Form Library is the e-sign template catalog — an entry is sendable once
-    // it carries a boldsign_template_id. Alias to `template_id` so the rest of
-    // this component (written against the old boldsign_templates shape) needs
-    // no other changes.
-    const { data } = await supabase
-      .from('form_packets')
-      .select('template_id:boldsign_template_id, name, state, doc_type, field_tokens, active')
-      .not('boldsign_template_id', 'is', null)
-      .eq('active', true)
-      .order('name')
-    setTemplates(data || [])
+    setTplLoading(true)
+    setTplError('')
+    let rows = []
+    let problem = ''
+
+    const { data, error } = await supabase.from('form_packets').select('*')
+    if (error) {
+      console.error('[Signatures] form_packets load failed:', error)
+      problem = `Form Library couldn't be read (${error.message})`
+      // Pre-unification installs: the retired registry still holds the catalog.
+      const legacy = await supabase.from('boldsign_templates').select('*')
+      if (!legacy.error) { rows = legacy.data || []; problem = '' }
+    } else {
+      rows = data || []
+    }
+
+    let list = sendableTemplates(rows)
+
+    // Nothing registered in the CRM catalog — fall back to the templates that
+    // exist in the BoldSign account itself so the send flow still works.
+    if (!list.length) {
+      try {
+        const { templates: raw } = await listBoldsignTemplates()
+        list = normalizeBoldsignTemplates(raw)
+      } catch (e) {
+        console.error('[Signatures] BoldSign template list failed:', e)
+        if (!problem) problem = `BoldSign templates couldn't be listed (${e.message})`
+      }
+    }
+
+    setTemplates(list)
+    setTplError(problem)
+    setTplLoading(false)
   }
 
   const loadDealFiles = async () => {
@@ -1505,11 +1536,12 @@ create policy "agent_notifications_policy" on agent_notifications
           </select>
         </div>
         <div style={{ display:'flex', gap:8 }}>
-          {templates.length > 0 && (
-            <button className="btn btn--secondary btn--sm" onClick={() => setTplOpen(true)}>
-              <Icon name="file" size={13}/> Send from Template
-            </button>
-          )}
+          {/* Always shown. It used to be hidden whenever the template list came
+              back empty, so a failed/unmigrated catalog read looked like the
+              feature had been removed. The modal explains an empty list. */}
+          <button className="btn btn--secondary btn--sm" onClick={() => setTplOpen(true)}>
+            <Icon name="file" size={13}/> Send from Template
+          </button>
           <button className="btn btn--primary btn--sm" onClick={() => setSendOpen(true)}>
             <Icon name="send" size={13}/> Send for Signature
           </button>
@@ -1586,7 +1618,9 @@ create policy "agent_notifications_policy" on agent_notifications
 
       {tplOpen && (
         <SendFromTemplateModal
-          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} templates={templates} activeAgent={activeAgent}
+          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts}
+          templates={templates} tplLoading={tplLoading} tplError={tplError} onRetryTemplates={loadTemplates}
+          activeAgent={activeAgent}
           onClose={() => setTplOpen(false)}
           onSent={() => { setTplOpen(false); loadEnvelopes() }}
         />
@@ -1600,7 +1634,10 @@ create policy "agent_notifications_policy" on agent_notifications
 //    editable (CRM-prefilled) input per field, then sends via /api/boldsign.
 const prettyLabel = (id) => String(id || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 
-function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], templates, activeAgent, onClose, onSent }) {
+function SendFromTemplateModal({
+  deal, contacts, properties, extraContacts = [], templates, activeAgent, onClose, onSent,
+  tplLoading = false, tplError = '', onRetryTemplates,
+}) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
 
@@ -1620,6 +1657,12 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [values,     setValues]     = React.useState({})     // fieldId → value
 
   const tpl = templates.find(t => t.template_id === templateId)
+
+  // The modal can now be opened while the catalog is still loading (the button
+  // is no longer gated on it), so pick the first template once it arrives.
+  React.useEffect(() => {
+    if (!templateId && visible.length) setTemplateId(visible[0].template_id)
+  }, [visible.length])
 
   // Load the template's roles + fields whenever the selection changes, and seed
   // signer/field inputs from the deal.
@@ -1725,6 +1768,31 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
       </div>
       <div className="modal__body">
+        {/* No templates to pick — say why instead of showing an empty dropdown. */}
+        {!templates.length ? (
+          <div style={{ fontSize:13, color:'var(--gw-mist)', lineHeight:1.7, padding:'4px 0 8px' }}>
+            {tplLoading ? 'Loading templates…' : (
+              <>
+                <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:'10px 12px', color:'var(--gw-ink)' }}>
+                  <strong>No e-sign templates available yet.</strong>
+                  <div style={{ marginTop:6 }}>
+                    Check <strong>Form Library</strong>: a packet marked <em>Sendable (disabled)</em> just
+                    needs Active set back to Yes. To add a new one, upload the form and paste its
+                    BoldSign template id into the packet — it then shows up here for every deal
+                    in that state.
+                  </div>
+                  {tplError && <div style={{ marginTop:8, fontSize:12, color:'var(--gw-red)' }}>{tplError}</div>}
+                </div>
+                {onRetryTemplates && (
+                  <button className="btn btn--secondary btn--sm" style={{ marginTop:10 }} onClick={onRetryTemplates}>
+                    <Icon name="refresh" size={12}/> Retry
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        ) : (
+        <>
         <div className="form-group">
           <label className="form-label required">Template</label>
           <select className="form-control" value={templateId} onChange={e => setTemplateId(e.target.value)}>
@@ -1733,6 +1801,12 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           {dealState && (
             <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
               Showing templates for {dealState}{matched.length ? '' : ' — none registered for this state yet, showing all'}.
+            </div>
+          )}
+          {tpl?.source === 'boldsign' && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
+              Listed straight from your BoldSign account — not registered in Form Library yet,
+              so no state or field tokens are attached.
             </div>
           )}
         </div>
@@ -1782,10 +1856,12 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px' }}>
           Next: BoldSign opens here in the app with these signers &amp; details filled in — review field placement and click Send.
         </div>
+        </>
+        )}
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-        <button className="btn btn--primary" onClick={submit} disabled={sending || loadingDet}>
+        <button className="btn btn--primary" onClick={submit} disabled={sending || loadingDet || !templates.length}>
           {sending ? 'Opening…' : 'Continue in BoldSign'}
         </button>
       </div>

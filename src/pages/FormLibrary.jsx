@@ -34,7 +34,12 @@ function UploadModal({ packet, onClose, onSaved }) {
     state: '', transaction_type: 'buyer', name: '', description: '',
     boldsign_template_id: '', doc_type: '', field_tokens: [], active: true,
   }
-  const [form, setForm]   = useState(packet ? { ...blank, ...packet, field_tokens: packet.field_tokens || [] } : blank)
+  // active: only an explicit false means disabled. A row that predates the
+  // column (null) is treated as active, so editing it can't silently flip the
+  // Active dropdown to "disabled" and drop it out of the deal's template list.
+  const [form, setForm]   = useState(packet
+    ? { ...blank, ...packet, field_tokens: packet.field_tokens || [], active: packet.active !== false }
+    : blank)
   const [tokensText, setTokensText] = useState((packet?.field_tokens || []).join(', '))
   const [files, setFiles] = useState([])   // newly selected package PDFs (a template can hold several)
   const [saving, setSaving] = useState(false)
@@ -499,8 +504,9 @@ create unique index if not exists uq_form_packets_boldsign_tid
                   <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--gw-ink)', display: 'flex', alignItems: 'center', gap: 8 }}>
                     {packet.name}
                     {packet.boldsign_template_id && (
-                      <span style={{ padding: '1px 7px', borderRadius: 8, fontSize: 10, fontWeight: 700, background: packet.active ? 'var(--gw-green-light)' : 'var(--gw-bone)', color: packet.active ? 'var(--gw-green)' : 'var(--gw-mist)' }}>
-                        {packet.active ? 'Sendable' : 'Sendable (disabled)'}
+                      // Matches sendableTemplates(): only an explicit false is disabled.
+                      <span style={{ padding: '1px 7px', borderRadius: 8, fontSize: 10, fontWeight: 700, background: packet.active !== false ? 'var(--gw-green-light)' : 'var(--gw-bone)', color: packet.active !== false ? 'var(--gw-green)' : 'var(--gw-mist)' }}>
+                        {packet.active !== false ? 'Sendable' : 'Sendable (disabled)'}
                       </span>
                     )}
                   </div>

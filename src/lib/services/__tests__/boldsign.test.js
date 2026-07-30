@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, seedSignersFromDeal } from '../boldsign.js'
+import { buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, seedSignersFromDeal, sendableTemplates, normalizeBoldsignTemplates } from '../boldsign.js'
 
 describe('buildTextTag', () => {
   it('builds the {{fieldType|signerIndex|required|label|fieldId}} syntax', () => {
@@ -116,5 +116,65 @@ describe('seedSignersFromDeal — auto-fill signer name/email from the deal', ()
     const out = seedSignersFromDeal({ roles, contact: null, activeAgent: agent })
     expect(out[1]).toEqual({ name: 'Alex Agent', email: 'alex@brokerage.com' })
     expect(out[2]).toEqual({ name: '', email: '' })
+  })
+})
+
+describe('sendableTemplates — which Form Library rows can be sent for signature', () => {
+  it('keeps rows with a boldsign template id and drops the rest', () => {
+    const out = sendableTemplates([
+      { name: 'Iowa Listing',  boldsign_template_id: 'tpl-1', state: 'IA', doc_type: 'listing' },
+      { name: 'Plain Handout', boldsign_template_id: null },
+      { name: 'Blank id',      boldsign_template_id: '   ' },
+    ])
+    expect(out.map(t => t.template_id)).toEqual(['tpl-1'])
+    expect(out[0]).toMatchObject({ name: 'Iowa Listing', state: 'IA', doc_type: 'listing', source: 'library' })
+  })
+
+  it('drops deactivated packets but keeps rows where active is missing (pre-migration)', () => {
+    const out = sendableTemplates([
+      { name: 'Off',     boldsign_template_id: 'a', active: false },
+      { name: 'On',      boldsign_template_id: 'b', active: true },
+      { name: 'Unknown', boldsign_template_id: 'c' },
+      { name: 'Null',    boldsign_template_id: 'd', active: null },
+    ])
+    expect(out.map(t => t.name)).toEqual(['Null', 'On', 'Unknown'])
+  })
+
+  it('accepts the retired boldsign_templates shape (template_id column)', () => {
+    expect(sendableTemplates([{ name: 'Legacy', template_id: 'tpl-9', active: true }])[0])
+      .toMatchObject({ template_id: 'tpl-9', name: 'Legacy' })
+  })
+
+  it('dedupes by template id, sorts by name, and defaults field_tokens to an array', () => {
+    const out = sendableTemplates([
+      { name: 'Zeta', boldsign_template_id: 'z' },
+      { name: 'Alpha', boldsign_template_id: 'a', field_tokens: ['property_address'] },
+      { name: 'Zeta copy', boldsign_template_id: 'z' },
+    ])
+    expect(out.map(t => t.name)).toEqual(['Alpha', 'Zeta'])
+    expect(out[0].field_tokens).toEqual(['property_address'])
+    expect(out[1].field_tokens).toEqual([])
+  })
+
+  it('tolerates junk input', () => {
+    expect(sendableTemplates()).toEqual([])
+    expect(sendableTemplates([null, undefined, {}])).toEqual([])
+  })
+})
+
+describe('normalizeBoldsignTemplates — fallback list straight from BoldSign', () => {
+  it('reads the varying id/name field names BoldSign returns', () => {
+    const out = normalizeBoldsignTemplates([
+      { templateId: 't1', templateName: 'Listing Agreement' },
+      { documentId: 't2', documentName: 'Agency Disclosure' },
+    ])
+    expect(out).toEqual([
+      { template_id: 't2', name: 'Agency Disclosure', state: '', doc_type: '', field_tokens: [], source: 'boldsign' },
+      { template_id: 't1', name: 'Listing Agreement', state: '', doc_type: '', field_tokens: [], source: 'boldsign' },
+    ])
+  })
+  it('skips entries with no id and tolerates junk', () => {
+    expect(normalizeBoldsignTemplates([{ templateName: 'No id' }])).toEqual([])
+    expect(normalizeBoldsignTemplates()).toEqual([])
   })
 })

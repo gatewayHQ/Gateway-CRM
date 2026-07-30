@@ -145,6 +145,12 @@ Two bugs made this flow unusable/unreliable, both fixed in `src/pages/FormLibrar
   - **deactivates** any linked entry whose template was deleted in BoldSign;
   - **draft-registers** (inactive) any BoldSign template not yet in the catalog, but *only* when its title confidently maps to one of `OPERATING_STATES` (`detectStateFromTitle()`) — ambiguous titles are reported in the job's response, never guessed, since `state` is compliance-relevant;
   - never overwrites an admin-set name/state/tokens on an existing entry, and never auto-activates a draft — an admin reviews and flips `active` in Form Library.
+  - **Safety rails on the deactivation pass** (it can switch off the whole catalog, which reads to an agent as the feature being removed): ids/titles are read through `boldsignTemplateId()` / `boldsignTemplateTitle()` because BoldSign spells them `templateId`/`documentId`/`id` and `title`/`templateName`/`documentName` depending on the endpoint; the list is **paged** through (a single 100-row page would treat template 101 as deleted); and if BoldSign returns **no readable ids at all**, the pass is skipped and the response carries a `warning` instead.
+
+**The deal's "Send from Template" picker:**
+- The button on a deal's Signatures tab is **always shown** — it used to be hidden whenever the template list came back empty, so one failed catalog read looked like the feature had been taken out of the app. An empty list is now explained inside the modal (with a Retry), not hidden.
+- `loadTemplates()` reads whole `form_packets` rows and filters with `sendableTemplates()` (unit-tested) instead of naming `boldsign_template_id`/`doc_type`/`field_tokens`/`active` in the select — the named select fails with `42703` on a database that hasn't run migration 0019 and silently empties the list. `active` counts as true unless it's explicitly `false`, so a row predating the column still shows.
+- Two fallbacks: a read error retries against the retired `boldsign_templates` registry, and an empty catalog falls back to `template-list` (the BoldSign account's own templates, normalized by `normalizeBoldsignTemplates()`) so an agent can still send while an admin fixes the catalog. Templates from that fallback are labelled in the picker — they carry no state or field tokens.
 
 ## Signer auto-fill (Send from Template)
 When an agent picks a template on a deal's Signatures tab, the signer name/email rows are pre-filled by `seedSignersFromDeal()` (`src/lib/services/boldsign.js`, unit-tested):
