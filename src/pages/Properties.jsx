@@ -963,6 +963,12 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       }]
     }
 
+    // The primary is resolved BEFORE the co-agent list is cleaned, because it can
+    // fall back to the acting agent — who may already be sitting in co_agent_ids.
+    // Leaving them in both places is what produced the legacy rows that tripped
+    // deals_co_agents_exclude_primary during the 0024 backfill, so strip the
+    // primary out of the co-agent list on every write.
+    const resolvedAgentId = form.assigned_agent_id || activeAgent?.id || null
     const payload = {
       ...form,
       id:                   resolvedId,
@@ -972,10 +978,14 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       baths:                form.baths      ? Number(form.baths)      : null,
       garage:               form.garage != null ? Number(form.garage) : 0,
       linked_contact_id:    form.linked_contact_id || null,
-      assigned_agent_id:    form.assigned_agent_id || activeAgent?.id || null,
+      assigned_agent_id:    resolvedAgentId,
       listing_expiry_date:  form.listing_expiry_date || null,
       price_history:        updatedHistory,
       comps:                form.comps || [],
+      details: {
+        ...(form.details || {}),
+        co_agent_ids: (form.details?.co_agent_ids || []).filter(id => id && id !== resolvedAgentId),
+      },
     }
     let error, data, status
     if (property?.id) {
