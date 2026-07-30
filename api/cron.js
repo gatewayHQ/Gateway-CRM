@@ -598,6 +598,14 @@ export function detectStateFromTitle(title) {
 // or the title across list/properties responses, so read every spelling we've
 // seen. Guessing wrong here is expensive: an id we fail to read looks like a
 // template that no longer exists, which used to deactivate the catalog entry.
+// Linked packets whose template id the live BoldSign account doesn't have.
+// Reported, not acted on — see the note in runBoldsignTemplateSync.
+export function catalogDrift(catalog = [], liveIds = new Set()) {
+  return (catalog || [])
+    .filter(row => row?.boldsign_template_id && row.active !== false && !liveIds.has(row.boldsign_template_id))
+    .map(row => ({ id: row.id, name: row.name, state: row.state, templateId: row.boldsign_template_id }))
+}
+
 export const boldsignTemplateId    = (t) => t?.templateId || t?.documentId || t?.id || null
 export const boldsignTemplateTitle = (t) => t?.title || t?.templateName || t?.documentName || t?.messageTitle || t?.name || ''
 
@@ -623,21 +631,29 @@ async function runBoldsignTemplateSync(supabase) {
 
   const { data: catalog } = await supabase
     .from('form_packets')
-    .select('id, boldsign_template_id, active')
+    .select('id, name, state, boldsign_template_id, active')
     .not('boldsign_template_id', 'is', null)
 
-  // Never mass-deactivate off an empty list. A BoldSign response we can't read
-  // (auth scope, a renamed id field, an empty page) would otherwise switch off
-  // every sendable packet overnight and make the Send-from-Template picker —
-  // and its button — look like it had been removed from the app.
+  // ── Drift is REPORTED, not enforced ────────────────────────────────────────
+  // This job used to switch `active` off for any packet whose template id it
+  // didn't find in the live list. That silently un-did the admin's work every
+  // night: point BOLDSIGN_API_KEY at a different environment (sandbox vs live),
+  // or carry ids from a since-deleted account, and every packet except the one
+  // that happens to exist there goes "Sendable (disabled)" at 3am — which reads
+  // as a broken CRM, not as configuration drift.
+  //
+  // A stale id already fails loudly and specifically at send time (BoldSign
+  // returns "template not found"), so pre-emptively disabling the packet buys
+  // nothing and costs the agent their forms. We list the drift in the job's
+  // response instead. Set BOLDSIGN_SYNC_DEACTIVATE=1 to restore enforcement.
+  const missing = catalogDrift(catalog, liveIds)
+
+  const enforce = process.env.BOLDSIGN_SYNC_DEACTIVATE === '1' && liveIds.size > 0
   let deactivated = 0
-  const skippedDeactivation = liveIds.size === 0
-  if (!skippedDeactivation) {
-    for (const row of (catalog || [])) {
-      if (row.active !== false && !liveIds.has(row.boldsign_template_id)) {
-        await supabase.from('form_packets').update({ active: false }).eq('id', row.id)
-        deactivated++
-      }
+  if (enforce) {
+    for (const row of missing) {
+      await supabase.from('form_packets').update({ active: false }).eq('id', row.id)
+      deactivated++
     }
   }
 
@@ -666,8 +682,14 @@ async function runBoldsignTemplateSync(supabase) {
     status: 200,
     body: {
       ok: true, live: liveTemplates.length, deactivated, drafted, unmatched,
-      ...(skippedDeactivation
-        ? { warning: 'BoldSign returned no readable template ids — skipped the deactivation pass so the catalog stays as-is' }
+      // Packets pointing at a template this API key can't see. Reported only —
+      // they stay sendable unless BOLDSIGN_SYNC_DEACTIVATE=1.
+      missing,
+      ...(missing.length && !enforce
+        ? { warning: `${missing.length} packet(s) point at a template this BoldSign key can't see — left sendable. Check that BOLDSIGN_API_KEY matches the account the templates live in.` }
+        : {}),
+      ...(liveIds.size === 0
+        ? { warning_ids: 'BoldSign returned no readable template ids — nothing was reconciled' }
         : {}),
     },
   }

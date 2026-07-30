@@ -377,6 +377,20 @@ export default function FormLibraryPage({ isAdmin }) {
     setLoading(false)
   }
 
+  // Every linked packet that's switched off. Historically the nightly BoldSign
+  // drift sync did this in bulk, so re-enabling them one modal at a time was
+  // busywork — this turns them all back on in one write.
+  const disabledSendable = packets.filter(p => p.boldsign_template_id && p.active === false)
+
+  const enableAllSendable = async () => {
+    const ids = disabledSendable.map(p => p.id)
+    if (!ids.length) return
+    const { data, error } = await supabase.from('form_packets').update({ active: true }).in('id', ids).select('id')
+    if (error) { pushToast(`Couldn't enable: ${error.message}`, 'error'); return }
+    pushToast(`${data?.length || ids.length} packet${(data?.length || ids.length) === 1 ? '' : 's'} set back to sendable`, 'success')
+    load()
+  }
+
   const del = async (id) => {
     if (!window.confirm('Delete this form packet?')) return
     await supabase.from('form_packets').delete().eq('id', id)
@@ -479,6 +493,19 @@ create unique index if not exists uq_form_packets_boldsign_tid
           <button className="btn btn--ghost btn--sm" onClick={() => setFilter({ state: '', type: '' })}>Clear</button>
         )}
       </div>
+
+      {/* Bulk recovery — shown only while linked packets are switched off. */}
+      {isAdmin && disabledSendable.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', background: '#fff8ec', border: '1px solid var(--gw-amber)', borderRadius: 'var(--radius)', padding: '10px 12px', marginBottom: 18 }}>
+          <div style={{ fontSize: 13, flex: 1, minWidth: 240, lineHeight: 1.5 }}>
+            <strong>{disabledSendable.length} packet{disabledSendable.length === 1 ? '' : 's'} with a BoldSign template {disabledSendable.length === 1 ? 'is' : 'are'} switched off</strong> —
+            {' '}hidden from every deal's Send from Template picker.
+          </div>
+          <button className="btn btn--primary btn--sm" onClick={enableAllSendable}>
+            <Icon name="check" size={13} /> Make all sendable
+          </button>
+        </div>
+      )}
 
       {/* Table */}
       {loading ? (
