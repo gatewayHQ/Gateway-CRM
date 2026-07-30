@@ -15,6 +15,7 @@ import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, do
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
+import CoAgentPicker from '../components/CoAgentPicker.jsx'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
   'Title Search Ordered',
@@ -1658,6 +1659,18 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
   const tpl = templates.find(t => t.template_id === templateId)
 
+  // Everyone who must appear on this paperwork: the deal's agent roster, primary
+  // first (src/lib/agentRoster.js). Recomputed here — not just inside the load
+  // effect — so the render can warn when the template can't seat all of them.
+  const roster = React.useMemo(() => dealRoster(deal, agents, property), [deal, agents, property])
+
+  // A signer row exists ONLY for a role the BoldSign template declares, so a
+  // two-role template (Seller + Listing Agent) physically cannot hold a
+  // co-agent. Naming that here is the difference between "the CRM is broken"
+  // and "this template needs a Co-Listing Agent role".
+  const agentRoleCount = (details?.roles || []).filter(r => /agent/i.test(String(r?.name || ''))).length
+  const unseatedAgents = roster.slice(Math.max(agentRoleCount, 0))
+
   // Load the template's roles + fields whenever the selection changes, and seed
   // signer/field inputs from the deal.
   React.useEffect(() => {
@@ -1672,10 +1685,9 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         setDetails({ roles, fields })
 
         // Seed signer name/email from the deal's linked contact (+ spouse for a
-        // second client role) and the acting agent. See seedSignersFromDeal.
+        // second client role) and the deal's agents. See seedSignersFromDeal.
         // Paperwork names the agents ON THE DEAL, not whoever is sending it —
         // roster[0] is the primary, the rest are co-agents.
-        const roster    = dealRoster(deal, agents, property)
         const primary   = roster[0] || activeAgent
         const coAgents  = roster.slice(1)
         const tokenVals = crmTokenValues({ deal, property, contact, agent: primary, coAgents })
@@ -1792,6 +1804,18 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
         {!loadingDet && details && (
           <>
+            {/* A co-agent on the deal with no role to sit in would silently vanish
+                from the paperwork — which is what forced agents to click Back
+                inside BoldSign and add the recipient by hand. Say so, and say
+                where to fix it permanently. */}
+            {unseatedAgents.length > 0 && (
+              <div style={{ background:'#fff3cd', border:'1px solid #ffe08a', borderRadius:'var(--radius)', padding:'8px 10px', marginBottom:12, fontSize:12, color:'#856404' }}>
+                <strong>{unseatedAgents.map(a => a.name).join(', ')}</strong>
+                {unseatedAgents.length === 1 ? ' is a co-agent on this deal but this template has no role for them.' : ' are co-agents on this deal but this template has no roles for them.'}
+                {' '}Add a <strong>Co-Listing Agent</strong> role in Form Library → Rebuild in BoldSign to seat them automatically, or add them as a recipient inside BoldSign on the next screen.
+              </div>
+            )}
+
             {/* One signer input per template role; leave a role blank to omit it. */}
             <div className="form-group">
               <label className="form-label required">Signers</label>
@@ -1975,10 +1999,6 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const setCD = (k, v) => setForm(p => ({...p, comp_data: {...(p.comp_data||{}), [k]: v}}))
   const cd = form.comp_data || {}
 
-  const toggleDealCoAgent = (agentId) => setForm(p => {
-    const cur = p.co_agent_ids || []
-    return { ...p, co_agent_ids: cur.includes(agentId) ? cur.filter(id => id !== agentId) : [...cur, agentId] }
-  })
   // Promoting a co-agent to primary must remove them from the co-agent list, or
   // the roster would name them twice (and trip deals_co_agents_exclude_primary).
   const setPrimaryAgent = (agentId) => setForm(p => ({
@@ -2138,29 +2158,16 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
             </div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
             <div className="form-group"><label className="form-label">Assigned Agent<span style={{ fontWeight:400, color:'var(--gw-mist)', marginLeft:6, fontSize:11 }}>primary — signs first on paperwork</span></label><select className="form-control" value={form.agent_id||''} onChange={e=>setPrimaryAgent(e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
-            {/* Co-Agents — the rest of the deal's roster. Seeded from the property
-                at conversion; editable here so a co-listing can change without
-                touching the property. */}
-            {agents.filter(a => a.id !== form.agent_id).length > 0 && (
-              <div className="form-group">
-                <label className="form-label">
-                  Co-Agents
-                  <span style={{ fontWeight:400, color:'var(--gw-mist)', marginLeft:6, fontSize:11 }}>
-                    appear on the pipeline card and generated paperwork
-                  </span>
-                </label>
-                <div className="coagent-list">
-                  {agents.filter(a => a.id !== form.agent_id).map(a => (
-                    <label key={a.id} className={`coagent-item${(form.co_agent_ids || []).includes(a.id) ? ' checked' : ''}`}>
-                      <input type="checkbox" checked={(form.co_agent_ids || []).includes(a.id)} onChange={() => toggleDealCoAgent(a.id)} />
-                      <Avatar agent={a} size={22} />
-                      <span>{a.name}</span>
-                      {a.role && <span style={{ fontSize:11, color:'var(--gw-mist)' }}>{a.role}</span>}
-                    </label>
-                  ))}
-                </div>
-              </div>
-            )}
+            {/* Co-Agent — sits directly under Assigned Agent, same control, so the
+                roster reads as one block. Seeded from the property at conversion;
+                editable here so a co-listing can change without touching the
+                property. */}
+            <CoAgentPicker
+              agents={agents}
+              primaryAgentId={form.agent_id}
+              value={form.co_agent_ids || []}
+              onChange={ids => set('co_agent_ids', ids)}
+            />
 
             {/* ── Comp Data ─────────────────────────────────────── */}
             <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>

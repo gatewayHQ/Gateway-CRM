@@ -13,6 +13,7 @@ import { logAudit } from '../lib/audit.js'
 import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
 import OptionSelect from '../components/OptionSelect.jsx'
+import CoAgentPicker from '../components/CoAgentPicker.jsx'
 
 // Types where commercial fields apply
 const COMMERCIAL_TYPES = COMMERCIAL_PROPERTY_TYPES
@@ -855,12 +856,6 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
 
   const addPhoto    = (url) => set('details', { ...(form.details || {}), photos: [...photos, url] })
   const removePhoto = (url) => set('details', { ...(form.details || {}), photos: photos.filter(u => u !== url) })
-  const toggleCoAgent = (agentId) => {
-    const next = coAgentIds.includes(agentId)
-      ? coAgentIds.filter(id => id !== agentId)
-      : [...coAgentIds, agentId]
-    set('details', { ...(form.details || {}), co_agent_ids: next })
-  }
   // Reassigning the property: the incoming primary must not linger in the
   // co-agent list, or the roster would carry the same agent twice (and trip
   // deals_co_agents_exclude_primary). The outgoing primary is NOT auto-added as
@@ -1157,26 +1152,13 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
         </div>
         <div className="form-group"><label className="form-label">Assigned Agent<span style={{ fontWeight:400, color:'var(--gw-mist)', marginLeft:6, fontSize:11 }}>primary — becomes the deal owner</span></label><select className="form-control" value={form.assigned_agent_id||''} onChange={e=>setPrimaryAgent(e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
         {/* Co-Agents */}
-        {agents.filter(a => a.id !== form.assigned_agent_id).length > 0 && (
-          <div className="form-group">
-            <label className="form-label">
-              Co-Agents
-              <span style={{ fontWeight: 400, color: 'var(--gw-mist)', marginLeft: 6, fontSize: 11 }}>
-                share commission — carried onto the deal and its paperwork
-              </span>
-            </label>
-            <div className="coagent-list">
-              {agents.filter(a => a.id !== form.assigned_agent_id).map(a => (
-                <label key={a.id} className={`coagent-item${coAgentIds.includes(a.id) ? ' checked' : ''}`}>
-                  <input type="checkbox" checked={coAgentIds.includes(a.id)} onChange={() => toggleCoAgent(a.id)} />
-                  <Avatar agent={a} size={22} />
-                  <span>{a.name}</span>
-                  {a.role && <span style={{ fontSize: 11, color: 'var(--gw-mist)' }}>{a.role}</span>}
-                </label>
-              ))}
-            </div>
-          </div>
-        )}
+        <CoAgentPicker
+          agents={agents}
+          primaryAgentId={form.assigned_agent_id}
+          value={coAgentIds}
+          onChange={ids => set('details', { ...(form.details || {}), co_agent_ids: ids })}
+          hint="share commission — carried onto the deal and its paperwork"
+        />
         <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} /></div>
 
         {/* ── Possible Buyers — powered by the matching engine ── */}
