@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, cleanupFailureAction } from '../boldsign.js'
+import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, cleanupFailureAction, normalizeRolePayload } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -182,5 +182,117 @@ describe('cleanupFailureAction — deleting a document from the Signatures tab',
     expect(cleanupFailureAction(401, false)).toBe('throw')
     expect(cleanupFailureAction(500, false)).toBe('throw')
     expect(cleanupFailureAction(undefined, false)).toBe('throw')
+  })
+})
+
+describe('normalizeRolePayload — "SignerName or SignerEmail is missing in roles"', () => {
+  // The live failure: an 8-role IA packet, three rows filled from the deal.
+  const TEMPLATE = [
+    { index: 1, name: 'Buyer' },     { index: 2, name: 'Buyer Agent' },
+    { index: 3, name: 'Co-buyer' },  { index: 4, name: 'Co-buyer agent' },
+    { index: 5, name: 'Seller' },    { index: 6, name: 'Co-seller' },
+    { index: 7, name: 'Listing agent' }, { index: 8, name: 'Co-listing agent' },
+  ]
+  const SENT = [
+    { roleIndex: 5, roleName: 'Seller',            signerName: 'Jean Irwin',      signerEmail: 'irwinfam@tcaexpress.net' },
+    { roleIndex: 7, roleName: 'Listing agent',     signerName: 'Daniel Stillson', signerEmail: 'daniel@gatewayreadvisors.com' },
+    { roleIndex: 8, roleName: 'Co-listing agent',  signerName: 'Nic Madsen',      signerEmail: 'nic@gatewayreadvisors.com' },
+  ]
+
+  it('reports the five roles BoldSign would have rejected the send over', () => {
+    const out = normalizeRolePayload({ roles: SENT, templateRoles: TEMPLATE, roleRemovalIndices: [1, 2, 3, 4, 6] })
+    expect(out.roles).toHaveLength(3)
+    expect(out.unfilled.map(u => u.name))
+      .toEqual(['Buyer', 'Buyer Agent', 'Co-buyer', 'Co-buyer agent', 'Co-seller'])
+  })
+
+  it('passes a complete role set through with contiguous signerOrder', () => {
+    const template = [{ index: 5, name: 'Seller' }, { index: 7, name: 'Listing agent' }]
+    const out = normalizeRolePayload({ roles: SENT.slice(0, 2), templateRoles: template })
+    expect(out.unfilled).toEqual([])
+    // Template indices are preserved (they address the template's fields)...
+    expect(out.roles.map(r => r.roleIndex)).toEqual([5, 7])
+    // ...but signerOrder is 1..N, which is what BoldSign wants.
+    expect(out.roles.map(r => r.signerOrder)).toEqual([1, 2])
+  })
+
+  it('treats a name without a valid email as unfilled — that IS the error condition', () => {
+    const template = [{ index: 1, name: 'Seller' }, { index: 2, name: 'Listing agent' }]
+    const out = normalizeRolePayload({
+      roles: [
+        { roleIndex: 1, signerName: 'Spouse With No Email', signerEmail: '' },
+        { roleIndex: 2, signerName: 'Daniel', signerEmail: 'daniel@g.com' },
+      ],
+      templateRoles: template,
+    })
+    expect(out.roles.map(r => r.signerName)).toEqual(['Daniel'])
+    expect(out.unfilled.map(u => u.name)).toEqual(['Seller'])
+  })
+
+  it('rejects a malformed email rather than letting BoldSign do it', () => {
+    const out = normalizeRolePayload({
+      roles: [{ roleIndex: 1, signerName: 'Typo', signerEmail: 'jean@@x' }],
+      templateRoles: [{ index: 1, name: 'Seller' }],
+    })
+    expect(out.roles).toEqual([])
+    expect(out.unfilled.map(u => u.name)).toEqual(['Seller'])
+  })
+
+  it('re-resolves a stale index by role name', () => {
+    // The browser thought Listing agent was role 2; the template has it at 7.
+    const out = normalizeRolePayload({
+      roles: [{ roleIndex: 2, roleName: 'Listing agent', signerName: 'Daniel', signerEmail: 'd@g.com' }],
+      templateRoles: [{ index: 7, name: 'Listing Agent' }],
+    })
+    expect(out.roles[0].roleIndex).toBe(7)
+    expect(out.unfilled).toEqual([])
+  })
+
+  it('drops a role the template does not have instead of sending a bad index', () => {
+    const out = normalizeRolePayload({
+      roles: [{ roleIndex: 99, roleName: 'Ghost', signerName: 'X', signerEmail: 'x@y.com' }],
+      templateRoles: [{ index: 1, name: 'Seller' }],
+    })
+    expect(out.roles).toEqual([])
+  })
+
+  it('keeps the first entry when two rows claim the same role', () => {
+    const out = normalizeRolePayload({
+      roles: [
+        { roleIndex: 1, signerName: 'First',  signerEmail: 'a@x.com' },
+        { roleIndex: 1, signerName: 'Second', signerEmail: 'b@x.com' },
+      ],
+      templateRoles: [{ index: 1, name: 'Seller' }],
+    })
+    expect(out.roles.map(r => r.signerName)).toEqual(['First'])
+  })
+
+  it('strips prefill fields with no id or an empty value', () => {
+    const out = normalizeRolePayload({
+      roles: [{
+        roleIndex: 1, signerName: 'Jean', signerEmail: 'j@x.com',
+        existingFormFields: [
+          { id: 'property_address', value: '2212 Okoboji Ave', isReadOnly: true },
+          { id: 'list_price', value: '' },
+          { id: '', value: 'orphan' },
+        ],
+      }],
+      templateRoles: [{ index: 1, name: 'Seller' }],
+    })
+    expect(out.roles[0].existingFormFields).toEqual([
+      { id: 'property_address', value: '2212 Okoboji Ave', isReadOnly: true },
+    ])
+  })
+
+  it('falls back to the caller removal list when the template roles are unavailable', () => {
+    // template/properties failed — trust the client's own view rather than block.
+    const out = normalizeRolePayload({ roles: SENT, templateRoles: [], roleRemovalIndices: [1, 2, 3, 4, 6] })
+    expect(out.roles.map(r => r.roleIndex)).toEqual([5, 7, 8])
+    expect(out.unfilled.map(u => u.index)).toEqual([1, 2, 3, 4, 6])
+  })
+
+  it('tolerates junk input', () => {
+    expect(normalizeRolePayload()).toEqual({ roles: [], roleRemovalIndices: [], unfilled: [] })
+    expect(normalizeRolePayload({ roles: [null, {}] }).roles).toEqual([])
   })
 })

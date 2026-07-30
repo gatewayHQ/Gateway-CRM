@@ -226,6 +226,82 @@ export function requiresExplicitFieldPlacement(signers, useTextTags) {
 // to a Seller/Listing-Agent pair matching our template convention (role 1 =
 // client, role 2 = agent) if the caller doesn't specify roles; always produces
 // a 1-based index per role.
+// ─── Template role payload ────────────────────────────────────────────────────
+// BoldSign validates a template send against the template's OWN role list: every
+// role it is asked to keep must carry a signerName AND a signerEmail, or the
+// whole request is rejected with "SignerName or SignerEmail is missing in roles".
+// `roleRemovalIndices` is the documented way to drop the roles you aren't using,
+// but it is NOT honored on every endpoint — on an 8-role packet where the CRM
+// filled 3 roles, the other 5 survived into validation and blocked the send even
+// though every visible field on screen was populated.
+//
+// So this never depends on removal working. It reconciles what the caller sent
+// against the template's real roles and reports exactly which roles are still
+// unfilled; the caller refuses the send with a CRM-authored, actionable message
+// instead of letting BoldSign reject a payload we already knew was incomplete.
+//
+// Also normalizes the parts BoldSign is fussy about:
+//   • roleIndex must be a real template index — matched by index, else by name,
+//     so a stale client-side index can't silently address the wrong role;
+//   • signerOrder must be contiguous from 1 (template indices are not);
+//   • a role with a name but no email (or an unparseable email) is not "filled";
+//   • removal indices are deduped and never overlap the roles being sent.
+// Same email rule the ad-hoc signer validation uses (EMAIL_RE, defined below).
+const ROLE_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
+export function normalizeRolePayload({ roles = [], templateRoles = [], roleRemovalIndices = [] } = {}) {
+  const byIndex = new Map()
+  const byName  = new Map()
+  for (const t of (templateRoles || [])) {
+    const idx = Number(t?.index)
+    if (!Number.isFinite(idx)) continue
+    byIndex.set(idx, t)
+    const key = String(t?.name || '').trim().toLowerCase()
+    if (key && !byName.has(key)) byName.set(key, t)
+  }
+  const haveTemplate = byIndex.size > 0
+
+  const out = []
+  const claimed = new Set()
+  for (const r of (roles || [])) {
+    const name  = String(r?.signerName  || '').trim()
+    const email = String(r?.signerEmail || '').trim()
+    // Resolve to a real template role: index first, then the role's name.
+    let idx = Number(r?.roleIndex)
+    if (haveTemplate) {
+      const nameKey = String(r?.roleName || '').trim().toLowerCase()
+      const match   = byIndex.get(idx) || (nameKey ? byName.get(nameKey) : null)
+      if (!match) continue                       // role the template doesn't have
+      idx = Number(match.index)
+    }
+    if (!Number.isFinite(idx) || claimed.has(idx)) continue
+    if (!name || !ROLE_EMAIL_RE.test(email)) continue   // not filled — reported below
+    claimed.add(idx)
+    out.push({
+      roleIndex:    idx,
+      signerName:   name,
+      signerEmail:  email,
+      ...(Array.isArray(r?.existingFormFields) && r.existingFormFields.length
+        ? { existingFormFields: r.existingFormFields.filter(f => f?.id && String(f.value ?? '').trim() !== '') }
+        : {}),
+    })
+  }
+  out.sort((a, b) => a.roleIndex - b.roleIndex)
+  out.forEach((r, i) => { r.signerOrder = i + 1 })
+
+  // Which template roles are left over. When the template list is unavailable we
+  // can only go on what the caller told us to remove.
+  const unfilled = haveTemplate
+    ? [...byIndex.values()]
+        .filter(t => !claimed.has(Number(t.index)))
+        .map(t => ({ index: Number(t.index), name: t.name || `Role ${t.index}` }))
+        .sort((a, b) => a.index - b.index)
+    : [...new Set((roleRemovalIndices || []).map(Number).filter(Number.isFinite))]
+        .filter(i => !claimed.has(i))
+        .map(i => ({ index: i, name: `Role ${i}` }))
+
+  return { roles: out, roleRemovalIndices: unfilled.map(u => u.index), unfilled }
+}
+
 // What to do when BoldSign refuses a revoke/delete while we're removing a
 // document from the CRM ('skip' = carry on and drop the CRM row, 'throw' = abort).
 //
@@ -734,6 +810,13 @@ export default async function handler(req, res) {
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
+      const templateRoles = await fetchTemplateRoles(templateId)
+      const norm = normalizeRolePayload({ roles, templateRoles, roleRemovalIndices })
+      if (!norm.roles.length) return res.status(400).json({ error: 'Every signer needs a name and a valid email' })
+      if (norm.unfilled.length) {
+        return res.status(400).json(incompleteRolesError(norm.unfilled, norm.roles.length + norm.unfilled.length))
+      }
+
       const svc        = getServiceClient()
       const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
       const payload = {
@@ -741,8 +824,8 @@ export default async function handler(req, res) {
         // filename). Prefer the caller's documentName so it's deal-specific.
         title:   documentName || emailSubject || 'Please sign this document',
         message: message || 'Please review and sign.',
-        roles,
-        ...(Array.isArray(roleRemovalIndices) && roleRemovalIndices.length ? { roleRemovalIndices } : {}),
+        roles:   norm.roles,
+        ...(norm.roleRemovalIndices.length ? { roleRemovalIndices: norm.roleRemovalIndices } : {}),
         ...(cc ? { cc } : {}),
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),   // BoldSign tags
         ...(onBehalfOf ? { onBehalfOf } : {}),
@@ -754,11 +837,11 @@ export default async function handler(req, res) {
           deal_id,
           agent_id:      actor.agent.id,
           document_id:   data.documentId,
-          signer_name:   roles.map(r => r.signerName).filter(Boolean).join(', '),
-          signer_email:  roles.map(r => r.signerEmail).filter(Boolean).join(', '),
+          signer_name:   norm.roles.map(r => r.signerName).join(', '),
+          signer_email:  norm.roles.map(r => r.signerEmail).join(', '),
           document_name: documentName || emailSubject || 'Document',
           subject:       emailSubject || null,
-          signers:       roles,
+          signers:       norm.roles,
           status:        'sent',
         }])
       }
@@ -773,16 +856,27 @@ export default async function handler(req, res) {
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
+      // Reconcile against the template's real roles and refuse an incomplete set
+      // here, rather than shipping it to BoldSign and relaying its error.
+      const templateRoles = await fetchTemplateRoles(templateId)
+      const norm = normalizeRolePayload({ roles, templateRoles, roleRemovalIndices })
+      if (!norm.roles.length) return res.status(400).json({ error: 'Every signer needs a name and a valid email' })
+      if (norm.unfilled.length) {
+        return res.status(400).json(incompleteRolesError(norm.unfilled, norm.roles.length + norm.unfilled.length))
+      }
+
       const svc        = getServiceClient()
       const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
       const payload = {
         title:          documentName || emailSubject || 'Please sign this document',
         message:        message || 'Please review and sign.',
-        roles,
+        roles:          norm.roles,
         sendViewOption: 'PreparePage',   // land on the field-placement editor
         showToolbar:    true,
         redirectUrl:    redirectUrl || '',
-        ...(Array.isArray(roleRemovalIndices) && roleRemovalIndices.length ? { roleRemovalIndices } : {}),
+        // Kept for the endpoints that honor it; correctness no longer depends on
+        // it, since an unfilled role never reaches this point.
+        ...(norm.roleRemovalIndices.length ? { roleRemovalIndices: norm.roleRemovalIndices } : {}),
         ...(cc ? { cc } : {}),
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),
         ...(onBehalfOf ? { onBehalfOf } : {}),
@@ -796,11 +890,11 @@ export default async function handler(req, res) {
           deal_id,
           agent_id:      actor.agent.id,
           document_id:   data.documentId,
-          signer_name:   roles.map(r => r.signerName).filter(Boolean).join(', '),
-          signer_email:  roles.map(r => r.signerEmail).filter(Boolean).join(', '),
+          signer_name:   norm.roles.map(r => r.signerName).join(', '),
+          signer_email:  norm.roles.map(r => r.signerEmail).join(', '),
           document_name: documentName || emailSubject || 'Document',
           subject:       emailSubject || null,
-          signers:       roles,
+          signers:       norm.roles,
           status:        'draft',
         }])
       }
@@ -810,6 +904,35 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Unknown action' })
   } catch (err) {
     return res.status(err.status || 500).json({ error: err.message })
+  }
+}
+
+// The template's real signer roles, straight from BoldSign, so a send is
+// reconciled against what the template actually has rather than what the browser
+// believed when the modal opened. Best-effort: a failure here degrades to the
+// caller's own indices rather than blocking the send.
+async function fetchTemplateRoles(templateId) {
+  try {
+    const data = await boldsign(`/template/properties?templateId=${encodeURIComponent(templateId)}`)
+    const raw  = data.roles || data.signerRoles || data.templateRoles || []
+    return raw.map((r, i) => ({
+      index: Number(r.roleIndex ?? r.index ?? i + 1),
+      name:  r.roleName || r.name || r.signerRole || `Role ${i + 1}`,
+    })).filter(r => Number.isFinite(r.index))
+  } catch (e) {
+    console.warn(`[boldsign] template/properties failed for ${templateId}: ${e.message}`)
+    return []
+  }
+}
+
+// Turn an incomplete role set into a CRM-authored 400 the agent can act on, so
+// BoldSign's "SignerName or SignerEmail is missing in roles" can never surface.
+function incompleteRolesError(unfilled, total) {
+  const names = unfilled.map(u => u.name).join(', ')
+  return {
+    error: `This template has ${total} signer role${total === 1 ? '' : 's'} and BoldSign needs a name and email for every one of them. `
+         + `Still empty: ${names}. Fill them in under "Add another signer", or register a template whose roles match this transaction.`,
+    unfilled,
   }
 }
 

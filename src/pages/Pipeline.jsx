@@ -1702,6 +1702,8 @@ create policy "agent_notifications_policy" on agent_notifications
 //    fillable fields from BoldSign, renders a signer input per role and an
 //    editable (CRM-prefilled) input per field, then sends via /api/boldsign.
 const prettyLabel = (id) => String(id || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+// Same rule the API validates with — a row with a malformed email is not "filled".
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
 
 function SendFromTemplateModal({
   deal, contacts, properties, extraContacts = [], templates, activeAgent, onClose, onSent,
@@ -1726,6 +1728,7 @@ function SendFromTemplateModal({
   const [values,     setValues]     = React.useState({})     // fieldId → value
   const [autoFilled, setAutoFilled] = React.useState([])     // role indices the CRM filled in
   const [showAllRoles, setShowAllRoles] = React.useState(false)
+  const [roleError,  setRoleError]  = React.useState('')     // pre-flight: roles still missing a signer
 
   const tpl = templates.find(t => t.template_id === templateId)
 
@@ -1760,6 +1763,7 @@ function SendFromTemplateModal({
         setSigners(seeded)
         setAutoFilled(roles.filter(r => seeded[r.index]?.name || seeded[r.index]?.email).map(r => r.index))
         setShowAllRoles(false)
+        setRoleError('')
 
         const seededValues = {}
         for (const f of fields) seededValues[f.id] = tokenVals[f.id] || ''
@@ -1776,8 +1780,27 @@ function SendFromTemplateModal({
   const submit = async () => {
     if (!templateId) { pushToast('Pick a template', 'error'); return }
     const roleList = details?.roles || []
-    const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())
+    const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && EMAIL_RE.test((signers[r.index]?.email || '').trim()))
     if (!filled.length) { pushToast('At least one signer needs a name and email', 'error'); return }
+
+    // Pre-flight. BoldSign validates a template send against the template's own
+    // role list and rejects the whole request — "SignerName or SignerEmail is
+    // missing in roles" — for any role it's asked to keep without a name and
+    // email. Asking it to drop the unused ones (roleRemovalIndices) is not
+    // honored on this endpoint, so an 8-role packet with 3 filled rows failed
+    // even though every field on screen was populated. Catch it here: show the
+    // empty rows, say exactly which ones, and never send an incomplete set.
+    const unfilled = roleList.filter(r => !filled.includes(r))
+    if (unfilled.length) {
+      setShowAllRoles(true)
+      setRoleError(
+        `This template has ${roleList.length} signer roles and BoldSign needs a name and email for every one. `
+        + `Still empty: ${unfilled.map(r => r.name).join(', ')}.`
+      )
+      pushToast(`${unfilled.length} signer role${unfilled.length === 1 ? '' : 's'} still need a name and email`, 'error')
+      return
+    }
+    setRoleError('')
     setSending(true)
 
     // Attach each filled field value to the role that owns it (or the first
@@ -1790,11 +1813,15 @@ function SendFromTemplateModal({
       const idx = (f.roleIndex && filled.some(r => r.index === f.roleIndex)) ? f.roleIndex : firstIdx
       ;(byRole[idx] ||= []).push({ id: f.id, value: v, isReadOnly: true })
     }
+    // roleName travels with each row so the API can re-resolve a stale index
+    // against the template's live role list. signerOrder is assigned server-side
+    // (template indices aren't contiguous, BoldSign wants 1..N).
     const roles = filled.map(r => ({
-      roleIndex: r.index, signerName: signers[r.index].name, signerEmail: signers[r.index].email,
-      signerOrder: r.index, existingFormFields: byRole[r.index] || [],
+      roleIndex: r.index, roleName: r.name,
+      signerName: signers[r.index].name.trim(), signerEmail: signers[r.index].email.trim(),
+      existingFormFields: byRole[r.index] || [],
     }))
-    const roleRemovalIndices = roleList.filter(r => !filled.includes(r)).map(r => r.index)
+    const roleRemovalIndices = unfilled.map(r => r.index)
 
     const docName = [tpl?.name || deal?.title, property?.address].filter(Boolean).join(' — ')
     const labels  = [tpl?.state, tpl?.doc_type, `deal:${deal.id}`].filter(Boolean)
@@ -1891,6 +1918,13 @@ function SendFromTemplateModal({
               Showing templates for {dealState}{matched.length ? '' : ' — none registered for this state yet, showing all'}.
             </div>
           )}
+          {/* Role count up front — an 8-role packet needs 8 signers, and that's
+              worth knowing before picking it rather than at send time. */}
+          {details?.roles?.length > autoFilled.length && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
+              {details.roles.length} signer roles on this template · {autoFilled.length} filled from this deal
+            </div>
+          )}
           {/* Compliance guard: state-specific forms are not interchangeable. */}
           {dealState && tpl?.state && normalizeState(tpl.state) !== dealState && (
             <div style={{ fontSize:11, color:'#8a6100', marginTop:6, fontWeight:600 }}>
@@ -1945,8 +1979,18 @@ function SendFromTemplateModal({
                   + Add another signer ({hiddenRoleCount} more role{hiddenRoleCount === 1 ? '' : 's'} on this template)
                 </button>
               )}
-              {showAllRoles && (
-                <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Roles left blank are removed from this send.</div>
+              {/* Pre-flight result — replaces BoldSign's opaque rejection. */}
+              {roleError && (
+                <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:'8px 10px', fontSize:12, lineHeight:1.6, marginTop:8 }}>
+                  {roleError}
+                  <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
+                    Fill them in above, or use a template whose roles match this transaction —
+                    a seller packet with Seller / Listing agent / Co-listing agent only.
+                  </div>
+                </div>
+              )}
+              {showAllRoles && !roleError && (
+                <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Every role on this template needs a name and email.</div>
               )}
             </div>
 
@@ -2104,6 +2148,14 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   // signer prefill on the Signatures tab (co-signers get their own rows).
   const extraContacts = additionalContactIds.map(id => contacts.find(c => c.id === id)).filter(Boolean)
 
+  // The licensees on this deal, in signing order — the same list the Signatures
+  // tab seeds signers from, so Details and the send flow can't disagree.
+  const dealTeam = React.useMemo(() => {
+    const property = properties?.find(p => p.id === form.property_id) || null
+    return resolveDealAgents({ deal: { ...deal, agent_id: form.agent_id }, property, agents, activeAgent })
+      .map(a => agents.find(x => x.id === a.id) || a)
+  }, [deal, form.agent_id, form.property_id, properties, agents, activeAgent])
+
   const set  = (k, v) => setForm(p => ({...p, [k]: v}))
   const setCD = (k, v) => setForm(p => ({...p, comp_data: {...(p.comp_data||{}), [k]: v}}))
   const cd = form.comp_data || {}
@@ -2248,6 +2300,32 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
             </div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
             <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+
+            {/* Agents on this deal — the assigned agent plus any co-agent, same
+                treatment as the deal page's card. Read-only here: co-agents are
+                set on the property, and this is where an agent looks to confirm
+                who will be on the paperwork. */}
+            {dealTeam.length > 0 && (
+              <div className="form-group">
+                <label className="form-label">Agents on This Deal</label>
+                <div style={{ display:'flex', flexDirection:'column', gap:5, padding:'8px 10px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)' }}>
+                  {dealTeam.map(a => (
+                    <div key={a.id} style={{ display:'flex', alignItems:'center', gap:7 }}>
+                      <Avatar agent={a} size={20}/>
+                      <span style={{ fontSize:12.5 }}>{a.name}</span>
+                      {a.id === form.agent_id
+                        ? <span style={{ fontSize:10, color:'var(--gw-mist)' }}>primary</span>
+                        : <span style={{ fontSize:10, color:'var(--gw-mist)' }}>co-agent</span>}
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>
+                  {dealTeam.length > 1
+                    ? 'Both pre-fill as signers when you Send for Signature.'
+                    : 'Add a co-agent on the property to have them pre-fill as a signer too.'}
+                </div>
+              </div>
+            )}
 
             {/* ── Comp Data ─────────────────────────────────────── */}
             <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>

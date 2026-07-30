@@ -171,6 +171,17 @@ Nothing about the parties is typed by hand. Everyone is resolved from data the d
 
 **Missing email:** a party with a name but no email is seeded as a name-only row, flagged inline (*"No email on file for this person"*) — BoldSign requires an email per signer, so that row is dropped from the send unless one is added. In the ad-hoc **Send for Signature** flow the same people are named under the signer list instead of becoming a blank blocking row. Either way nobody is silently omitted.
 
+## "SignerName or SignerEmail is missing in roles"
+BoldSign validates a template send against the **template's own** role list: every role it is asked to keep must carry a `signerName` **and** a `signerEmail`, or the entire request is rejected with that message. `roleRemovalIndices` is the documented way to drop unused roles, but it is **not honored on `createEmbeddedRequestUrl`** — on an 8-role packet with 3 rows filled from the deal, the other 5 survived into validation and blocked the send even though every field on screen was populated. Unknown JSON properties are ignored by BoldSign's deserializer, so the failure was silent.
+
+Correctness no longer depends on removal working:
+- `normalizeRolePayload()` (`api/boldsign.js`, unit-tested) reconciles the caller's roles against the template's live roles from `/template/properties` — matched by index, then by role **name**, so a stale browser-side index can't address the wrong role. It drops rows whose name or email is missing/malformed (that *is* the error condition), dedupes roles claiming the same index, strips prefill fields with no id or empty value, and renumbers `signerOrder` 1..N (template indices aren't contiguous).
+- Both `template-send` and `template-embed-url` refuse an incomplete set with a **CRM-authored 400** naming the unfilled roles, so BoldSign's message can never reach an agent.
+- The picker pre-flights the same rule before any API call: it expands the hidden rows, names the empty roles inline, and points at the real fix — a template whose roles match the transaction (the 2-role Seller / Listing Agent convention, or Seller / Listing agent / Co-listing agent for a co-listed deal).
+- If `/template/properties` is unreachable the send is not blocked — it degrades to the caller's own removal list.
+
+**Template design rule:** a template's role set should match one side of one transaction. An 8-role packet carrying both sides needs 8 real signers on every send; that's a template problem the CRM can only surface, not fix.
+
 ## Removing a document from the Signatures tab
 `action: 'document-delete'` — the sender or an **admin** may remove any non-`completed` document; a completed one is the signed legal record and is refused outright.
 - **Drafts** (never sent) are always removable. BoldSign rejects `revoke` on a document that was never sent *and* `delete` on one still in draft, and the old code aborted the whole request on any non-404 error — so the trash icon on a draft only ever raised a toast. Cleanup of BoldSign's copy is now best-effort (`cleanupFailureAction()`, unit-tested), the CRM row goes regardless, and whatever BoldSign said is recorded in `audit_log` and returned as `boldsign` for the toast.
