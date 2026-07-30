@@ -51,6 +51,55 @@ export const templateDetails       = (templateId) => call({ action: 'template-de
 export const sendFromTemplate      = (p) => call({ action: 'template-send', ...p })
 export const templateEmbedUrl      = (p) => call({ action: 'template-embed-url', ...p })
 
+// Which Form Library rows are actually sendable for e-signature: an entry
+// qualifies once it carries a BoldSign template id and hasn't been deactivated.
+//
+// Callers pass raw `select('*')` rows on purpose. Naming the post-unification
+// columns (boldsign_template_id / doc_type / field_tokens / active) in the
+// select makes the whole query fail with 42703 on an install that hasn't run
+// migration 0019 yet — which silently emptied the template list and hid the
+// Send-from-Template button. Reading everything and filtering here can't fail
+// that way. `active` is treated as true when the column/value is missing so a
+// pre-0019 row still shows up. Also accepts rows from the retired
+// `boldsign_templates` registry, which named the column `template_id`.
+export function sendableTemplates(rows = []) {
+  return (rows || [])
+    .filter(r => r && r.active !== false && String(r.boldsign_template_id || r.template_id || '').trim())
+    .map(r => ({
+      template_id:  String(r.boldsign_template_id || r.template_id).trim(),
+      name:         r.name || r.template_name || 'Untitled template',
+      state:        r.state || '',
+      doc_type:     r.doc_type || '',
+      // Which side the packet is written for ('buyer' | 'seller' | 'lease' |
+      // 'general') — used to warn when it doesn't match the deal's side.
+      tx_type:      String(r.transaction_type || '').toLowerCase(),
+      field_tokens: Array.isArray(r.field_tokens) ? r.field_tokens : [],
+      source:       'library',
+    }))
+    .filter((t, i, all) => all.findIndex(o => o.template_id === t.template_id) === i)
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+// Same shape, built from a raw BoldSign `/template/list` payload. Used as a
+// fallback when the CRM catalog has nothing registered, so an agent can still
+// send from a template that exists in BoldSign. Field names vary across BoldSign
+// responses (templateId/documentId, templateName/documentName), hence the
+// tolerant reads. No state/doc_type — those live only in the CRM catalog.
+export function normalizeBoldsignTemplates(items = []) {
+  return (items || [])
+    .map(t => ({
+      template_id:  String(t?.templateId || t?.documentId || t?.id || '').trim(),
+      name:         t?.templateName || t?.documentName || t?.messageTitle || t?.name || 'Untitled template',
+      state:        '',
+      doc_type:     '',
+      field_tokens: [],
+      source:       'boldsign',
+    }))
+    .filter(t => t.template_id)
+    .filter((t, i, all) => all.findIndex(o => o.template_id === t.template_id) === i)
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
 // ── Text tags ─────────────────────────────────────────────────────────────────
 // BoldSign auto-places a field when it finds `{{fieldType|signerIndex|required|
 // label|fieldId}}` in the document text. Setting fieldId to a CRM token (see
@@ -85,6 +134,18 @@ export function normalizeState(s) {
 // and primary contact. Only tokens the template actually declares get sent.
 // The canonical token → value map from a deal's context. Field IDs on a
 // template that match one of these keys get auto-filled.
+// The deal's gross commission rate, wherever it was entered: the admin's
+// commissions row (passed in as deal.commission), the agent's own entry in
+// comp_data, or a legacy column on the deal.
+export function commissionRate(deal) {
+  const candidates = [deal?.commission?.gross_pct, deal?.comp_data?.commission_pct, deal?.commission_pct]
+  for (const c of candidates) {
+    const n = Number(c)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return null
+}
+
 export function crmTokenValues({ deal, property, contact, agent } = {}) {
   const money = (n) => (n != null && n !== '' ? `$${Number(n).toLocaleString()}` : '')
   const fullAddr = [property?.address, property?.city, property?.state, property?.zip].filter(Boolean).join(', ')
@@ -95,7 +156,10 @@ export function crmTokenValues({ deal, property, contact, agent } = {}) {
     property_state:     property?.state || '',
     property_zip:       property?.zip || '',
     list_price:         money(property?.price ?? deal?.value),
-    commission_pct:     deal?.commission_pct != null ? `${deal.commission_pct}%` : '',
+    // There is no deals.commission_pct column — the rate lives on the admin's
+    // commissions row (back-office) or, when an agent entered it, in comp_data.
+    // Reading only the column meant this token always came out blank.
+    commission_pct:     commissionRate(deal) != null ? `${commissionRate(deal)}%` : '',
     listing_start_date: deal?.comp_data?.listing_start || '',
     listing_end_date:   deal?.comp_data?.listing_end || deal?.expected_close_date || '',
     seller_name:        [contact?.first_name, contact?.last_name].filter(Boolean).join(' '),
@@ -117,41 +181,213 @@ export function buildPrefill(fieldTokens = [], ctx = {}) {
 
 // Role names that should be filled with the deal's client(s) rather than the
 // agent. Broad on purpose so generic template roles ("Signer 1") still seed.
-const CLIENT_ROLE_RE = /(seller|buyer|client|owner|purchaser|grantor|grantee|landlord|tenant|lessor|lessee|borrower|customer|signer)/
+const CLIENT_ROLE_RE = /(seller|buyer|client|owner|purchaser|grantor|grantee|landlord|tenant|lessor|lessee|borrower|customer|signer|party)/
 
-// Pre-fill a template's signer rows from the deal's people:
-//   • a role mentioning "agent" → the acting agent (first such role only)
-//   • client-type roles → the deal's linked contact, then that contact's
-//     spouse for a second client role (co-buyers / husband & wife)
-//   • anything else keeps the template's own placeholder (r.defaultName/Email)
-// Returns { [roleIndex]: { name, email } }. Pure — the agent can still edit any
-// field before sending. Requires the deal to have a linked contact; with none,
-// client roles fall back to the template placeholder (usually blank).
-export function seedSignersFromDeal({ roles = [], contact = null, additionalContacts = [], activeAgent = null } = {}) {
+// Which side of the transaction a role belongs to, and whether it's a licensee
+// row or a client row. "Broker" is deliberately NOT an agent keyword — that row
+// is usually the broker of record, not the agent working the deal.
+const BUYER_SIDE_RE  = /(buyer|purchaser|grantee|tenant|lessee|borrower)/
+const SELLER_SIDE_RE = /(seller|owner|grantor|landlord|lessor)/
+const AGENT_ROLE_RE  = /(agent|realtor)/
+
+// ── BoldSign role name → CRM party ───────────────────────────────────────────
+// The explicit mapping table. Matching a role by name is what decides who gets
+// dropped from a send, so it's a table first and heuristics only as a fallback —
+// a mis-read role name means either the wrong person on a contract or a role
+// removed that shouldn't be.
+//
+// `seat` is which person of that party takes the row: seat 1 is the primary
+// (Seller, Listing Agent), seat 2 the second (Co-seller, Co-listing Agent). Seats
+// make assignment independent of the order BoldSign happens to return roles in,
+// so a template that lists "Co-seller" before "Seller" still puts the primary
+// contact in the Seller row.
+//
+// To add a role: use one of these names in BoldSign, or add the alias here.
+// Names are matched case-insensitively with punctuation/whitespace normalized,
+// so "Buyer's Agent", "buyers agent" and "BUYER  AGENT" are all one entry.
+export const ROLE_ALIASES = Object.freeze({
+  // ── Clients, buyer side ──
+  'buyer':              { party: 'client', side: 'buyer',  seat: 1 },
+  'buyer 1':            { party: 'client', side: 'buyer',  seat: 1 },
+  'purchaser':          { party: 'client', side: 'buyer',  seat: 1 },
+  'tenant':             { party: 'client', side: 'buyer',  seat: 1 },
+  'co buyer':           { party: 'client', side: 'buyer',  seat: 2 },
+  'buyer 2':            { party: 'client', side: 'buyer',  seat: 2 },
+  'second buyer':       { party: 'client', side: 'buyer',  seat: 2 },
+  'co purchaser':       { party: 'client', side: 'buyer',  seat: 2 },
+  'co tenant':          { party: 'client', side: 'buyer',  seat: 2 },
+
+  // ── Clients, seller side ──
+  'seller':             { party: 'client', side: 'seller', seat: 1 },
+  'seller 1':           { party: 'client', side: 'seller', seat: 1 },
+  'owner':              { party: 'client', side: 'seller', seat: 1 },
+  'landlord':           { party: 'client', side: 'seller', seat: 1 },
+  'co seller':          { party: 'client', side: 'seller', seat: 2 },
+  'seller 2':           { party: 'client', side: 'seller', seat: 2 },
+  'second seller':      { party: 'client', side: 'seller', seat: 2 },
+  'co owner':           { party: 'client', side: 'seller', seat: 2 },
+  'co landlord':        { party: 'client', side: 'seller', seat: 2 },
+
+  // ── Agents, buyer side ──
+  'buyer agent':        { party: 'agent',  side: 'buyer',  seat: 1 },
+  'buyers agent':       { party: 'agent',  side: 'buyer',  seat: 1 },
+  'selling agent':      { party: 'agent',  side: 'buyer',  seat: 1 },
+  'co buyer agent':     { party: 'agent',  side: 'buyer',  seat: 2 },
+  'co buyers agent':    { party: 'agent',  side: 'buyer',  seat: 2 },
+  'buyer co agent':     { party: 'agent',  side: 'buyer',  seat: 2 },
+
+  // ── Agents, seller side ──
+  'listing agent':      { party: 'agent',  side: 'seller', seat: 1 },
+  'seller agent':       { party: 'agent',  side: 'seller', seat: 1 },
+  'sellers agent':      { party: 'agent',  side: 'seller', seat: 1 },
+  'co listing agent':   { party: 'agent',  side: 'seller', seat: 2 },
+  'co seller agent':    { party: 'agent',  side: 'seller', seat: 2 },
+  'listing co agent':   { party: 'agent',  side: 'seller', seat: 2 },
+
+  // ── Side-agnostic ──
+  'agent':              { party: 'agent',  side: '',       seat: 1 },
+  'co agent':           { party: 'agent',  side: '',       seat: 2 },
+  'realtor':            { party: 'agent',  side: '',       seat: 1 },
+  'client':             { party: 'client', side: '',       seat: 1 },
+  'co client':          { party: 'client', side: '',       seat: 2 },
+})
+
+// Lowercase, collapse punctuation/whitespace: "Co-Buyer's  Agent" → "co buyers agent".
+export function normalizeRoleName(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/[’']/g, '')          // buyer's → buyers
+    .replace(/[^a-z0-9]+/g, ' ')   // dashes, slashes, punctuation → space
+    .trim()
+    .replace(/\s+/g, ' ')
+}
+
+// party: 'agent' | 'client' | 'other' · side: 'buyer' | 'seller' | '' (either)
+// seat: 1 = primary, 2 = the co- row.
+export function roleKind(name) {
+  const n = normalizeRoleName(name)
+  const exact = ROLE_ALIASES[n]
+  if (exact) return { ...exact }
+
+  // Fallback for a role name the table doesn't carry (custom templates, "Signer
+  // 1", "Party B"). Seat comes from a leading "co" or a trailing 2/3.
+  const seat = /^co\b/.test(n) || /\b([2-9])$/.test(n) ? 2 : 1
+  const side = BUYER_SIDE_RE.test(n) ? 'buyer' : SELLER_SIDE_RE.test(n) ? 'seller' : ''
+  if (AGENT_ROLE_RE.test(n))          return { party: 'agent',  side, seat }
+  if (side || CLIENT_ROLE_RE.test(n)) return { party: 'client', side, seat }
+  return { party: 'other', side: '', seat }
+}
+
+// Every licensee on the deal, in signing order: the deal's own agent first, then
+// co-agents. Co-agents live on the linked property (`details.co_agent_ids`,
+// set by the Properties drawer) — a deal-level `co_agent_ids` array is also
+// honored for legacy rows. `activeAgent` is only a fallback for a deal with no
+// agent set, so an admin opening someone else's deal doesn't replace the agent
+// of record on the paperwork.
+//
+// Pure: resolves ids against the `agents` roster already loaded by the page —
+// no extra query, so the co-agent simply appears with no UI to fill in.
+export function resolveDealAgents({ deal = null, property = null, agents = [], activeAgent = null } = {}) {
+  const byId = new Map((agents || []).filter(a => a?.id).map(a => [a.id, a]))
+  const ids  = [
+    deal?.agent_id,
+    ...(property?.details?.co_agent_ids || []),
+    ...(deal?.co_agent_ids || []),
+  ].filter(Boolean)
+
+  const out  = []
+  const seen = new Set()
+  const push = (a) => {
+    if (!a) return
+    const key = (a.email || a.name || '').toLowerCase()
+    if (!key || seen.has(key)) return
+    seen.add(key)
+    out.push({ id: a.id, name: a.name || '', email: a.email || '' })
+  }
+  for (const id of [...new Set(ids)]) push(byId.get(id))
+  if (!out.length) push(activeAgent)
+  return out
+}
+
+// The deal's side of the transaction, used to route people to the matching
+// template roles. Set on the Details tab (comp_data.transaction_type).
+export const dealSide = (deal) => {
+  const t = String(deal?.comp_data?.transaction_type || '').toLowerCase()
+  return t === 'buyer' || t === 'seller' ? t : ''
+}
+
+// The deal's client-side signers in order: primary contact, linked additional
+// contacts (co-buyers / spouses, each with their own email), then the primary's
+// stored spouse_name as a last resort (name only — no email on file).
+export function dealClientSigners({ contact = null, additionalContacts = [] } = {}) {
   const toPerson = c => ({ name: `${c?.first_name || ''} ${c?.last_name || ''}`.trim(), email: c?.email || '' })
   const people = []
-  if (contact && (contact.first_name || contact.last_name || contact.email)) people.push(toPerson(contact))
-  // Real linked additional contacts (co-buyers / spouses) come next, in order —
-  // these carry their own email, unlike the stored spouse_name below.
-  for (const c of (additionalContacts || [])) {
-    const p = toPerson(c)
-    if (p.name || p.email) people.push(p)
+  const seen   = new Set()
+  const push = (p) => {
+    if (!p.name && !p.email) return
+    const key = (p.email || p.name).toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    people.push(p)
   }
-  // Fall back to the primary contact's stored spouse name (no email on file)
-  // only when no real additional contacts are linked to the deal.
-  if (!(additionalContacts || []).length && contact?.spouse_name) people.push({ name: contact.spouse_name, email: '' })
-  const out = {}
-  let usedAgent = false, personIdx = 0
-  for (const r of roles) {
-    const n = String(r?.name || '').toLowerCase()
-    if (!usedAgent && /agent/.test(n) && activeAgent?.email) {
-      out[r.index] = { name: activeAgent.name || '', email: activeAgent.email || '' }
-      usedAgent = true
-    } else if (CLIENT_ROLE_RE.test(n) && personIdx < people.length) {
-      out[r.index] = { ...people[personIdx++] }
-    } else {
-      out[r.index] = { name: r?.defaultName || '', email: r?.defaultEmail || '' }
+  if (contact) push(toPerson(contact))
+  for (const c of (additionalContacts || [])) push(toPerson(c))
+  if (!(additionalContacts || []).length && contact?.spouse_name) push({ name: contact.spouse_name, email: '' })
+  return people
+}
+
+// Pre-fill a template's signer rows from everyone the CRM already knows about:
+//   • agent-type roles → the deal's agent, then each co-agent, in order
+//   • client-type roles → the primary contact, then each additional contact
+//     (co-buyer / spouse), in order
+//   • anything else keeps the template's own placeholder (r.defaultName/Email)
+//
+// When the deal's side is known (`side` — comp_data.transaction_type), people
+// fill the roles on THEIR side first and generic roles second, and never the
+// opposite side: a buyer-side deal must not drop the buyer into the template's
+// Seller row. With no side on the deal, every client/agent role is eligible in
+// template order (the pre-side behavior).
+//
+// Returns { [roleIndex]: { name, email } }. Pure — the agent can still edit any
+// row before sending, and rows left blank are removed from the send.
+export function seedSignersFromDeal({
+  roles = [], contact = null, additionalContacts = [],
+  activeAgent = null, agents = [], side = '',
+} = {}) {
+  const clients = dealClientSigners({ contact, additionalContacts })
+  const licensees = ((agents || []).length ? agents : (activeAgent ? [activeAgent] : []))
+    .filter(Boolean)
+    .map(a => ({ name: a.name || '', email: a.email || '' }))
+    .filter(a => a.name || a.email)
+
+  const kinds = roles.map(r => ({ r, ...roleKind(r?.name) }))
+  const out   = {}
+  for (const { r } of kinds) out[r.index] = { name: r?.defaultName || '', email: r?.defaultEmail || '' }
+
+  // Assign by SEAT, not by the order BoldSign returned the roles in: person 1
+  // takes the seat-1 row (Seller, Listing Agent), person 2 the seat-2 row
+  // (Co-seller, Co-listing Agent). A template that lists Co-seller above Seller
+  // therefore still puts the primary contact in the Seller row. Ties keep
+  // template order (Array.sort is stable).
+  const bySeat = (list) => [...list].sort((a, b) => (a.seat || 9) - (b.seat || 9))
+
+  const fill = (party, queue) => {
+    // Our side first, then side-agnostic roles ("Signer 1", a bare "Agent");
+    // opposite-side roles are never auto-filled when we know the side. A deal
+    // that represents BOTH sides leaves transaction_type off buyer/seller, which
+    // makes every role of that party eligible in template order.
+    const groups = side
+      ? [kinds.filter(k => k.party === party && k.side === side),
+         kinds.filter(k => k.party === party && !k.side)]
+      : [kinds.filter(k => k.party === party)]
+    for (const group of groups) {
+      for (const k of bySeat(group)) {
+        if (!queue.length) return
+        out[k.r.index] = queue.shift()
+      }
     }
   }
+  fill('agent',  [...licensees])
+  fill('client', [...clients])
   return out
 }

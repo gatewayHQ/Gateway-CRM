@@ -142,18 +142,100 @@ Two bugs made this flow unusable/unreliable, both fixed in `src/pages/FormLibrar
 **Catalog (in the CRM — Form Library):**
 - Register a template by pasting its BoldSign template id into a Form Library entry (Settings → BoldSign links here too), along with `state`, `doc_type`, and comma-separated `field_tokens`. The entry shows a **Sendable** badge and becomes selectable in a deal's "Send from Template" picker, filtered to the deal's state.
 - **Nightly drift sync** (`GET /api/cron?task=boldsign-sync`, 3am): calls `template-list` and reconciles the catalog —
-  - **deactivates** any linked entry whose template was deleted in BoldSign;
+  - **reports** (does not disable) any linked entry whose template id the live account doesn't have, in the job response's `missing[]` + a `warning`. It used to set `active = false`, which silently un-did the admin's work overnight: point `BOLDSIGN_API_KEY` at a different environment (sandbox vs live) or carry ids from a deleted account and every packet except the ones that happen to exist there goes *Sendable (disabled)* at 3am. A stale id already fails loudly at send time ("template not found"), so disabling the packet buys nothing and costs the agent their forms. Set `BOLDSIGN_SYNC_DEACTIVATE=1` to restore enforcement;
+  - Form Library shows a **"Make all sendable"** banner (admin-only) whenever linked packets are switched off, so recovering from a past bulk deactivation is one click rather than one modal per packet;
   - **draft-registers** (inactive) any BoldSign template not yet in the catalog, but *only* when its title confidently maps to one of `OPERATING_STATES` (`detectStateFromTitle()`) — ambiguous titles are reported in the job's response, never guessed, since `state` is compliance-relevant;
   - never overwrites an admin-set name/state/tokens on an existing entry, and never auto-activates a draft — an admin reviews and flips `active` in Form Library.
+  - **Safety rails on the deactivation pass** (it can switch off the whole catalog, which reads to an agent as the feature being removed): ids/titles are read through `boldsignTemplateId()` / `boldsignTemplateTitle()` because BoldSign spells them `templateId`/`documentId`/`id` and `title`/`templateName`/`documentName` depending on the endpoint; the list is **paged** through (a single 100-row page would treat template 101 as deleted); and if BoldSign returns **no readable ids at all**, the pass is skipped and the response carries a `warning` instead.
 
-## Signer auto-fill (Send from Template)
-When an agent picks a template on a deal's Signatures tab, the signer name/email rows are pre-filled by `seedSignersFromDeal()` (`src/lib/services/boldsign.js`, unit-tested):
-- A role whose name mentions **agent** → the acting agent.
-- **Client-type roles** (seller/buyer/client/owner/purchaser/grantor/grantee/landlord/tenant/lessor/lessee/borrower/customer/signer) → the deal's people, in order: the **primary contact** (`deals.contact_id`), then any **Additional Contacts** linked to the deal (`deal_contacts` — migration 0021), so a template with two signer roles gets the primary and the co-buyer/spouse, each with their own email.
-- If no additional contacts are linked but the primary contact has a stored **spouse name**, that fills a second client role (name only — spouse email isn't stored).
-- Any other role (e.g. Witness) keeps the template's placeholder.
+**The deal's "Send from Template" picker:**
+- The button on a deal's Signatures tab is **always shown** — it used to be hidden whenever the template list came back empty, so one failed catalog read looked like the feature had been taken out of the app. An empty list is now explained inside the modal (with a Retry), not hidden.
+- `loadTemplates()` reads whole `form_packets` rows and filters with `sendableTemplates()` (unit-tested) instead of naming `boldsign_template_id`/`doc_type`/`field_tokens`/`active` in the select — the named select fails with `42703` on a database that hasn't run migration 0019 and silently empties the list. `active` counts as true unless it's explicitly `false`, so a row predating the column still shows.
+- Two fallbacks: a read error retries against the retired `boldsign_templates` registry, and an empty catalog falls back to `template-list` (the BoldSign account's own templates, normalized by `normalizeBoldsignTemplates()`) so an agent can still send while an admin fixes the catalog. Templates from that fallback are labelled in the picker — they carry no state or field tokens.
 
-The agent can edit every field before sending. **Prerequisite:** the deal must have a linked Contact (`deals.contact_id`) with an email — if a deal has no contact, client rows fall back to the template placeholder (usually blank). Link co-signers via the deal drawer's **Additional Contacts** picker so they seed with real emails.
+## Signer auto-fill (both send flows)
+Nothing about the parties is typed by hand. Everyone is resolved from data the deal drawer has already loaded — no extra query, so a co-agent simply appears in the recipient list with no field to fill in.
+
+**Who is on the deal** (`src/lib/services/boldsign.js`, all unit-tested and pure):
+- `resolveDealAgents({ deal, property, agents, activeAgent })` → licensees in signing order: `deals.agent_id` first, then co-agents from the linked property's **`properties.details.co_agent_ids`** (set in the Properties drawer), then a legacy deal-level `co_agent_ids` if present. Deduped by email. `activeAgent` is only a fallback for a deal with no agent — an admin opening someone else's deal never replaces the agent of record on the paperwork.
+- `dealClientSigners({ contact, additionalContacts })` → clients in order: the **primary contact** (`deals.contact_id`), then each **Additional Contact** linked to the deal (`deal_contacts`, migration 0021), then the primary's stored **`spouse_name`** as a last resort (name only — no email on file). Deduped by lower-cased email.
+- `dealSide(deal)` → `'buyer' | 'seller' | ''` from **`deals.comp_data.transaction_type`** (the Details tab's side toggle).
+
+**How rows are matched** — `roleKind(name)` classifies each template role as `{ party: 'agent' | 'client' | 'other', side: 'buyer' | 'seller' | '' }`. "Broker" is deliberately *not* an agent keyword (that row is the broker of record). `seedSignersFromDeal()` then fills:
+- agent roles ← the agent list, in order (two agents fill *both* the Buyer Agent and Co-buyer agent rows);
+- client roles ← the client list, in order (two buyers fill Buyer and Co-buyer);
+- **our side first, side-agnostic roles second, and never the opposite side** when `side` is known — a buyer-side deal cannot drop the buyer into the template's Seller row. With no side on the deal, every client/agent role is eligible in template order (the pre-side behavior).
+- Anything else (Witness, Notary) keeps the template's own placeholder.
+
+**In the picker**, only the rows the CRM filled are rendered; the remaining roles sit behind **"+ Add another signer (N more roles on this template)"**. A 7-role purchase-agreement packet used to render five empty rows, which read as "these are mine to fill in". Blank roles are still removed from the send (`roleRemovalIndices`).
+
+**Missing email:** a party with a name but no email is seeded as a name-only row, flagged inline (*"No email on file for this person"*) — BoldSign requires an email per signer, so that row is dropped from the send unless one is added. In the ad-hoc **Send for Signature** flow the same people are named under the signer list instead of becoming a blank blocking row. Either way nobody is silently omitted.
+
+## "SignerName or SignerEmail is missing in roles"
+**Sending a subset of a template's roles is normal and supported.** Roles the deal has nobody for go into `roleRemovalIndices` and BoldSign drops them — that is how a listing packet has always gone out with just Seller + Listing agent, and it has to stay that way: on a purchase agreement where the brokerage represents one side, the other side's rows are legitimately empty in the picker.
+
+BoldSign **will** refuse to drop a role that owns fields on the document — you cannot remove the Buyer from a purchase agreement that has buyer signature blocks — and that refusal comes back as this same generic message. The observed failure was a **buyer**-side agency packet chosen on a **seller**-side deal: the roles the document has fields for were exactly the ones being removed.
+
+> An earlier revision of this file claimed `roleRemovalIndices` is not honored on `createEmbeddedRequestUrl`, and the CRM was changed to demand a signer for every role. That was wrong — subset sends demonstrably work (the Purchase Agreement Packet drafts on 2212 Okoboji went out with two of eight roles filled) — and the hard block has been removed.
+
+**Two separate removals are required, not one.** `roleRemovalIndices` drops the RECIPIENT entry for a role. It does **not** remove the Signature/Initial/etc. fields still physically placed on the document pointing at that role's index — those are a template-authoring-time concept, separate from the send-time recipient list. If they aren't also removed, BoldSign finds fields with no signer behind them and reports it with the **exact same generic message**, so a send that correctly computed and sent `roleRemovalIndices` (confirmed on a live send: the error named precisely the roles that were supposed to be removed, no more no less) can still fail for a second, unrelated reason.
+
+The companion mechanism is `removeFormFields` — an array of field ID strings, e.g. `"removeFormFields": ["Label1","CheckBox1"]` ([BoldSign KB 21039](https://support.boldsign.com/kb/article/21039/how-to-remove-specific-fields-from-a-template-when-sending-a-signature-request-via-api)). `fetchTemplateShape()` reads the template's fields (not just roles) from `/template/properties` in the same call already used for role reconciliation; `normalizeRolePayload()` computes which field IDs belong to a role being removed and returns them as `removeFormFields`. Both `template-send` and `template-embed-url` send it alongside `roleRemovalIndices`/`RoleRemovalIndices`. An unscoped field (no `roleIndex` — e.g. today's date, a document-level checkbox) is never touched.
+
+**Property casing matters.** BoldSign documents this as `RoleRemovalIndices` (PascalCase). The CRM sends the array under **both** `roleRemovalIndices` and `RoleRemovalIndices` in the same payload: a case-sensitive model binder silently ignores an unknown property, and a silently-ignored removal list leaves every unused role in the send — producing exactly this error on every one-sided send while looking like a permissions problem. Duplicate-but-equal keys are last-wins for the usual JSON deserializers, so sending both is safe.
+
+**Prefill fields follow their owner.** A field owned by a role being removed is dropped from `existingFormFields` rather than re-attached to the first filled signer (which is what the code used to do — sending a Buyer-owned field as the Seller's).
+
+What the send path does:
+- attempts the send with whoever is on the deal, as it always did;
+- on a roles rejection, returns a CRM-authored 400 naming the roles BoldSign kept (`unremovableRolesError()`), with the vendor text alongside for the log. The picker expands those rows and shows the message inline instead of relaying "SignerName or SignerEmail is missing in roles";
+- warns at selection time when the packet's `transaction_type` doesn't match the deal's side (`comp_data.transaction_type`) — that mismatch is what causes this.
+
+The payload is normalized on the way out either way:
+- `normalizeRolePayload()` (unit-tested) reconciles the caller's roles against the template's live roles from `/template/properties` — matched by index, then by role **name**, so a stale browser-side index can't address the wrong role. It drops rows whose name or email is missing/malformed, dedupes roles claiming the same index, strips prefill fields with no id or empty value, and renumbers `signerOrder` 1..N (template indices aren't contiguous — we were sending 5, 7, 8).
+- If `/template/properties` is unreachable, nothing is blocked: it degrades to the caller's own removal list.
+
+**Template design rule:** a packet's roles should be the signature blocks the paper actually has, for one side of one transaction. A role declared in BoldSign with no field on the document is a role that can be dropped but never usefully filled.
+
+### Required template setup (one-time, per template)
+Every role must be **deletable**, or a one-sided send is rejected:
+1. Open the template in BoldSign → for **every** role, enable **"Delete this recipient"**.
+2. Recommended: leave **"Allow sender to edit/delete form fields"** on (`allowEditFormField` / `allowDeleteFormField`, both default-on) so an agent can adjust in the PreparePage.
+3. Save.
+
+If that permission is off, `RoleRemovalIndices` fails and the send comes back as "SignerName or SignerEmail is missing in roles". The API surfaces that as a message naming the roles *and* the setting to turn on — it is not a code problem.
+
+The CRM now sends `removeFormFields` alongside `RoleRemovalIndices` on every send (see "SignerName or SignerEmail is missing in roles" above), so a role's fields no longer need "Allow sender to edit/delete form fields" to be removed. **"Delete this recipient" is still the one setting the CRM cannot substitute for** — if the same 5 roles are refused again after this change, that permission is the remaining thing to check per role, per template.
+
+### Role name → CRM party (`ROLE_ALIASES`)
+Role matching drives who gets dropped, so it is an explicit table (`src/lib/services/boldsign.js`), with heuristics only as a fallback for names it doesn't carry. Names match case-insensitively with punctuation and spacing normalized (`normalizeRoleName`), so `Buyer's Agent`, `buyers agent` and `BUYER  AGENT` are one entry.
+
+| BoldSign role name | party | side | seat |
+|---|---|---|---|
+| Buyer · Purchaser · Tenant · Buyer 1 | client | buyer | 1 |
+| Co-buyer · Buyer 2 · Second buyer · Co-purchaser | client | buyer | 2 |
+| Seller · Owner · Landlord · Seller 1 | client | seller | 1 |
+| Co-seller · Seller 2 · Second seller · Co-owner | client | seller | 2 |
+| Buyer's Agent · Selling Agent | agent | buyer | 1 |
+| Co-buyer's Agent | agent | buyer | 2 |
+| Listing Agent · Seller's Agent | agent | seller | 1 |
+| Co-listing Agent | agent | seller | 2 |
+| Agent · Realtor · Client | either | — | 1 |
+| Co-agent · Co-client | either | — | 2 |
+| Witness, Notary, Broker (of record) | other | — | — |
+
+**`seat`** is which person of that party takes the row — seat 1 the primary, seat 2 the co- row. Assignment goes by seat, not by the order BoldSign returns roles in, so a template listing Co-seller above Seller still puts the primary contact in Seller.
+
+**Side gating:** with `deals.comp_data.transaction_type` set to `buyer` or `seller`, only that side's roles (then side-agnostic ones) are filled — the opposite side is never auto-filled, and lands in `RoleRemovalIndices`. A deal representing **both** sides should leave that field off `buyer`/`seller`; every matching role then fills in template order.
+
+**Net behavior:** buyer + buyer's agent on the deal → Seller and Listing Agent removed. Seller + listing agent → Buyer and Buyer's Agent removed. Both sides → all matching roles kept. No post-send signer additions needed.
+## Removing a document from the Signatures tab
+`action: 'document-delete'` — the sender or an **admin** may remove any non-`completed` document; a completed one is the signed legal record and is refused outright.
+- **Drafts** (never sent) are always removable. BoldSign rejects `revoke` on a document that was never sent *and* `delete` on one still in draft, and the old code aborted the whole request on any non-404 error — so the trash icon on a draft only ever raised a toast. Cleanup of BoldSign's copy is now best-effort (`cleanupFailureAction()`, unit-tested), the CRM row goes regardless, and whatever BoldSign said is recorded in `audit_log` and returned as `boldsign` for the toast.
+- **In-flight** documents keep the strict path: only "already gone / not in progress" (400/404) is skippable — anything else aborts, so the CRM never forgets a signature request a client can still act on.
+- Admins get a **"Delete N drafts"** button in the tab header when a deal has more than one draft (abandoned prepare-and-send attempts pile up fast), instead of confirming a dialog per row.
+
+**Ad-hoc flow parity:** *Send for Signature* seeds one row per client-side signer (primary + additional contacts + the property owner when different), and the *"I need to sign as well"* box adds the deal agent **and** every co-agent at routing order 2.
 
 ## CRM prefill tokens
 `property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `broker_name` · `agent_name` · `agent_email` · `list_price` · `commission_pct` · `listing_start_date` · `listing_end_date` · `close_date`

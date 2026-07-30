@@ -9,7 +9,7 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, templateEmbedUrl, templateDetails, listBoldsignTemplates, sendableTemplates, normalizeBoldsignTemplates, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, resolveDealAgents, dealClientSigners, dealSide } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
@@ -1066,7 +1066,7 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
 //      signature + date field per signer and sends immediately via BoldSign
 //   3. BoldSign emails each signer; they sign in their browser
 //   4. BoldSign webhook hits /api/boldsign → status flips sent → completed
-function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent, onClose, onSent }) {
+function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent, clientSigners = [], dealAgents = [], onClose, onSent }) {
   // Primary signer: contact linked directly to the deal
   const contact      = contacts?.find(c => c.id === deal?.contact_id)
   const defaultName  = `${contact?.first_name || ''} ${contact?.last_name || ''}`.trim()
@@ -1091,32 +1091,46 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const [useTextTags, setUseTextTags] = React.useState(false)   // PDF already has {{...}} text tags baked in
   const fileRef = React.useRef()
 
+  // Every client-side signer the deal knows about — primary contact, then each
+  // additional contact (co-buyer / husband & wife), then the property owner if
+  // they're someone else. Only people with an email get a row: every signer needs
+  // one, so a row without it would just block the send. Anyone skipped is named
+  // under the list instead of silently dropped.
   const [signers, setSigners] = React.useState(() => {
-    // Signer 1: deal contact. If they have no email, fall back to property owner.
-    let s1Name  = defaultName
-    let s1Email = defaultEmail
-    if (!s1Email && ownerContact?.email) {
-      s1Name  = ownerName
-      s1Email = ownerContact.email
+    const rows = []
+    const seen = new Set()
+    const add  = (name, email) => {
+      const key = (email || '').toLowerCase()
+      if (!email || seen.has(key)) return
+      seen.add(key)
+      rows.push({ id: rows.length + 1, name, email })
     }
-    const base = [{ id: 1, name: s1Name, email: s1Email }]
-    if (ownerIsDifferent && ownerEmail && ownerEmail !== s1Email) {
-      base.push({ id: 2, name: ownerName, email: ownerEmail })
-    }
-    return base
+    for (const p of clientSigners) add(p.name, p.email)
+    if (ownerIsDifferent && ownerEmail) add(ownerName, ownerEmail)
+    return rows.length ? rows : [{ id: 1, name: defaultName, email: defaultEmail }]
   })
+
+  // Named on the deal but unreachable — surfaced so nobody assumes they were sent.
+  const noEmailParties = clientSigners.filter(p => p.name && !p.email).map(p => p.name)
 
   const addSigner    = () => setSigners(p => [...p, { id: Date.now(), name:'', email:'' }])
   const removeSigner = (id) => setSigners(p => p.filter(s => s.id !== id))
   const updateSigner = (id, k, v) => setSigners(p => p.map(s => s.id===id ? {...s,[k]:v} : s))
 
+  // Licensees who sign after the clients: the deal's agent AND any co-agent on
+  // the property — the co-agent comes along automatically, nothing to type.
+  const signingAgents = (dealAgents.length ? dealAgents : (activeAgent ? [activeAgent] : []))
+    .filter(a => a?.email)
+
   const allSigners = React.useMemo(() => {
     const clients = signers.map(s => ({ ...s, routingOrder: 1 }))
-    if (agentSigns && activeAgent) {
-      clients.push({ id:'agent', name: activeAgent.name, email: activeAgent.email, routingOrder: 2 })
+    if (agentSigns) {
+      signingAgents.forEach((a, i) => clients.push({
+        id: `agent-${a.id || i}`, name: a.name, email: a.email, routingOrder: 2,
+      }))
     }
     return clients
-  }, [signers, agentSigns, activeAgent])
+  }, [signers, agentSigns, dealAgents, activeAgent])
 
   const toBase64 = f => new Promise((res, rej) => {
     const r = new FileReader(); r.onload = e => res(e.target.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(f)
@@ -1239,16 +1253,24 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
             </div>
           ))}
           <button className="btn btn--secondary btn--sm" onClick={addSigner} style={{marginTop:2}}>+ Add another signer</button>
+          {noEmailParties.length > 0 && (
+            <div style={{ fontSize:11, color:'#8a6100', marginTop:8 }}>
+              {noEmailParties.join(', ')} {noEmailParties.length === 1 ? 'is' : 'are'} on this deal but {noEmailParties.length === 1 ? 'has' : 'have'} no
+              email on file — add one on the contact to include {noEmailParties.length === 1 ? 'them' : 'each of them'}.
+            </div>
+          )}
         </div>
 
-        {/* Agent signs last */}
-        {activeAgent && (
+        {/* Agents sign last — the deal's agent plus any co-agent, together */}
+        {signingAgents.length > 0 && (
           <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:16, background:'var(--gw-bone)' }}>
             <input type="checkbox" id="agentSigns" checked={agentSigns} onChange={e=>setAgentSigns(e.target.checked)} style={{width:15,height:15,cursor:'pointer'}}/>
             <label htmlFor="agentSigns" style={{ fontSize:13, cursor:'pointer', flex:1 }}>
-              <strong>I need to sign as well</strong> — {activeAgent.name} signs <em>after</em> the client{signers.length>1?'s':''}
+              <strong>{signingAgents.length > 1 ? 'We need to sign as well' : 'I need to sign as well'}</strong> — {signingAgents.map(a => a.name).join(' and ')} sign{signingAgents.length > 1 ? '' : 's'} <em>after</em> the client{signers.length>1?'s':''}
             </label>
-            {agentSigns && <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[signers.length]||'#6b7280', display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700 }}>{signers.length+1}</div>}
+            {agentSigns && signingAgents.map((a, i) => (
+              <div key={a.id || i} style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[signers.length+i]||'#6b7280', display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700 }}>{signers.length+1+i}</div>
+            ))}
           </div>
         )}
 
@@ -1309,16 +1331,19 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   )
 }
 
-function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeAgent }) {
+function SignaturesTab({ deal, contacts, properties, agents = [], extraContacts = [], activeAgent, isAdmin = false }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
   const [sendOpen,    setSendOpen]    = React.useState(false)
   const [tplOpen,     setTplOpen]     = React.useState(false)
   const [templates,   setTemplates]   = React.useState([])
+  const [tplLoading,  setTplLoading]  = React.useState(true)
+  const [tplError,    setTplError]    = React.useState('')
   const [dealFiles,   setDealFiles]   = React.useState([])
   const [downloading, setDownloading] = React.useState({})
   const [deleting,    setDeleting]    = React.useState({})
+  const [bulkDeleting, setBulkDeleting] = React.useState(false)
   const [statusFilter, setStatusFilter] = React.useState('active')   // active | drafts | completed | all
 
   React.useEffect(() => {
@@ -1352,18 +1377,47 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeA
     setLoading(false)
   }
 
+  // Form Library is the e-sign template catalog — an entry is sendable once it
+  // carries a boldsign_template_id. Read whole rows and filter in JS
+  // (sendableTemplates) rather than naming the post-unification columns in the
+  // select: on a database that hasn't run migration 0019 the named select fails
+  // with 42703 and the list comes back empty, which is what made the
+  // "Send from Template" button disappear. Errors now surface instead of
+  // silently hiding the feature, and there are two fallbacks.
   const loadTemplates = async () => {
-    // Form Library is the e-sign template catalog — an entry is sendable once
-    // it carries a boldsign_template_id. Alias to `template_id` so the rest of
-    // this component (written against the old boldsign_templates shape) needs
-    // no other changes.
-    const { data } = await supabase
-      .from('form_packets')
-      .select('template_id:boldsign_template_id, name, state, doc_type, field_tokens, active')
-      .not('boldsign_template_id', 'is', null)
-      .eq('active', true)
-      .order('name')
-    setTemplates(data || [])
+    setTplLoading(true)
+    setTplError('')
+    let rows = []
+    let problem = ''
+
+    const { data, error } = await supabase.from('form_packets').select('*')
+    if (error) {
+      console.error('[Signatures] form_packets load failed:', error)
+      problem = `Form Library couldn't be read (${error.message})`
+      // Pre-unification installs: the retired registry still holds the catalog.
+      const legacy = await supabase.from('boldsign_templates').select('*')
+      if (!legacy.error) { rows = legacy.data || []; problem = '' }
+    } else {
+      rows = data || []
+    }
+
+    let list = sendableTemplates(rows)
+
+    // Nothing registered in the CRM catalog — fall back to the templates that
+    // exist in the BoldSign account itself so the send flow still works.
+    if (!list.length) {
+      try {
+        const { templates: raw } = await listBoldsignTemplates()
+        list = normalizeBoldsignTemplates(raw)
+      } catch (e) {
+        console.error('[Signatures] BoldSign template list failed:', e)
+        if (!problem) problem = `BoldSign templates couldn't be listed (${e.message})`
+      }
+    }
+
+    setTemplates(list)
+    setTplError(problem)
+    setTplLoading(false)
   }
 
   const loadDealFiles = async () => {
@@ -1430,15 +1484,54 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeA
     if (!window.confirm(`Remove "${env.document_name || 'this document'}"? This cannot be undone.`)) return
     setDeleting(p => ({ ...p, [env.id]: true }))
     try {
-      await apiDeleteDocument(env.document_id)
+      const r = await apiDeleteDocument(env.document_id)
       setEnvelopes(prev => prev.filter(e => e.id !== env.id))
-      pushToast('Document removed', 'info')
+      pushToast(r?.boldsign ? `Document removed — ${r.boldsign}` : 'Document removed', 'info')
     } catch (err) {
       pushToast(err.message, 'error')
     } finally {
       setDeleting(p => ({ ...p, [env.id]: false }))
     }
   }
+
+  // Admin housekeeping: clear out abandoned drafts in one pass. Drafts were
+  // never sent, so there's nothing for a client to act on and nothing signed to
+  // preserve — the alternative is confirming a dialog once per row.
+  const drafts = envelopes.filter(e => e.status === 'draft')
+  const deleteAllDrafts = async () => {
+    if (!drafts.length) return
+    if (!window.confirm(`Remove all ${drafts.length} draft document${drafts.length === 1 ? '' : 's'} on this deal? Drafts were never sent. This cannot be undone.`)) return
+    setBulkDeleting(true)
+    let removed = 0
+    const failures = []
+    for (const env of drafts) {
+      try { await apiDeleteDocument(env.document_id); removed++ }
+      catch (err) { failures.push(`${env.document_name || 'Document'}: ${err.message}`) }
+    }
+    setBulkDeleting(false)
+    await loadEnvelopes()
+    if (removed) pushToast(`${removed} draft${removed === 1 ? '' : 's'} removed`, 'success')
+    if (failures.length) {
+      console.error('[Signatures] draft delete failures:', failures)
+      pushToast(`${failures.length} couldn't be removed — ${failures[0]}`, 'error')
+    }
+  }
+
+  // Everyone who signs on our side, resolved once here so both send flows get
+  // the same list with no extra query and nothing for the agent to fill in:
+  // the deal's agent + any co-agent on the linked property, and the primary
+  // contact + any additional contacts (co-buyer / spouse).
+  const dealProperty = properties?.find(p => p.id === deal?.property_id) || null
+  const dealAgents   = React.useMemo(
+    () => resolveDealAgents({ deal, property: dealProperty, agents, activeAgent }),
+    [deal?.id, deal?.agent_id, dealProperty?.id, agents, activeAgent],
+  )
+  const primaryContact = contacts?.find(c => c.id === deal?.contact_id) || null
+  const clientSigners  = React.useMemo(
+    () => dealClientSigners({ contact: primaryContact, additionalContacts: extraContacts }),
+    [primaryContact?.id, extraContacts],
+  )
+  const side = dealSide(deal)
 
   const visibleEnvelopes = envelopes.filter(env => {
     if (statusFilter === 'all')       return true
@@ -1505,11 +1598,18 @@ create policy "agent_notifications_policy" on agent_notifications
           </select>
         </div>
         <div style={{ display:'flex', gap:8 }}>
-          {templates.length > 0 && (
-            <button className="btn btn--secondary btn--sm" onClick={() => setTplOpen(true)}>
-              <Icon name="file" size={13}/> Send from Template
+          {/* Admin housekeeping — only while there are drafts to clear. */}
+          {isAdmin && drafts.length > 1 && (
+            <button className="btn btn--ghost btn--sm" onClick={deleteAllDrafts} disabled={bulkDeleting} style={{ color:'var(--gw-red)' }}>
+              <Icon name="trash" size={13}/> {bulkDeleting ? 'Removing…' : `Delete ${drafts.length} drafts`}
             </button>
           )}
+          {/* Always shown. It used to be hidden whenever the template list came
+              back empty, so a failed/unmigrated catalog read looked like the
+              feature had been removed. The modal explains an empty list. */}
+          <button className="btn btn--secondary btn--sm" onClick={() => setTplOpen(true)}>
+            <Icon name="file" size={13}/> Send from Template
+          </button>
           <button className="btn btn--primary btn--sm" onClick={() => setSendOpen(true)}>
             <Icon name="send" size={13}/> Send for Signature
           </button>
@@ -1579,6 +1679,7 @@ create policy "agent_notifications_policy" on agent_notifications
       {sendOpen && (
         <SendSignatureModal
           deal={deal} contacts={contacts} properties={properties} dealFiles={dealFiles} activeAgent={activeAgent}
+          clientSigners={clientSigners} dealAgents={dealAgents}
           onClose={() => setSendOpen(false)}
           onSent={() => { setSendOpen(false); loadEnvelopes() }}
         />
@@ -1586,7 +1687,9 @@ create policy "agent_notifications_policy" on agent_notifications
 
       {tplOpen && (
         <SendFromTemplateModal
-          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} templates={templates} activeAgent={activeAgent}
+          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts}
+          templates={templates} tplLoading={tplLoading} tplError={tplError} onRetryTemplates={loadTemplates}
+          activeAgent={activeAgent} dealAgents={dealAgents} side={side}
           onClose={() => setTplOpen(false)}
           onSent={() => { setTplOpen(false); loadEnvelopes() }}
         />
@@ -1599,8 +1702,13 @@ create policy "agent_notifications_policy" on agent_notifications
 //    fillable fields from BoldSign, renders a signer input per role and an
 //    editable (CRM-prefilled) input per field, then sends via /api/boldsign.
 const prettyLabel = (id) => String(id || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+// Same rule the API validates with — a row with a malformed email is not "filled".
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
 
-function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], templates, activeAgent, onClose, onSent }) {
+function SendFromTemplateModal({
+  deal, contacts, properties, extraContacts = [], templates, activeAgent, onClose, onSent,
+  tplLoading = false, tplError = '', onRetryTemplates, dealAgents = [], side = '',
+}) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
 
@@ -1618,8 +1726,17 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [loadingDet, setLoadingDet] = React.useState(false)
   const [signers,    setSigners]    = React.useState({})     // roleIndex → { name, email }
   const [values,     setValues]     = React.useState({})     // fieldId → value
+  const [autoFilled, setAutoFilled] = React.useState([])     // role indices the CRM filled in
+  const [showAllRoles, setShowAllRoles] = React.useState(false)
+  const [roleError,  setRoleError]  = React.useState('')     // pre-flight: roles still missing a signer
 
   const tpl = templates.find(t => t.template_id === templateId)
+
+  // The modal can now be opened while the catalog is still loading (the button
+  // is no longer gated on it), so pick the first template once it arrives.
+  React.useEffect(() => {
+    if (!templateId && visible.length) setTemplateId(visible[0].template_id)
+  }, [visible.length])
 
   // Load the template's roles + fields whenever the selection changes, and seed
   // signer/field inputs from the deal.
@@ -1634,10 +1751,19 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         const fields = (det.fields || []).filter(f => isFillableField(f.type))
         setDetails({ roles, fields })
 
-        // Seed signer name/email from the deal's linked contact (+ spouse for a
-        // second client role) and the acting agent. See seedSignersFromDeal.
-        const tokenVals = crmTokenValues({ deal, property, contact, agent: activeAgent })
-        setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent }))
+        // Seed every signer row the CRM can fill: the deal's agent and each
+        // co-agent into the agent roles, the primary contact and each additional
+        // contact into the client roles on the deal's side. Nothing to fill in
+        // by hand — see seedSignersFromDeal.
+        const tokenVals = crmTokenValues({ deal, property, contact, agent: dealAgents[0] || activeAgent })
+        const seeded    = seedSignersFromDeal({
+          roles, contact, additionalContacts: extraContacts,
+          activeAgent, agents: dealAgents, side,
+        })
+        setSigners(seeded)
+        setAutoFilled(roles.filter(r => seeded[r.index]?.name || seeded[r.index]?.email).map(r => r.index))
+        setShowAllRoles(false)
+        setRoleError('')
 
         const seededValues = {}
         for (const f of fields) seededValues[f.id] = tokenVals[f.id] || ''
@@ -1654,25 +1780,44 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const submit = async () => {
     if (!templateId) { pushToast('Pick a template', 'error'); return }
     const roleList = details?.roles || []
-    const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())
+    const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && EMAIL_RE.test((signers[r.index]?.email || '').trim()))
     if (!filled.length) { pushToast('At least one signer needs a name and email', 'error'); return }
+
+    // Send whoever is on the deal. Roles the deal has nobody for go in
+    // roleRemovalIndices and BoldSign drops them — that's how a listing packet
+    // has always gone out with just Seller + Listing agent, and it must stay
+    // that way: on a purchase agreement where we only represent one side, the
+    // other side's rows are legitimately empty here.
+    //
+    // BoldSign refuses to drop a role that owns fields on the document, and says
+    // so with a generic "SignerName or SignerEmail is missing in roles". That is
+    // handled on the way back (see the catch), not by blocking the attempt.
+    const unfilled = roleList.filter(r => !filled.includes(r))
+    setRoleError('')
     setSending(true)
 
-    // Attach each filled field value to the role that owns it (or the first
-    // filled role if the field isn't role-scoped). CRM-entered values are locked.
+    // Attach each filled field value to the role that owns it. A field owned by a
+    // role we're REMOVING is skipped entirely — it used to be re-attached to the
+    // first filled role, which meant sending (say) a Buyer-owned field as the
+    // Seller's, on a role whose fields are about to be dropped. Only unscoped
+    // fields fall back to the first signer.
     const firstIdx = filled[0].index
     const byRole = {}
     for (const f of (details.fields || [])) {
       const v = (values[f.id] || '').trim()
       if (!v) continue
-      const idx = (f.roleIndex && filled.some(r => r.index === f.roleIndex)) ? f.roleIndex : firstIdx
-      ;(byRole[idx] ||= []).push({ id: f.id, value: v, isReadOnly: true })
+      if (f.roleIndex && !filled.some(r => r.index === f.roleIndex)) continue   // owner is being removed
+      ;(byRole[f.roleIndex || firstIdx] ||= []).push({ id: f.id, value: v, isReadOnly: true })
     }
+    // roleName travels with each row so the API can re-resolve a stale index
+    // against the template's live role list. signerOrder is assigned server-side
+    // (template indices aren't contiguous, BoldSign wants 1..N).
     const roles = filled.map(r => ({
-      roleIndex: r.index, signerName: signers[r.index].name, signerEmail: signers[r.index].email,
-      signerOrder: r.index, existingFormFields: byRole[r.index] || [],
+      roleIndex: r.index, roleName: r.name,
+      signerName: signers[r.index].name.trim(), signerEmail: signers[r.index].email.trim(),
+      existingFormFields: byRole[r.index] || [],
     }))
-    const roleRemovalIndices = roleList.filter(r => !filled.includes(r)).map(r => r.index)
+    const roleRemovalIndices = unfilled.map(r => r.index)
 
     const docName = [tpl?.name || deal?.title, property?.address].filter(Boolean).join(' — ')
     const labels  = [tpl?.state, tpl?.doc_type, `deal:${deal.id}`].filter(Boolean)
@@ -1685,13 +1830,30 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
       if (!url) { pushToast('BoldSign did not return a send URL', 'error'); return }
       setEmbedUrl(url)
     } catch (err) {
-      pushToast(err.message, 'error')
+      // BoldSign kept roles it wouldn't drop (the document has fields for them).
+      // Show those rows and name them, rather than relaying the vendor's text.
+      if (unfilled.length && /signername|signeremail|roles/i.test(err.message || '')) {
+        setShowAllRoles(true)
+        setRoleError(err.message)
+        pushToast(`${unfilled.length} role${unfilled.length === 1 ? '' : 's'} still need a signer`, 'error')
+      } else {
+        pushToast(err.message, 'error')
+      }
     } finally {
       setSending(false)
     }
   }
 
   const fields = details?.fields || []
+
+  // Which signer rows to render. Default: just the ones the CRM auto-filled
+  // (keeping each role's original index/colour). If nothing could be seeded —
+  // no contact on the deal — show them all rather than an empty Signers block.
+  const allRoles   = (details?.roles || []).map((role, i) => ({ role, i }))
+  const shownRoles = (showAllRoles || !autoFilled.length)
+    ? allRoles
+    : allRoles.filter(({ role }) => autoFilled.includes(role.index))
+  const hiddenRoleCount = allRoles.length - shownRoles.length
 
   // Step 2 — BoldSign's embedded prepare/send UI (replaces our own send popup).
   if (embedUrl) {
@@ -1725,6 +1887,31 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
       </div>
       <div className="modal__body">
+        {/* No templates to pick — say why instead of showing an empty dropdown. */}
+        {!templates.length ? (
+          <div style={{ fontSize:13, color:'var(--gw-mist)', lineHeight:1.7, padding:'4px 0 8px' }}>
+            {tplLoading ? 'Loading templates…' : (
+              <>
+                <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:'10px 12px', color:'var(--gw-ink)' }}>
+                  <strong>No e-sign templates available yet.</strong>
+                  <div style={{ marginTop:6 }}>
+                    Check <strong>Form Library</strong>: a packet marked <em>Sendable (disabled)</em> just
+                    needs Active set back to Yes. To add a new one, upload the form and paste its
+                    BoldSign template id into the packet — it then shows up here for every deal
+                    in that state.
+                  </div>
+                  {tplError && <div style={{ marginTop:8, fontSize:12, color:'var(--gw-red)' }}>{tplError}</div>}
+                </div>
+                {onRetryTemplates && (
+                  <button className="btn btn--secondary btn--sm" style={{ marginTop:10 }} onClick={onRetryTemplates}>
+                    <Icon name="refresh" size={12}/> Retry
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        ) : (
+        <>
         <div className="form-group">
           <label className="form-label required">Template</label>
           <select className="form-control" value={templateId} onChange={e => setTemplateId(e.target.value)}>
@@ -1733,6 +1920,34 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           {dealState && (
             <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
               Showing templates for {dealState}{matched.length ? '' : ' — none registered for this state yet, showing all'}.
+            </div>
+          )}
+          {/* Role count up front — an 8-role packet needs 8 signers, and that's
+              worth knowing before picking it rather than at send time. */}
+          {details?.roles?.length > autoFilled.length && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
+              {details.roles.length} signer roles on this template · {autoFilled.length} filled from this deal
+            </div>
+          )}
+          {/* The mismatch that actually bites: a buyer packet on a listing (or
+              the reverse). The roles the document has fields for then belong to
+              the side this deal has nobody for, and BoldSign won't drop them. */}
+          {side && tpl?.tx_type && ['buyer','seller'].includes(tpl.tx_type) && tpl.tx_type !== side && (
+            <div style={{ fontSize:11, color:'#8a6100', marginTop:6, fontWeight:600 }}>
+              This is a {tpl.tx_type}-side packet on a {side}-side deal — the {tpl.tx_type}'s rows
+              will be empty and BoldSign may refuse to drop them.
+            </div>
+          )}
+          {/* Compliance guard: state-specific forms are not interchangeable. */}
+          {dealState && tpl?.state && normalizeState(tpl.state) !== dealState && (
+            <div style={{ fontSize:11, color:'#8a6100', marginTop:6, fontWeight:600 }}>
+              This is a {normalizeState(tpl.state)} form on an {dealState} deal — confirm it's the right one before sending.
+            </div>
+          )}
+          {tpl?.source === 'boldsign' && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
+              Listed straight from your BoldSign account — not registered in Form Library yet,
+              so no state or field tokens are attached.
             </div>
           )}
         </div>
@@ -1746,22 +1961,50 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
         {!loadingDet && details && (
           <>
-            {/* One signer input per template role; leave a role blank to omit it. */}
+            {/* Only the rows the CRM filled are shown — a purchase-agreement
+                template carries every role for both sides, and rendering five
+                empty rows made agents think they had something to fill in. The
+                rest stay one click away and are dropped from the send if blank. */}
             <div className="form-group">
               <label className="form-label required">Signers</label>
-              {details.roles.map((r, i) => (
-                <div key={r.index} style={{ marginBottom:10 }}>
-                  <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:4 }}>
-                    <span style={{ display:'inline-flex', width:18, height:18, borderRadius:'50%', background:SIGNER_COLORS[i]||'#6b7280', color:'#fff', alignItems:'center', justifyContent:'center', fontSize:10, marginRight:6 }}>{r.index}</span>
-                    {r.name}
+              {shownRoles.map(({ role: r, i }) => {
+                const missingEmail = (signers[r.index]?.name || '').trim() && !(signers[r.index]?.email || '').trim()
+                return (
+                  <div key={r.index} style={{ marginBottom:10 }}>
+                    <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:4 }}>
+                      <span style={{ display:'inline-flex', width:18, height:18, borderRadius:'50%', background:SIGNER_COLORS[i]||'#6b7280', color:'#fff', alignItems:'center', justifyContent:'center', fontSize:10, marginRight:6 }}>{r.index}</span>
+                      {r.name}
+                    </div>
+                    <div style={{ display:'flex', gap:8 }}>
+                      <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={signers[r.index]?.name || ''} onChange={e => setSigner(r.index, 'name', e.target.value)}/>
+                      <input className="form-control" style={{ flex:1, ...(missingEmail ? { borderColor:'var(--gw-amber)' } : {}) }} placeholder="Email" type="email" value={signers[r.index]?.email || ''} onChange={e => setSigner(r.index, 'email', e.target.value)}/>
+                    </div>
+                    {missingEmail && (
+                      <div style={{ fontSize:11, color:'#8a6100', marginTop:4 }}>
+                        No email on file for this person — add one to include them in this send.
+                      </div>
+                    )}
                   </div>
-                  <div style={{ display:'flex', gap:8 }}>
-                    <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={signers[r.index]?.name || ''} onChange={e => setSigner(r.index, 'name', e.target.value)}/>
-                    <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={signers[r.index]?.email || ''} onChange={e => setSigner(r.index, 'email', e.target.value)}/>
+                )
+              })}
+              {hiddenRoleCount > 0 && (
+                <button className="btn btn--ghost btn--sm" style={{ padding:'2px 4px', fontSize:12 }} onClick={() => setShowAllRoles(true)}>
+                  + Add another signer ({hiddenRoleCount} more role{hiddenRoleCount === 1 ? '' : 's'} on this template)
+                </button>
+              )}
+              {/* Pre-flight result — replaces BoldSign's opaque rejection. */}
+              {roleError && (
+                <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:'8px 10px', fontSize:12, lineHeight:1.6, marginTop:8 }}>
+                  {roleError}
+                  <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
+                    Fill them in above, or use a template whose roles match this transaction —
+                    a seller packet with Seller / Listing agent / Co-listing agent only.
                   </div>
                 </div>
-              ))}
-              <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Roles left blank are removed from this send.</div>
+              )}
+              {showAllRoles && !roleError && (
+                <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Every role on this template needs a name and email.</div>
+              )}
             </div>
 
             {/* Editable, CRM-prefilled detail fields the sellers see filled in. */}
@@ -1782,14 +2025,153 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px' }}>
           Next: BoldSign opens here in the app with these signers &amp; details filled in — review field placement and click Send.
         </div>
+        </>
+        )}
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-        <button className="btn btn--primary" onClick={submit} disabled={sending || loadingDet}>
+        <button className="btn btn--primary" onClick={submit} disabled={sending || loadingDet || !templates.length}>
           {sending ? 'Opening…' : 'Continue in BoldSign'}
         </button>
       </div>
     </Modal>
+  )
+}
+
+// ── Commission tab — where the deal's commission actually gets entered ────────
+// The compliance gate blocks closing on "Commission not entered" and its Fix
+// button pointed at a `commission` tab that didn't exist, so there was nowhere on
+// the deal to enter it — only the office-wide Commission page.
+//
+// Splits and participants stay back-office data: `commissions` is admin-only at
+// the RLS level (commissions_admin_only, 2026-06-12), and that policy is what
+// stops one agent reading another's pay. So this tab writes to whichever place
+// the caller is allowed to write:
+//   • admin  → the real commissions row (gross_pct clears the closing gate; the
+//              Commission page still owns splits/participants)
+//   • agent  → deals.comp_data.commission_pct, the rate they negotiated, for the
+//              office to confirm. No schema change and no privacy hole.
+function CommissionTab({ deal, isAdmin, onSaved }) {
+  const [pct,     setPct]     = React.useState('')
+  const [fee,     setFee]     = React.useState('')
+  const [notes,   setNotes]   = React.useState('')
+  const [rowId,   setRowId]   = React.useState(null)
+  const [loading, setLoading] = React.useState(true)
+  const [saving,  setSaving]  = React.useState(false)
+
+  React.useEffect(() => {
+    if (!deal?.id) return
+    let alive = true
+    ;(async () => {
+      setLoading(true)
+      const proposed = deal.comp_data?.commission_pct
+      if (isAdmin) {
+        const { data } = await supabase.from('commissions').select('*').eq('deal_id', deal.id).maybeSingle()
+        if (!alive) return
+        setRowId(data?.id || null)
+        // Seed from the agent's proposed rate when the office hasn't entered one.
+        setPct(String(data?.gross_pct ?? proposed ?? ''))
+        setFee(String(data?.transaction_fee ?? ''))
+        setNotes(data?.notes || '')
+      } else {
+        if (!alive) return
+        setPct(String(proposed ?? ''))
+      }
+      if (alive) setLoading(false)
+    })()
+    return () => { alive = false }
+  }, [deal?.id, isAdmin])
+
+  const rate  = Number(pct) || 0
+  const value = Number(deal?.value) || 0
+  const gross = value * rate / 100
+
+  const save = async () => {
+    if (rate <= 0)  { pushToast('Enter a commission rate above 0', 'error'); return }
+    if (rate > 100) { pushToast('A commission rate over 100% is not valid', 'error'); return }
+    setSaving(true)
+    try {
+      if (isAdmin) {
+        const payload = {
+          deal_id: deal.id, gross_pct: rate,
+          transaction_fee: Number(fee) || 0,
+          notes: notes.trim() || null,
+          updated_at: new Date().toISOString(),
+        }
+        const q = rowId
+          ? supabase.from('commissions').update(payload).eq('id', rowId).select('id')
+          : supabase.from('commissions').insert([payload]).select('id')
+        const { data, error } = await q
+        if (error) { pushToast(`Couldn't save: ${error.message}`, 'error'); return }
+        if (data?.[0]?.id) setRowId(data[0].id)
+        pushToast('Commission saved', 'success')
+      } else {
+        const comp = { ...(deal.comp_data || {}), commission_pct: rate }
+        const { error } = await supabase.from('deals').update({ comp_data: comp }).eq('id', deal.id)
+        if (error) { pushToast(`Couldn't save: ${error.message}`, 'error'); return }
+        pushToast('Commission rate recorded — the office finalizes the splits', 'success')
+      }
+      onSaved?.()
+    } finally { setSaving(false) }
+  }
+
+  if (loading) return <div style={{ padding:24, color:'var(--gw-mist)', fontSize:13 }}>Loading…</div>
+
+  return (
+    <div style={{ padding:16, overflowY:'auto', flex:1 }}>
+      <div className="form-row">
+        <div className="form-group">
+          <label className="form-label required">Gross Commission %</label>
+          <input className="form-control" type="number" step="0.01" min="0" max="100"
+            value={pct} onChange={e => setPct(e.target.value)} placeholder="3.0"/>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Gross Commission $</label>
+          <input className="form-control" readOnly value={gross ? formatCurrency(gross) : '—'}
+            style={{ background:'var(--gw-bone)' }}/>
+        </div>
+      </div>
+      <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:-6, marginBottom:14 }}>
+        {value > 0
+          ? <>Calculated on the deal value of {formatCurrency(value)}. Change that on the Details tab.</>
+          : <>Set a deal value on the Details tab and the dollar amount fills in here.</>}
+      </div>
+
+      {isAdmin && (
+        <>
+          <div className="form-group">
+            <label className="form-label">Transaction Fee $</label>
+            <input className="form-control" type="number" step="1" min="0" value={fee}
+              onChange={e => setFee(e.target.value)} placeholder="0"/>
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>
+              Flat brokerage fee for this deal, split across the agents on it and charged on top of cap.
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Notes</label>
+            <textarea className="form-control" rows={3} value={notes} onChange={e => setNotes(e.target.value)}
+              placeholder="Referral, rebate, anything the office needs to know…"/>
+          </div>
+          <div style={{ fontSize:12, color:'var(--gw-mist)', lineHeight:1.6, borderTop:'1px solid var(--gw-border)', paddingTop:12 }}>
+            Saving a rate above 0 clears the <strong>Commission not entered</strong> closing blocker.
+            Per-agent splits, participants and payouts stay on the <strong>Commission</strong> page.
+          </div>
+        </>
+      )}
+
+      {!isAdmin && (
+        <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, color:'var(--gw-mist)', lineHeight:1.6 }}>
+          Record the rate you negotiated. The office confirms it and works out the splits —
+          payout numbers stay with the admin.
+        </div>
+      )}
+
+      <div style={{ marginTop:16 }}>
+        <button className="btn btn--primary" onClick={save} disabled={saving}>
+          {saving ? 'Saving…' : 'Save Commission'}
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -1894,7 +2276,7 @@ async function syncDealContacts(dealId, contactIds) {
   } catch (e) { console.error('[syncDealContacts]', e) }
 }
 
-export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, onSave, initialTab = 'details' }) {
+export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, isAdmin = false, onSave, initialTab = 'details' }) {
   const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
@@ -1915,6 +2297,14 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   // Resolved additional-contact objects — used for the "Send from Template"
   // signer prefill on the Signatures tab (co-signers get their own rows).
   const extraContacts = additionalContactIds.map(id => contacts.find(c => c.id === id)).filter(Boolean)
+
+  // The licensees on this deal, in signing order — the same list the Signatures
+  // tab seeds signers from, so Details and the send flow can't disagree.
+  const dealTeam = React.useMemo(() => {
+    const property = properties?.find(p => p.id === form.property_id) || null
+    return resolveDealAgents({ deal: { ...deal, agent_id: form.agent_id }, property, agents, activeAgent })
+      .map(a => agents.find(x => x.id === a.id) || a)
+  }, [deal, form.agent_id, form.property_id, properties, agents, activeAgent])
 
   const set  = (k, v) => setForm(p => ({...p, [k]: v}))
   const setCD = (k, v) => setForm(p => ({...p, comp_data: {...(p.comp_data||{}), [k]: v}}))
@@ -1984,7 +2374,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       {/* Tab bar — only for existing deals */}
       {isExisting && (
         <div className="drawer-tabs">
-          {[['details','Details'],['dates','Key Dates'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
+          {[['details','Details'],['dates','Key Dates'],['checklist','Checklist'],['commission','Commission'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
             <button key={id} className={`drawer-tab${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}>
               {label}
             </button>
@@ -2060,6 +2450,32 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
             </div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
             <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+
+            {/* Agents on this deal — the assigned agent plus any co-agent, same
+                treatment as the deal page's card. Read-only here: co-agents are
+                set on the property, and this is where an agent looks to confirm
+                who will be on the paperwork. */}
+            {dealTeam.length > 0 && (
+              <div className="form-group">
+                <label className="form-label">Agents on This Deal</label>
+                <div style={{ display:'flex', flexDirection:'column', gap:5, padding:'8px 10px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)' }}>
+                  {dealTeam.map(a => (
+                    <div key={a.id} style={{ display:'flex', alignItems:'center', gap:7 }}>
+                      <Avatar agent={a} size={20}/>
+                      <span style={{ fontSize:12.5 }}>{a.name}</span>
+                      {a.id === form.agent_id
+                        ? <span style={{ fontSize:10, color:'var(--gw-mist)' }}>primary</span>
+                        : <span style={{ fontSize:10, color:'var(--gw-mist)' }}>co-agent</span>}
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>
+                  {dealTeam.length > 1
+                    ? 'Both pre-fill as signers when you Send for Signature.'
+                    : 'Add a co-agent on the property to have them pre-fill as a signer too.'}
+                </div>
+              </div>
+            )}
 
             {/* ── Comp Data ─────────────────────────────────────── */}
             <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
@@ -2187,7 +2603,12 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
-        <SignaturesTab deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} activeAgent={activeAgent} />
+        <SignaturesTab deal={deal} contacts={contacts} properties={properties} agents={agents} extraContacts={extraContacts} activeAgent={activeAgent} isAdmin={isAdmin} />
+      )}
+
+      {/* Commission tab — the closing gate's "Fix" button lands here */}
+      {tab === 'commission' && isExisting && (
+        <CommissionTab deal={deal} isAdmin={isAdmin} onSaved={onSave} />
       )}
 
       {/* Client Portal tab */}
@@ -2836,7 +3257,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
       <DealDrawer open={drawer} onClose={() => setDrawer(false)}
         deal={editing ? editing : { stage: defaultStage }}
-        agents={agents} contacts={contacts} properties={properties} dealContacts={dealContacts} activeAgent={activeAgent} onSave={reload} />
+        agents={agents} contacts={contacts} properties={properties} dealContacts={dealContacts} activeAgent={activeAgent} isAdmin={isAdmin} onSave={reload} />
       {confirm && <ConfirmDialog message="This will permanently delete this deal." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {confirmProp && <ConfirmDialog message="Remove this listing from the pipeline? Any linked deals are kept but will be unlinked from the property." onConfirm={() => delProperty(confirmProp)} onCancel={() => setConfirmProp(null)} />}
     </div>

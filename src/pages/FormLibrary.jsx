@@ -34,7 +34,12 @@ function UploadModal({ packet, onClose, onSaved }) {
     state: '', transaction_type: 'buyer', name: '', description: '',
     boldsign_template_id: '', doc_type: '', field_tokens: [], active: true,
   }
-  const [form, setForm]   = useState(packet ? { ...blank, ...packet, field_tokens: packet.field_tokens || [] } : blank)
+  // active: only an explicit false means disabled. A row that predates the
+  // column (null) is treated as active, so editing it can't silently flip the
+  // Active dropdown to "disabled" and drop it out of the deal's template list.
+  const [form, setForm]   = useState(packet
+    ? { ...blank, ...packet, field_tokens: packet.field_tokens || [], active: packet.active !== false }
+    : blank)
   const [tokensText, setTokensText] = useState((packet?.field_tokens || []).join(', '))
   const [files, setFiles] = useState([])   // newly selected package PDFs (a template can hold several)
   const [saving, setSaving] = useState(false)
@@ -372,6 +377,20 @@ export default function FormLibraryPage({ isAdmin }) {
     setLoading(false)
   }
 
+  // Every linked packet that's switched off. Historically the nightly BoldSign
+  // drift sync did this in bulk, so re-enabling them one modal at a time was
+  // busywork — this turns them all back on in one write.
+  const disabledSendable = packets.filter(p => p.boldsign_template_id && p.active === false)
+
+  const enableAllSendable = async () => {
+    const ids = disabledSendable.map(p => p.id)
+    if (!ids.length) return
+    const { data, error } = await supabase.from('form_packets').update({ active: true }).in('id', ids).select('id')
+    if (error) { pushToast(`Couldn't enable: ${error.message}`, 'error'); return }
+    pushToast(`${data?.length || ids.length} packet${(data?.length || ids.length) === 1 ? '' : 's'} set back to sendable`, 'success')
+    load()
+  }
+
   const del = async (id) => {
     if (!window.confirm('Delete this form packet?')) return
     await supabase.from('form_packets').delete().eq('id', id)
@@ -475,6 +494,19 @@ create unique index if not exists uq_form_packets_boldsign_tid
         )}
       </div>
 
+      {/* Bulk recovery — shown only while linked packets are switched off. */}
+      {isAdmin && disabledSendable.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', background: '#fff8ec', border: '1px solid var(--gw-amber)', borderRadius: 'var(--radius)', padding: '10px 12px', marginBottom: 18 }}>
+          <div style={{ fontSize: 13, flex: 1, minWidth: 240, lineHeight: 1.5 }}>
+            <strong>{disabledSendable.length} packet{disabledSendable.length === 1 ? '' : 's'} with a BoldSign template {disabledSendable.length === 1 ? 'is' : 'are'} switched off</strong> —
+            {' '}hidden from every deal's Send from Template picker.
+          </div>
+          <button className="btn btn--primary btn--sm" onClick={enableAllSendable}>
+            <Icon name="check" size={13} /> Make all sendable
+          </button>
+        </div>
+      )}
+
       {/* Table */}
       {loading ? (
         <div style={{ color: 'var(--gw-mist)', fontSize: 13 }}>Loading…</div>
@@ -499,8 +531,9 @@ create unique index if not exists uq_form_packets_boldsign_tid
                   <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--gw-ink)', display: 'flex', alignItems: 'center', gap: 8 }}>
                     {packet.name}
                     {packet.boldsign_template_id && (
-                      <span style={{ padding: '1px 7px', borderRadius: 8, fontSize: 10, fontWeight: 700, background: packet.active ? 'var(--gw-green-light)' : 'var(--gw-bone)', color: packet.active ? 'var(--gw-green)' : 'var(--gw-mist)' }}>
-                        {packet.active ? 'Sendable' : 'Sendable (disabled)'}
+                      // Matches sendableTemplates(): only an explicit false is disabled.
+                      <span style={{ padding: '1px 7px', borderRadius: 8, fontSize: 10, fontWeight: 700, background: packet.active !== false ? 'var(--gw-green-light)' : 'var(--gw-bone)', color: packet.active !== false ? 'var(--gw-green)' : 'var(--gw-mist)' }}>
+                        {packet.active !== false ? 'Sendable' : 'Sendable (disabled)'}
                       </span>
                     )}
                   </div>

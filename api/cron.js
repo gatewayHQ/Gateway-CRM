@@ -578,6 +578,8 @@ async function runNudges(supabase) {
 // what actually exists there. It never overwrites an admin-set name/state/
 // tokens on an existing entry, and never auto-activates a new draft:
 //   • DEACTIVATE any linked entry whose template no longer exists in BoldSign
+//     — skipped entirely when BoldSign returns no readable template ids, so a
+//     bad/empty response can never switch off the whole catalog
 //   • DRAFT-REGISTER (inactive) any BoldSign template not yet in the catalog,
 //     ONLY when its title confidently maps to one of our operating states —
 //     ambiguous titles are reported, never guessed, since state is
@@ -592,28 +594,64 @@ export function detectStateFromTitle(title) {
   return null
 }
 
+// BoldSign's template payloads aren't consistent about which key carries the id
+// or the title across list/properties responses, so read every spelling we've
+// seen. Guessing wrong here is expensive: an id we fail to read looks like a
+// template that no longer exists, which used to deactivate the catalog entry.
+// Linked packets whose template id the live BoldSign account doesn't have.
+// Reported, not acted on — see the note in runBoldsignTemplateSync.
+export function catalogDrift(catalog = [], liveIds = new Set()) {
+  return (catalog || [])
+    .filter(row => row?.boldsign_template_id && row.active !== false && !liveIds.has(row.boldsign_template_id))
+    .map(row => ({ id: row.id, name: row.name, state: row.state, templateId: row.boldsign_template_id }))
+}
+
+export const boldsignTemplateId    = (t) => t?.templateId || t?.documentId || t?.id || null
+export const boldsignTemplateTitle = (t) => t?.title || t?.templateName || t?.documentName || t?.messageTitle || t?.name || ''
+
 async function runBoldsignTemplateSync(supabase) {
   if (!process.env.BOLDSIGN_API_KEY) {
     return { status: 200, body: { ok: false, skipped: 'BOLDSIGN_API_KEY not set' } }
   }
 
+  // Page through the whole account — a single page=1&pageSize=100 fetch treats
+  // template 101 as deleted.
   let liveTemplates = []
   try {
-    const data = await boldsign('/template/list?page=1&pageSize=100')
-    liveTemplates = data.result || data.templates || []
+    for (let page = 1; page <= 20; page++) {
+      const data  = await boldsign(`/template/list?page=${page}&pageSize=100`)
+      const batch = data.result || data.templates || []
+      liveTemplates.push(...batch)
+      if (batch.length < 100) break
+    }
   } catch (e) {
     return { status: 200, body: { ok: false, error: `BoldSign template list failed: ${e.message}` } }
   }
-  const liveIds = new Set(liveTemplates.map(t => t.templateId || t.id).filter(Boolean))
+  const liveIds = new Set(liveTemplates.map(boldsignTemplateId).filter(Boolean))
 
   const { data: catalog } = await supabase
     .from('form_packets')
-    .select('id, boldsign_template_id, active')
+    .select('id, name, state, boldsign_template_id, active')
     .not('boldsign_template_id', 'is', null)
 
+  // ── Drift is REPORTED, not enforced ────────────────────────────────────────
+  // This job used to switch `active` off for any packet whose template id it
+  // didn't find in the live list. That silently un-did the admin's work every
+  // night: point BOLDSIGN_API_KEY at a different environment (sandbox vs live),
+  // or carry ids from a since-deleted account, and every packet except the one
+  // that happens to exist there goes "Sendable (disabled)" at 3am — which reads
+  // as a broken CRM, not as configuration drift.
+  //
+  // A stale id already fails loudly and specifically at send time (BoldSign
+  // returns "template not found"), so pre-emptively disabling the packet buys
+  // nothing and costs the agent their forms. We list the drift in the job's
+  // response instead. Set BOLDSIGN_SYNC_DEACTIVATE=1 to restore enforcement.
+  const missing = catalogDrift(catalog, liveIds)
+
+  const enforce = process.env.BOLDSIGN_SYNC_DEACTIVATE === '1' && liveIds.size > 0
   let deactivated = 0
-  for (const row of (catalog || [])) {
-    if (row.active && !liveIds.has(row.boldsign_template_id)) {
+  if (enforce) {
+    for (const row of missing) {
       await supabase.from('form_packets').update({ active: false }).eq('id', row.id)
       deactivated++
     }
@@ -623,9 +661,9 @@ async function runBoldsignTemplateSync(supabase) {
   let drafted = 0
   const unmatched = []
   for (const t of liveTemplates) {
-    const tid = t.templateId || t.id
+    const tid = boldsignTemplateId(t)
     if (!tid || knownIds.has(tid)) continue
-    const title = t.title || t.name || 'Untitled BoldSign template'
+    const title = boldsignTemplateTitle(t) || 'Untitled BoldSign template'
     const state = detectStateFromTitle(title)
     if (!state) { unmatched.push({ templateId: tid, title }); continue }
     await supabase.from('form_packets').insert([{
@@ -640,5 +678,19 @@ async function runBoldsignTemplateSync(supabase) {
     drafted++
   }
 
-  return { status: 200, body: { ok: true, live: liveTemplates.length, deactivated, drafted, unmatched } }
+  return {
+    status: 200,
+    body: {
+      ok: true, live: liveTemplates.length, deactivated, drafted, unmatched,
+      // Packets pointing at a template this API key can't see. Reported only —
+      // they stay sendable unless BOLDSIGN_SYNC_DEACTIVATE=1.
+      missing,
+      ...(missing.length && !enforce
+        ? { warning: `${missing.length} packet(s) point at a template this BoldSign key can't see — left sendable. Check that BOLDSIGN_API_KEY matches the account the templates live in.` }
+        : {}),
+      ...(liveIds.size === 0
+        ? { warning_ids: 'BoldSign returned no readable template ids — nothing was reconciled' }
+        : {}),
+    },
+  }
 }

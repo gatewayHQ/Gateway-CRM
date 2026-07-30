@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, seedSignersFromDeal } from '../boldsign.js'
+import { buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, seedSignersFromDeal, sendableTemplates, normalizeBoldsignTemplates, resolveDealAgents, dealClientSigners, dealSide, roleKind, commissionRate, normalizeRoleName, ROLE_ALIASES } from '../boldsign.js'
 
 describe('buildTextTag', () => {
   it('builds the {{fieldType|signerIndex|required|label|fieldId}} syntax', () => {
@@ -111,10 +111,305 @@ describe('seedSignersFromDeal — auto-fill signer name/email from the deal', ()
     expect(seedSignersFromDeal({ roles, contact, activeAgent: agent })[1]).toEqual({ name: '', email: '' })
   })
 
-  it('only fills the first agent role, not a second', () => {
+  it('leaves a second agent role blank when there is only one agent on the deal', () => {
     const roles = [{ index: 1, name: 'Agent' }, { index: 2, name: 'Co-Agent' }]
     const out = seedSignersFromDeal({ roles, contact: null, activeAgent: agent })
     expect(out[1]).toEqual({ name: 'Alex Agent', email: 'alex@brokerage.com' })
     expect(out[2]).toEqual({ name: '', email: '' })
+  })
+
+  it('fills BOTH agent roles when the deal has a co-agent', () => {
+    const roles = [{ index: 1, name: 'Listing Agent' }, { index: 2, name: 'Co-Listing Agent' }]
+    const agents = [agent, { name: 'Nic Madsen', email: 'nic@brokerage.com' }]
+    const out = seedSignersFromDeal({ roles, contact: null, agents })
+    expect(out[1]).toEqual({ name: 'Alex Agent', email: 'alex@brokerage.com' })
+    expect(out[2]).toEqual({ name: 'Nic Madsen', email: 'nic@brokerage.com' })
+  })
+
+  it('seeds a full purchase-agreement packet on a buyer deal without touching the seller side', () => {
+    // The exact role set that shipped in the screenshot report.
+    const roles = [
+      { index: 1, name: 'Buyer' },      { index: 2, name: 'Buyer Agent' },
+      { index: 3, name: 'Co-buyer' },   { index: 4, name: 'Co-buyer agent' },
+      { index: 5, name: 'Seller' },     { index: 6, name: 'Co-seller' },
+      { index: 7, name: 'Listing agent' },
+    ]
+    const out = seedSignersFromDeal({
+      roles, side: 'buyer',
+      contact: { first_name: 'Jean', last_name: 'Irwin', email: 'jean@x.com' },
+      additionalContacts: [{ first_name: 'Pat', last_name: 'Irwin', email: 'pat@x.com' }],
+      agents: [{ name: 'Daniel Stillson', email: 'daniel@g.com' }, { name: 'Nic Madsen', email: 'nic@g.com' }],
+    })
+    expect(out[1]).toEqual({ name: 'Jean Irwin', email: 'jean@x.com' })
+    expect(out[2]).toEqual({ name: 'Daniel Stillson', email: 'daniel@g.com' })
+    expect(out[3]).toEqual({ name: 'Pat Irwin', email: 'pat@x.com' })
+    expect(out[4]).toEqual({ name: 'Nic Madsen', email: 'nic@g.com' })
+    // Never auto-fill the other side of the table.
+    expect(out[5]).toEqual({ name: '', email: '' })
+    expect(out[6]).toEqual({ name: '', email: '' })
+    expect(out[7]).toEqual({ name: '', email: '' })
+  })
+
+  it('routes a seller deal to the seller rows', () => {
+    const roles = [
+      { index: 1, name: 'Buyer' }, { index: 2, name: 'Seller' },
+      { index: 3, name: 'Co-seller' }, { index: 4, name: 'Listing Agent' },
+    ]
+    const out = seedSignersFromDeal({
+      roles, side: 'seller', contact, agents: [agent],   // contact carries spouse_name
+    })
+    expect(out[1]).toEqual({ name: '', email: '' })                          // buyer row untouched
+    expect(out[2]).toEqual({ name: 'Jane Seller', email: 'jane@x.com' })
+    expect(out[3]).toEqual({ name: 'John Seller', email: '' })               // spouse, no email on file
+    expect(out[4]).toEqual({ name: 'Alex Agent', email: 'alex@brokerage.com' })
+  })
+
+  it('falls back to side-agnostic roles when the template has none for our side', () => {
+    const roles = [{ index: 1, name: 'Signer 1' }, { index: 2, name: 'Agent' }]
+    const out = seedSignersFromDeal({ roles, side: 'buyer', contact, agents: [agent] })
+    expect(out[1]).toEqual({ name: 'Jane Seller', email: 'jane@x.com' })
+    expect(out[2]).toEqual({ name: 'Alex Agent', email: 'alex@brokerage.com' })
+  })
+
+  it('never invents more signers than the deal has people', () => {
+    const roles = [{ index: 1, name: 'Buyer' }, { index: 2, name: 'Co-buyer' }]
+    const out = seedSignersFromDeal({ roles, side: 'buyer', contact: { first_name: 'Solo', last_name: 'Buyer', email: 's@x.com' } })
+    expect(out[2]).toEqual({ name: '', email: '' })
+  })
+})
+
+describe('roleKind — the BoldSign role name → CRM party mapping', () => {
+  it('reads party, side and seat from the table', () => {
+    expect(roleKind('Buyer Agent')).toEqual({ party: 'agent', side: 'buyer', seat: 1 })
+    expect(roleKind('Co-buyer agent')).toEqual({ party: 'agent', side: 'buyer', seat: 2 })
+    expect(roleKind('Listing agent')).toEqual({ party: 'agent', side: 'seller', seat: 1 })
+    expect(roleKind('Co-listing agent')).toEqual({ party: 'agent', side: 'seller', seat: 2 })
+    expect(roleKind('Seller')).toEqual({ party: 'client', side: 'seller', seat: 1 })
+    expect(roleKind('Co-seller')).toEqual({ party: 'client', side: 'seller', seat: 2 })
+  })
+
+  it('normalizes punctuation, case and spacing before matching', () => {
+    for (const n of ["Buyer's Agent", 'buyers agent', 'BUYER  AGENT', 'Buyer-Agent']) {
+      expect(roleKind(n)).toEqual({ party: 'agent', side: 'buyer', seat: 1 })
+    }
+    expect(roleKind("Co-Buyer's  Agent")).toEqual({ party: 'agent', side: 'buyer', seat: 2 })
+  })
+
+  it('falls back to heuristics for a role the table has no alias for', () => {
+    expect(roleKind('Signer 1')).toEqual({ party: 'client', side: '', seat: 1 })
+    expect(roleKind('Signer 2')).toEqual({ party: 'client', side: '', seat: 2 })
+    expect(roleKind('Grantor')).toMatchObject({ party: 'client', side: 'seller' })
+    expect(roleKind('Witness')).toMatchObject({ party: 'other' })
+  })
+
+  it('does not treat the broker-of-record row as the deal agent', () => {
+    expect(roleKind('Broker').party).toBe('other')
+  })
+
+  it('normalizeRoleName is what makes the aliases stable', () => {
+    expect(normalizeRoleName("Co-Listing Agent's")).toBe('co listing agents')
+    expect(normalizeRoleName('  SELLER   2  ')).toBe('seller 2')
+  })
+})
+
+describe('seat assignment — independent of the order BoldSign returns roles', () => {
+  const contact = { first_name: 'Jean', last_name: 'Irwin', email: 'jean@x.com' }
+  const extra   = [{ first_name: 'Pat', last_name: 'Irwin', email: 'pat@x.com' }]
+  const agents  = [{ name: 'Daniel Stillson', email: 'daniel@g.com' }, { name: 'Nic Madsen', email: 'nic@g.com' }]
+
+  it('puts the primary in the seat-1 row even when the co- row comes first', () => {
+    const roles = [
+      { index: 1, name: 'Co-seller' },        // seat 2, listed FIRST
+      { index: 2, name: 'Seller' },           // seat 1
+      { index: 3, name: 'Co-listing agent' }, // seat 2
+      { index: 4, name: 'Listing agent' },    // seat 1
+    ]
+    const out = seedSignersFromDeal({ roles, side: 'seller', contact, additionalContacts: extra, agents })
+    expect(out[2]).toEqual({ name: 'Jean Irwin', email: 'jean@x.com' })      // Seller
+    expect(out[1]).toEqual({ name: 'Pat Irwin',  email: 'pat@x.com' })       // Co-seller
+    expect(out[4]).toEqual({ name: 'Daniel Stillson', email: 'daniel@g.com' })
+    expect(out[3]).toEqual({ name: 'Nic Madsen', email: 'nic@g.com' })
+  })
+
+  it('a deal representing both sides (no side set) fills every matching role in order', () => {
+    const roles = [
+      { index: 1, name: 'Buyer' }, { index: 2, name: 'Seller' },
+      { index: 3, name: 'Buyer Agent' }, { index: 4, name: 'Listing agent' },
+    ]
+    const out = seedSignersFromDeal({ roles, contact, additionalContacts: extra, agents })
+    expect(out[1]).toEqual({ name: 'Jean Irwin', email: 'jean@x.com' })
+    expect(out[2]).toEqual({ name: 'Pat Irwin',  email: 'pat@x.com' })
+    expect(out[3]).toEqual({ name: 'Daniel Stillson', email: 'daniel@g.com' })
+    expect(out[4]).toEqual({ name: 'Nic Madsen', email: 'nic@g.com' })
+  })
+
+  it('buyer-only deal: seller-side roles stay blank and get removed from the send', () => {
+    const roles = [
+      { index: 1, name: 'Buyer' }, { index: 2, name: "Buyer's Agent" },
+      { index: 3, name: 'Seller' }, { index: 4, name: 'Listing Agent' },
+    ]
+    const out = seedSignersFromDeal({ roles, side: 'buyer', contact, agents: [agents[0]] })
+    expect(out[1]).toEqual({ name: 'Jean Irwin', email: 'jean@x.com' })
+    expect(out[2]).toEqual({ name: 'Daniel Stillson', email: 'daniel@g.com' })
+    expect(out[3]).toEqual({ name: '', email: '' })
+    expect(out[4]).toEqual({ name: '', email: '' })
+  })
+})
+
+describe('resolveDealAgents — the deal agent + co-agents, in signing order', () => {
+  const agents = [
+    { id: 'a1', name: 'Daniel Stillson', email: 'daniel@g.com' },
+    { id: 'a2', name: 'Nic Madsen',      email: 'nic@g.com' },
+    { id: 'a3', name: 'Someone Else',    email: 'else@g.com' },
+  ]
+
+  it('puts the deal agent first and appends the property co-agents', () => {
+    const out = resolveDealAgents({
+      deal: { agent_id: 'a1' },
+      property: { details: { co_agent_ids: ['a2'] } },
+      agents,
+    })
+    expect(out.map(a => a.name)).toEqual(['Daniel Stillson', 'Nic Madsen'])
+    expect(out[1].email).toBe('nic@g.com')
+  })
+
+  it('dedupes when the co-agent is also the deal agent', () => {
+    const out = resolveDealAgents({ deal: { agent_id: 'a1' }, property: { details: { co_agent_ids: ['a1'] } }, agents })
+    expect(out).toHaveLength(1)
+  })
+
+  it('honors a legacy deal-level co_agent_ids array', () => {
+    const out = resolveDealAgents({ deal: { agent_id: 'a1', co_agent_ids: ['a2'] }, agents })
+    expect(out.map(a => a.id)).toEqual(['a1', 'a2'])
+  })
+
+  it('drops co-agent ids that are not on the roster', () => {
+    const out = resolveDealAgents({ deal: { agent_id: 'a1' }, property: { details: { co_agent_ids: ['gone'] } }, agents })
+    expect(out.map(a => a.id)).toEqual(['a1'])
+  })
+
+  it('falls back to the acting agent only when the deal has no agent', () => {
+    expect(resolveDealAgents({ deal: {}, agents, activeAgent: agents[2] }).map(a => a.id)).toEqual(['a3'])
+    // …and does NOT substitute the viewer when the deal has its own agent.
+    expect(resolveDealAgents({ deal: { agent_id: 'a1' }, agents, activeAgent: agents[2] }).map(a => a.id)).toEqual(['a1'])
+  })
+})
+
+describe('dealClientSigners / dealSide', () => {
+  it('orders primary, additional contacts, and dedupes by email', () => {
+    const out = dealClientSigners({
+      contact: { first_name: 'Jean', last_name: 'Irwin', email: 'jean@x.com' },
+      additionalContacts: [
+        { first_name: 'Pat', last_name: 'Irwin', email: 'pat@x.com' },
+        { first_name: 'Jean', last_name: 'Irwin', email: 'JEAN@x.com' },   // same person, different case
+      ],
+    })
+    expect(out).toEqual([
+      { name: 'Jean Irwin', email: 'jean@x.com' },
+      { name: 'Pat Irwin',  email: 'pat@x.com' },
+    ])
+  })
+
+  it('keeps a party with no email so the UI can flag them', () => {
+    const out = dealClientSigners({ contact: { first_name: 'No', last_name: 'Email' } })
+    expect(out).toEqual([{ name: 'No Email', email: '' }])
+  })
+
+  it('reads the side off comp_data.transaction_type, and only buyer/seller', () => {
+    expect(dealSide({ comp_data: { transaction_type: 'buyer' } })).toBe('buyer')
+    expect(dealSide({ comp_data: { transaction_type: 'Seller' } })).toBe('seller')
+    expect(dealSide({ comp_data: { transaction_type: 'lease' } })).toBe('')
+    expect(dealSide({})).toBe('')
+  })
+})
+
+describe('sendableTemplates — which Form Library rows can be sent for signature', () => {
+  it('keeps rows with a boldsign template id and drops the rest', () => {
+    const out = sendableTemplates([
+      { name: 'Iowa Listing',  boldsign_template_id: 'tpl-1', state: 'IA', doc_type: 'listing' },
+      { name: 'Plain Handout', boldsign_template_id: null },
+      { name: 'Blank id',      boldsign_template_id: '   ' },
+    ])
+    expect(out.map(t => t.template_id)).toEqual(['tpl-1'])
+    expect(out[0]).toMatchObject({ name: 'Iowa Listing', state: 'IA', doc_type: 'listing', source: 'library' })
+  })
+
+  it('drops deactivated packets but keeps rows where active is missing (pre-migration)', () => {
+    const out = sendableTemplates([
+      { name: 'Off',     boldsign_template_id: 'a', active: false },
+      { name: 'On',      boldsign_template_id: 'b', active: true },
+      { name: 'Unknown', boldsign_template_id: 'c' },
+      { name: 'Null',    boldsign_template_id: 'd', active: null },
+    ])
+    expect(out.map(t => t.name)).toEqual(['Null', 'On', 'Unknown'])
+  })
+
+  it('accepts the retired boldsign_templates shape (template_id column)', () => {
+    expect(sendableTemplates([{ name: 'Legacy', template_id: 'tpl-9', active: true }])[0])
+      .toMatchObject({ template_id: 'tpl-9', name: 'Legacy' })
+  })
+
+  it('dedupes by template id, sorts by name, and defaults field_tokens to an array', () => {
+    const out = sendableTemplates([
+      { name: 'Zeta', boldsign_template_id: 'z' },
+      { name: 'Alpha', boldsign_template_id: 'a', field_tokens: ['property_address'] },
+      { name: 'Zeta copy', boldsign_template_id: 'z' },
+    ])
+    expect(out.map(t => t.name)).toEqual(['Alpha', 'Zeta'])
+    expect(out[0].field_tokens).toEqual(['property_address'])
+    expect(out[1].field_tokens).toEqual([])
+  })
+
+  it('tolerates junk input', () => {
+    expect(sendableTemplates()).toEqual([])
+    expect(sendableTemplates([null, undefined, {}])).toEqual([])
+  })
+})
+
+describe('normalizeBoldsignTemplates — fallback list straight from BoldSign', () => {
+  it('reads the varying id/name field names BoldSign returns', () => {
+    const out = normalizeBoldsignTemplates([
+      { templateId: 't1', templateName: 'Listing Agreement' },
+      { documentId: 't2', documentName: 'Agency Disclosure' },
+    ])
+    expect(out).toEqual([
+      { template_id: 't2', name: 'Agency Disclosure', state: '', doc_type: '', field_tokens: [], source: 'boldsign' },
+      { template_id: 't1', name: 'Listing Agreement', state: '', doc_type: '', field_tokens: [], source: 'boldsign' },
+    ])
+  })
+  it('skips entries with no id and tolerates junk', () => {
+    expect(normalizeBoldsignTemplates([{ templateName: 'No id' }])).toEqual([])
+    expect(normalizeBoldsignTemplates()).toEqual([])
+  })
+})
+
+describe('commissionRate — the commission_pct prefill token', () => {
+  it('prefers the admin commissions row, then the agent entry, then the legacy column', () => {
+    expect(commissionRate({ commission: { gross_pct: 3 }, comp_data: { commission_pct: 2.5 } })).toBe(3)
+    expect(commissionRate({ comp_data: { commission_pct: 2.5 } })).toBe(2.5)
+    expect(commissionRate({ commission_pct: 6 })).toBe(6)
+  })
+  it('is null when nothing usable is entered — the token stays blank', () => {
+    expect(commissionRate({})).toBeNull()
+    expect(commissionRate({ comp_data: { commission_pct: 0 } })).toBeNull()
+    expect(commissionRate({ comp_data: { commission_pct: 'abc' } })).toBeNull()
+    expect(commissionRate()).toBeNull()
+  })
+  it('fills the token once a rate exists', () => {
+    expect(crmTokenValues({ deal: { comp_data: { commission_pct: 3 } } }).commission_pct).toBe('3%')
+    expect(crmTokenValues({ deal: {} }).commission_pct).toBe('')
+  })
+})
+
+describe('sendableTemplates — packet side', () => {
+  it('carries transaction_type through so the picker can flag a mismatch', () => {
+    const out = sendableTemplates([
+      { name: 'Buyer Agreement/IA Agency Packet', boldsign_template_id: 't1', state: 'IA', transaction_type: 'buyer' },
+      { name: 'Listing Agreement/Iowa Agency Packet', boldsign_template_id: 't2', state: 'IA', transaction_type: 'seller' },
+    ])
+    expect(out.map(t => t.tx_type)).toEqual(['buyer', 'seller'])
+  })
+  it('is an empty string when the packet has no type', () => {
+    expect(sendableTemplates([{ name: 'X', boldsign_template_id: 't' }])[0].tx_type).toBe('')
   })
 })
