@@ -189,6 +189,36 @@ The payload is normalized on the way out either way:
 
 **Template design rule:** a packet's roles should be the signature blocks the paper actually has, for one side of one transaction. A role declared in BoldSign with no field on the document is a role that can be dropped but never usefully filled.
 
+### Required template setup (one-time, per template)
+Every role must be **deletable**, or a one-sided send is rejected:
+1. Open the template in BoldSign → for **every** role, enable **"Delete this recipient"**.
+2. Recommended: leave **"Allow sender to edit/delete form fields"** on (`allowEditFormField` / `allowDeleteFormField`, both default-on) so an agent can adjust in the PreparePage.
+3. Save.
+
+If that permission is off, `RoleRemovalIndices` fails and the send comes back as "SignerName or SignerEmail is missing in roles". The API surfaces that as a message naming the roles *and* the setting to turn on — it is not a code problem.
+
+### Role name → CRM party (`ROLE_ALIASES`)
+Role matching drives who gets dropped, so it is an explicit table (`src/lib/services/boldsign.js`), with heuristics only as a fallback for names it doesn't carry. Names match case-insensitively with punctuation and spacing normalized (`normalizeRoleName`), so `Buyer's Agent`, `buyers agent` and `BUYER  AGENT` are one entry.
+
+| BoldSign role name | party | side | seat |
+|---|---|---|---|
+| Buyer · Purchaser · Tenant · Buyer 1 | client | buyer | 1 |
+| Co-buyer · Buyer 2 · Second buyer · Co-purchaser | client | buyer | 2 |
+| Seller · Owner · Landlord · Seller 1 | client | seller | 1 |
+| Co-seller · Seller 2 · Second seller · Co-owner | client | seller | 2 |
+| Buyer's Agent · Selling Agent | agent | buyer | 1 |
+| Co-buyer's Agent | agent | buyer | 2 |
+| Listing Agent · Seller's Agent | agent | seller | 1 |
+| Co-listing Agent | agent | seller | 2 |
+| Agent · Realtor · Client | either | — | 1 |
+| Co-agent · Co-client | either | — | 2 |
+| Witness, Notary, Broker (of record) | other | — | — |
+
+**`seat`** is which person of that party takes the row — seat 1 the primary, seat 2 the co- row. Assignment goes by seat, not by the order BoldSign returns roles in, so a template listing Co-seller above Seller still puts the primary contact in Seller.
+
+**Side gating:** with `deals.comp_data.transaction_type` set to `buyer` or `seller`, only that side's roles (then side-agnostic ones) are filled — the opposite side is never auto-filled, and lands in `RoleRemovalIndices`. A deal representing **both** sides should leave that field off `buyer`/`seller`; every matching role then fills in template order.
+
+**Net behavior:** buyer + buyer's agent on the deal → Seller and Listing Agent removed. Seller + listing agent → Buyer and Buyer's Agent removed. Both sides → all matching roles kept. No post-send signer additions needed.
 ## Removing a document from the Signatures tab
 `action: 'document-delete'` — the sender or an **admin** may remove any non-`completed` document; a completed one is the signed legal record and is refused outright.
 - **Drafts** (never sent) are always removable. BoldSign rejects `revoke` on a document that was never sent *and* `delete` on one still in draft, and the old code aborted the whole request on any non-404 error — so the trash icon on a draft only ever raised a toast. Cleanup of BoldSign's copy is now best-effort (`cleanupFailureAction()`, unit-tested), the CRM row goes regardless, and whatever BoldSign said is recorded in `audit_log` and returned as `boldsign` for the toast.

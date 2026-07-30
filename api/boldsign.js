@@ -949,9 +949,10 @@ async function fetchTemplateRoles(templateId) {
 function unremovableRolesError(unfilled, vendorMessage) {
   const names = unfilled.map(u => u.name).join(', ')
   return {
-    error: `BoldSign wouldn't drop these roles because the document has fields for them: ${names}. `
-         + `Fill them in under "Add another signer" — or pick a packet for this side of the transaction, `
-         + `if that's what happened.`,
+    error: `BoldSign refused to drop these roles: ${names}. `
+         + `Open the template in BoldSign and turn on "Delete this recipient" for each of them — `
+         + `that permission is what allows a one-sided send. Until then, fill them in under `
+         + `"Add another signer", or pick a packet for this side of the transaction.`,
     unfilled,
     boldsign: vendorMessage,
   }

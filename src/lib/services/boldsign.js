@@ -190,13 +190,92 @@ const BUYER_SIDE_RE  = /(buyer|purchaser|grantee|tenant|lessee|borrower)/
 const SELLER_SIDE_RE = /(seller|owner|grantor|landlord|lessor)/
 const AGENT_ROLE_RE  = /(agent|realtor)/
 
-// party: 'agent' | 'client' | 'other'   side: 'buyer' | 'seller' | '' (either)
+// ── BoldSign role name → CRM party ───────────────────────────────────────────
+// The explicit mapping table. Matching a role by name is what decides who gets
+// dropped from a send, so it's a table first and heuristics only as a fallback —
+// a mis-read role name means either the wrong person on a contract or a role
+// removed that shouldn't be.
+//
+// `seat` is which person of that party takes the row: seat 1 is the primary
+// (Seller, Listing Agent), seat 2 the second (Co-seller, Co-listing Agent). Seats
+// make assignment independent of the order BoldSign happens to return roles in,
+// so a template that lists "Co-seller" before "Seller" still puts the primary
+// contact in the Seller row.
+//
+// To add a role: use one of these names in BoldSign, or add the alias here.
+// Names are matched case-insensitively with punctuation/whitespace normalized,
+// so "Buyer's Agent", "buyers agent" and "BUYER  AGENT" are all one entry.
+export const ROLE_ALIASES = Object.freeze({
+  // ── Clients, buyer side ──
+  'buyer':              { party: 'client', side: 'buyer',  seat: 1 },
+  'buyer 1':            { party: 'client', side: 'buyer',  seat: 1 },
+  'purchaser':          { party: 'client', side: 'buyer',  seat: 1 },
+  'tenant':             { party: 'client', side: 'buyer',  seat: 1 },
+  'co buyer':           { party: 'client', side: 'buyer',  seat: 2 },
+  'buyer 2':            { party: 'client', side: 'buyer',  seat: 2 },
+  'second buyer':       { party: 'client', side: 'buyer',  seat: 2 },
+  'co purchaser':       { party: 'client', side: 'buyer',  seat: 2 },
+  'co tenant':          { party: 'client', side: 'buyer',  seat: 2 },
+
+  // ── Clients, seller side ──
+  'seller':             { party: 'client', side: 'seller', seat: 1 },
+  'seller 1':           { party: 'client', side: 'seller', seat: 1 },
+  'owner':              { party: 'client', side: 'seller', seat: 1 },
+  'landlord':           { party: 'client', side: 'seller', seat: 1 },
+  'co seller':          { party: 'client', side: 'seller', seat: 2 },
+  'seller 2':           { party: 'client', side: 'seller', seat: 2 },
+  'second seller':      { party: 'client', side: 'seller', seat: 2 },
+  'co owner':           { party: 'client', side: 'seller', seat: 2 },
+  'co landlord':        { party: 'client', side: 'seller', seat: 2 },
+
+  // ── Agents, buyer side ──
+  'buyer agent':        { party: 'agent',  side: 'buyer',  seat: 1 },
+  'buyers agent':       { party: 'agent',  side: 'buyer',  seat: 1 },
+  'selling agent':      { party: 'agent',  side: 'buyer',  seat: 1 },
+  'co buyer agent':     { party: 'agent',  side: 'buyer',  seat: 2 },
+  'co buyers agent':    { party: 'agent',  side: 'buyer',  seat: 2 },
+  'buyer co agent':     { party: 'agent',  side: 'buyer',  seat: 2 },
+
+  // ── Agents, seller side ──
+  'listing agent':      { party: 'agent',  side: 'seller', seat: 1 },
+  'seller agent':       { party: 'agent',  side: 'seller', seat: 1 },
+  'sellers agent':      { party: 'agent',  side: 'seller', seat: 1 },
+  'co listing agent':   { party: 'agent',  side: 'seller', seat: 2 },
+  'co seller agent':    { party: 'agent',  side: 'seller', seat: 2 },
+  'listing co agent':   { party: 'agent',  side: 'seller', seat: 2 },
+
+  // ── Side-agnostic ──
+  'agent':              { party: 'agent',  side: '',       seat: 1 },
+  'co agent':           { party: 'agent',  side: '',       seat: 2 },
+  'realtor':            { party: 'agent',  side: '',       seat: 1 },
+  'client':             { party: 'client', side: '',       seat: 1 },
+  'co client':          { party: 'client', side: '',       seat: 2 },
+})
+
+// Lowercase, collapse punctuation/whitespace: "Co-Buyer's  Agent" → "co buyers agent".
+export function normalizeRoleName(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/[’']/g, '')          // buyer's → buyers
+    .replace(/[^a-z0-9]+/g, ' ')   // dashes, slashes, punctuation → space
+    .trim()
+    .replace(/\s+/g, ' ')
+}
+
+// party: 'agent' | 'client' | 'other' · side: 'buyer' | 'seller' | '' (either)
+// seat: 1 = primary, 2 = the co- row.
 export function roleKind(name) {
-  const n    = String(name || '').toLowerCase()
+  const n = normalizeRoleName(name)
+  const exact = ROLE_ALIASES[n]
+  if (exact) return { ...exact }
+
+  // Fallback for a role name the table doesn't carry (custom templates, "Signer
+  // 1", "Party B"). Seat comes from a leading "co" or a trailing 2/3.
+  const seat = /^co\b/.test(n) || /\b([2-9])$/.test(n) ? 2 : 1
   const side = BUYER_SIDE_RE.test(n) ? 'buyer' : SELLER_SIDE_RE.test(n) ? 'seller' : ''
-  if (AGENT_ROLE_RE.test(n))            return { party: 'agent',  side }
-  if (side || CLIENT_ROLE_RE.test(n))   return { party: 'client', side }
-  return { party: 'other', side: '' }
+  if (AGENT_ROLE_RE.test(n))          return { party: 'agent',  side, seat }
+  if (side || CLIENT_ROLE_RE.test(n)) return { party: 'client', side, seat }
+  return { party: 'other', side: '', seat }
 }
 
 // Every licensee on the deal, in signing order: the deal's own agent first, then
@@ -285,16 +364,27 @@ export function seedSignersFromDeal({
   const out   = {}
   for (const { r } of kinds) out[r.index] = { name: r?.defaultName || '', email: r?.defaultEmail || '' }
 
+  // Assign by SEAT, not by the order BoldSign returned the roles in: person 1
+  // takes the seat-1 row (Seller, Listing Agent), person 2 the seat-2 row
+  // (Co-seller, Co-listing Agent). A template that lists Co-seller above Seller
+  // therefore still puts the primary contact in the Seller row. Ties keep
+  // template order (Array.sort is stable).
+  const bySeat = (list) => [...list].sort((a, b) => (a.seat || 9) - (b.seat || 9))
+
   const fill = (party, queue) => {
-    // Our side first, then side-agnostic roles ("Signer 1", "Listing Agent" on a
-    // buyer deal); opposite-side roles are never auto-filled when we know the side.
-    const eligible = side
-      ? [...kinds.filter(k => k.party === party && k.side === side),
-         ...kinds.filter(k => k.party === party && !k.side)]
-      : kinds.filter(k => k.party === party)
-    for (const k of eligible) {
-      if (!queue.length) return
-      out[k.r.index] = queue.shift()
+    // Our side first, then side-agnostic roles ("Signer 1", a bare "Agent");
+    // opposite-side roles are never auto-filled when we know the side. A deal
+    // that represents BOTH sides leaves transaction_type off buyer/seller, which
+    // makes every role of that party eligible in template order.
+    const groups = side
+      ? [kinds.filter(k => k.party === party && k.side === side),
+         kinds.filter(k => k.party === party && !k.side)]
+      : [kinds.filter(k => k.party === party)]
+    for (const group of groups) {
+      for (const k of bySeat(group)) {
+        if (!queue.length) return
+        out[k.r.index] = queue.shift()
+      }
     }
   }
   fill('agent',  [...licensees])
