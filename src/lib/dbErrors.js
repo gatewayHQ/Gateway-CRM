@@ -40,6 +40,12 @@ export function friendlyDbError(error) {
   // 23505 = unique_violation
   if (code === '23505' || /duplicate key value/i.test(msg)) {
     if (/email/i.test(msg)) return 'A contact with this email already exists.'
+    // One CRM form packet per BoldSign template (uq_form_packets_boldsign_tid).
+    // Form Library resolves the owning packet by name before it gets here; this
+    // is the fallback for every other caller.
+    if (/uq_form_packets_boldsign_tid/.test(msg) || /boldsign_template_id/.test(msg)) {
+      return 'That BoldSign template is already linked to another form packet. Find it in the Form Library (it may be an inactive, auto-discovered draft) and edit that packet instead of creating a second one.'
+    }
     return 'This record already exists.'
   }
 
@@ -56,4 +62,26 @@ export function friendlyDbError(error) {
   }
 
   return null
+}
+
+/**
+ * True when `error` says the database doesn't have `column` — i.e. a migration
+ * hasn't been applied yet. Lets a write retry without the new column instead of
+ * failing outright (see Properties → Start Deal and migration 0025).
+ *
+ * Covers both shapes PostgREST produces:
+ *   • 42703 undefined_column — `column "co_agent_ids" of relation "deals" does not exist`
+ *   • PGRST204              — `Could not find the 'co_agent_ids' column of 'deals' in the schema cache`
+ * Pass no `column` to match any unknown-column error.
+ */
+export function isUnknownColumnError(error, column = null) {
+  if (!error) return false
+  const code = error.code
+  const msg  = `${error.message || ''} ${error.details || ''}`
+  const isUnknownColumn =
+    code === '42703' || code === 'PGRST204' ||
+    /column .* does not exist/i.test(msg) ||
+    /could not find the '[^']+' column/i.test(msg)
+  if (!isUnknownColumn) return false
+  return column ? new RegExp(`\\b${column}\\b`).test(msg) : true
 }

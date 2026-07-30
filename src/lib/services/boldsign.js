@@ -85,9 +85,16 @@ export function normalizeState(s) {
 // and primary contact. Only tokens the template actually declares get sent.
 // The canonical token → value map from a deal's context. Field IDs on a
 // template that match one of these keys get auto-filled.
-export function crmTokenValues({ deal, property, contact, agent } = {}) {
+// `agent` is the deal's PRIMARY agent; `coAgents` is the rest of the roster
+// (src/lib/agentRoster.js#dealRoster returns them in that order). Dual-agent
+// paperwork needs both — a contract that names only the primary is wrong on a
+// co-listed deal, which is why agent_2_* and agent_names exist.
+export function crmTokenValues({ deal, property, contact, agent, coAgents = [] } = {}) {
   const money = (n) => (n != null && n !== '' ? `$${Number(n).toLocaleString()}` : '')
   const fullAddr = [property?.address, property?.city, property?.state, property?.zip].filter(Boolean).join(', ')
+  const co = (coAgents || []).filter(Boolean).filter(a => a.id == null || a.id !== agent?.id)
+  const co1 = co[0] || null
+  const allNames = [agent?.name, ...co.map(a => a.name)].filter(Boolean)
   return {
     property_address:   property?.address || deal?.prop_address || '',
     property_full:      fullAddr,
@@ -104,6 +111,14 @@ export function crmTokenValues({ deal, property, contact, agent } = {}) {
     agent_name:         agent?.name || '',
     agent_email:        agent?.email || '',
     broker_name:        agent?.brokerage || agent?.broker_name || '',
+    // ── Dual-agent tokens ────────────────────────────────────────────────────
+    agent_2_name:       co1?.name || '',
+    agent_2_email:      co1?.email || '',
+    agent_2_license:    co1?.license_number || '',
+    // Every agent on the deal, primary first — for templates with a single
+    // "listing agent(s)" line rather than two separate fields.
+    agent_names:        allNames.join(' & '),
+    agent_count:        String(allNames.length || 0),
   }
 }
 
@@ -120,15 +135,23 @@ export function buildPrefill(fieldTokens = [], ctx = {}) {
 const CLIENT_ROLE_RE = /(seller|buyer|client|owner|purchaser|grantor|grantee|landlord|tenant|lessor|lessee|borrower|customer|signer)/
 
 // Pre-fill a template's signer rows from the deal's people:
-//   • a role mentioning "agent" → the acting agent (first such role only)
+//   • agent roles → the deal's agent roster in order: the first agent role gets
+//     the primary, each further agent role gets the next co-agent. `dealAgents`
+//     comes from agentRoster.dealRoster(deal, agents, property); with none
+//     supplied it falls back to the acting agent for the first role only, which
+//     is the pre-dual-agent behavior.
 //   • client-type roles → the deal's linked contact, then that contact's
 //     spouse for a second client role (co-buyers / husband & wife)
 //   • anything else keeps the template's own placeholder (r.defaultName/Email)
 // Returns { [roleIndex]: { name, email } }. Pure — the agent can still edit any
 // field before sending. Requires the deal to have a linked contact; with none,
 // client roles fall back to the template placeholder (usually blank).
-export function seedSignersFromDeal({ roles = [], contact = null, additionalContacts = [], activeAgent = null } = {}) {
+export function seedSignersFromDeal({ roles = [], contact = null, additionalContacts = [], activeAgent = null, dealAgents = [] } = {}) {
   const toPerson = c => ({ name: `${c?.first_name || ''} ${c?.last_name || ''}`.trim(), email: c?.email || '' })
+  // Roster first (primary → co-agents); the acting agent is the legacy fallback
+  // when a caller hasn't been wired up to pass the roster yet.
+  const agentQueue = (dealAgents || []).filter(a => a && (a.name || a.email))
+  if (!agentQueue.length && activeAgent) agentQueue.push(activeAgent)
   const people = []
   if (contact && (contact.first_name || contact.last_name || contact.email)) people.push(toPerson(contact))
   // Real linked additional contacts (co-buyers / spouses) come next, in order —
@@ -141,12 +164,12 @@ export function seedSignersFromDeal({ roles = [], contact = null, additionalCont
   // only when no real additional contacts are linked to the deal.
   if (!(additionalContacts || []).length && contact?.spouse_name) people.push({ name: contact.spouse_name, email: '' })
   const out = {}
-  let usedAgent = false, personIdx = 0
+  let agentIdx = 0, personIdx = 0
   for (const r of roles) {
     const n = String(r?.name || '').toLowerCase()
-    if (!usedAgent && /agent/.test(n) && activeAgent?.email) {
-      out[r.index] = { name: activeAgent.name || '', email: activeAgent.email || '' }
-      usedAgent = true
+    if (/agent/.test(n) && agentIdx < agentQueue.length) {
+      const a = agentQueue[agentIdx++]
+      out[r.index] = { name: a.name || '', email: a.email || '' }
     } else if (CLIENT_ROLE_RE.test(n) && personIdx < people.length) {
       out[r.index] = { ...people[personIdx++] }
     } else {

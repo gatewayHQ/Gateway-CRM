@@ -2,6 +2,8 @@ import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { fetchVisibleDeals } from '../lib/services/deals.js'
 import { formatCurrency, formatDate, STAGE_LABELS, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
+import { dealRoster, dealRosterIds } from '../lib/agentRoster.js'
+import { friendlyDbError, isUnknownColumnError } from '../lib/dbErrors.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import {
   weightedValue, daysInStage, isRotting, dealActivityState, nextKeyDate,
@@ -9,10 +11,13 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
+import { DEFAULTS as COMM_DEFAULTS, dealCompPayload, DEAL_COMP_COLUMNS } from '../lib/commission.js'
+import { validateAgentComp } from '../lib/validation.js'
 import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
+import CoAgentPicker from '../components/CoAgentPicker.jsx'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
   'Title Search Ordered',
@@ -1066,6 +1071,35 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
 //      signature + date field per signer and sends immediately via BoldSign
 //   3. BoldSign emails each signer; they sign in their browser
 //   4. BoldSign webhook hits /api/boldsign → status flips sent → completed
+// Same-origin landing page BoldSign redirects the iframe to when a flow ends.
+// Without this the iframe redirects to the deal URL and boots a nested copy of
+// the whole CRM inside itself. Mirrors FormLibrary's editor return URL.
+const BOLDSIGN_RETURN_URL = () => `${window.location.origin}/boldsign-return.html`
+
+// Never tell an agent a document was "Sent" without confirming it with BoldSign.
+// The embedded wizard can legitimately finish as a Draft (the agent saved instead
+// of sending), and reporting that as sent is how paperwork silently doesn't go
+// out. Reconciles the row to the real status and words the toast to match.
+async function reportBoldSignOutcome(documentId) {
+  if (!documentId) {
+    pushToast('Finished in BoldSign — use Refresh on the document to confirm its status', 'info')
+    return null
+  }
+  let status = null
+  try { ({ status } = await getDocStatus(documentId)) }
+  catch { /* status lookup is best-effort; fall through to the neutral message */ }
+
+  if (status && status !== 'draft' && status !== 'none') {
+    await supabase.from('boldsign_documents').update({ status }).eq('document_id', documentId)
+    pushToast('Sent for signature', 'success')
+  } else if (status === 'draft' || status === 'none') {
+    pushToast('Saved as a draft in BoldSign — it was NOT sent. Reopen it from this tab to finish sending.', 'info')
+  } else {
+    pushToast('Finished in BoldSign — use Refresh on the document to confirm its status', 'info')
+  }
+  return status
+}
+
 function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent, onClose, onSent }) {
   // Primary signer: contact linked directly to the deal
   const contact      = contacts?.find(c => c.id === deal?.contact_id)
@@ -1088,6 +1122,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const [sending,    setSending]   = React.useState(false)
   const [dragOver,   setDragOver]  = React.useState(false)
   const [embedUrl,   setEmbedUrl]  = React.useState(null)   // BoldSign prepare/send iframe URL
+  const docIdRef = React.useRef(null)                       // BoldSign documentId for the draft it just minted
   const [useTextTags, setUseTextTags] = React.useState(false)   // PDF already has {{...}} text tags baked in
   const fileRef = React.useRef()
 
@@ -1163,7 +1198,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
         documentBase64: base64,
         documentName:   finalDocName,
         signers:        signerPayload,
-        redirectUrl:    window.location.href,
+        redirectUrl:    BOLDSIGN_RETURN_URL(),
         useTextTags,
       })
     } catch (err) {
@@ -1186,6 +1221,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
         status:        'draft',
       }])
     }
+    docIdRef.current = data.documentId || null
     setEmbedUrl(data.url)
   }
 
@@ -1203,7 +1239,10 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
         <div className="modal__body" style={{ padding: 0 }}>
           <BoldSignFrame
             url={embedUrl}
-            onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
+            flow="document"
+            returnUrlMarker="boldsign-return"
+            onDone={() => reportBoldSignOutcome(docIdRef.current).finally(onSent)}
+            onDraft={() => pushToast('Draft saved — finish in the BoldSign window above to send it', 'info')}
             onError={() => pushToast('Send was cancelled in BoldSign', 'info')}
           />
         </div>
@@ -1264,7 +1303,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
                 return (
                   <div key={f.name} onClick={()=>{ setPickedFile(picked?'':f.name); if(!picked){setFile(null)} }}
                     style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', border:`1px solid ${picked?'var(--gw-azure)':'var(--gw-border)'}`, borderRadius:'var(--radius)', marginBottom:4, cursor:'pointer', background:picked?'var(--gw-sky)':'#fff' }}>
-                    <Icon name="file" size={13} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
+                    <Icon name="document" size={13} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
                     <span style={{ fontSize:12, flex:1, fontWeight:picked?700:400 }}>{name}</span>
                     {picked && <Icon name="check" size={13} style={{ color:'var(--gw-azure)' }}/>}
                   </div>
@@ -1309,7 +1348,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   )
 }
 
-function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeAgent }) {
+function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents = [], activeAgent }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
@@ -1507,7 +1546,7 @@ create policy "agent_notifications_policy" on agent_notifications
         <div style={{ display:'flex', gap:8 }}>
           {templates.length > 0 && (
             <button className="btn btn--secondary btn--sm" onClick={() => setTplOpen(true)}>
-              <Icon name="file" size={13}/> Send from Template
+              <Icon name="document" size={13}/> Send from Template
             </button>
           )}
           <button className="btn btn--primary btn--sm" onClick={() => setSendOpen(true)}>
@@ -1528,7 +1567,7 @@ create policy "agent_notifications_policy" on agent_notifications
               return (
                 <div key={env.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:8, background:'#fff', overflow:'hidden' }}>
                   <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px' }}>
-                    <Icon name="file" size={18} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
+                    <Icon name="document" size={18} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
                     <div style={{ flex:1, minWidth:0 }}>
                       <div style={{ fontSize:13, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{env.document_name || 'Document'}</div>
                       <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>
@@ -1586,7 +1625,7 @@ create policy "agent_notifications_policy" on agent_notifications
 
       {tplOpen && (
         <SendFromTemplateModal
-          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} templates={templates} activeAgent={activeAgent}
+          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} templates={templates} agents={agents} activeAgent={activeAgent}
           onClose={() => setTplOpen(false)}
           onSent={() => { setTplOpen(false); loadEnvelopes() }}
         />
@@ -1600,7 +1639,7 @@ create policy "agent_notifications_policy" on agent_notifications
 //    editable (CRM-prefilled) input per field, then sends via /api/boldsign.
 const prettyLabel = (id) => String(id || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 
-function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], templates, activeAgent, onClose, onSent }) {
+function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], templates, agents = [], activeAgent, onClose, onSent }) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
 
@@ -1613,6 +1652,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [templateId, setTemplateId] = React.useState(visible[0]?.template_id || '')
   const [subject,    setSubject]    = React.useState(`Please sign: ${deal?.title || 'Document'}`)
   const [embedUrl,   setEmbedUrl]   = React.useState(null)   // BoldSign prepare/send iframe URL
+  const docIdRef = React.useRef(null)                        // BoldSign documentId for the draft it just minted
   const [sending,    setSending]    = React.useState(false)
   const [details,    setDetails]    = React.useState(null)   // { roles, fields }
   const [loadingDet, setLoadingDet] = React.useState(false)
@@ -1620,6 +1660,18 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [values,     setValues]     = React.useState({})     // fieldId → value
 
   const tpl = templates.find(t => t.template_id === templateId)
+
+  // Everyone who must appear on this paperwork: the deal's agent roster, primary
+  // first (src/lib/agentRoster.js). Recomputed here — not just inside the load
+  // effect — so the render can warn when the template can't seat all of them.
+  const roster = React.useMemo(() => dealRoster(deal, agents, property), [deal, agents, property])
+
+  // A signer row exists ONLY for a role the BoldSign template declares, so a
+  // two-role template (Seller + Listing Agent) physically cannot hold a
+  // co-agent. Naming that here is the difference between "the CRM is broken"
+  // and "this template needs a Co-Listing Agent role".
+  const agentRoleCount = (details?.roles || []).filter(r => /agent/i.test(String(r?.name || ''))).length
+  const unseatedAgents = roster.slice(Math.max(agentRoleCount, 0))
 
   // Load the template's roles + fields whenever the selection changes, and seed
   // signer/field inputs from the deal.
@@ -1635,9 +1687,13 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         setDetails({ roles, fields })
 
         // Seed signer name/email from the deal's linked contact (+ spouse for a
-        // second client role) and the acting agent. See seedSignersFromDeal.
-        const tokenVals = crmTokenValues({ deal, property, contact, agent: activeAgent })
-        setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent }))
+        // second client role) and the deal's agents. See seedSignersFromDeal.
+        // Paperwork names the agents ON THE DEAL, not whoever is sending it —
+        // roster[0] is the primary, the rest are co-agents.
+        const primary   = roster[0] || activeAgent
+        const coAgents  = roster.slice(1)
+        const tokenVals = crmTokenValues({ deal, property, contact, agent: primary, coAgents })
+        setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent, dealAgents: roster }))
 
         const seededValues = {}
         for (const f of fields) seededValues[f.id] = tokenVals[f.id] || ''
@@ -1681,8 +1737,9 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     try {
       // Open BoldSign's embedded prepare/send UI in-frame with the signers +
       // prefilled values passed through; the agent reviews and sends there.
-      const { url } = await templateEmbedUrl({ ...args, redirectUrl: window.location.href })
+      const { url, documentId } = await templateEmbedUrl({ ...args, redirectUrl: BOLDSIGN_RETURN_URL() })
       if (!url) { pushToast('BoldSign did not return a send URL', 'error'); return }
+      docIdRef.current = documentId || null
       setEmbedUrl(url)
     } catch (err) {
       pushToast(err.message, 'error')
@@ -1707,7 +1764,10 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         <div className="modal__body" style={{ padding: 0 }}>
           <BoldSignFrame
             url={embedUrl}
-            onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
+            flow="document"
+            returnUrlMarker="boldsign-return"
+            onDone={() => reportBoldSignOutcome(docIdRef.current).finally(onSent)}
+            onDraft={() => pushToast('Draft saved — finish in the BoldSign window above to send it', 'info')}
             onError={() => pushToast('Send was cancelled in BoldSign', 'info')}
           />
         </div>
@@ -1746,6 +1806,18 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
         {!loadingDet && details && (
           <>
+            {/* A co-agent on the deal with no role to sit in would silently vanish
+                from the paperwork — which is what forced agents to click Back
+                inside BoldSign and add the recipient by hand. Say so, and say
+                where to fix it permanently. */}
+            {unseatedAgents.length > 0 && (
+              <div style={{ background:'#fff3cd', border:'1px solid #ffe08a', borderRadius:'var(--radius)', padding:'8px 10px', marginBottom:12, fontSize:12, color:'#856404' }}>
+                <strong>{unseatedAgents.map(a => a.name).join(', ')}</strong>
+                {unseatedAgents.length === 1 ? ' is a co-agent on this deal but this template has no role for them.' : ' are co-agents on this deal but this template has no roles for them.'}
+                {' '}Add a <strong>Co-Listing Agent</strong> role in Form Library → Rebuild in BoldSign to seat them automatically, or add them as a recipient inside BoldSign on the next screen.
+              </div>
+            )}
+
             {/* One signer input per template role; leave a role blank to omit it. */}
             <div className="form-group">
               <label className="form-label required">Signers</label>
@@ -1894,8 +1966,14 @@ async function syncDealContacts(dealId, contactIds) {
   } catch (e) { console.error('[syncDealContacts]', e) }
 }
 
-export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, onSave, initialTab = 'details' }) {
-  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
+export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, isAdmin = false, onSave, initialTab = 'details' }) {
+  const blank = {
+    title:'', contact_id:'', property_id:'', agent_id:'', co_agent_ids:[], stage:'lead', value:'', probability:0,
+    expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{},
+    // The agent's own compensation on this deal — a rate by default, pre-filled
+    // with the firm's typical one-side rate so the common case needs no typing.
+    agent_comp_type: 'rate', agent_comp_rate_pct: COMM_DEFAULTS.GROSS_PCT, agent_comp_flat: '',
+  }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
@@ -1904,13 +1982,27 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const [additionalContactIds, setAdditionalContactIds] = useState([])
 
   React.useEffect(() => {
-    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {} } : blank)
+    // A deal linked to a property but carrying no roster of its own predates the
+    // carry-over fix — seed the editor from the property so simply opening and
+    // saving the deal materializes the roster instead of silently blanking it.
+    const linkedProp = deal?.property_id ? properties.find(p => p.id === deal.property_id) : null
+    setForm(deal ? {
+      ...blank, ...deal,
+      co_agent_ids: dealRosterIds(deal, linkedProp).filter(id => id !== deal.agent_id),
+      expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '',
+      comp_data: deal.comp_data || {},
+      // Never pre-fill a rate onto a saved deal that has none — an untouched
+      // save must leave its compensation exactly as the office left it.
+      agent_comp_type:     deal.agent_comp_type || 'rate',
+      agent_comp_rate_pct: deal.agent_comp_rate_pct ?? '',
+      agent_comp_flat:     deal.agent_comp_flat ?? '',
+    } : blank)
     setErrors({})
     setTab(deal?.id ? initialTab : 'details')
     setAdditionalContactIds(
       deal?.id ? (dealContacts || []).filter(dc => dc.deal_id === deal.id).map(dc => dc.contact_id) : []
     )
-  }, [deal, open, initialTab, dealContacts])
+  }, [deal, open, initialTab, dealContacts, properties])
 
   // Resolved additional-contact objects — used for the "Send from Template"
   // signer prefill on the Signatures tab (co-signers get their own rows).
@@ -1919,6 +2011,12 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const set  = (k, v) => setForm(p => ({...p, [k]: v}))
   const setCD = (k, v) => setForm(p => ({...p, comp_data: {...(p.comp_data||{}), [k]: v}}))
   const cd = form.comp_data || {}
+
+  // Promoting a co-agent to primary must remove them from the co-agent list, or
+  // the roster would name them twice (and trip deals_co_agents_exclude_primary).
+  const setPrimaryAgent = (agentId) => setForm(p => ({
+    ...p, agent_id: agentId, co_agent_ids: (p.co_agent_ids || []).filter(id => id !== agentId),
+  }))
 
   // One unified stage list for every deal. Deals stored with an off-list token
   // (from the brief track-split era) display as the nearest column and are
@@ -1931,9 +2029,39 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
   const COMM_SUBTYPES = ['multifamily','office','land','retail','industrial','mixed-use']
 
+  const isExisting = !!deal?.id
+  const isNew      = !isExisting
+  // ── Who may touch the agent's compensation on this deal ───────────────────
+  // Mirrors the database trigger from migration 0024: the deal's own agent sets
+  // it at creation (or fills it in on a pre-0024 deal), admins keep full
+  // control forever, and nobody else — a co-listed agent or a sharing team peer
+  // who can otherwise edit this deal — sees or changes another agent's cut.
+  const ownsDeal    = isNew || (!!activeAgent?.id && deal?.agent_id === activeAgent.id)
+  const canSeeComp  = isAdmin || ownsDeal
+  const canEditComp = isAdmin || isNew || (ownsDeal && !deal?.agent_comp_type)
+  const compIsFlat  = form.agent_comp_type === 'flat'
+  // Live "what this is worth" preview — a flat fee is the number itself; a rate
+  // needs a deal value to mean anything.
+  const compEstimate = (() => {
+    const amt = Number(compIsFlat ? form.agent_comp_flat : form.agent_comp_rate_pct)
+    if (!Number.isFinite(amt) || amt <= 0) return 0
+    if (compIsFlat) return amt
+    const val = Number(form.value)
+    return Number.isFinite(val) && val > 0 ? val * amt / 100 : 0
+  })()
+
   const save = async () => {
     const e = {}
     if (!form.title.trim()) e.title = true
+    // Compensation is required on a new deal; on an existing one an empty value
+    // is left alone (legacy deals the office still prices by hand).
+    if (canEditComp) {
+      const comp = validateAgentComp(
+        { type: form.agent_comp_type, rate_pct: form.agent_comp_rate_pct, flat: form.agent_comp_flat },
+        { required: isNew },
+      )
+      if (!comp.valid) e.agent_comp = comp.error
+    }
     setErrors(e)
     if (Object.keys(e).length > 0) return
     setSaving(true)
@@ -1948,20 +2076,52 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         contact_id:          form.contact_id   || null,
         property_id:         form.property_id  || null,
         agent_id:            form.agent_id     || null,
+        // Additional agents on the deal. Filtered against the primary so the
+        // roster can't list the same agent twice.
+        co_agent_ids:        (form.co_agent_ids || []).filter(id => id && id !== form.agent_id),
         notes:               form.notes        || null,
         prop_category:       form.prop_category || null,
         prop_subtype:        form.prop_subtype  || null,
         comp_data:           form.comp_data     || null,
+        // Agent-set compensation (rate OR flat, never both). Sent on every save
+        // so admin edits land too; the DB trigger freezes it for everyone else.
+        ...dealCompPayload(form),
       }
-      let error, savedId = deal?.id
-      if (deal?.id) {
-        ;({ error } = await supabase.from('deals').update(payload).eq('id', deal.id))
-      } else {
-        let data
-        ;({ data, error } = await supabase.from('deals').insert([payload]).select('id').single())
-        savedId = data?.id
+      const write = async (body) => {
+        if (deal?.id) {
+          const { error } = await supabase.from('deals').update(body).eq('id', deal.id)
+          return { error, id: deal.id }
+        }
+        const { data, error } = await supabase.from('deals').insert([body]).select('id').single()
+        return { error, id: data?.id }
       }
-      if (error) { pushToast(error.message, 'error'); return }
+      let { error, id: savedId } = await write(payload)
+
+      // Two independent migrations add columns this form writes: 0024 (agent
+      // compensation) and 0025 (co-agent roster). A database missing either must
+      // not cost the agent their edit. Postgres names ONE unknown column per
+      // error, so strip what it names and retry until it saves or fails for some
+      // other reason — otherwise a database missing both would still error.
+      const dropped = new Set()
+      for (let attempt = 0; error && attempt < 3; attempt++) {
+        const msg = `${error.message || ''} ${error.details || ''}`
+        if (isUnknownColumnError(error, 'co_agent_ids')) dropped.add('co_agent_ids')
+        else if (isUnknownColumnError(error) && /agent_comp/i.test(msg)) {
+          for (const col of DEAL_COMP_COLUMNS) dropped.add(col)
+        } else break
+        const bare = { ...payload }
+        for (const col of dropped) delete bare[col]
+        ;({ error, id: savedId } = await write(bare))
+      }
+      if (!error && dropped.size) {
+        if (dropped.has('co_agent_ids') && (payload.co_agent_ids || []).length) {
+          pushToast('Saved, but co-agents need migration 0025 applied before they persist on the deal.', 'error')
+        }
+        if (DEAL_COMP_COLUMNS.some(col => dropped.has(col))) {
+          pushToast('Saved — ask an admin to apply migration 0024 to store your commission', 'error')
+        }
+      }
+      if (error) { pushToast(friendlyDbError(error) || error.message, 'error'); return }
 
       // Sync additional contacts (best-effort — the deal itself is already saved).
       if (savedId) await syncDealContacts(savedId, additionalContactIds)
@@ -1976,8 +2136,6 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       setSaving(false)
     }
   }
-
-  const isExisting = !!deal?.id
 
   return (
     <Drawer open={open} onClose={onClose} title={deal?.id ? (form.title || 'Edit Deal') : 'Add Deal'} width={500}>
@@ -2059,7 +2217,79 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
               <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Husband &amp; wife, co-buyers, co-owners — these also pre-fill as signers when you Send from Template.</div>
             </div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
-            <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+            <div className="form-group"><label className="form-label">Assigned Agent<span style={{ fontWeight:400, color:'var(--gw-mist)', marginLeft:6, fontSize:11 }}>primary — signs first on paperwork</span></label><select className="form-control" value={form.agent_id||''} onChange={e=>setPrimaryAgent(e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+            {/* Co-Agent — sits directly under Assigned Agent, same control, so the
+                roster reads as one block. Seeded from the property at conversion;
+                editable here so a co-listing can change without touching the
+                property. */}
+            <CoAgentPicker
+              agents={agents}
+              primaryAgentId={form.agent_id}
+              value={form.co_agent_ids || []}
+              onChange={ids => set('co_agent_ids', ids)}
+            />
+
+            {/* ── My Compensation ───────────────────────────────────
+                Set once by the agent creating the deal: EITHER a commission
+                rate OR a flat fee. It becomes the default the commission engine
+                uses — the office no longer has to open the transaction just to
+                record the cut. Splits, overrides and any later change stay with
+                the admins (Back Office → Commission). */}
+            {canSeeComp && (
+              <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
+                <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:12 }}>
+                  {isAdmin && !ownsDeal ? 'Agent Compensation' : 'My Compensation'}
+                </div>
+
+                {/* Rate vs flat fee — mutually exclusive by construction */}
+                <div className="form-group">
+                  <label className="form-label required">How am I paid on this deal?</label>
+                  <div role="radiogroup" aria-label="Compensation type" style={{ display:'flex', gap:0, border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
+                    {[['rate','Commission rate (%)'],['flat','Flat fee ($)']].map(([type, label]) => (
+                      <button key={type} type="button" role="radio" aria-checked={form.agent_comp_type === type}
+                        disabled={!canEditComp}
+                        onClick={() => setForm(p => ({ ...p, agent_comp_type: type }))}
+                        style={{ flex:1, padding:'7px 0', border:'none', cursor: canEditComp ? 'pointer' : 'default', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, transition:'all 150ms',
+                          background: form.agent_comp_type === type ? 'var(--gw-slate)' : '#fff',
+                          color:      form.agent_comp_type === type ? '#fff'            : 'var(--gw-mist)',
+                          opacity:    canEditComp || form.agent_comp_type === type ? 1 : 0.6 }}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Only the chosen field is rendered — there is never a stale
+                    value from the other option sitting on screen. */}
+                <div className="form-group">
+                  <label className="form-label required">{compIsFlat ? 'Flat fee (USD)' : 'Commission rate (%)'}</label>
+                  <input
+                    className={`form-control${errors.agent_comp ? ' error' : ''}`}
+                    type="number" min="0" step={compIsFlat ? '100' : '0.1'} {...(compIsFlat ? {} : { max: '100' })}
+                    disabled={!canEditComp}
+                    value={compIsFlat ? (form.agent_comp_flat ?? '') : (form.agent_comp_rate_pct ?? '')}
+                    onChange={e => set(compIsFlat ? 'agent_comp_flat' : 'agent_comp_rate_pct', e.target.value)}
+                    placeholder={compIsFlat ? '2500' : String(COMM_DEFAULTS.GROSS_PCT)}
+                  />
+                  {errors.agent_comp && <div style={{ fontSize:11, color:'var(--gw-red)', marginTop:4 }}>{errors.agent_comp}</div>}
+                  {!errors.agent_comp && (
+                    <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>
+                      {compEstimate
+                        ? <>Gross commission on this deal: <strong>{formatCurrency(compEstimate)}</strong>{!compIsFlat && Number(form.value) > 0 && <> ({form.agent_comp_rate_pct}% of {formatCurrency(Number(form.value))})</>}</>
+                        : canEditComp
+                          ? 'Your cut on this deal — the office can still adjust or split it later.'
+                          : 'Set when this deal was created. Ask the office to change it.'}
+                    </div>
+                  )}
+                </div>
+
+                {!canEditComp && (
+                  <div style={{ fontSize:11, color:'var(--gw-mist)', background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'7px 10px', marginTop:-4 }}>
+                    Locked — commission changes, splits and overrides are handled by the office.
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* ── Comp Data ─────────────────────────────────────── */}
             <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
@@ -2187,7 +2417,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
-        <SignaturesTab deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} activeAgent={activeAgent} />
+        <SignaturesTab deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} agents={agents} activeAgent={activeAgent} />
       )}
 
       {/* Client Portal tab */}
@@ -2604,10 +2834,9 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                     const contact    = contactMap[deal.contact_id]
                     const agent      = agentMap[deal.agent_id]
                     const dealProp   = deal.property_id ? propertyMap[deal.property_id] : null
-                    const coAgIds    = dealProp?.details?.co_agent_ids || []
-                    const allAgents  = [deal.agent_id, ...coAgIds].filter(Boolean)
-                      .map(id => agentMap[id]).filter(Boolean)
-                      .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
+                    // Roster = deal.agent_id + deal.co_agent_ids, falling back to
+                    // the property for deals converted before 0025. See agentRoster.js.
+                    const allAgents  = dealRoster(deal, agentMap, dealProp)
                     const overdue    = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
                     const urgency    = getKeyDateUrgency(deal)
                     const nearestKD  = urgency ? getNearestKeyDate(deal) : null
@@ -2710,9 +2939,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
               <tbody>
                 {listRows.map(({ deal, contact, weighted, dis, rotting, activity, keyDate }) => {
                   const col = boardStageFor(deal, resolvedTrack)
-                  const teamAgents = [deal.agent_id, ...((propertyMap[deal.property_id]?.details?.co_agent_ids) || [])]
-                    .filter(Boolean).map(id => agentMap[id]).filter(Boolean)
-                    .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
+                  const teamAgents = dealRoster(deal, agentMap, deal.property_id ? propertyMap[deal.property_id] : null)
                   const kdColor = keyDate == null ? 'var(--gw-mist)' : keyDate.daysUntil <= 2 ? '#dc2626' : keyDate.daysUntil <= 7 ? '#d97706' : 'var(--gw-ink)'
                   return (
                     <tr key={deal.id} onClick={() => go(`deal/${deal.id}`)}
@@ -2836,7 +3063,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
       <DealDrawer open={drawer} onClose={() => setDrawer(false)}
         deal={editing ? editing : { stage: defaultStage }}
-        agents={agents} contacts={contacts} properties={properties} dealContacts={dealContacts} activeAgent={activeAgent} onSave={reload} />
+        agents={agents} contacts={contacts} properties={properties} dealContacts={dealContacts} activeAgent={activeAgent} isAdmin={isAdmin} onSave={reload} />
       {confirm && <ConfirmDialog message="This will permanently delete this deal." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {confirmProp && <ConfirmDialog message="Remove this listing from the pipeline? Any linked deals are kept but will be unlinked from the property." onConfirm={() => delProperty(confirmProp)} onCancel={() => setConfirmProp(null)} />}
     </div>

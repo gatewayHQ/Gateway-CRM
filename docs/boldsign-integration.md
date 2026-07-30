@@ -114,6 +114,59 @@ Two bugs made this flow unusable/unreliable, both fixed in `src/pages/FormLibrar
 - **Auto-save on completion.** `onDone` now calls the existing `save()` function automatically — no separate click needed. State + Packet Name are validated *before* the editor opens (so a template is never built for an unnamed/unsaved packet), and the same PDF selected for "Build in BoldSign" now also backs the packet's own storage upload (previously that file only fed the BoldSign template and a *second*, separate file choice was needed to satisfy Save's "Upload a PDF file" check for a brand-new packet).
 - **"Rebuild in BoldSign" now actually edits the existing template.** It previously re-ran the *create* path unconditionally — re-uploading the PDF and minting a brand-new BoldSign template id every time, silently orphaning the old one. It now calls `template-editor-url` with the existing `templateId`, which hits BoldSign's `getEmbeddedTemplateEditUrl` (already implemented server-side, just never called from here) and reopens the same template for editing.
 
+## Template id uniqueness — `uq_form_packets_boldsign_tid`
+
+`form_packets.boldsign_template_id` carries a **partial unique index** (`where
+boldsign_template_id is not null`, migration 0019): unlimited packets with no
+template, but a given BoldSign template may be linked to **at most one** packet.
+That invariant is what makes "Send from Template" unambiguous, and it stays.
+
+**Why `duplicate key value violates unique constraint "uq_form_packets_boldsign_tid"`
+used to happen.** BoldSign mints the template the moment "Build in BoldSign"
+opens the editor — before the CRM has written anything. Three paths then left an
+id owned by a row nobody was looking at:
+
+1. **Abandoned build → nightly re-registration.** Editor closed / reloaded /
+   `onDone` missed ⇒ template exists in BoldSign, no CRM row. At 3am the drift
+   sync draft-registers it as an **inactive** packet named after the BoldSign
+   title. The admin later builds or pastes that same id into a *new* packet →
+   collision with a row they never knowingly created.
+2. **Second save in one modal session.** `save()` chose insert-vs-update from the
+   `packet` prop only, so an auto-save (editor "done") followed by any further
+   save re-INSERTED the same id.
+3. **Cron ↔ admin race.** The sync's "already known" set is a snapshot; an admin
+   linking an id mid-run made its insert fail, and the failure was swallowed
+   while still counting as `drafted`.
+
+**Fixed by** (`src/lib/services/formPackets.js`, `FormLibrary.jsx`, `api/cron.js`):
+- **Claim-on-create.** A fresh "Build in BoldSign" writes the packet as a
+  **disabled draft carrying the new id** *before* the editor opens, so the CRM
+  always owns what BoldSign just minted. Abandoning the editor now leaves a
+  visible disabled draft (finish it with **Rebuild in BoldSign**) instead of an
+  orphan for the cron to find.
+- **Session row ownership.** `rowIdRef` records the inserted id, so every later
+  save in the same modal is an UPDATE. Persisted files are tracked too, so a
+  second save doesn't re-upload the same PDFs under new paths.
+- **Pre-flight conflict check.** `findPacketByTemplateId()` looks the id up
+  (case-insensitively — BoldSign ids are hex GUIDs) before writing and reports
+  *"already linked to the packet «Iowa Listing Agreement» (IA · seller,
+  disabled)"*. The index remains the backstop: a lost race is caught as 23505 and
+  translated to the same message (also in `friendlyDbError`).
+- **Normalization.** `normalizeTemplateId()` strips whitespace/NBSP from pastes
+  and maps blank → `NULL` (never `''`, which is a *value* and would collide
+  across blank packets).
+- **Honest cron.** Duplicate inserts count as `skippedExisting`, real failures
+  are logged and returned in `failed`, and `ok` is false when any occurred.
+
+**Triage & recovery:** `scripts/db-verify/production/boldsign_tid_triage.sql` —
+read-only diagnostics first (who owns the id, auto-discovered drafts,
+case-duplicates, index shape), then three commented recovery paths: **adopt** the
+existing row, **transplant** the id onto the packet that has the PDFs (unlink
+before relink, one transaction), or **release** the id and rebuild. Rule of
+thumb: if the template has ever been sent, relink — never delete-and-recreate.
+Deleting a template in BoldSign is also what makes the nightly sync deactivate
+its packet, so always clean up the BoldSign side after PATH C.
+
 ## Drafts cleanup (Signatures tab)
 - **Filter dropdown**: Active (default — hides completed) / Drafts only / Completed only / All.
 - **Delete** (trash icon, shown on any non-`completed` row): calls `document-delete`, which **revokes** the document in BoldSign first if it's still in progress (BoldSign requires `completed`/`revoked`/`declined` before `DELETE`), then deletes it there, writes an `audit_log` entry, and removes the local `boldsign_documents` row. Completed (signed) records are refused — they're the legal record and aren't deletable from this action.
