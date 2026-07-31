@@ -9,7 +9,7 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
@@ -1110,6 +1110,21 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const removeSigner = (id) => setSigners(p => p.filter(s => s.id !== id))
   const updateSigner = (id, k, v) => setSigners(p => p.map(s => s.id===id ? {...s,[k]:v} : s))
 
+  // Validate at PICK time, not at send time. Drag-and-drop bypasses the input's
+  // own accept=".pdf", so a dropped .docx used to be shipped to BoldSign
+  // labelled as a PDF and failed there with an opaque message; an oversized file
+  // failed even later, as a bare HTTP 413.
+  const chooseFile = (picked) => {
+    if (!picked) return
+    if (!/\.pdf$/i.test(picked.name) && picked.type !== 'application/pdf') {
+      pushToast(`"${picked.name}" is not a PDF. Convert it first — BoldSign only signs PDFs.`, 'error'); return
+    }
+    if (picked.size > MAX_SEND_BYTES) {
+      pushToast(`"${picked.name}" is ${fmtBytes(picked.size)} — the limit is ${fmtBytes(MAX_SEND_BYTES)}. Split it into two packets.`, 'error'); return
+    }
+    setFile(picked); setPickedFile('')
+  }
+
   const allSigners = React.useMemo(() => {
     const clients = signers.map(s => ({ ...s, routingOrder: 1 }))
     if (agentSigns && activeAgent) {
@@ -1118,33 +1133,34 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     return clients
   }, [signers, agentSigns, activeAgent])
 
-  const toBase64 = f => new Promise((res, rej) => {
-    const r = new FileReader(); r.onload = e => res(e.target.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(f)
-  })
-
   const sendForSignature = async () => {
     const invalid = signers.find(s => !s.name.trim() || !s.email.trim())
     if (invalid) { pushToast('All signers need a name and email', 'error'); return }
     if (!file && !pickedFile) { pushToast('Select or upload a document', 'error'); return }
     setSending(true)
 
-    let base64, finalDocName
+    // The PDF stays in storage and travels as a short-lived SIGNED URL, not as
+    // base64 in the request body: a serverless request is capped at 4.5 MB and
+    // base64 adds ~33%, so inline bytes silently limited every send to ~3.3 MB of
+    // PDF — under the size of a normal scanned disclosure packet. A file already
+    // on the deal is signed where it sits; a newly chosen one is uploaded to the
+    // deal's folder first, so the exact document that went out for signature is
+    // on the deal too. The API can only fetch a URL on our own bucket.
+    let documentUrl, finalDocName
     try {
+      let path
       if (file) {
-        base64 = await toBase64(file)
-        finalDocName = file.name
+        const up = await uploadSendablePdf(supabase, { file, dealId: deal.id })
+        path = up.path
+        finalDocName = up.name
       } else {
-        const { data: urlData, error: urlErr } = await supabase.storage
-          .from(BUCKET)
-          .createSignedUrl(`deal-${deal.id}/${pickedFile}`, 300)
-        if (urlErr) throw new Error(urlErr.message)
-        const blob = await fetch(urlData.signedUrl).then(r => r.blob())
-        base64 = await toBase64(blob)
+        path = `deal-${deal.id}/${pickedFile}`
         finalDocName = pickedFile.replace(/^\d+-/, '')
       }
+      documentUrl = await signSendableUrl(supabase, path)
     } catch (err) {
       setSending(false)
-      pushToast('Could not read document: ' + err.message, 'error')
+      pushToast(err.message, 'error')
       return
     }
 
@@ -1158,12 +1174,18 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       // baked in, BoldSign auto-places fields from them; otherwise the agent
       // places fields visually in the PreparePage before sending — we no
       // longer guess coordinates here.
+      //
+      // The API writes the tracking row itself, before returning this URL, so a
+      // document can never reach a client without the CRM knowing about it (the
+      // insert used to happen here in the browser, unchecked, and racing the
+      // Sent webhook).
       data = await documentEmbedUrl({
-        emailSubject:   subject,
-        documentBase64: base64,
-        documentName:   finalDocName,
-        signers:        signerPayload,
-        redirectUrl:    window.location.href,
+        emailSubject: subject,
+        documentUrl,
+        documentName: finalDocName,
+        deal_id:      deal.id,
+        signers:      signerPayload,
+        redirectUrl:  window.location.href,
         useTextTags,
       })
     } catch (err) {
@@ -1171,21 +1193,6 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     }
     setSending(false)
     if (!data.url) { pushToast('BoldSign did not return a send URL', 'error'); return }
-
-    // Track the draft so status updates land when the agent sends + it's signed.
-    if (data.documentId) {
-      await supabase.from('boldsign_documents').insert([{
-        deal_id:       deal.id,
-        agent_id:      activeAgent?.id || null,
-        document_id:   data.documentId,
-        signer_name:   allSigners.map(s => s.name).join(', '),
-        signer_email:  allSigners.map(s => s.email).join(', '),
-        document_name: finalDocName,
-        subject,
-        signers:       signerPayload,
-        status:        'draft',
-      }])
-    }
     setEmbedUrl(data.url)
   }
 
@@ -1204,6 +1211,10 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
           <BoldSignFrame
             url={embedUrl}
             onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
+            // Saved-as-draft is NOT sent. Reporting it as sent (which is what
+            // happened when both events shared one handler) left the agent
+            // believing the client had the document.
+            onDraft={() => { pushToast('Saved as a draft in BoldSign — nothing has been sent yet. Reopen it from the Drafts filter to finish.', 'info'); onSent() }}
             onError={() => pushToast('Send was cancelled in BoldSign', 'info')}
           />
         </div>
@@ -1277,10 +1288,11 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
             onClick={()=>fileRef.current.click()}
             onDragOver={e=>{e.preventDefault();setDragOver(true)}}
             onDragLeave={()=>setDragOver(false)}
-            onDrop={e=>{e.preventDefault();setDragOver(false);setFile(e.dataTransfer.files[0]);setPickedFile('')}}>
-            <input ref={fileRef} type="file" accept=".pdf" style={{display:'none'}} onChange={e=>{setFile(e.target.files[0]);setPickedFile('')}}/>
-            {file ? <div style={{fontSize:12,fontWeight:600,color:'var(--gw-green)'}}>{file.name}</div>
-              : <><Icon name="upload" size={18} style={{color:'var(--gw-border)',marginBottom:4}}/><div style={{fontSize:12}}>Drop PDF or click to browse</div></>}
+            onDrop={e=>{e.preventDefault();setDragOver(false);chooseFile(e.dataTransfer.files[0])}}>
+            <input ref={fileRef} type="file" accept=".pdf" style={{display:'none'}} onChange={e=>{chooseFile(e.target.files[0]); e.target.value=''}}/>
+            {file
+              ? <div style={{fontSize:12,fontWeight:600,color:'var(--gw-green)'}}>{file.name} <span style={{fontWeight:400,color:'var(--gw-mist)'}}>· {fmtBytes(file.size)}</span></div>
+              : <><Icon name="upload" size={18} style={{color:'var(--gw-border)',marginBottom:4}}/><div style={{fontSize:12}}>Drop PDF or click to browse</div><div style={{fontSize:10,color:'var(--gw-mist)',marginTop:2}}>PDF up to {fmtBytes(MAX_SEND_BYTES)}</div></>}
           </div>
         </div>
 
@@ -1319,6 +1331,8 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeA
   const [dealFiles,   setDealFiles]   = React.useState([])
   const [downloading, setDownloading] = React.useState({})
   const [deleting,    setDeleting]    = React.useState({})
+  const [reminding,   setReminding]   = React.useState({})
+  const [templateErr, setTemplateErr] = React.useState('')   // set when the catalog can't be read (e.g. migration not applied)
   const [statusFilter, setStatusFilter] = React.useState('active')   // active | drafts | completed | all
 
   React.useEffect(() => {
@@ -1357,12 +1371,27 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeA
     // it carries a boldsign_template_id. Alias to `template_id` so the rest of
     // this component (written against the old boldsign_templates shape) needs
     // no other changes.
-    const { data } = await supabase
+    //
+    // The error is BOUND and SURFACED. It used to be discarded, which meant that
+    // on a database where the e-sign columns hadn't been added yet the query
+    // failed, `templates` stayed empty, and the "Send from Template" button
+    // simply never rendered — the entire feature looked unbuilt rather than
+    // unprovisioned, with nothing anywhere saying why.
+    const { data, error } = await supabase
       .from('form_packets')
       .select('template_id:boldsign_template_id, name, state, doc_type, field_tokens, active')
       .not('boldsign_template_id', 'is', null)
       .eq('active', true)
       .order('name')
+    if (error) {
+      const missingColumn = error.code === '42703' || error.code === 'PGRST204' || /boldsign_template_id|form_packets/.test(error.message || '')
+      setTemplateErr(missingColumn
+        ? 'Template sending is not set up on this database yet — the Form Library e-signature columns are missing. Ask your admin to run migrations/production/2026-07-31_boldsign_hardening.sql in Supabase.'
+        : `Could not load templates: ${error.message}`)
+      setTemplates([])
+      return
+    }
+    setTemplateErr('')
     setTemplates(data || [])
   }
 
@@ -1375,52 +1404,68 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeA
     let data
     try { data = await getDocStatus(env.document_id) }
     catch (err) { pushToast(err.message, 'error'); return }
-    const patch = { status: data.status, completed_at: data.completedDateTime || null }
+    // Only write completed_at when there IS one — assigning `|| null`
+    // unconditionally wiped a known signing date whenever a status read came
+    // back without it, losing the "Signed on …" record permanently.
+    const patch = { status: data.status }
+    if (data.completedDateTime) patch.completed_at = data.completedDateTime
     await supabase.from('boldsign_documents').update(patch).eq('id', env.id)
     setEnvelopes(prev => prev.map(e => e.id === env.id ? { ...e, ...patch } : e))
     pushToast(`Status: ${data.status}`, 'info')
   }
 
-  const downloadSigned = async (env) => {
-    setDownloading(p => ({ ...p, [env.id]: true }))
-
-    // First check if the signed copy was saved to storage by the webhook
-    const signedFile = dealFiles.find(f => f.name.includes('signed-') && f.name.includes(env.document_id?.slice(0, 8) || ''))
-      || dealFiles.find(f => f.name.includes('signed-'))
-
-    if (signedFile) {
-      const { data } = await supabase.storage.from(BUCKET).createSignedUrl(`deal-${deal.id}/${signedFile.name}`, 120)
-      if (data?.signedUrl) {
-        window.open(data.signedUrl, '_blank')
-        setDownloading(p => ({ ...p, [env.id]: false }))
-        return
-      }
-    }
-
-    // Fall back: download directly from BoldSign API
-    let data
-    try { data = await apiDownloadSigned(env.document_id) }
-    catch (err) { setDownloading(p => ({ ...p, [env.id]: false })); pushToast(err.message, 'error'); return }
-    setDownloading(p => ({ ...p, [env.id]: false }))
-
-    // Trigger browser download
-    const link = document.createElement('a')
-    link.href = `data:application/pdf;base64,${data.base64}`
-    link.download = `signed-${env.document_name || 'document.pdf'}`
-    link.click()
-  }
-
-  const downloadAuditTrail = async (env) => {
-    const key = `audit-${env.id}`
+  // Fetch the signed PDF (or audit trail) for THIS document.
+  //
+  // Two bugs lived in the old version of this. It matched files by scanning the
+  // deal's whole storage folder for a name containing "signed-", and since the
+  // archived filename never contained the document id, the id-specific predicate
+  // could never match — so on a deal with several signed documents every row
+  // handed back the SAME (first) PDF. And the fallback returned the file as
+  // base64 through the API, which a 4.5 MB response cap made impossible for a
+  // large packet.
+  //
+  // Now the API resolves the row's own recorded archive path and returns a
+  // short-lived signed storage URL, archiving from BoldSign first if needed.
+  const fetchDocumentPdf = async (env, kind) => {
+    const key = kind === 'audit' ? `audit-${env.id}` : env.id
     setDownloading(p => ({ ...p, [key]: true }))
-    let data
-    try { data = await apiDownloadAudit(env.document_id) }
-    catch (err) { setDownloading(p => ({ ...p, [key]: false })); pushToast(err.message, 'error'); return }
-    setDownloading(p => ({ ...p, [key]: false }))
-    const link = document.createElement('a')
-    link.href = `data:application/pdf;base64,${data.base64}`
-    link.download = `audit-${(env.document_name || 'document').replace(/\.pdf$/i, '')}.pdf`
-    link.click()
+    try {
+      const data = kind === 'audit'
+        ? await apiDownloadAudit(env.document_id)
+        : await apiDownloadSigned(env.document_id)
+      if (!data?.url) { pushToast('That file is not available yet — try again shortly.', 'error'); return }
+      const a = document.createElement('a')
+      a.href = data.url
+      a.download = data.filename || `${kind}-${(env.document_name || 'document').replace(/\.pdf$/i, '')}.pdf`
+      a.target = '_blank'
+      a.rel = 'noopener'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setDownloading(p => ({ ...p, [key]: false }))
+    }
+  }
+  const downloadSigned     = (env) => fetchDocumentPdf(env, 'signed')
+  const downloadAuditTrail = (env) => fetchDocumentPdf(env, 'audit')
+
+  // Nudge whoever still owes a signature. The API refuses when there's nobody
+  // left to remind and records the nudge, so the nightly auto-reminder sweep
+  // doesn't immediately chase the same signer again.
+  const remind = async (env) => {
+    setReminding(p => ({ ...p, [env.id]: true }))
+    try {
+      await apiRemindDocument(env.document_id)
+      const patch = { last_reminded_at: new Date().toISOString(), reminder_count: (env.reminder_count || 0) + 1 }
+      setEnvelopes(prev => prev.map(e => e.id === env.id ? { ...e, ...patch } : e))
+      pushToast(`Reminder sent to ${env.signer_name || 'the signers'}`, 'success')
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setReminding(p => ({ ...p, [env.id]: false }))
+    }
   }
 
   // Remove a draft/unsigned/expired document to keep this tab tidy. The API
@@ -1516,6 +1561,13 @@ create policy "agent_notifications_policy" on agent_notifications
         </div>
       </div>
 
+      {/* Why "Send from Template" isn't here — never fail silently. */}
+      {templateErr && (
+        <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, lineHeight:1.6, marginBottom:12 }}>
+          <strong>Template sending unavailable.</strong> {templateErr}
+        </div>
+      )}
+
       {loading
         ? <div style={{ fontSize:13, color:'var(--gw-mist)' }}>Loading…</div>
         : visibleEnvelopes.length === 0
@@ -1525,6 +1577,12 @@ create policy "agent_notifications_policy" on agent_notifications
           : visibleEnvelopes.map(env => {
               const sc        = DS_STATUS[env.status] || DS_STATUS.sent
               const completed = env.status === 'completed'
+              // Chasing signatures is the job — surface how long this has been
+              // outstanding, and offer a nudge, right on the row.
+              const awaiting  = ['sent', 'delivered'].includes(env.status)
+              const daysOut   = awaiting && (env.sent_at || env.created_at)
+                ? Math.floor((Date.now() - new Date(env.sent_at || env.created_at)) / 86400000)
+                : null
               return (
                 <div key={env.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:8, background:'#fff', overflow:'hidden' }}>
                   <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px' }}>
@@ -1536,9 +1594,28 @@ create policy "agent_notifications_policy" on agent_notifications
                         {completed && env.completed_at && (
                           <span> · Signed {new Date(env.completed_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}</span>
                         )}
+                        {daysOut !== null && daysOut >= 2 && (
+                          <span style={{ color: daysOut >= 7 ? 'var(--gw-red)' : 'var(--gw-amber)', fontWeight:600 }}>
+                            {' '}· waiting {daysOut}d
+                            {env.reminder_count > 0 && ` · ${env.reminder_count} reminder${env.reminder_count > 1 ? 's' : ''} sent`}
+                          </span>
+                        )}
                       </div>
                     </div>
                     <span style={{ padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:700, background:sc.bg, color:sc.color, flexShrink:0, textTransform:'capitalize' }}>{env.status}</span>
+                    {awaiting && (
+                      <button
+                        className="btn btn--secondary btn--sm"
+                        style={{ fontSize:11, flexShrink:0 }}
+                        onClick={() => remind(env)}
+                        disabled={reminding[env.id]}
+                        title={env.last_reminded_at
+                          ? `Last reminded ${new Date(env.last_reminded_at).toLocaleDateString('en-US', { month:'short', day:'numeric' })}`
+                          : 'Email the outstanding signers a reminder'}
+                      >
+                        {reminding[env.id] ? 'Sending…' : 'Remind'}
+                      </button>
+                    )}
                     <button className="btn btn--ghost btn--icon btn--sm" title="Refresh status" onClick={() => refreshStatus(env)}>
                       <Icon name="refresh" size={12}/>
                     </button>
@@ -1617,6 +1694,13 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [details,    setDetails]    = React.useState(null)   // { roles, fields }
   const [loadingDet, setLoadingDet] = React.useState(false)
   const [signers,    setSigners]    = React.useState({})     // roleIndex → { name, email }
+  // Signing order. Parallel is the DEFAULT: this used to be hard-wired to
+  // sequential (signerOrder = role index), so two co-buyers sitting at the same
+  // table couldn't sign together — the second signer's email wasn't even sent
+  // until the first finished and the webhook landed. Sequential is still
+  // available for the cases that need it (client signs, then the agent
+  // countersigns), it's just no longer imposed on every send.
+  const [inOrder,    setInOrder]    = React.useState(false)
   const [values,     setValues]     = React.useState({})     // fieldId → value
 
   const tpl = templates.find(t => t.template_id === templateId)
@@ -1668,9 +1752,11 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
       const idx = (f.roleIndex && filled.some(r => r.index === f.roleIndex)) ? f.roleIndex : firstIdx
       ;(byRole[idx] ||= []).push({ id: f.id, value: v, isReadOnly: true })
     }
-    const roles = filled.map(r => ({
+    // Equal signerOrder → BoldSign notifies everyone at once. Ascending order →
+    // each signer waits for the one before them.
+    const roles = filled.map((r, i) => ({
       roleIndex: r.index, signerName: signers[r.index].name, signerEmail: signers[r.index].email,
-      signerOrder: r.index, existingFormFields: byRole[r.index] || [],
+      signerOrder: inOrder ? i + 1 : 1, existingFormFields: byRole[r.index] || [],
     }))
     const roleRemovalIndices = roleList.filter(r => !filled.includes(r)).map(r => r.index)
 
@@ -1708,6 +1794,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           <BoldSignFrame
             url={embedUrl}
             onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
+            onDraft={() => { pushToast('Saved as a draft in BoldSign — nothing has been sent yet. Reopen it from the Drafts filter to finish.', 'info'); onSent() }}
             onError={() => pushToast('Send was cancelled in BoldSign', 'info')}
           />
         </div>
@@ -1762,6 +1849,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 </div>
               ))}
               <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Roles left blank are removed from this send.</div>
+
+              <label style={{ display:'flex', alignItems:'center', gap:8, marginTop:10, padding:'8px 10px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)', cursor:'pointer' }}>
+                <input type="checkbox" checked={inOrder} onChange={e => setInOrder(e.target.checked)} style={{ width:14, height:14, cursor:'pointer' }}/>
+                <span style={{ fontSize:12, flex:1 }}>
+                  <strong>Sign in this order</strong> — each signer waits for the one above.
+                  <span style={{ color:'var(--gw-mist)' }}> Leave off and everyone gets it at once (best for co-buyers).</span>
+                </span>
+              </label>
             </div>
 
             {/* Editable, CRM-prefilled detail fields the sellers see filled in. */}

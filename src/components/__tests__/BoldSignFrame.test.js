@@ -6,11 +6,10 @@ const SELF     = 'https://crm.example.com'
 const from = (origin, status) => classifyBoldSignMessage({ origin, data: { status }, selfOrigin: SELF })
 
 describe('classifyBoldSignMessage — embedded template editor completion (the "template didn\'t save" bug)', () => {
-  it('treats the template editor finish events as done', () => {
+  it('treats the template editor FINISH events as done', () => {
     // These are what the embedded TEMPLATE editor emits — previously unmatched,
     // so template saves silently never wrote back to the Form Library.
     expect(from(BOLDSIGN, 'onCreateClick')).toBe('done')
-    expect(from(BOLDSIGN, 'onSaveClick')).toBe('done')
     expect(from(BOLDSIGN, 'onSaveAndCloseClick')).toBe('done')
   })
 
@@ -25,6 +24,26 @@ describe('classifyBoldSignMessage — embedded template editor completion (the "
     expect(from(BOLDSIGN, 'onSuccessfullySigned')).toBe('done')
     expect(from(BOLDSIGN, 'onCreateFailed')).toBe('error')
     expect(from(BOLDSIGN, 'onDeclined')).toBe('error')
+  })
+})
+
+describe('classifyBoldSignMessage — saved-but-not-sent is NOT a send', () => {
+  // A draft save used to be classified 'done', so the agent was told "Sent for
+  // signature" while the CRM row stayed 'draft' and the client had nothing.
+  it('classifies a document draft save as draft, not done', () => {
+    expect(from(BOLDSIGN, 'onDraftSuccess')).toBe('draft')
+  })
+
+  // 'onDraftSuccess' CONTAINS the substring 'success'. If DRAFT were checked
+  // after SUCCESS, this would fall through to 'done' — which is exactly the bug.
+  it('is not fooled by "success" appearing inside the draft event name', () => {
+    expect(from(BOLDSIGN, 'onDraftSuccess')).not.toBe('done')
+  })
+
+  // An intermediate Save in the template editor must not tear the iframe down —
+  // the admin is still placing fields.
+  it('classifies an intermediate template editor save as draft', () => {
+    expect(from(BOLDSIGN, 'onSaveClick')).toBe('draft')
   })
 })
 

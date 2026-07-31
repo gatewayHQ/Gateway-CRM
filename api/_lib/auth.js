@@ -45,6 +45,26 @@ function extractBearer(req) {
   return raw.replace(/^Bearer\s+/i, '').trim()
 }
 
+// A Supabase client acting AS THE CALLER (anon key + their JWT), so every read
+// goes through the same RLS/storage policies the browser is subject to.
+//
+// Use this — not getServiceClient() — whenever an API route reads a resource
+// the caller *named* (a storage path, a row id). The service key would happily
+// hand back another agent's deal documents; this cannot, because it is not
+// privileged. Not memoized: each request carries a different token.
+export function getUserClient(req) {
+  const jwt = extractBearer(req)
+  if (!jwt) { const e = new Error('Sign in required'); e.status = 401; throw e }
+  if (!ANON_KEY) {
+    const e = new Error('Server misconfigured: VITE_SUPABASE_ANON_KEY missing')
+    e.status = 500; throw e
+  }
+  return createClient(SUPABASE_URL, ANON_KEY, {
+    global: { headers: { Authorization: `Bearer ${jwt}` } },
+    auth:   { persistSession: false, autoRefreshToken: false },
+  })
+}
+
 // Verify the caller's JWT and return the Supabase auth user, or null on failure.
 // Does NOT touch the agents table — call requireAgent() for that.
 export async function requireAuthUser(req) {

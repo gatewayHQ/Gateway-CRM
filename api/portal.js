@@ -10,10 +10,63 @@
 //   • only documents the agent explicitly shared (comp_data.portal_docs) are
 //     signed/returned — internal files are never exposed
 //   • sensitive deal fields (value, probability, notes) are never returned
+//   • a portal visitor may only sign as one of THIS deal's own client contacts
+//     — never as the agent or the other side. See portalSignableEmails().
 // ─────────────────────────────────────────────────────────────────────────────
 import { createClient } from '@supabase/supabase-js'
 
 const DOC_BUCKET = 'deal-documents'
+
+// ─── Portal signer authorization ──────────────────────────────────────────────
+// A document's signer list routinely contains people who are NOT the portal's
+// visitor: the listing agent (who countersigns), and on a dual-representation
+// deal the other party. Holding the portal link must therefore not be enough to
+// sign as *a* signer — it must be one of the client contacts this portal
+// belongs to.
+//
+// Returns the intersection of (document signers) ∩ (this deal's client emails),
+// lowercased. Both the GET payload and the sign-link minter use it, so the
+// portal never even discloses an address the visitor can't act as. An empty
+// result means "this visitor cannot sign this document here" — they can still
+// use BoldSign's own emailed link, which authenticates them independently.
+//
+// Pure + exported for unit tests.
+const normEmail = (e) => String(e || '').trim().toLowerCase()
+export function portalSignableEmails(signerEmailCsv, clientEmails) {
+  const allowed = new Set((clientEmails || []).map(normEmail).filter(Boolean))
+  return String(signerEmailCsv || '')
+    .split(',')
+    .map(normEmail)
+    .filter(e => e && allowed.has(e))
+}
+
+// Statuses a client may act on. Allow-list, NOT a deny-list: a 'draft' row
+// exists as soon as an agent opens the prepare screen — before fields are
+// placed and before they click Send — so a deny-list leaked half-prepared
+// documents into the portal. 'declined'/'expired' aren't signable either.
+const PORTAL_SIGNABLE_STATUSES = ['sent', 'delivered']
+
+// Every client contact on a deal: the primary (deals.contact_id) plus any
+// additional contacts (co-buyers / spouses) linked via deal_contacts.
+// Defensive about deal_contacts — production carries a legacy table of unknown
+// shape and the junction migration may not be applied yet, so a failure there
+// degrades to "primary contact only" rather than breaking the portal.
+async function loadDealClientEmails(supabase, deal) {
+  const emails = []
+  if (deal.contact_id) {
+    const { data } = await supabase.from('contacts').select('email').eq('id', deal.contact_id).maybeSingle()
+    if (data?.email) emails.push(data.email)
+  }
+  try {
+    const { data: links } = await supabase.from('deal_contacts').select('contact_id').eq('deal_id', deal.id)
+    const ids = (links || []).map(l => l.contact_id).filter(Boolean)
+    if (ids.length) {
+      const { data: extra } = await supabase.from('contacts').select('email').in('id', ids)
+      for (const c of extra || []) if (c?.email) emails.push(c.email)
+    }
+  } catch { /* legacy/absent deal_contacts — primary contact only */ }
+  return emails
+}
 
 // Client-friendly stage labels + ordered funnel for the progress bar
 const STAGE_FLOW = ['lead', 'qualified', 'showing', 'offer', 'under-contract', 'closed']
@@ -111,20 +164,31 @@ export default async function handler(req, res) {
         .map(({ name, url }) => ({ name, url }))
     }
 
-    // 4b. Pending signature documents for this deal (client can sign in-portal).
-    const { data: sigAll } = await supabase
-      .from('boldsign_documents')
-      .select('document_id, document_name, status, signer_email')
-      .eq('deal_id', deal.id)
-      .order('created_at', { ascending: false })
+    // 4b. Signature documents this client can actually sign in-portal.
+    //     Two gates, both required:
+    //       • status is genuinely awaiting signature (never a draft the agent
+    //         hasn't sent, never a declined/expired one)
+    //       • at least one signer address belongs to THIS deal's clients — and
+    //         only those addresses are returned, so the payload can't be used
+    //         to sign as the agent or the other party
+    const [{ data: sigAll }, clientEmails] = await Promise.all([
+      supabase
+        .from('boldsign_documents')
+        .select('document_id, document_name, status, signer_email, sent_at')
+        .eq('deal_id', deal.id)
+        .in('status', PORTAL_SIGNABLE_STATUSES)
+        .order('created_at', { ascending: false }),
+      loadDealClientEmails(supabase, deal),
+    ])
     const signatureDocs = (sigAll || [])
-      .filter(d => !['completed', 'voided'].includes(d.status))
       .map(d => ({
         documentId: d.document_id,
         name:       (d.document_name || 'Document').replace(/\.pdf$/i, ''),
         status:     d.status,
-        signers:    String(d.signer_email || '').split(',').map(s => s.trim()).filter(Boolean),
+        sentAt:     d.sent_at || null,
+        signers:    portalSignableEmails(d.signer_email, clientEmails),
       }))
+      .filter(d => d.signers.length > 0)
 
     const steps = stepsRes.data || []
     const doneCount = steps.filter(s => s.completed).length
@@ -181,17 +245,28 @@ async function handlePortalSignLink(req, res) {
 
   const supabase = createClient(SUPABASE_URL, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } })
   try {
-    const { data: deal } = await supabase.from('deals').select('id')
+    const { data: deal } = await supabase.from('deals').select('id, contact_id')
       .eq('portal_token', token).eq('portal_enabled', true).maybeSingle()
     if (!deal) return res.status(404).json({ error: 'This portal link is no longer active.' })
 
     const { data: doc } = await supabase.from('boldsign_documents')
       .select('document_id, signer_email, status').eq('document_id', documentId).eq('deal_id', deal.id).maybeSingle()
     if (!doc) return res.status(404).json({ error: 'Document not found for this portal.' })
-    if (['completed', 'voided'].includes(doc.status)) return res.status(400).json({ error: 'This document is already finalized.' })
+    if (!PORTAL_SIGNABLE_STATUSES.includes(doc.status)) {
+      return res.status(400).json({ error: 'This document is not awaiting your signature.' })
+    }
 
-    const emails = String(doc.signer_email || '').toLowerCase().split(',').map(s => s.trim())
-    if (!emails.includes(signerEmail)) return res.status(403).json({ error: 'That email is not a signer on this document.' })
+    // AUTHORIZATION: the requested address must be a signer on the document AND
+    // one of this deal's own client contacts. Checking "is a signer" alone let
+    // anyone holding the portal link open a signing session as the listing
+    // agent (or the other party) and execute their signature block.
+    const clientEmails = await loadDealClientEmails(supabase, deal)
+    const signable     = portalSignableEmails(doc.signer_email, clientEmails)
+    if (!signable.includes(signerEmail)) {
+      // Deliberately identical message whether the address isn't a signer or
+      // isn't this client's — don't confirm who else is on the document.
+      return res.status(403).json({ error: 'That email is not able to sign this document here. Please use the link BoldSign emailed you.' })
+    }
 
     const qs = new URLSearchParams({ documentId, signerEmail })
     const r  = await fetch(`https://api.boldsign.com/v1/document/getEmbeddedSignLink?${qs.toString()}`, {

@@ -5,6 +5,7 @@
  * GET /api/cron?task=sequence       — drip-sequence step runner (email)
  * GET /api/cron?task=nudges         — transaction-layer agent nudges
  * GET /api/cron?task=boldsign-sync  — nightly Form Library ↔ BoldSign template drift sync
+ *                                     + auto-reminders for stale signature requests
  *
  * These scheduled tasks share one serverless function (Vercel Hobby caps total
  * functions at 12 — this repo is already at that cap). Each is dispatched by
@@ -22,7 +23,7 @@
  */
 
 import { createClient } from '@supabase/supabase-js'
-import { boldsign } from './boldsign.js'
+import { boldsign, listAllTemplates } from './boldsign.js'
 import { OPERATING_STATES } from '../src/lib/constants.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -597,26 +598,43 @@ async function runBoldsignTemplateSync(supabase) {
     return { status: 200, body: { ok: false, skipped: 'BOLDSIGN_API_KEY not set' } }
   }
 
-  let liveTemplates = []
+  // Read EVERY page. This used to fetch page 1 only (pageSize=100) and treat it
+  // as the complete set of live templates — so the night the account passed 100
+  // templates, every catalog entry on page 2+ looked deleted and was
+  // deactivated, silently removing those packets from the send picker.
+  let liveTemplates = [], complete = false
   try {
-    const data = await boldsign('/template/list?page=1&pageSize=100')
-    liveTemplates = data.result || data.templates || []
+    ({ templates: liveTemplates, complete } = await listAllTemplates())
   } catch (e) {
     return { status: 200, body: { ok: false, error: `BoldSign template list failed: ${e.message}` } }
   }
   const liveIds = new Set(liveTemplates.map(t => t.templateId || t.id).filter(Boolean))
 
-  const { data: catalog } = await supabase
+  const { data: catalog, error: catalogErr } = await supabase
     .from('form_packets')
-    .select('id, boldsign_template_id, active')
+    .select('id, name, boldsign_template_id, active')
     .not('boldsign_template_id', 'is', null)
+  if (catalogErr) {
+    return { status: 200, body: { ok: false, error: `form_packets read failed: ${catalogErr.message} — has the 2026-07-31 migration bundle been applied?` } }
+  }
 
+  // FAIL CLOSED. Deactivating is destructive to an agent's ability to send a
+  // legally-required form, so it only happens when we are confident the live
+  // list is authoritative: a complete walk that returned something. An empty or
+  // truncated response means "we don't know", not "they're all gone".
   let deactivated = 0
-  for (const row of (catalog || [])) {
-    if (row.active && !liveIds.has(row.boldsign_template_id)) {
-      await supabase.from('form_packets').update({ active: false }).eq('id', row.id)
-      deactivated++
+  const deactivatedNames = []
+  const canDeactivate = complete && liveIds.size > 0
+  if (canDeactivate) {
+    for (const row of (catalog || [])) {
+      if (row.active && !liveIds.has(row.boldsign_template_id)) {
+        await supabase.from('form_packets').update({ active: false }).eq('id', row.id)
+        deactivated++
+        deactivatedNames.push(row.name)
+      }
     }
+  } else {
+    console.warn(`[cron] boldsign-sync: skipping deactivation (complete=${complete}, live=${liveIds.size}) — refusing to switch packets off on an unreliable list`)
   }
 
   const knownIds = new Set((catalog || []).map(r => r.boldsign_template_id))
@@ -640,5 +658,80 @@ async function runBoldsignTemplateSync(supabase) {
     drafted++
   }
 
-  return { status: 200, body: { ok: true, live: liveTemplates.length, deactivated, drafted, unmatched } }
+  // Chase outstanding signatures in the same nightly run (no extra cron slot).
+  const reminders = await runSignatureReminders(supabase)
+
+  return {
+    status: 200,
+    body: {
+      ok: true, live: liveTemplates.length, listComplete: complete,
+      deactivated, deactivatedNames, drafted, unmatched,
+      deactivationSkipped: !canDeactivate || undefined,
+      reminders,
+    },
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task: auto-remind stale signature requests (runs with boldsign-sync)
+//
+// Chasing signatures is most of the work of getting a deal closed, and it was
+// entirely manual: nothing reminded a signer, and the UI had no Remind button at
+// all. This sweeps documents still awaiting signature and asks BoldSign to
+// re-send its reminder email.
+//
+// Deliberately conservative — an e-signature request that nags daily gets
+// ignored or marked as spam:
+//   • nothing before it's been out for REMIND_AFTER_DAYS
+//   • at most one reminder every REMIND_EVERY_DAYS per document
+//   • at most MAX_REMINDERS_PER_DOC over the document's life
+//   • capped per run so one bad night can't email a client ten times
+// The ledger lives on boldsign_documents (last_reminded_at, reminder_count).
+// ─────────────────────────────────────────────────────────────────────────────
+const REMIND_AFTER_DAYS     = 3
+const REMIND_EVERY_DAYS     = 3
+const MAX_REMINDERS_PER_DOC = 4
+const MAX_REMINDERS_PER_RUN = 50
+
+export function shouldRemind(doc, now = new Date()) {
+  if (!['sent', 'delivered'].includes(doc.status)) return false
+  if ((doc.reminder_count || 0) >= MAX_REMINDERS_PER_DOC) return false
+  const days = (from) => (now - new Date(from)) / 86400000
+  const sentAt = doc.sent_at || doc.created_at
+  if (!sentAt || days(sentAt) < REMIND_AFTER_DAYS) return false
+  if (doc.last_reminded_at && days(doc.last_reminded_at) < REMIND_EVERY_DAYS) return false
+  return true
+}
+
+async function runSignatureReminders(supabase) {
+  const { data: pending, error } = await supabase
+    .from('boldsign_documents')
+    .select('id, document_id, document_name, status, sent_at, created_at, last_reminded_at, reminder_count')
+    .in('status', ['sent', 'delivered'])
+    .order('sent_at', { ascending: true })
+    .limit(500)
+  if (error) {
+    // Most likely the reminder columns aren't there yet — report, don't throw.
+    return { ok: false, error: `${error.message} — has the 2026-07-31 migration bundle been applied?` }
+  }
+
+  const now = new Date()
+  const due = (pending || []).filter(d => shouldRemind(d, now)).slice(0, MAX_REMINDERS_PER_RUN)
+  let sent = 0
+  const failed = []
+  for (const doc of due) {
+    try {
+      await boldsign(`/document/remind?documentId=${encodeURIComponent(doc.document_id)}`, { method: 'POST', json: {} })
+      await supabase.from('boldsign_documents').update({
+        last_reminded_at: now.toISOString(),
+        reminder_count:   (doc.reminder_count || 0) + 1,
+      }).eq('id', doc.id)
+      sent++
+    } catch (e) {
+      // A 400 here usually means the document is no longer remindable (just
+      // completed, revoked). Record it and carry on with the rest.
+      failed.push({ documentId: doc.document_id, error: e.message })
+    }
+  }
+  return { ok: true, candidates: (pending || []).length, due: due.length, sent, failed }
 }

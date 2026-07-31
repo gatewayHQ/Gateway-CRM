@@ -25,15 +25,76 @@ async function call(payload) {
 }
 
 // ── Documents (ad-hoc send flow) ─────────────────────────────────────────────
+// A send takes `documentPath` (a deal-documents storage path) rather than
+// base64. Vercel caps a function request at 4.5 MB and base64 inflates by ~33%,
+// so inline bytes silently capped every send at ~3.3 MB of PDF — well under a
+// normal scanned disclosure packet. Upload to storage first (see
+// uploadSendablePdf) and pass the path; the API streams it to BoldSign.
 export const sendDocument     = (p)          => call({ action: 'send', ...p })
 export const documentEmbedUrl = (p)          => call({ action: 'document-embed-url', ...p })
 export const signLink         = (p)          => call({ action: 'sign-link', ...p })
 export const getDocStatus    = (documentId) => call({ action: 'status',   documentId })
+// download/audit-download return { url, filename } — a short-lived signed
+// storage URL, not base64, so size is not a factor and each document resolves
+// to its OWN archived file.
 export const downloadSigned  = (documentId) => call({ action: 'download', documentId })
 export const downloadAudit   = (documentId) => call({ action: 'audit-download', documentId })
 export const remindDocument  = (documentId) => call({ action: 'remind',   documentId })
 export const deleteDocument  = (documentId) => call({ action: 'document-delete', documentId })
 export const debugBoldsign   = ()           => call({ action: 'debug' })
+
+// ── Sendable-PDF upload ───────────────────────────────────────────────────────
+// BoldSign accepts files well above what a serverless request body can carry, so
+// the browser puts the PDF in the deal's own document folder (which it already
+// has permission to write) and the API reads it back with the caller's
+// credentials. Side benefit: the exact document that went out for signature is
+// on the deal, not just in BoldSign.
+export const SEND_BUCKET = 'deal-documents'
+// BoldSign's own per-file ceiling. Checked here so an oversized file is refused
+// with a real sentence instead of an opaque failure mid-send.
+export const MAX_SEND_BYTES = 25 * 1024 * 1024
+
+export function formatBytes(b) {
+  if (!b) return '0 B'
+  if (b < 1024) return `${b} B`
+  if (b < 1048576) return `${(b / 1024).toFixed(0)} KB`
+  return `${(b / 1048576).toFixed(1)} MB`
+}
+
+// Validate + upload, returning the storage path to hand to the API.
+// `supabase` is injected so this stays testable and the service module keeps no
+// hidden dependency on a live client.
+export async function uploadSendablePdf(supabase, { file, dealId }) {
+  if (!file)   throw new Error('Select or upload a document')
+  if (!dealId) throw new Error('This send is not attached to a deal')
+  if (file.size > MAX_SEND_BYTES) {
+    throw new Error(`"${file.name}" is ${formatBytes(file.size)} — BoldSign's limit is ${formatBytes(MAX_SEND_BYTES)}. Split it into two packets.`)
+  }
+  const looksPdf = /\.pdf$/i.test(file.name) || file.type === 'application/pdf'
+  if (!looksPdf) throw new Error(`"${file.name}" is not a PDF. Convert it first — BoldSign only signs PDFs here.`)
+
+  // Same naming convention the Documents tab uses (timestamp prefix, stripped
+  // for display), so a sent document looks native alongside manual uploads.
+  const safeName = file.name.replace(/[^\w.\- ]+/g, '_')
+  const path = `deal-${dealId}/${Date.now()}-${safeName}`
+  const { error } = await supabase.storage.from(SEND_BUCKET).upload(path, file, {
+    contentType: 'application/pdf', upsert: false,
+  })
+  if (error) throw new Error(`Could not upload "${file.name}": ${error.message}`)
+  return { path, name: safeName }
+}
+
+// Hand the API a short-lived signed URL rather than a bare path. The browser can
+// only sign an object its own RLS lets it read, so the API needs no credentials
+// of its own to fetch it — and it doesn't depend on the anon key being present
+// as a runtime (not just build-time) env var on the server.
+export async function signSendableUrl(supabase, path) {
+  const { data, error } = await supabase.storage.from(SEND_BUCKET).createSignedUrl(path, 600)
+  if (error || !data?.signedUrl) {
+    throw new Error(`Could not prepare that document for sending${error?.message ? `: ${error.message}` : ''}`)
+  }
+  return data.signedUrl
+}
 
 // ── Sender identities (admin) ────────────────────────────────────────────────
 export const createIdentity      = (agentId, name, email) => call({ action: 'identity-create', agentId, name, email })
