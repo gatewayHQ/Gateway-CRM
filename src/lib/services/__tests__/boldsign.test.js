@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, seedSignersFromDeal, dealAgentList, orderAgentSigners } from '../boldsign.js'
+import { buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
 
 describe('buildTextTag', () => {
   it('builds the {{fieldType|signerIndex|required|label|fieldId}} syntax', () => {
@@ -252,5 +252,107 @@ describe('seedSignersFromDeal — agent roles never take a client', () => {
     const roles = [{ index: 1, name: 'Seller' }, { index: 2, name: 'Listing Agent' }]
     const out = seedSignersFromDeal({ roles, contact, activeAgent: tc, dealAgents: [me, nic] })
     expect(out[2]).toEqual({ name: 'Daniel Stillson', email: 'daniel@gw.com' })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// buildTemplateRoles — BoldSign's post-removal index shift.
+//
+// BoldSign applies roleRemovalIndices first, then expects each supplied role's
+// roleIndex to be its position in the REMAINING list. Verified against the live
+// API on the Iowa Agency Packet (5 roles: Seller, Listing Agent, Co-seller,
+// Co-listing agent, Buyer):
+//   roles [1,2]   + removals [3,4,5] → accepted
+//   roles [1,2,4] + removals [3,5]   → "SignerName or SignerEmail is missing in roles"
+// ─────────────────────────────────────────────────────────────────────────────
+describe('buildTemplateRoles — index shift after role removal', () => {
+  const IOWA_PACKET = [
+    { index: 1, name: 'Seller' },
+    { index: 2, name: 'Listing Agent' },
+    { index: 3, name: 'Co-seller' },
+    { index: 4, name: 'Co-listing agent' },
+    { index: 5, name: 'Buyer' },
+  ]
+  const jean = { name: 'Jean Irwin',      email: 'irwinfam@tcaexpress.net' }
+  const dan  = { name: 'Daniel Stillson', email: 'daniel@gatewayreadvisors.com' }
+  const nic  = { name: 'Nic Madsen',      email: 'nic@gatewayreadvisors.com' }
+
+  it('REGRESSION: shifts a co-listing agent down past the skipped co-seller', () => {
+    // The exact payload that failed: Seller + Listing Agent + Co-listing agent,
+    // with Co-seller and Buyer left blank.
+    const { roles, roleRemovalIndices } = buildTemplateRoles({
+      roleList: IOWA_PACKET, signers: { 1: jean, 2: dan, 4: nic },
+    })
+    expect(roleRemovalIndices).toEqual([3, 5])          // original numbering
+    expect(roles.map(r => r.roleIndex)).toEqual([1, 2, 3])  // was [1,2,4] → rejected
+    expect(roles[2]).toMatchObject({ roleIndex: 3, signerName: 'Nic Madsen', signerEmail: nic.email })
+  })
+
+  it('leaves a payload that already worked completely unchanged', () => {
+    // Trailing-only removal: nothing is dropped below role 1 or 2, so no shift.
+    const { roles, roleRemovalIndices } = buildTemplateRoles({
+      roleList: IOWA_PACKET, signers: { 1: jean, 2: dan },
+    })
+    expect(roleRemovalIndices).toEqual([3, 4, 5])
+    expect(roles.map(r => r.roleIndex)).toEqual([1, 2])
+  })
+
+  it('shifts correctly with several interior gaps', () => {
+    const { roles, roleRemovalIndices } = buildTemplateRoles({
+      roleList: IOWA_PACKET, signers: { 2: dan, 5: nic },   // skip 1, 3, 4
+    })
+    expect(roleRemovalIndices).toEqual([1, 3, 4])
+    expect(roles.map(r => r.roleIndex)).toEqual([1, 2])     // 2→1, 5→2
+  })
+
+  it('emits a dense 1..N sequence for every skip pattern', () => {
+    // Whatever the agent leaves blank, the result must be contiguous from 1 —
+    // that is the property BoldSign actually enforces.
+    const people = [jean, dan, nic, jean, dan]
+    for (let mask = 1; mask < 32; mask++) {
+      const signers = {}
+      IOWA_PACKET.forEach((r, i) => { if (mask & (1 << i)) signers[r.index] = people[i] })
+      const { roles } = buildTemplateRoles({ roleList: IOWA_PACKET, signers })
+      expect(roles.map(r => r.roleIndex)).toEqual(roles.map((_, i) => i + 1))
+    }
+  })
+
+  it('keeps every role when they are all filled', () => {
+    const signers = { 1: jean, 2: dan, 3: jean, 4: nic, 5: dan }
+    const { roles, roleRemovalIndices } = buildTemplateRoles({ roleList: IOWA_PACKET, signers })
+    expect(roleRemovalIndices).toEqual([])
+    expect(roles.map(r => r.roleIndex)).toEqual([1, 2, 3, 4, 5])
+  })
+
+  it('treats a name-only or email-only row as unfilled, and trims values', () => {
+    const signers = { 1: jean, 2: { name: 'No Email', email: '  ' }, 3: { name: '', email: 'x@y.com' }, 4: { name: ' Nic Madsen ', email: ' nic@x.com ' } }
+    const { roles, roleRemovalIndices } = buildTemplateRoles({ roleList: IOWA_PACKET, signers })
+    expect(roleRemovalIndices).toEqual([2, 3, 5])
+    expect(roles.map(r => r.roleIndex)).toEqual([1, 2])
+    expect(roles[1]).toMatchObject({ signerName: 'Nic Madsen', signerEmail: 'nic@x.com' })
+  })
+
+  it('looks up prefilled fields by ORIGINAL role index, not the shifted one', () => {
+    // Field metadata comes from the template and is unaffected by removal, so a
+    // shift must not misroute a role's prefilled values.
+    const fieldsByRole = { 4: [{ id: 'property_address', value: '2212 Okoboji Ave', isReadOnly: true }] }
+    const { roles } = buildTemplateRoles({
+      roleList: IOWA_PACKET, signers: { 1: jean, 2: dan, 4: nic }, fieldsByRole,
+    })
+    const nicRole = roles.find(r => r.signerName === 'Nic Madsen')
+    expect(nicRole.roleIndex).toBe(3)
+    expect(nicRole.existingFormFields).toEqual(fieldsByRole[4])
+  })
+
+  it('numbers signing order over the surviving roles, not the original indices', () => {
+    const parallel = buildTemplateRoles({ roleList: IOWA_PACKET, signers: { 1: jean, 2: dan, 4: nic } })
+    expect(parallel.roles.map(r => r.signerOrder)).toEqual([1, 1, 1])   // everyone at once
+    const ordered = buildTemplateRoles({ roleList: IOWA_PACKET, signers: { 1: jean, 2: dan, 4: nic }, inOrder: true })
+    expect(ordered.roles.map(r => r.signerOrder)).toEqual([1, 2, 3])
+  })
+
+  it('handles an empty role list and an empty signer map', () => {
+    expect(buildTemplateRoles({})).toEqual({ roles: [], roleRemovalIndices: [], filledCount: 0 })
+    expect(buildTemplateRoles({ roleList: IOWA_PACKET, signers: {} }).roleRemovalIndices).toEqual([1, 2, 3, 4, 5])
   })
 })

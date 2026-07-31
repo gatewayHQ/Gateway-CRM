@@ -9,7 +9,7 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
@@ -1764,6 +1764,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
     // Attach each filled field value to the role that owns it (or the first
     // filled role if the field isn't role-scoped). CRM-entered values are locked.
+    // Keyed by ORIGINAL role index — buildTemplateRoles handles the index shift.
     const firstIdx = filled[0].index
     const byRole = {}
     for (const f of (details.fields || [])) {
@@ -1772,13 +1773,13 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
       const idx = (f.roleIndex && filled.some(r => r.index === f.roleIndex)) ? f.roleIndex : firstIdx
       ;(byRole[idx] ||= []).push({ id: f.id, value: v, isReadOnly: true })
     }
-    // Equal signerOrder → BoldSign notifies everyone at once. Ascending order →
-    // each signer waits for the one before them.
-    const roles = filled.map((r, i) => ({
-      roleIndex: r.index, signerName: signers[r.index].name, signerEmail: signers[r.index].email,
-      signerOrder: inOrder ? i + 1 : 1, existingFormFields: byRole[r.index] || [],
-    }))
-    const roleRemovalIndices = roleList.filter(r => !filled.includes(r)).map(r => r.index)
+    // Roles + removals, with BoldSign's post-removal index shift applied — see
+    // buildTemplateRoles. Leaving a middle role blank (e.g. Co-seller, with a
+    // co-listing agent filled below it) used to send an index past the end of
+    // the remaining list, which BoldSign rejected as a role with no signer.
+    const { roles, roleRemovalIndices } = buildTemplateRoles({
+      roleList, signers, fieldsByRole: byRole, inOrder,
+    })
 
     const docName = [tpl?.name || deal?.title, property?.address].filter(Boolean).join(' — ')
     const labels  = [tpl?.state, tpl?.doc_type, `deal:${deal.id}`].filter(Boolean)

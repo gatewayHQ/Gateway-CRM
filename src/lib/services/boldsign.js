@@ -141,6 +141,57 @@ export function normalizeState(s) {
   return STATE_CODES[v.toLowerCase()] || v.toUpperCase()
 }
 
+// ── Template send payload ────────────────────────────────────────────────────
+// Build BoldSign's `roles` array + `roleRemovalIndices` for a template send,
+// from the roles the agent actually filled in.
+//
+// THE INDEX SHIFT. BoldSign applies roleRemovalIndices FIRST and then expects
+// each supplied role's `roleIndex` to be its position in the REMAINING list —
+// not its original index in the template. Observed directly:
+//
+//   roles [1,2]   + removals [3,4,5] → accepted  (nothing removed below 1 or 2)
+//   roles [1,2,4] + removals [3,5]   → rejected: "SignerName or SignerEmail is
+//                                      missing in roles"
+//
+// In the second case role 3 is dropped, so only three roles remain and index 4
+// addresses nothing — the third remaining role ends up with no signer, which is
+// exactly what BoldSign complains about. The bug only became reachable once a
+// co-agent started being seeded into a middle role, leaving an interior gap.
+//
+// So: removal indices stay in the template's ORIGINAL numbering (that's how
+// BoldSign identifies what to drop), while each surviving role's index is
+// shifted down by the number of removed roles below it.
+//
+//   roles [1,2,4] + removals [3,5] → roles [1,2,3] + removals [3,5]
+//
+// Roles before the first removal keep their number, so a payload that works
+// today is unchanged — the shift only affects the shape that currently fails.
+//
+// `fieldsByRole` is keyed by ORIGINAL role index (template field metadata is
+// unaffected by removal), and is looked up before the shift is applied.
+export function buildTemplateRoles({ roleList = [], signers = {}, fieldsByRole = {}, inOrder = false } = {}) {
+  const value = (idx, key) => String(signers?.[idx]?.[key] || '').trim()
+  const filled = roleList.filter(r => value(r.index, 'name') && value(r.index, 'email'))
+  const removed = roleList
+    .filter(r => !filled.includes(r))
+    .map(r => r.index)
+    .sort((a, b) => a - b)
+
+  const shift = (idx) => idx - removed.filter(x => x < idx).length
+
+  const roles = filled.map((r, i) => ({
+    roleIndex:    shift(r.index),
+    signerName:   value(r.index, 'name'),
+    signerEmail:  value(r.index, 'email'),
+    // Equal signerOrder → BoldSign notifies everyone at once. Ascending → each
+    // signer waits for the one before them.
+    signerOrder:  inOrder ? i + 1 : 1,
+    existingFormFields: fieldsByRole?.[r.index] || [],
+  }))
+
+  return { roles, roleRemovalIndices: removed, filledCount: filled.length }
+}
+
 // ── CRM → template field prefill ─────────────────────────────────────────────
 // Maps our fixed label/id tokens to values pulled from the deal + its property
 // and primary contact. Only tokens the template actually declares get sent.
