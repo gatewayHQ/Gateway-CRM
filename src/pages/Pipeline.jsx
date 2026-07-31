@@ -9,7 +9,7 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
@@ -1321,7 +1321,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   )
 }
 
-function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeAgent }) {
+function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents = [], activeAgent }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
@@ -1333,6 +1333,7 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeA
   const [deleting,    setDeleting]    = React.useState({})
   const [reminding,   setReminding]   = React.useState({})
   const [templateErr, setTemplateErr] = React.useState('')   // set when the catalog can't be read (e.g. migration not applied)
+  const [participantIds, setParticipantIds] = React.useState([])   // co-agents paid on the deal (admin-visible only)
   const [statusFilter, setStatusFilter] = React.useState('active')   // active | drafts | completed | all
 
   React.useEffect(() => {
@@ -1340,6 +1341,7 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeA
     loadEnvelopes()
     loadDealFiles()
     loadTemplates()
+    loadParticipants()
 
     // Realtime subscription — auto-update status when webhook fires
     const channel = supabase.channel(`sig-documents-${deal.id}`)
@@ -1399,6 +1401,24 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], activeA
     const { data } = await supabase.storage.from(BUCKET).list(`deal-${deal.id}`, { sortBy: { column: 'created_at', order: 'desc' } })
     setDealFiles((data || []).filter(f => f.name !== '.emptyFolderPlaceholder'))
   }
+
+  // Co-agents who are paid participants on the deal. Commissions are admin-only
+  // under RLS, so this quietly yields nothing for a regular agent — who then
+  // sees owner + co_agent_ids, exactly what the deal page shows them.
+  const loadParticipants = async () => {
+    const { data } = await supabase.from('commissions').select('participants').eq('deal_id', deal.id).maybeSingle()
+    const ids = (Array.isArray(data?.participants) ? data.participants : [])
+      .map(p => p?.agent_id).filter(Boolean)
+    setParticipantIds(ids)
+  }
+
+  // The agents on this deal, ordered exactly like the "Agents on deal" card:
+  // primary first, then co-agents. Used to seed agent signer roles so a
+  // co-listing agent doesn't have to be typed in on every send.
+  const dealAgents = React.useMemo(
+    () => dealAgentList({ deal, agents, participantAgentIds: participantIds }),
+    [deal, agents, participantIds]
+  )
 
   const refreshStatus = async (env) => {
     let data
@@ -1663,7 +1683,7 @@ create policy "agent_notifications_policy" on agent_notifications
 
       {tplOpen && (
         <SendFromTemplateModal
-          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} templates={templates} activeAgent={activeAgent}
+          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} dealAgents={dealAgents} templates={templates} activeAgent={activeAgent}
           onClose={() => setTplOpen(false)}
           onSent={() => { setTplOpen(false); loadEnvelopes() }}
         />
@@ -1677,7 +1697,7 @@ create policy "agent_notifications_policy" on agent_notifications
 //    editable (CRM-prefilled) input per field, then sends via /api/boldsign.
 const prettyLabel = (id) => String(id || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 
-function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], templates, activeAgent, onClose, onSent }) {
+function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], dealAgents = [], templates, activeAgent, onClose, onSent }) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
 
@@ -1721,7 +1741,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         // Seed signer name/email from the deal's linked contact (+ spouse for a
         // second client role) and the acting agent. See seedSignersFromDeal.
         const tokenVals = crmTokenValues({ deal, property, contact, agent: activeAgent })
-        setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent }))
+        setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent, dealAgents }))
 
         const seededValues = {}
         for (const f of fields) seededValues[f.id] = tokenVals[f.id] || ''
@@ -2282,7 +2302,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
-        <SignaturesTab deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} activeAgent={activeAgent} />
+        <SignaturesTab deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} agents={agents} activeAgent={activeAgent} />
       )}
 
       {/* Client Portal tab */}

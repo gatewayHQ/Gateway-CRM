@@ -176,19 +176,80 @@ export function buildPrefill(fieldTokens = [], ctx = {}) {
     .map(f => ({ ...f, isReadOnly: true }))        // CRM-owned values are locked
 }
 
-// Role names that should be filled with the deal's client(s) rather than the
+// Role names that should be filled with the deal's client(s) rather than an
 // agent. Broad on purpose so generic template roles ("Signer 1") still seed.
 const CLIENT_ROLE_RE = /(seller|buyer|client|owner|purchaser|grantor|grantee|landlord|tenant|lessor|lessee|borrower|customer|signer)/
 
+// Roles filled from the AGENTS on the deal.
+const AGENT_ROLE_RE = /(agent|broker|realtor)/
+
+// Roles that must NEVER be seeded with a client, even when CLIENT_ROLE_RE
+// matches them. This exists because CLIENT_ROLE_RE is substring-based and
+// several professional roles contain a client keyword — most importantly
+// "Buyer's Agent", which matches /buyer/. Before this guard, a template whose
+// roles ran [Seller, Listing Agent, Buyer's Agent] seeded the CO-BUYER'S name
+// and email into the buyer's-agent signature slot: the acting agent consumed
+// the first agent role, so the second one fell through to the client branch.
+// The row arrived pre-filled and plausible, and sending it asked a client to
+// sign as their own agent. Worse, it was order-dependent — the same three roles
+// in a different order behaved correctly, so it wouldn't reproduce reliably.
+// A blank row is always the safer failure here.
+const NON_CLIENT_ROLE_RE = /(agent|broker|realtor|attorney|escrow|title|lender|notary|witness)/
+
+// The agents on a deal, in the order they should fill agent roles. Mirrors the
+// "Agents on deal" card (src/pages/DealPage.jsx) so the send modal seeds exactly
+// the people the deal page shows: primary agent, then legacy co_agent_ids, then
+// commission participants, deduped.
+//
+// participantAgentIds is passed separately because commissions are admin-only
+// under RLS — a non-admin simply gets [] for it and sees owner + co_agent_ids,
+// which is the same thing the deal page shows them.
+export function dealAgentList({ deal, agents = [], participantAgentIds = [] } = {}) {
+  const ids = [deal?.agent_id, ...(deal?.co_agent_ids || []), ...(participantAgentIds || [])].filter(Boolean)
+  const seen = new Set()
+  const out  = []
+  for (const id of ids) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    const a = (agents || []).find(x => x?.id === id)
+    if (a && (a.name || a.email)) out.push({ id: a.id, name: a.name || '', email: a.email || '' })
+  }
+  return out
+}
+
+// Order the agent-side people for filling agent roles: the acting agent first
+// when they are actually on the deal, then everyone else on it.
+//
+// When the acting agent is NOT on the deal — an admin or transaction coordinator
+// sending on an agent's behalf — the deal's own agents fill the roles instead.
+// The listing agent should sign the listing agreement, not the coordinator who
+// happened to click Send.
+export function orderAgentSigners({ activeAgent = null, dealAgents = [] } = {}) {
+  const norm = (a) => ({ name: a?.name || '', email: a?.email || '' })
+  const key  = (a) => String(a.email || a.name).toLowerCase()
+  const list = (dealAgents || []).map(norm).filter(a => a.name || a.email)
+  const acting = activeAgent && (activeAgent.name || activeAgent.email) ? norm(activeAgent) : null
+
+  if (!list.length) return acting ? [acting] : []
+  if (acting && list.some(a => key(a) === key(acting))) {
+    return [acting, ...list.filter(a => key(a) !== key(acting))]
+  }
+  return list
+}
+
 // Pre-fill a template's signer rows from the deal's people:
-//   • a role mentioning "agent" → the acting agent (first such role only)
-//   • client-type roles → the deal's linked contact, then that contact's
-//     spouse for a second client role (co-buyers / husband & wife)
-//   • anything else keeps the template's own placeholder (r.defaultName/Email)
+//   • agent/broker/realtor roles → the agents ON THE DEAL, in order (see
+//     orderAgentSigners). A co-listing agent fills the second agent role
+//     instead of being left blank for the sender to type out every send.
+//   • client-type roles → the deal's linked contact, then any additional
+//     contacts, then that contact's stored spouse name (co-buyers / husband
+//     & wife)
+//   • anything else — and any professional role with no agent left to assign —
+//     keeps the template's own placeholder (r.defaultName/Email)
 // Returns { [roleIndex]: { name, email } }. Pure — the agent can still edit any
 // field before sending. Requires the deal to have a linked contact; with none,
 // client roles fall back to the template placeholder (usually blank).
-export function seedSignersFromDeal({ roles = [], contact = null, additionalContacts = [], activeAgent = null } = {}) {
+export function seedSignersFromDeal({ roles = [], contact = null, additionalContacts = [], activeAgent = null, dealAgents = [] } = {}) {
   const toPerson = c => ({ name: `${c?.first_name || ''} ${c?.last_name || ''}`.trim(), email: c?.email || '' })
   const people = []
   if (contact && (contact.first_name || contact.last_name || contact.email)) people.push(toPerson(contact))
@@ -201,17 +262,23 @@ export function seedSignersFromDeal({ roles = [], contact = null, additionalCont
   // Fall back to the primary contact's stored spouse name (no email on file)
   // only when no real additional contacts are linked to the deal.
   if (!(additionalContacts || []).length && contact?.spouse_name) people.push({ name: contact.spouse_name, email: '' })
+  const agentSigners = orderAgentSigners({ activeAgent, dealAgents })
+
   const out = {}
-  let usedAgent = false, personIdx = 0
+  const placeholder = (r) => ({ name: r?.defaultName || '', email: r?.defaultEmail || '' })
+  let personIdx = 0, agentIdx = 0
   for (const r of roles) {
     const n = String(r?.name || '').toLowerCase()
-    if (!usedAgent && /agent/.test(n) && activeAgent?.email) {
-      out[r.index] = { name: activeAgent.name || '', email: activeAgent.email || '' }
-      usedAgent = true
-    } else if (CLIENT_ROLE_RE.test(n) && personIdx < people.length) {
+    if (AGENT_ROLE_RE.test(n)) {
+      // Agent roles are only ever filled from the deal's agents. Falling through
+      // to the client branch is what put a client's email in an agent's slot.
+      const a = agentSigners[agentIdx]
+      out[r.index] = a ? { name: a.name, email: a.email } : placeholder(r)
+      if (a) agentIdx++
+    } else if (!NON_CLIENT_ROLE_RE.test(n) && CLIENT_ROLE_RE.test(n) && personIdx < people.length) {
       out[r.index] = { ...people[personIdx++] }
     } else {
-      out[r.index] = { name: r?.defaultName || '', email: r?.defaultEmail || '' }
+      out[r.index] = placeholder(r)
     }
   }
   return out
