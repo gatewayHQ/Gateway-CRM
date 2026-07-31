@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, seedSignersFromDeal } from '../boldsign.js'
+import { buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, seedSignersFromDeal, dealAgentList, orderAgentSigners } from '../boldsign.js'
 
 describe('buildTextTag', () => {
   it('builds the {{fieldType|signerIndex|required|label|fieldId}} syntax', () => {
@@ -111,10 +111,146 @@ describe('seedSignersFromDeal — auto-fill signer name/email from the deal', ()
     expect(seedSignersFromDeal({ roles, contact, activeAgent: agent })[1]).toEqual({ name: '', email: '' })
   })
 
-  it('only fills the first agent role, not a second', () => {
+  it('fills only one agent role when the deal has no co-agent to assign', () => {
+    // With a co-agent on the deal, role 2 IS filled — see the dealAgents suite.
     const roles = [{ index: 1, name: 'Agent' }, { index: 2, name: 'Co-Agent' }]
     const out = seedSignersFromDeal({ roles, contact: null, activeAgent: agent })
     expect(out[1]).toEqual({ name: 'Alex Agent', email: 'alex@brokerage.com' })
     expect(out[2]).toEqual({ name: '', email: '' })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Co-agents on a deal → agent signer roles.
+//
+// The source of truth is the same one the "Agents on deal" card uses
+// (src/pages/DealPage.jsx): deal.agent_id, then legacy co_agent_ids, then
+// commission participants — so the send modal seeds the people the deal page
+// shows, in the same order.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('dealAgentList — mirrors the "Agents on deal" card', () => {
+  const agents = [
+    { id: 'a1', name: 'Daniel Stillson', email: 'daniel@gw.com' },
+    { id: 'a2', name: 'Nic Madsen',      email: 'nic@gw.com' },
+    { id: 'a3', name: 'Third Agent',     email: 'third@gw.com' },
+  ]
+
+  it('puts the primary agent first, then co-agents', () => {
+    const deal = { agent_id: 'a1', co_agent_ids: ['a2'] }
+    expect(dealAgentList({ deal, agents })).toEqual([
+      { id: 'a1', name: 'Daniel Stillson', email: 'daniel@gw.com' },
+      { id: 'a2', name: 'Nic Madsen',      email: 'nic@gw.com' },
+    ])
+  })
+
+  it('picks up a co-agent that only exists as a commission participant', () => {
+    const deal = { agent_id: 'a1' }
+    expect(dealAgentList({ deal, agents, participantAgentIds: ['a2'] }).map(a => a.id)).toEqual(['a1', 'a2'])
+  })
+
+  it('dedupes an agent listed in more than one source', () => {
+    const deal = { agent_id: 'a1', co_agent_ids: ['a2', 'a1'] }
+    expect(dealAgentList({ deal, agents, participantAgentIds: ['a2', 'a1'] }).map(a => a.id)).toEqual(['a1', 'a2'])
+  })
+
+  it('ignores ids with no matching agent row, and tolerates a bare deal', () => {
+    expect(dealAgentList({ deal: { agent_id: 'ghost' }, agents })).toEqual([])
+    expect(dealAgentList({ deal: null, agents })).toEqual([])
+    expect(dealAgentList({})).toEqual([])
+  })
+})
+
+describe('orderAgentSigners — who signs the agent block', () => {
+  const me  = { name: 'Daniel Stillson', email: 'daniel@gw.com' }
+  const nic = { name: 'Nic Madsen',      email: 'nic@gw.com' }
+
+  it('promotes the acting agent to the front when they are on the deal', () => {
+    expect(orderAgentSigners({ activeAgent: me, dealAgents: [nic, me] })).toEqual([me, nic])
+  })
+
+  it('leaves the deal order alone when the sender is NOT on the deal', () => {
+    // An admin / transaction coordinator sending on someone's deal: the listing
+    // agent signs the listing agreement, not whoever clicked Send.
+    const tc = { name: 'Office Admin', email: 'admin@gw.com' }
+    expect(orderAgentSigners({ activeAgent: tc, dealAgents: [me, nic] })).toEqual([me, nic])
+  })
+
+  it('falls back to the acting agent when the deal has no resolved agents', () => {
+    expect(orderAgentSigners({ activeAgent: me, dealAgents: [] })).toEqual([me])
+    expect(orderAgentSigners({ activeAgent: null, dealAgents: [] })).toEqual([])
+  })
+})
+
+describe('seedSignersFromDeal — agent roles never take a client', () => {
+  const contact = { first_name: 'Jane', last_name: 'Seller', email: 'jane@x.com' }
+  const cobuyer = { first_name: 'John', last_name: 'CoBuyer', email: 'john@x.com' }
+  const me      = { name: 'Daniel Stillson', email: 'daniel@gw.com' }
+  const nic     = { name: 'Nic Madsen',      email: 'nic@gw.com' }
+
+  it("REGRESSION: a second agent role must not be seeded with the co-buyer", () => {
+    // Seller / Listing Agent / Buyer's Agent used to put John CoBuyer in role 3,
+    // because the acting agent consumed the first agent role and "buyer's agent"
+    // matches /buyer/. Sending it asked a client to sign as their own agent.
+    const roles = [{ index: 1, name: 'Seller' }, { index: 2, name: 'Listing Agent' }, { index: 3, name: "Buyer's Agent" }]
+    const out = seedSignersFromDeal({ roles, contact, additionalContacts: [cobuyer], activeAgent: me })
+    expect(out[1]).toEqual({ name: 'Jane Seller', email: 'jane@x.com' })
+    expect(out[2]).toEqual({ name: 'Daniel Stillson', email: 'daniel@gw.com' })
+    expect(out[3]).toEqual({ name: '', email: '' })            // blank, NOT the co-buyer
+    expect(out[3].email).not.toBe('john@x.com')
+  })
+
+  it('fills a second agent role with the co-agent on the deal', () => {
+    const roles = [{ index: 1, name: 'Seller' }, { index: 2, name: 'Listing Agent' }, { index: 3, name: 'Co-Listing Agent' }]
+    const out = seedSignersFromDeal({ roles, contact, activeAgent: me, dealAgents: [me, nic] })
+    expect(out[2]).toEqual({ name: 'Daniel Stillson', email: 'daniel@gw.com' })
+    expect(out[3]).toEqual({ name: 'Nic Madsen', email: 'nic@gw.com' })
+  })
+
+  it('is order-independent — the same roles reversed seed the same people', () => {
+    // The old logic was order-dependent, which is why the bug was hard to spot.
+    const a = seedSignersFromDeal({
+      roles: [{ index: 1, name: 'Buyer' }, { index: 2, name: "Buyer's Agent" }, { index: 3, name: 'Listing Agent' }],
+      contact, additionalContacts: [cobuyer], activeAgent: me, dealAgents: [me, nic],
+    })
+    const b = seedSignersFromDeal({
+      roles: [{ index: 1, name: 'Buyer' }, { index: 2, name: 'Listing Agent' }, { index: 3, name: "Buyer's Agent" }],
+      contact, additionalContacts: [cobuyer], activeAgent: me, dealAgents: [me, nic],
+    })
+    // Whichever agent role comes first gets the acting agent; the other gets the
+    // co-agent. Neither ever gets a client.
+    expect([a[2], a[3]]).toEqual([{ name: 'Daniel Stillson', email: 'daniel@gw.com' }, { name: 'Nic Madsen', email: 'nic@gw.com' }])
+    expect([b[2], b[3]]).toEqual([{ name: 'Daniel Stillson', email: 'daniel@gw.com' }, { name: 'Nic Madsen', email: 'nic@gw.com' }])
+  })
+
+  it('leaves other professional roles blank rather than seeding a client', () => {
+    const roles = [
+      { index: 1, name: 'Seller' },
+      { index: 2, name: "Seller's Attorney" },
+      { index: 3, name: 'Title Company' },
+      { index: 4, name: 'Escrow Officer' },
+    ]
+    const out = seedSignersFromDeal({ roles, contact, additionalContacts: [cobuyer], activeAgent: me })
+    expect(out[1]).toEqual({ name: 'Jane Seller', email: 'jane@x.com' })
+    for (const i of [2, 3, 4]) expect(out[i]).toEqual({ name: '', email: '' })
+  })
+
+  it('keeps a professional role\'s own template placeholder when it has one', () => {
+    const roles = [{ index: 1, name: 'Title Company', defaultName: 'Dickinson Title', defaultEmail: 'closings@dtitle.com' }]
+    expect(seedSignersFromDeal({ roles, contact, activeAgent: me })[1])
+      .toEqual({ name: 'Dickinson Title', email: 'closings@dtitle.com' })
+  })
+
+  it('falls back to the template placeholder when there is no agent left to assign', () => {
+    const roles = [{ index: 1, name: 'Listing Agent' }, { index: 2, name: 'Co-Listing Agent', defaultName: 'TBD', defaultEmail: '' }]
+    const out = seedSignersFromDeal({ roles, activeAgent: me, dealAgents: [me] })
+    expect(out[1]).toEqual({ name: 'Daniel Stillson', email: 'daniel@gw.com' })
+    expect(out[2]).toEqual({ name: 'TBD', email: '' })
+  })
+
+  it('seeds the deal\'s own agents when an admin sends on their behalf', () => {
+    const tc = { name: 'Office Admin', email: 'admin@gw.com' }
+    const roles = [{ index: 1, name: 'Seller' }, { index: 2, name: 'Listing Agent' }]
+    const out = seedSignersFromDeal({ roles, contact, activeAgent: tc, dealAgents: [me, nic] })
+    expect(out[2]).toEqual({ name: 'Daniel Stillson', email: 'daniel@gw.com' })
   })
 })
