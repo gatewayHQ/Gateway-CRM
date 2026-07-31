@@ -125,6 +125,16 @@ create table if not exists deals (
   prop_category       text,                 -- 'residential' | 'commercial' (deal-level category)
   prop_subtype        text,                 -- commercial subtype: multifamily, office, land, retail, industrial
   comp_data           jsonb default '{}',   -- { key_dates:[{type,date}], portal_docs:[name], state, transaction_type }
+  -- The ASSIGNED AGENT's commission entry (Details tab) — what the client is
+  -- charged, not how it is split. `commissions` is admin-only, so this is the
+  -- agent-writable input the back office builds the split from. Resolution order
+  -- lives in src/lib/commission.js.
+  commission_type     text default 'percent' constraint deals_commission_type_check
+                        check (commission_type is null or commission_type in ('percent','flat')),
+  commission_pct      numeric constraint deals_commission_pct_range
+                        check (commission_pct is null or (commission_pct >= 0 and commission_pct <= 100)),
+  commission_flat     numeric constraint deals_commission_flat_nonneg
+                        check (commission_flat is null or commission_flat >= 0),
   portal_token        uuid,                 -- client portal share token (unguessable)
   portal_enabled      boolean default false,
   created_at          timestamptz default now(),
@@ -248,7 +258,7 @@ create table if not exists commissions (
   referral_pct    numeric not null default 0,      -- legacy: referral fee off the top
   co_agent_pct    numeric not null default 0,      -- legacy: co-agent share of agent gross
   transaction_fee numeric not null default 0,      -- flat per-deal brokerage fee, split across agents, charged on top of cap
-  sides           jsonb not null default '[]',     -- [{ key,label,rate_pct,referral_pct,referral_flat }]
+  sides           jsonb not null default '[]',     -- [{ key,label,rate_pct,flat,referral_pct,referral_flat }] (flat > 0 replaces rate_pct)
   participants    jsonb not null default '[]',     -- [{ id,agent_id,name,role,allocation_pct,split_pct,no_split,fee }] (fee = per-agent override of the flat-fee share)
   notes           text,
   created_at      timestamptz default now(),

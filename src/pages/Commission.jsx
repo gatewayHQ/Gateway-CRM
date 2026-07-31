@@ -7,7 +7,7 @@ import MyEarnings from './MyEarnings.jsx'
 import { BrokerageReport, CapsEditor } from './BackOffice.jsx'
 import {
   computeCommission, normalizeCommission, breakdownForDeal,
-  makeSide, makeParticipant, DEFAULTS,
+  makeSide, makeParticipant, describeDealCommission, DEFAULTS,
 } from '../lib/commission.js'
 
 const D_GROSS = DEFAULTS.GROSS_PCT
@@ -65,6 +65,10 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
     const twoSided = norm.sides.length > 1
     return {
       sides: norm.sides.map(s => ({ ...s })),
+      // Per-side pricing mode. Not persisted — it's derived from which field the
+      // stored side actually uses, and drives `effectiveSides` below so the
+      // inert field can never leak into the math or the saved row.
+      sideModes: Object.fromEntries(norm.sides.map(s => [s.id, Number(s.flat || 0) > 0 ? 'flat' : 'percent'])),
       participants: norm.participants
         .filter(p => p._legacy_co_pct == null) // legacy co marker not editable directly
         .map(p => ({ ...p })),
@@ -83,10 +87,23 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
 
   const sp = deal?.value || 0
 
+  // What the assigned agent entered on the deal's Details tab — shown as a
+  // reference so the back office can see where a seeded number came from.
+  const agentEntry = describeDealCommission(deal)
+
+  // A side is priced EITHER by percentage OR by flat fee. Zero out whichever
+  // field the current mode doesn't use, so a leftover value can't quietly drive
+  // the math (the engine keys on `flat > 0`) or get written back on save.
+  const effectiveSides = form.sides.map(s => (
+    form.sideModes?.[s.id] === 'flat'
+      ? { ...s, rate_pct: 0 }
+      : { ...s, flat: 0 }
+  ))
+
   // Live breakdown straight from the engine — identical math to the reports.
   const result = computeCommission({
     sale_price: sp,
-    sides: form.sides,
+    sides: effectiveSides,
     participants: form.participants,
     transaction_fee: form.transaction_fee,
   })
@@ -94,6 +111,9 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
   // ── Side editing ────────────────────────────────────────────────────────
   const setSide = (id, patch) =>
     setForm(p => ({ ...p, sides: p.sides.map(s => s.id === id ? { ...s, ...patch } : s) }))
+
+  const setSideMode = (id, mode) =>
+    setForm(p => ({ ...p, sideModes: { ...(p.sideModes || {}), [id]: mode } }))
 
   const toggleTwoSided = (on) => {
     setForm(p => {
@@ -158,7 +178,7 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
     const primary = result.primary
     const payload = {
       deal_id: deal.id,
-      sides: form.sides,
+      sides: effectiveSides,
       participants: form.participants,
       // Legacy mirror (single-side blended view):
       gross_pct:       result.effective_rate_pct,
@@ -201,6 +221,15 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
           <div style={{ fontSize:11, color:'var(--gw-mist)', textTransform:'uppercase', letterSpacing:'0.06em', marginBottom:2 }}>Deal</div>
           <div style={{ fontWeight:600 }}>{deal?.title}</div>
           {sp>0 && <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:2 }}>Sale Price: {formatCurrency(sp)}</div>}
+          {agentEntry && (
+            <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:2 }}>
+              Agent entered:{' '}
+              <strong style={{ color:'var(--gw-ink)' }}>
+                {agentEntry.type === 'flat' ? `${formatCurrency(agentEntry.flat)} flat` : `${agentEntry.pct}%`}
+              </strong>
+              {agentEntry.gross > 0 && <> → {formatCurrency(agentEntry.gross)} gross</>}
+            </div>
+          )}
         </div>
 
         {/* ── SIDES ─────────────────────────────────────────────────────── */}
@@ -214,15 +243,39 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
           </label>
 
           {form.sides.map((s, i) => {
-            const rs = result.sides[i] || {}
+            const rs   = result.sides[i] || {}
+            const flat = form.sideModes?.[s.id] === 'flat'
             return (
               <div key={s.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:8 }}>
                 {form.twoSided && <div style={{ fontSize:12, fontWeight:700, marginBottom:8 }}>{s.label}</div>}
+
+                {/* Percentage of the sale price, or a flat fee for this side. */}
+                <div style={{ display:'flex', gap:0, border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden', marginBottom:10 }}>
+                  {[['percent','Percentage'],['flat','Flat Fee']].map(([key, label]) => (
+                    <button key={key} type="button" onClick={()=>setSideMode(s.id, key)}
+                      style={{ flex:1, padding:'6px 0', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:11, fontWeight:600, transition:'all 150ms',
+                        background: (key === 'flat') === flat ? 'var(--gw-slate)' : '#fff',
+                        color:      (key === 'flat') === flat ? '#fff'            : 'var(--gw-mist)' }}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
                 <div className="form-row" style={{ display:'flex', gap:10 }}>
                   <div style={{ flex:1 }}>
-                    <label style={fieldLabel}>Rate (%)</label>
-                    <input className="form-control" type="number" min="0" max="100" step="0.1" value={s.rate_pct}
-                      onChange={e=>setSide(s.id,{ rate_pct:e.target.value })} />
+                    {flat ? (
+                      <>
+                        <label style={fieldLabel}>Flat fee ($)</label>
+                        <input className="form-control" type="number" min="0" step="100" value={s.flat ?? ''}
+                          onChange={e=>setSide(s.id,{ flat:e.target.value })} placeholder="0" />
+                      </>
+                    ) : (
+                      <>
+                        <label style={fieldLabel}>Rate (%)</label>
+                        <input className="form-control" type="number" min="0" max="100" step="0.1" value={s.rate_pct}
+                          onChange={e=>setSide(s.id,{ rate_pct:e.target.value })} />
+                      </>
+                    )}
                   </div>
                   <div style={{ flex:1 }}>
                     <label style={fieldLabel}>Referral (% of this side)</label>
@@ -331,7 +384,7 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
             {[
               { label:'Sale Price', val: sp, color:'var(--gw-ink)' },
               ...result.sides.flatMap(s => [
-                { label:`${form.twoSided ? s.label + ' — ' : ''}Gross (${s.rate_pct}%)`, val: s.gross, color:'var(--gw-ink)' },
+                { label:`${form.twoSided ? s.label + ' — ' : ''}Gross (${Number(s.flat || 0) > 0 ? 'flat fee' : `${s.rate_pct}%`})`, val: s.gross, color:'var(--gw-ink)' },
                 s.referral > 0 && { label:`  Referral (${s.referral_pct}%)`, val:-s.referral, color:'var(--gw-red)' },
               ]),
               { label:'Net to Split', val: result.net_total, color:'var(--gw-ink)', rule:true },

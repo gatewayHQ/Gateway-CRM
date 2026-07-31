@@ -38,6 +38,26 @@ describe('crmTokenValues + buildPrefill', () => {
     expect(vals.property_address).toBe('123 Main St')
   })
 
+  it('fills the commission tokens from a percentage deal', () => {
+    const vals = crmTokenValues(ctx)
+    expect(vals.commission_pct).toBe('3%')
+    expect(vals.commission_amount).toBe('$13,500')
+  })
+
+  it('a flat-fee deal fills the dollar token and leaves the rate token empty', () => {
+    // There is no percentage to print on a listing agreement for a flat fee, so
+    // commission_pct stays blank rather than printing a misleading "0%".
+    const vals = crmTokenValues({ ...ctx, deal: { ...ctx.deal, commission_type: 'flat', commission_flat: 12500 } })
+    expect(vals.commission_pct).toBe('')
+    expect(vals.commission_amount).toBe('$12,500')
+  })
+
+  it('leaves both commission tokens empty when the agent has entered nothing', () => {
+    const vals = crmTokenValues({ ...ctx, deal: { value: 450000 } })
+    expect(vals.commission_pct).toBe('')
+    expect(vals.commission_amount).toBe('')
+  })
+
   it('buildPrefill only includes known, non-empty tokens and locks them read-only', () => {
     const fields = buildPrefill(['property_address', 'agent_name', 'unknown_token'], ctx)
     expect(fields).toEqual([
