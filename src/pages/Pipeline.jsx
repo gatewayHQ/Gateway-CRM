@@ -9,6 +9,8 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
+import { describeDealCommission } from '../lib/commission.js'
+import { friendlyDbError } from '../lib/dbErrors.js'
 import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2010,8 +2012,86 @@ async function syncDealContacts(dealId, contactIds) {
   } catch (e) { console.error('[syncDealContacts]', e) }
 }
 
+// ── Commission entry (deal Details tab) ──────────────────────────────────────
+// The one commission number the ASSIGNED AGENT owns: what the client is being
+// charged, priced either as a percentage of the deal value or as a flat fee.
+// How that gross gets SPLIT (per-agent take-home, referrals, the brokerage's
+// share) is back-office data in the admin-only `commissions` table and never
+// appears here — this field is its input. `src/lib/commission.js` documents the
+// precedence: an admin's explicit entry wins, then this, then the legacy scalar.
+function CommissionFields({ form, set }) {
+  const type    = form.commission_type === 'flat' ? 'flat' : 'percent'
+  const value   = Number(form.value) || 0
+  const preview = describeDealCommission({ ...form, commission_type: type })
+
+  return (
+    <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
+      <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:12 }}>Commission</div>
+
+      {/* Percentage / Flat fee — same toggle pattern as Property Category */}
+      <div className="form-group">
+        <label className="form-label">How is it charged?</label>
+        <div style={{ display:'flex', gap:0, border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
+          {[['percent','Percentage'],['flat','Flat Fee']].map(([key, label]) => (
+            <button key={key} type="button" onClick={() => set('commission_type', key)}
+              style={{ flex:1, padding:'7px 0', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, transition:'all 150ms',
+                background: type === key ? 'var(--gw-slate)' : '#fff',
+                color:      type === key ? '#fff'            : 'var(--gw-mist)' }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {type === 'percent' ? (
+        <div className="form-group">
+          <label className="form-label">Commission Rate (%)</label>
+          <input className="form-control" type="number" min="0" max="100" step="0.05"
+            value={form.commission_pct ?? ''} onChange={e=>set('commission_pct', e.target.value)} placeholder="e.g. 3" />
+        </div>
+      ) : (
+        <div className="form-group">
+          <label className="form-label">Flat Fee ($)</label>
+          <input className="form-control" type="number" min="0" step="100"
+            value={form.commission_flat ?? ''} onChange={e=>set('commission_flat', e.target.value)} placeholder="e.g. 12500" />
+        </div>
+      )}
+
+      {/* Live gross — the agent never has to do the math in their head. */}
+      <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12 }}>
+        {!preview ? (
+          <span style={{ color:'var(--gw-mist)' }}>
+            Enter {type === 'flat' ? 'a flat fee' : 'a rate'} to see the gross commission on this deal.
+          </span>
+        ) : preview.gross <= 0 ? (
+          <span style={{ color:'var(--gw-mist)' }}>
+            {preview.pct}% — add a Sale / Deal Value above to see the dollar amount.
+          </span>
+        ) : (
+          <>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline' }}>
+              <span style={{ color:'var(--gw-mist)' }}>Gross commission</span>
+              <strong style={{ fontSize:14 }}>{formatCurrency(preview.gross)}</strong>
+            </div>
+            <div style={{ color:'var(--gw-mist)', marginTop:4, fontSize:11 }}>
+              {type === 'flat'
+                ? (value > 0
+                    ? <>Flat fee — {(preview.gross / value * 100).toFixed(2)}% of {formatCurrency(value)}.</>
+                    : <>Flat fee, independent of the deal value.</>)
+                : <>{preview.pct}% of {formatCurrency(value)}.</>}
+            </div>
+          </>
+        )}
+      </div>
+      <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
+        This is the total commission charged on the deal — the back office splits it from here.
+      </div>
+    </div>
+  )
+}
+
 export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, onSave, initialTab = 'details' }) {
-  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{} }
+  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, commission_type:'percent', commission_pct:'', commission_flat:'' }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
@@ -2020,7 +2100,16 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const [additionalContactIds, setAdditionalContactIds] = useState([])
 
   React.useEffect(() => {
-    setForm(deal ? { ...blank, ...deal, expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '', comp_data: deal.comp_data || {} } : blank)
+    setForm(deal ? {
+      ...blank, ...deal,
+      expected_close_date: deal.expected_close_date ? deal.expected_close_date.slice(0,10) : '',
+      comp_data: deal.comp_data || {},
+      // Null columns must become '' so the inputs stay controlled, and a legacy
+      // row with no type flag reads as a percentage deal (matching migration 0024).
+      commission_type:  deal.commission_type === 'flat' ? 'flat' : 'percent',
+      commission_pct:   deal.commission_pct  ?? '',
+      commission_flat:  deal.commission_flat ?? '',
+    } : blank)
     setErrors({})
     setTab(deal?.id ? initialTab : 'details')
     setAdditionalContactIds(
@@ -2068,21 +2157,47 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         prop_category:       form.prop_category || null,
         prop_subtype:        form.prop_subtype  || null,
         comp_data:           form.comp_data     || null,
+        // Commission entry — only the field the chosen type uses is persisted, so
+        // switching percent ⇄ flat can't leave a stale amount behind for the
+        // engine (or a listing agreement) to pick up.
+        commission_type:     form.commission_type === 'flat' ? 'flat' : 'percent',
+        commission_pct:      form.commission_type !== 'flat' && form.commission_pct  !== '' && form.commission_pct  !== null ? Number(form.commission_pct)  : null,
+        commission_flat:     form.commission_type === 'flat' && form.commission_flat !== '' && form.commission_flat !== null ? Number(form.commission_flat) : null,
       }
-      let error, savedId = deal?.id
-      if (deal?.id) {
-        ;({ error } = await supabase.from('deals').update(payload).eq('id', deal.id))
-      } else {
-        let data
-        ;({ data, error } = await supabase.from('deals').insert([payload]).select('id').single())
-        savedId = data?.id
+      const write = async (body) => {
+        if (deal?.id) {
+          const { error } = await supabase.from('deals').update(body).eq('id', deal.id)
+          return { error, savedId: deal.id }
+        }
+        const { data, error } = await supabase.from('deals').insert([body]).select('id').single()
+        return { error, savedId: data?.id }
       }
-      if (error) { pushToast(error.message, 'error'); return }
+
+      let { error, savedId } = await write(payload)
+      let degraded = false
+
+      // The commission columns arrive with migration 0024. Until it's applied,
+      // drop them and save the rest rather than blocking the whole deal — the
+      // agent gets an actionable pointer instead of an opaque schema error.
+      if (error && /commission_(type|pct|flat)/.test(error.message || '')) {
+        const { commission_type, commission_pct, commission_flat, ...rest } = payload
+        const retry = await write(rest)
+        if (retry.error) { pushToast(friendlyDbError(retry.error) || retry.error.message, 'error'); return }
+        savedId  = retry.savedId
+        degraded = true
+      } else if (error) {
+        pushToast(friendlyDbError(error) || error.message, 'error'); return
+      }
 
       // Sync additional contacts (best-effort — the deal itself is already saved).
       if (savedId) await syncDealContacts(savedId, additionalContactIds)
 
-      pushToast(deal?.id ? 'Deal updated' : 'Deal added')
+      pushToast(
+        degraded
+          ? 'Deal saved, but the commission was not — ask an admin to apply database migration 0024.'
+          : (deal?.id ? 'Deal updated' : 'Deal added'),
+        degraded ? 'error' : undefined,
+      )
       await onSave()
       onClose()
     } catch(err) {
@@ -2176,6 +2291,9 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
             </div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
             <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+
+            {/* ── Commission ────────────────────────────────────── */}
+            <CommissionFields form={form} set={set} />
 
             {/* ── Comp Data ─────────────────────────────────────── */}
             <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>

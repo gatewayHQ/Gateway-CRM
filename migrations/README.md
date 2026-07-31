@@ -41,6 +41,7 @@ file is safe.
 | 0020 | `0020_boldsign_identity_default.sql` | Adds `boldsign_sender_identities.is_default` (org-wide OnBehalfOf fallback) with a partial unique index enforcing at most one default | No (additive column) | With the sender-identity management deploy |
 | 0021 | `0021_multi_contacts.sql` | Adds `deal_contacts` + `property_contacts` junction tables so a deal/property can carry additional contacts (husband & wife, co-buyers, co-owners). Primary `contact_id`/`linked_contact_id` unchanged | No (additive tables; app degrades to single-contact until run) | With the multi-contact deploy |
 | 0022 | `0022_form_packet_multi_file.sql` | Adds `form_packets.storage_paths` (jsonb) so a packet/template can hold several source PDFs (listing agreement + disclosures) combined into one BoldSign template. `storage_path` stays the primary/first | No (additive column; save degrades to single-file until run) | With the package-template deploy |
+| 0024 | `0024_deal_commission_entry.sql` | Adds `deals.commission_type` / `commission_pct` / `commission_flat` — the assigned agent's own commission entry (percentage **or** flat fee) on the deal's Details tab, since `commissions` is admin-only. Adopts the legacy production `commission_pct` column and backfills `commission_type = 'percent'` | Yes, indirectly — an agent-entered commission now outranks a legacy `commissions.gross_pct` scalar in reports (structured `sides` still win) | With the commission-entry deploy |
 
 > Note the numeric order vs. recommended run order: **0001 → 0003 → 0004 → 0005 → 0006 → 0007 → 0002 (Phase A) → 0008 → 0009 → 0010 → 0011 (Phase A, then Phase B after verification)**.
 > 0011's Phase B is the only step that changes what data the database returns,
@@ -133,6 +134,59 @@ collaborate on) is enforced today in the app layer — `api/campaigns.js?action=
 filters by the caller's `agent_id` / `landing_config.agent_ids`. The eventual
 hard guarantee is a `mailings` RLS policy (a follow-up to 0002), since the
 campaigns API runs on the service key and bypasses RLS.
+
+---
+
+## 0024 — the agent's own commission entry (read before running)
+
+0013 made `commissions` **admin-only**: every row holds each participant's
+split, so an agent can neither read nor write one. That left the agent with no
+place to record the one commission number they actually negotiate — *what are we
+charging this client?* — and the back office had to chase it by phone.
+
+0024 puts that number on `deals`, which agents already read/write under 0011's
+scoping, entered from the deal drawer's **Details** tab as either a percentage
+(`commission_pct`) or a flat fee (`commission_flat`), selected by
+`commission_type`. It is the **input** to the split, never the split itself — no
+take-home, no per-agent percentage, nothing an agent shouldn't see.
+
+**It adopts an existing production column.** The live `deals` table has carried a
+legacy `commission_pct numeric` since before this codebase (see
+`production/README.md`), already feeding the `commission_pct` BoldSign token.
+`add column if not exists` adopts it rather than recreating it, and the
+`commission_type` backfill lights up whatever values are already stored — so
+deals that silently held a rate start showing it in the UI the moment this runs.
+
+**The one behavior change.** `src/lib/commission.js` resolves a deal's gross in
+this order:
+
+1. `commissions.sides` — the back office's explicit entry. Once an admin saves in
+   the Commission editor this wins, full stop.
+2. `deals.commission_*` — the agent's entry (this migration).
+3. `commissions.gross_pct` — the legacy scalar.
+4. `3.0%` — nothing entered anywhere.
+
+So on a deal whose commission row is still the **legacy** shape (never re-saved
+in the structured editor), an agent's entry now drives the reports where
+`gross_pct` used to. That is the intent — the agent is stating the deal's actual
+commission — but it means a legacy row's rate can be superseded by an agent
+typing a different one. Deals already carrying structured `sides` are unaffected,
+and an admin can always override by saving in the Commission editor. Before
+running, the deals exposed to that change are:
+
+```sql
+select d.id, d.title, c.gross_pct, d.commission_pct
+  from deals d join commissions c on c.deal_id = d.id
+ where coalesce(jsonb_array_length(c.sides), 0) = 0
+   and d.commission_pct is not null
+   and d.commission_pct <> c.gross_pct;
+```
+
+**Flat fees reach the engine too.** A commission *side* can now be priced as a
+flat dollar fee (`sides[].flat` > 0 replaces `rate_pct`), so an agent's flat-fee
+deal survives an admin edit in the Commission editor instead of being forced back
+into a percentage. `sides` is jsonb — no schema change, only the column comment
+is refreshed.
 
 ---
 

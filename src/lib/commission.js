@@ -11,9 +11,11 @@
  * A real transaction is two things stacked together:
  *
  *   1. SIDES — where the commission comes from. A deal can be the listing side,
- *      the buyer side, or BOTH (when the brokerage double-ends). Each side has
- *      its own rate and its own optional referral, because a referral often only
- *      touches one side (e.g. the listing was referred in, the buyer side wasn't).
+ *      the buyer side, or BOTH (when the brokerage double-ends). Each side is
+ *      priced EITHER as a percentage of the sale price (`rate_pct`) OR as a flat
+ *      dollar fee (`flat` > 0 wins), and carries its own optional referral,
+ *      because a referral often only touches one side (e.g. the listing was
+ *      referred in, the buyer side wasn't).
  *
  *   2. PARTICIPANTS — who splits the net. Each agent on the deal carries their
  *      OWN brokerage arrangement: some agents split with the house (e.g. 60/40),
@@ -29,6 +31,19 @@
  *      each for two agents). It is charged ON TOP and does NOT count toward an
  *      agent's annual cap — the cap measures only the brokerage SPLIT. A
  *      per-agent `fee` > 0 overrides that agent's share of the flat fee.
+ *
+ * ── Where the gross comes from ───────────────────────────────────────────────
+ * Two people can state a deal's commission, and they win in this order:
+ *
+ *   1. commissions.sides   — the back office's explicit entry (admin-only table).
+ *                            Once an admin saves in the Commission editor this
+ *                            is authoritative, full stop.
+ *   2. deals.commission_*  — the ASSIGNED AGENT's entry on the deal's Details
+ *                            tab: either a percentage or a flat fee. This is the
+ *                            deal the agent actually struck with the client, so
+ *                            it outranks a stale legacy scalar.
+ *   3. commissions.gross_pct — the legacy flat column.
+ *   4. DEFAULTS.GROSS_PCT  — nothing entered anywhere.
  *
  * ── Backward compatibility ───────────────────────────────────────────────────
  * Existing rows use the old flat shape (gross_pct / referral_pct / broker_pct /
@@ -70,10 +85,42 @@ export function makeParticipant({ agent = null, role = 'primary', allocation_pct
   }
 }
 
-/** A single-side commission (the simple, most common case). */
-export function makeSide(key = 'sale', rate_pct = DEFAULTS.GROSS_PCT) {
+/**
+ * A single-side commission (the simple, most common case). `flat` is a flat
+ * dollar fee for the side; when it is > 0 it REPLACES the percentage rate.
+ */
+export function makeSide(key = 'sale', rate_pct = DEFAULTS.GROSS_PCT, flat = 0) {
   const label = key === 'listing' ? 'Listing side' : key === 'buyer' ? 'Buyer side' : 'Sale'
-  return { id: uid(), key, label, rate_pct, referral_pct: 0, referral_flat: 0 }
+  return { id: uid(), key, label, rate_pct, flat, referral_pct: 0, referral_flat: 0 }
+}
+
+/**
+ * The assigned agent's own commission entry from the deal's Details tab, or
+ * null when they haven't entered one. `commission_type` picks which field is
+ * live — a zero/blank amount counts as "not entered" so an untouched deal falls
+ * through to the back-office/default gross rather than computing to $0.
+ */
+export function dealCommissionEntry(deal) {
+  if (!deal) return null
+  if (deal.commission_type === 'flat') {
+    const flat = num(deal.commission_flat, 0)
+    return flat > 0 ? { type: 'flat', pct: 0, flat } : null
+  }
+  const pct = num(deal.commission_pct, 0)
+  return pct > 0 ? { type: 'percent', pct, flat: 0 } : null
+}
+
+/**
+ * A deal-level entry resolved to dollars: the entry plus the `gross` commission
+ * it produces (the flat fee itself, or the rate applied to the deal value). Null
+ * when the agent hasn't entered one. This is what the UI renders — the engine
+ * itself goes through `normalizeCommission`.
+ */
+export function describeDealCommission(deal) {
+  const entry = dealCommissionEntry(deal)
+  if (!entry) return null
+  const gross = entry.type === 'flat' ? entry.flat : num(deal?.value, 0) * entry.pct / 100
+  return { ...entry, gross: round2(gross) }
 }
 
 /**
@@ -96,13 +143,19 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
   }
 
   // Legacy flat shape (or no row yet) → upgrade to one side + participants.
-  const gross_pct    = num(commission?.gross_pct, DEFAULTS.GROSS_PCT)
+  // The agent's own entry on the deal outranks the legacy scalar (see the
+  // precedence list at the top of this file); a flat fee zeroes the rate.
+  const entry        = dealCommissionEntry(deal)
+  const gross_pct    = entry
+    ? (entry.type === 'flat' ? 0 : entry.pct)
+    : num(commission?.gross_pct, DEFAULTS.GROSS_PCT)
+  const gross_flat   = entry && entry.type === 'flat' ? entry.flat : 0
   const referral_pct = num(commission?.referral_pct, 0)
   const agent_pct    = num(commission?.agent_pct, DEFAULTS.SPLIT_PCT)
   const co_agent_pct = num(commission?.co_agent_pct, 0)
   const fee          = num(commission?.transaction_fee, 0)
 
-  const sides = [{ ...makeSide('sale', gross_pct), referral_pct }]
+  const sides = [{ ...makeSide('sale', gross_pct, gross_flat), referral_pct }]
 
   const primaryAgent = agents.find(a => a.id === deal?.agent_id) || null
   const primary = makeParticipant({ agent: primaryAgent, role: 'primary', allocation_pct: 100 })
@@ -136,7 +189,10 @@ export function computeCommission(input) {
 
   const sides = rawSides.map(s => {
     const rate = num(s.rate_pct, 0)
-    const gross = sale_price * rate / 100
+    const flat = num(s.flat, 0)
+    // A flat fee is priced independently of the sale price; the percentage rate
+    // only applies when no flat fee is set.
+    const gross = flat > 0 ? flat : sale_price * rate / 100
     const referral = num(s.referral_flat, 0) > 0
       ? num(s.referral_flat, 0)
       : gross * num(s.referral_pct, 0) / 100

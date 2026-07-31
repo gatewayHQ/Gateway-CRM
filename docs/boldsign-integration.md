@@ -182,7 +182,14 @@ When an agent picks a template on a deal's Signatures tab, the signer name/email
 The agent can edit every field before sending. **Prerequisite:** the deal must have a linked Contact (`deals.contact_id`) with an email — if a deal has no contact, client rows fall back to the template placeholder (usually blank). Link co-signers via the deal drawer's **Additional Contacts** picker so they seed with real emails.
 
 ## CRM prefill tokens
-`property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `broker_name` · `agent_name` · `agent_email` · `list_price` · `commission_pct` · `listing_start_date` · `listing_end_date` · `close_date`
+`property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `broker_name` · `agent_name` · `agent_email` · `list_price` · `commission_pct` · `commission_amount` · `listing_start_date` · `listing_end_date` · `close_date`
+
+Both commission tokens come from the agent's entry on the deal's **Details** tab
+(`deals.commission_type` / `commission_pct` / `commission_flat` — migration 0024).
+`commission_pct` fills only on a percentage deal, since a flat-fee deal has no
+rate to print; `commission_amount` is the dollar figure either way. Neither fills
+when the agent hasn't entered a commission, so an unfilled field is a prompt to
+go enter one rather than a silent `0%` on a signed agreement.
 
 ## Environment variables
 | Var | Purpose |

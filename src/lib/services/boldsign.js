@@ -6,6 +6,7 @@
 // fixes the class of bug where a caller forgot the token and got a 401.
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from '../supabase.js'
+import { describeDealCommission } from '../commission.js'
 
 async function authHeaders() {
   const { data: { session } } = await supabase.auth.getSession()
@@ -200,6 +201,7 @@ export function buildTemplateRoles({ roleList = [], signers = {}, fieldsByRole =
 export function crmTokenValues({ deal, property, contact, agent } = {}) {
   const money = (n) => (n != null && n !== '' ? `$${Number(n).toLocaleString()}` : '')
   const fullAddr = [property?.address, property?.city, property?.state, property?.zip].filter(Boolean).join(', ')
+  const dealComm = describeDealCommission(deal)
   return {
     property_address:   property?.address || deal?.prop_address || '',
     property_full:      fullAddr,
@@ -207,7 +209,11 @@ export function crmTokenValues({ deal, property, contact, agent } = {}) {
     property_state:     property?.state || '',
     property_zip:       property?.zip || '',
     list_price:         money(property?.price ?? deal?.value),
-    commission_pct:     deal?.commission_pct != null ? `${deal.commission_pct}%` : '',
+    // The agent's commission entry (deal Details tab). `commission_pct` stays
+    // percentage-only — a flat-fee deal has no rate to print on the agreement —
+    // while `commission_amount` is the dollar figure either way.
+    commission_pct:     dealComm && dealComm.type === 'percent' ? `${dealComm.pct}%` : '',
+    commission_amount:  dealComm ? money(dealComm.gross) : '',
     listing_start_date: deal?.comp_data?.listing_start || '',
     listing_end_date:   deal?.comp_data?.listing_end || deal?.expected_close_date || '',
     seller_name:        [contact?.first_name, contact?.last_name].filter(Boolean).join(' '),
