@@ -47,11 +47,14 @@ Nightly:  /api/cron?task=boldsign-sync
 - **Prefill by field ID:** a template field whose ID matches a CRM token (`property_address`, `seller_name`, `agent_name`, `broker_name`, …) is auto-filled and sent **read-only**. See `crmTokenValues()`.
 - **Embedded everywhere:** agents send via BoldSign's embedded prepare UI in-frame; clients sign via embedded signing in the portal. Requires **approved domains** in BoldSign + a paid tier.
 - **Reliability:** the central `boldsign()` client does exponential backoff + jitter on network / 429 / 5xx, and attaches an `Idempotency-Key` to writes.
+- **Document bytes never travel as base64.** A Vercel function caps request *and* response payloads at 4.5 MB and base64 inflates by ~33%, which silently limited every send to ~3.3 MB of PDF — under the size of a normal scanned disclosure packet. The browser puts the PDF in the deal's storage folder and passes a short-lived **signed URL**; the API streams it to BoldSign. Downloads work the same way in reverse (signed storage URL out). Nothing is size-limited except BoldSign's own 25 MB per-file ceiling, which is checked client-side with a real message.
+- **Every send is tracked server-side before the agent gets a send URL.** An untracked document is worse than a failed one: it reaches the client and then never updates, archives, or appears in the CRM. If the row can't be written the draft is deleted and the send is refused.
+- **Archive paths are deterministic and recorded on the row** (`signed_storage_path` / `audit_storage_path`), so a webhook redelivery overwrites instead of duplicating, and each document resolves to *its own* PDF rather than the first `signed-` file in the deal folder.
 
 ## Data model
 | Table | Purpose |
 |---|---|
-| `boldsign_documents` | one row per send: `document_id`, `deal_id`, `agent_id`, `status`, `signer_*`, `signers` jsonb, `completed_at`, `audit_trail_saved` |
+| `boldsign_documents` | one row per send: `document_id`, `deal_id`, `agent_id`, `status`, `signer_*`, `signers` jsonb, `completed_at`, `audit_trail_saved`, `signed_storage_path`, `audit_storage_path`, `last_reminded_at`, `reminder_count` |
 | `form_packets` | **the template/form catalog.** `state`, `transaction_type`, `name`, `storage_path` (plain downloadable forms) plus `boldsign_template_id`, `doc_type`, `field_tokens`, `active` (e-sign-ready entries) |
 | `boldsign_sender_identities` | per-agent send-on-behalf: `agent_id`, `email`, `status` (pending/approved/declined) |
 | `boldsign_templates` | **superseded** by `form_packets` (0019 backfills it in) — kept, not dropped, for rollback safety. Don't write new rows here. |
@@ -62,8 +65,9 @@ Signed PDFs + audit-trail PDFs are archived to the `deal-documents` bucket.
 | Action | Auth | Purpose |
 |---|---|---|
 | `send` | agent | Ad-hoc immediate send (multipart). Requires `useTextTags: true` or per-signer `tabs` — no auto-placement. |
-| `document-embed-url` | agent | Ad-hoc → embedded prepare/send URL (iframe). `useTextTags` optional; otherwise the agent places fields in BoldSign. |
-| `status` / `download` / `audit-download` / `remind` | agent | Doc status, signed PDF, audit trail PDF, reminder |
+| `document-embed-url` | agent | Ad-hoc → embedded prepare/send URL (iframe). `useTextTags` optional; otherwise the agent places fields in BoldSign. Writes the tracking row **before** returning the URL. |
+| `status` / `remind` | agent | Doc status; nudge outstanding signers (records `last_reminded_at` / `reminder_count`) |
+| `download` / `audit-download` | agent | Returns `{ url, filename }` — a 5-minute signed **storage** URL, never base64 |
 | `document-delete` | agent (sender) / admin | Remove a draft/unsigned/expired document — revokes if in-progress, then deletes in BoldSign, then removes the local row. Refuses `completed` records. |
 | `template-list` / `template-details` | agent | List templates / read a template's roles + fields |
 | `template-send` / `template-embed-url` | agent | Send from template (JSON) / embedded prepare from template |
@@ -72,7 +76,28 @@ Signed PDFs + audit-trail PDFs are archived to the `deal-documents` bucket.
 | `debug` | agent | Config sanity check |
 | _(no `action`)_ | webhook | BoldSign lifecycle events (HMAC-verified) |
 
-`getEmbeddedSignLink` for clients is minted via `GET /api/portal?action=sign-link` (portal-token validated).
+`getEmbeddedSignLink` for clients is minted via `GET /api/portal?action=sign-link`.
+
+## Client-portal signing — who may sign as whom
+A portal link is a bearer credential for **one deal**, not for one person, and a
+document's signer list normally also contains the listing agent (who
+countersigns) and sometimes the other party. Two gates therefore apply, both in
+`api/portal.js`:
+
+- **Status allow-list** (`sent`/`delivered` only). A `draft` row exists the
+  moment an agent opens the prepare screen — before fields are placed, before
+  anything is sent — so the previous deny-list (`!completed && !voided`) exposed
+  half-prepared documents, plus declined and expired ones, as "Documents to Sign".
+- **`portalSignableEmails()`** intersects the document's signers with *this deal's
+  own client contacts* (`deals.contact_id` + `deal_contacts`). Only that
+  intersection is returned in the payload and only it is accepted by the
+  sign-link minter. Authorizing on "is a signer" alone — which is what the code
+  did — let anyone holding the portal link open a signing session **as the agent**
+  and execute their signature block. Unit-tested in
+  `api/__tests__/portal-signing.test.js`.
+
+A client whose address isn't on the document simply doesn't see it in the portal;
+BoldSign's own emailed link still authenticates them independently.
 
 ## Reliability: idempotency + retry (`boldsign()`)
 - **Retryable:** network errors, `408/429/500/502/503/504`. Backoff `400·2^n ms + jitter`, honoring `Retry-After`, max 3 attempts.
@@ -169,14 +194,49 @@ The agent can edit every field before sending. **Prerequisite:** the deal must h
 - `2026-07-07_esign_transaction_layer.sql` — `boldsign_documents` + transaction layer. **Applied.**
 - `2026-07-08_boldsign_phase1.sql` — `boldsign_sender_identities` + `boldsign_templates`. **Applied.**
 - `2026-07-08_boldsign_audit_trail.sql` — `boldsign_documents.audit_trail_saved`. **Applied.**
-- `2026-07-16_form_library_boldsign_unification.sql` — adds e-sign columns to `form_packets` and backfills existing `boldsign_templates` rows. **Pending.**
-- `2026-07-17_boldsign_identity_default.sql` — `boldsign_sender_identities.is_default` + partial unique index. **Pending.**
+- **`2026-07-31_boldsign_hardening.sql` — APPLY THIS ONE.** A single idempotent
+  bundle that supersedes the four migrations below (they were all still pending,
+  which is why "Send from Template" never appeared: `form_packets` had no
+  `boldsign_template_id` column, the query failed, the error was discarded, and
+  the button was hidden) **and** adds this deploy's columns
+  (`signed_storage_path`, `audit_storage_path`, `last_reminded_at`,
+  `reminder_count`). Ends with verification `SELECT`s. Superseded, no longer
+  apply individually:
+  - `2026-07-16_form_library_boldsign_unification.sql`
+  - `2026-07-17_boldsign_identity_default.sql`
+  - `2026-07-17_form_packet_multi_file.sql`
+  - `2026-07-17_multi_contacts.sql`
+
+**Deploy order is flexible** — every read of a new column falls back when it's
+absent (with a `console.warn` naming the bundle), so shipping the app before the
+SQL degrades rather than breaks. Apply the SQL first anyway.
 
 ## Testing
 - `api/__tests__/boldsign.test.js` — retry/idempotency, `buildSignerPayload`/`requiresExplicitFieldPlacement` (retired-placement contract), `normalizeTemplateRoles` (the Roles-empty fix), `resolveOnBehalfOf` (agent identity → org-default fallback → null).
 - `api/__tests__/cron-boldsign-sync.test.js` — `detectStateFromTitle`.
 - `src/lib/services/__tests__/boldsign.test.js` — `buildTextTag`, `normalizeState`, `crmTokenValues`/`buildPrefill`, `isFillableField`.
 - Manual smoke test after deploy: Form Library → Add/Edit Packet → confirm the dialog scrolls and shows Save/Cancel → Build in BoldSign (confirms the Roles/DocumentTitle fix) → place a field and click Finish inside the embedded editor → confirm it auto-saves and closes back to the library list with the new template id and a "Sendable" badge, with no separate Save click needed → click "Rebuild in BoldSign" on that same packet and confirm it reopens the *same* template (not a new one) → send from a deal → sign in Sandbox → confirm the signed PDF + audit trail land in Documents with a "Signed by … on …" note → delete an unsigned draft from the Signatures tab filter view.
+
+## Chasing signatures (reminders)
+- **Manual:** a **Remind** button on every row awaiting signature (Signatures
+  tab). Refuses when there's nobody left to remind, and records the nudge.
+- **Automatic:** folded into the nightly `boldsign-sync` cron (no extra Vercel
+  cron slot). `shouldRemind()` bounds it deliberately — nothing before **3 days**
+  outstanding, at most one reminder every **3 days** per document, at most **4**
+  over its life, and **50** per run. A request that nags gets marked as spam.
+- The row shows **waiting Nd** (amber, red past a week) and how many reminders
+  have gone out, so the tab doubles as a follow-up queue.
+- Ledger: `boldsign_documents.last_reminded_at` / `reminder_count`. Tested in
+  `api/__tests__/cron-boldsign-sync.test.js`.
+
+## Signing order
+Parallel is the **default**. `signerOrder` was previously hard-wired to the role
+index, which forced strictly sequential signing on every template send — two
+co-buyers at the same kitchen table couldn't sign together, because the second
+signer's email wasn't sent until the first finished and the webhook landed. The
+send modal now has a **"Sign in this order"** checkbox for the cases that need it
+(client signs, then the agent countersigns); left off, everyone is notified at
+once.
 
 ## Roadmap
 1. ✅ Text-tags authoring + retired coordinate auto-placement.

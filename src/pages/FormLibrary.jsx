@@ -47,6 +47,7 @@ function UploadModal({ packet, onClose, onSaved }) {
   const [roles, setRoles] = useState([{ name: 'Seller' }, { name: 'Listing Agent' }])
   const fileRef = useRef()
   const savedFromEditorRef = useRef(false)   // guards against the editor firing "done" twice (message + redirect)
+  const savedPacketIdRef   = useRef(null)    // row created by an intermediate editor save, so the next save updates it
 
   // Takes an ALREADY-materialized array — the caller must Array.from() the live
   // FileList before resetting the input's value, or the files vanish (the state
@@ -115,12 +116,23 @@ function UploadModal({ packet, onClose, onSaved }) {
     pushToast('Template saved in BoldSign — saving to Form Library…', 'success')
     await save()
   }
+  // An intermediate Save inside the editor is NOT "finished". It used to be
+  // classified as completion, which closed the iframe and threw the admin out
+  // mid-layout — painful on a combined packet with fields across 30 pages.
+  // Persist the packet so the template id isn't lost, and leave them working.
+  const handleEditorDraftSave = async () => {
+    if (savedFromEditorRef.current) return
+    pushToast('Progress saved in BoldSign', 'info')
+    await save({ keepOpen: true })
+  }
   const handleEditorError = () => {
     setEditorUrl(null)
     pushToast('BoldSign editor closed without finishing — no changes were saved', 'info')
   }
 
-  const save = async () => {
+  // `keepOpen` is set by an intermediate editor save: persist the packet but
+  // don't close the modal or navigate the admin away from the editor.
+  const save = async ({ keepOpen = false } = {}) => {
     if (!form.state.trim()) { pushToast('State is required', 'error'); return }
     if (!form.name.trim())  { pushToast('Packet name is required', 'error'); return }
     if (isNew && !files.length) { pushToast('Add at least one PDF file', 'error'); return }
@@ -154,8 +166,11 @@ function UploadModal({ packet, onClose, onSaved }) {
         field_tokens,
         active: form.active,
       }
-      const upsert = (p) => packet?.id
-        ? supabase.from('form_packets').update(p).eq('id', packet.id).select()
+      // Target the existing row, or one this modal already created via an
+      // intermediate editor save — never insert twice for the same packet.
+      const rowId = packet?.id || savedPacketIdRef.current
+      const upsert = (p) => rowId
+        ? supabase.from('form_packets').update(p).eq('id', rowId).select()
         : supabase.from('form_packets').insert([p]).select()
       let { data, error } = await upsert(payload)
       // Graceful fallback if migration 0022 (storage_paths) hasn't been applied yet.
@@ -167,6 +182,13 @@ function UploadModal({ packet, onClose, onSaved }) {
       if (packet?.id && Array.isArray(data) && data.length === 0) {
         pushToast('Nothing was updated — the change did not persist.', 'error'); return
       }
+      // Remember the row we just created so the NEXT save updates it instead of
+      // inserting a second packet (an intermediate editor save can be followed
+      // by the final one).
+      const saved = Array.isArray(data) ? data[0] : data
+      if (saved?.id) savedPacketIdRef.current = saved.id
+
+      if (keepOpen) return          // editor still open — no toast, no close
       pushToast(isNew ? 'Form packet added' : 'Packet updated')
       onSaved()
     } catch (e) {
@@ -194,7 +216,7 @@ function UploadModal({ packet, onClose, onSaved }) {
           <div style={{ padding: '10px 24px', fontSize: 12, color: 'var(--gw-mist)', borderBottom: '1px solid var(--gw-border)' }}>
             Place fields, then click <strong>Finish</strong> in BoldSign — the template saves back to this packet automatically.
           </div>
-          <BoldSignFrame url={editorUrl} onDone={handleEditorDone} onError={handleEditorError} returnUrlMarker="boldsign-return" />
+          <BoldSignFrame url={editorUrl} onDone={handleEditorDone} onDraft={handleEditorDraftSave} onError={handleEditorError} returnUrlMarker="boldsign-return" />
         </div>
       ) : (
       <>

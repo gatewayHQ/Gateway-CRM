@@ -468,8 +468,22 @@ create table if not exists boldsign_documents (
   sent_at           timestamptz default now(),
   completed_at      timestamptz,
   audit_trail_saved boolean default false,
+  -- Where THIS document's completed PDF + audit trail were archived. Recorded
+  -- so the UI resolves a row to its own file instead of guessing by filename
+  -- (which returned the wrong PDF on any deal with several signed documents),
+  -- and so large PDFs are served as signed storage URLs rather than base64
+  -- through a serverless function (4.5 MB payload cap).
+  signed_storage_path text,
+  audit_storage_path  text,
+  -- Reminder ledger — nightly auto-reminder sweep + the manual Remind button.
+  last_reminded_at  timestamptz,
+  reminder_count    integer default 0,
   created_at        timestamptz default now()
 );
+-- Status values written by the app (deliberately NOT a check constraint: an
+-- unrecognized future BoldSign status would otherwise hard-fail the webhook,
+-- and BoldSign stops retrying after a 200):
+--   draft | sent | delivered | completed | declined | expired | voided
 
 alter table boldsign_documents enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
@@ -721,6 +735,10 @@ create index if not exists idx_boldsign_docs_deal   on boldsign_documents(deal_i
 create index if not exists idx_boldsign_docs_agent  on boldsign_documents(agent_id);
 create index if not exists idx_boldsign_docs_status on boldsign_documents(status) where status not in ('completed','voided');
 create index if not exists idx_boldsign_docs_docid  on boldsign_documents(document_id);
+-- Nightly reminder sweep + "what's still outstanding" queries: in-flight only,
+-- ordered by age.
+create index if not exists idx_boldsign_docs_awaiting on boldsign_documents(sent_at)
+  where status in ('sent','delivered');
 
 -- transaction_steps — deal checklist queries
 create index if not exists idx_txn_steps_deal  on transaction_steps(deal_id, sort_order);
@@ -1316,6 +1334,9 @@ create policy "form_packets_all" on form_packets
   for all to authenticated using (true) with check (true);
 create unique index if not exists uq_form_packets_boldsign_tid
   on form_packets(boldsign_template_id) where boldsign_template_id is not null;
+-- The send picker reads only active, template-linked rows.
+create index if not exists idx_form_packets_sendable
+  on form_packets(state, transaction_type) where boldsign_template_id is not null and active;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- DEADLINE REMINDERS (cron-sent, dedup log)

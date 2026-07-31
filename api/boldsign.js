@@ -1,4 +1,4 @@
-import { applyJsonCors, requireAgent, errorResponse, getServiceClient } from './_lib/auth.js'
+import { applyJsonCors, requireAgent, errorResponse, getServiceClient, getUserClient, SUPABASE_URL } from './_lib/auth.js'
 import closingPacketHandler from './_handlers/closing-packet.js'
 import crypto from 'node:crypto'
 
@@ -114,19 +114,142 @@ export async function boldsign(path, { method = 'GET', form, json, raw = false, 
   }
 }
 
+const DEAL_BUCKET = 'deal-documents'
+
+// ─── Document bytes ───────────────────────────────────────────────────────────
+// A send used to carry its PDF as base64 inside the JSON request body. Vercel
+// caps a serverless request at 4.5 MB and base64 adds ~33%, so anything over
+// roughly 3.3 MB of PDF failed with a bare platform 413 — which is most real
+// scanned disclosure packets. The bytes now stay in storage and are streamed to
+// BoldSign server-side, where no such cap applies.
+//
+// Three accepted forms, in priority order:
+//   1. documentUrl   — a short-lived signed storage URL the BROWSER minted. This
+//      is the primary path: the browser could only sign an object its own RLS
+//      lets it read, so authorization is inherently the caller's and no server
+//      credentials are involved at all.
+//   2. documentPath  — read with the CALLER'S credentials (never the service
+//      key, which would happily return another agent's deal documents).
+//   3. documentBase64 — small/legacy callers.
+//
+// SECURITY: both caller-supplied forms are constrained.
+//   • documentUrl must be a signed-object URL on THIS Supabase project's
+//     deal-documents bucket — a strict prefix match, so this cannot be turned
+//     into a request against an arbitrary or internal host (SSRF).
+//   • documentPath is shape-restricted to a single deal folder: no traversal,
+//     no other bucket.
+const DEAL_DOC_PATH_RE = /^deal-[0-9a-f-]{36}\/[^/\\]{1,255}$/i
+
+function badRequest(message) { const e = new Error(message); e.status = 400; return e }
+
+// BoldSign rejects a non-PDF with an opaque error, and the ad-hoc send modal's
+// drag-and-drop bypasses its own `accept=".pdf"` filter. Check the magic bytes
+// and say something useful instead.
+function assertPdf(buffer, label) {
+  if (buffer.length < 5 || buffer.subarray(0, 5).toString('latin1') !== '%PDF-') {
+    throw badRequest(`"${label || 'That file'}" is not a PDF. Convert it to PDF and try again.`)
+  }
+  if (!buffer.length) throw badRequest('The document is empty.')
+  return buffer
+}
+
+// Exported for unit tests: is this a signed URL on our own deal-documents bucket?
+export function isOwnSignedStorageUrl(url, supabaseUrl = SUPABASE_URL) {
+  const prefix = `${String(supabaseUrl).replace(/\/$/, '')}/storage/v1/object/sign/${DEAL_BUCKET}/`
+  return typeof url === 'string' && url.startsWith(prefix)
+}
+
+async function resolveDocumentBytes(req, { documentUrl, documentPath, documentBase64, documentName }) {
+  if (documentUrl) {
+    if (!isOwnSignedStorageUrl(documentUrl)) {
+      throw badRequest('documentUrl must be a signed URL for this project\'s deal-documents bucket')
+    }
+    let r
+    try { r = await fetch(documentUrl) }
+    catch (e) { throw badRequest(`Could not read that document from storage: ${e.message}`) }
+    if (!r.ok) throw badRequest(`Could not read that document from storage (HTTP ${r.status}) — the link may have expired`)
+    return assertPdf(Buffer.from(await r.arrayBuffer()), documentName)
+  }
+  if (documentPath) {
+    if (!DEAL_DOC_PATH_RE.test(documentPath)) {
+      throw badRequest('documentPath must be a deal document path (deal-<uuid>/<filename>)')
+    }
+    const asCaller = getUserClient(req)
+    const { data, error } = await asCaller.storage.from(DEAL_BUCKET).download(documentPath)
+    if (error || !data) {
+      throw badRequest(`Could not read that document from storage${error?.message ? `: ${error.message}` : ''}`)
+    }
+    return assertPdf(Buffer.from(await data.arrayBuffer()), documentName || documentPath.split('/').pop())
+  }
+  if (documentBase64) {
+    return assertPdf(Buffer.from(documentBase64, 'base64'), documentName)
+  }
+  throw badRequest('documentUrl, documentPath or documentBase64 required')
+}
+
+// ─── Archiving ────────────────────────────────────────────────────────────────
+// ─── Template listing ─────────────────────────────────────────────────────────
+// BoldSign's /template/list is paginated at 100 max. Reading only page 1 and
+// treating it as the complete set is dangerous: the nightly drift sync
+// DEACTIVATES any catalog entry whose template is "missing", so the moment the
+// account passed 100 templates every packet on page 2+ would be silently
+// switched off and vanish from the send picker.
+//
+// Returns { templates, complete }. `complete: false` means the walk was cut
+// short (runaway guard) and callers MUST NOT infer absence from it.
+const TEMPLATE_PAGE_SIZE = 100
+const TEMPLATE_PAGE_LIMIT = 50            // 5,000 templates — a runaway guard, not a real limit
+
+export async function listAllTemplates() {
+  const templates = []
+  for (let page = 1; page <= TEMPLATE_PAGE_LIMIT; page++) {
+    const data  = await boldsign(`/template/list?page=${page}&pageSize=${TEMPLATE_PAGE_SIZE}`)
+    const batch = data.result || data.templates || []
+    templates.push(...batch)
+    if (batch.length < TEMPLATE_PAGE_SIZE) return { templates, complete: true }
+  }
+  console.warn(`[boldsign] template list hit the ${TEMPLATE_PAGE_LIMIT}-page guard — treating as incomplete`)
+  return { templates, complete: false }
+}
+
 // Pull a BoldSign PDF (signed document or audit trail) and archive it into the
 // deal-documents bucket. Best-effort — returns { storagePath, size } or null.
-async function archiveBoldsignPdf(supabase, { path, dealId, filename }) {
+//
+// The path is DETERMINISTIC (derived from the document id, not Date.now()) and
+// upserted. Two consequences, both deliberate:
+//   • a webhook redelivery overwrites the same object instead of adding another
+//     copy of an 8 MB PDF to storage on every retry;
+//   • the row can record exactly where ITS file lives, so the UI stops guessing
+//     by filename — which returned the wrong PDF whenever a deal had more than
+//     one signed document.
+// The document-id suffix keeps the name readable while staying unique.
+export function archivePath({ dealId, documentId, baseName, kind }) {
+  const slug = String(baseName || 'document')
+    .replace(/\.pdf$/i, '')
+    .replace(/[^\w.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60) || 'document'
+  return `deal-${dealId}/${kind}-${slug}-${String(documentId).slice(0, 8)}.pdf`
+}
+
+async function archiveBoldsignPdf(supabase, { path, storagePath }) {
   try {
     const r = await boldsign(path, { raw: true })
     if (!r.ok) return null
     const buf = await r.arrayBuffer()
-    const storagePath = `deal-${dealId}/${Date.now()}-${filename}`
-    const { error } = await supabase.storage.from('deal-documents').upload(
-      storagePath, Buffer.from(buf), { contentType: 'application/pdf', upsert: false }
+    if (!buf.byteLength) return null
+    const { error } = await supabase.storage.from(DEAL_BUCKET).upload(
+      storagePath, Buffer.from(buf), { contentType: 'application/pdf', upsert: true }
     )
-    return error ? null : { storagePath, size: buf.byteLength }
-  } catch { return null }
+    if (error) {
+      console.error(`[boldsign] archive upload failed for ${storagePath}: ${error.message}`)
+      return null
+    }
+    return { storagePath, size: buf.byteLength }
+  } catch (e) {
+    console.error(`[boldsign] archive failed for ${storagePath}: ${e.message}`)
+    return null
+  }
 }
 
 // Record an archived BoldSign PDF in document_versions so it carries real CRM
@@ -136,6 +259,18 @@ async function archiveBoldsignPdf(supabase, { path, dealId, filename }) {
 // Best-effort — never throws.
 async function recordDocumentVersion(supabase, { dealId, documentName, storagePath, size, pinnedAs, note }) {
   try {
+    // Idempotence: the archive path is deterministic, so a webhook redelivery
+    // arrives with a storage_path we've already recorded. Without this guard
+    // each retry added another version row (v1, v2, v3…) for the same bytes and
+    // moved the 'signed' pin around.
+    const { data: already } = await supabase
+      .from('document_versions')
+      .select('id')
+      .eq('deal_id', dealId)
+      .eq('storage_path', storagePath)
+      .limit(1)
+    if (already?.length) return
+
     const { data: existing } = await supabase
       .from('document_versions')
       .select('version_num')
@@ -154,7 +289,45 @@ async function recordDocumentVersion(supabase, { dealId, documentName, storagePa
       size, mime_type: 'application/pdf', version_num: nextVersion,
       pinned_as: pinnedAs || null, source: 'boldsign', note: note || null,
     }])
-  } catch { /* best-effort — the storage upload already succeeded */ }
+  } catch (e) {
+    // Best-effort by design — the storage upload already succeeded, and a
+    // metadata-only problem must never 500 a webhook (BoldSign would retry).
+    // Logged so a persistent failure is greppable in the function logs instead
+    // of invisible forever.
+    console.error(`[boldsign] recordDocumentVersion failed for ${storagePath}: ${e.message}`)
+  }
+}
+
+// ─── Send tracking ────────────────────────────────────────────────────────────
+// One boldsign_documents row per send, written server-side with the service key
+// on EVERY send path (ad-hoc and template) before the caller is handed a send
+// URL. Returns true on success; the caller decides whether an untracked send is
+// acceptable (it isn't — an untracked document gets emailed to a client and then
+// silently never updates, archives, or appears in the Signatures tab).
+//
+// `signers` is the normalized signer array; both naming conventions are accepted
+// because the ad-hoc flow uses {name,email} and the template flow uses
+// {signerName,signerEmail}.
+export async function trackDocument(supabase, { dealId, agentId, documentId, signers, documentName, subject, status }) {
+  const list  = Array.isArray(signers) ? signers : []
+  const names = list.map(s => s?.name || s?.signerName).filter(Boolean)
+  const mails = list.map(s => s?.email || s?.signerEmail).filter(Boolean)
+  const { error } = await supabase.from('boldsign_documents').insert([{
+    deal_id:       dealId,
+    agent_id:      agentId || null,
+    document_id:   documentId,
+    signer_name:   names.join(', '),
+    signer_email:  mails.join(', '),
+    document_name: documentName || 'Document',
+    subject:       subject || null,
+    signers:       list,
+    status:        status || 'sent',
+  }])
+  if (error) {
+    console.error(`[boldsign] FAILED to track document ${documentId} on deal ${dealId}: ${error.message}`)
+    return false
+  }
+  return true
 }
 
 // ─── Field placement ─────────────────────────────────────────────────────────
@@ -357,8 +530,7 @@ export default async function handler(req, res) {
 
   try {
     if (body.action === 'send') {
-      const { signers, documentBase64, documentName, emailSubject, useTextTags, textTagDefinitions } = body
-      if (!documentBase64) return res.status(400).json({ error: 'documentBase64 required' })
+      const { signers, documentUrl, documentPath, documentBase64, documentName, emailSubject, useTextTags, textTagDefinitions, deal_id } = body
       const invalid = validateSigners(signers)
       if (invalid) return res.status(400).json({ error: invalid })
       // No prepare step here — fields must come from text tags or explicit tabs.
@@ -370,7 +542,7 @@ export default async function handler(req, res) {
       )
       const hasOrder = orderedSigners.some(s => Number(s.routingOrder || 1) !== 1)
 
-      const pdfBuffer     = Buffer.from(documentBase64, 'base64')
+      const pdfBuffer     = await resolveDocumentBytes(req, { documentUrl, documentPath, documentBase64, documentName })
       const signerPayload = buildSignerPayload(orderedSigners)
 
       // Send AS the acting agent when they have an approved sender identity, so
@@ -394,6 +566,17 @@ export default async function handler(req, res) {
 
       const data = await boldsign('/document/send', { method: 'POST', form })
 
+      // Track it against the deal so status updates, archiving and the
+      // Signatures tab all work — this path previously created a document
+      // BoldSign knew about and the CRM did not.
+      if (deal_id && data.documentId) {
+        await trackDocument(getServiceClient(), {
+          dealId: deal_id, agentId: actor.agent.id, documentId: data.documentId,
+          signers: orderedSigners, documentName: documentName || 'Document',
+          subject: emailSubject || null, status: 'sent',
+        })
+      }
+
       return res.json({
         envelopeId: data.documentId,   // alias for app compatibility
         documentId: data.documentId,
@@ -406,14 +589,13 @@ export default async function handler(req, res) {
     // from the PDF's {{...}} tags; otherwise the agent places fields visually
     // in the PreparePage — no coordinates are guessed here either way.
     if (body.action === 'document-embed-url') {
-      const { signers, documentBase64, documentName, emailSubject, redirectUrl, useTextTags, textTagDefinitions } = body
-      if (!documentBase64) return res.status(400).json({ error: 'documentBase64 required' })
+      const { signers, documentUrl, documentPath, documentBase64, documentName, emailSubject, redirectUrl, useTextTags, textTagDefinitions, deal_id } = body
       const invalidEmbed = validateSigners(signers)
       if (invalidEmbed) return res.status(400).json({ error: invalidEmbed })
 
       const orderedSigners = [...signers].sort((a, b) => Number(a.routingOrder || 1) - Number(b.routingOrder || 1))
       const hasOrder      = orderedSigners.some(s => Number(s.routingOrder || 1) !== 1)
-      const pdfBuffer     = Buffer.from(documentBase64, 'base64')
+      const pdfBuffer     = await resolveDocumentBytes(req, { documentUrl, documentPath, documentBase64, documentName })
       const signerPayload = buildSignerPayload(orderedSigners)
       let onBehalfOf = null
       try { onBehalfOf = await resolveOnBehalfOf(getServiceClient(), actor.agent.id) } catch { /* default sender */ }
@@ -434,7 +616,34 @@ export default async function handler(req, res) {
       form.append('Files', new Blob([pdfBuffer], { type: 'application/pdf' }), documentName || 'document.pdf')
 
       const data = await boldsign('/document/createEmbeddedRequestUrl', { method: 'POST', form })
-      return res.json({ url: data.sendUrl || data.embeddedSendUrl || data.url || null, documentId: data.documentId || null })
+      const url  = data.sendUrl || data.embeddedSendUrl || data.url || null
+
+      // Track the draft HERE, before returning the URL. This used to be an
+      // unchecked insert in the browser after the URL came back, which lost
+      // documents two ways: a failed insert left a document BoldSign would
+      // email with no CRM record at all, and an agent who clicked Send quickly
+      // could have the Sent webhook arrive first — it found no row, returned
+      // 200, and BoldSign never redelivered, so the document was stuck
+      // untracked forever. Server-side and ordered before the URL, neither can
+      // happen. Matches what template-embed-url already did.
+      let tracked = false
+      if (deal_id && data.documentId) {
+        tracked = await trackDocument(getServiceClient(), {
+          dealId: deal_id, agentId: actor.agent.id, documentId: data.documentId,
+          signers: orderedSigners, documentName: documentName || 'Document',
+          subject: emailSubject || null, status: 'draft',
+        })
+        if (!tracked) {
+          // Don't leave an untrackable draft behind for the agent to trip over.
+          // It has not been sent to anyone at this point.
+          try { await boldsign(`/document/delete?documentId=${encodeURIComponent(data.documentId)}&deletePermanently=true`, { method: 'DELETE' }) }
+          catch { /* best-effort cleanup */ }
+          return res.status(500).json({
+            error: 'Could not record this document against the deal, so it was not opened for sending. Nothing was sent — please try again.',
+          })
+        }
+      }
+      return res.json({ url, documentId: data.documentId || null, tracked })
     }
 
     // Embedded SIGNING: a URL to load in an iframe so a signer completes the
@@ -461,34 +670,92 @@ export default async function handler(req, res) {
       })
     }
 
-    if (body.action === 'download') {
+    // Signed PDF / compliance audit trail. Returns a short-lived SIGNED STORAGE
+    // URL, never base64 — a Vercel function response is capped at 4.5 MB, so
+    // base64 made any signed packet over ~3.3 MB undownloadable. The webhook
+    // normally archived it already; if not (audit trail lagging, webhook missed,
+    // pre-existing row), fetch from BoldSign, archive it now, and hand back a
+    // URL to that. Either way the row records where ITS file is, so nothing is
+    // resolved by filename guessing.
+    if (body.action === 'download' || body.action === 'audit-download') {
+      const isAudit = body.action === 'audit-download'
       const id = body.envelopeId || body.documentId
       if (!id) return res.status(400).json({ error: 'documentId required' })
-      // BoldSign returns the signed PDF bytes directly (not a JSON url).
-      const r = await boldsign(`/document/download?documentId=${encodeURIComponent(id)}`, { raw: true })
-      if (!r.ok) return res.status(400).json({ error: 'Completed PDF not available' })
-      const buffer = await r.arrayBuffer()
-      return res.json({
-        base64:      Buffer.from(buffer).toString('base64'),
-        contentType: 'application/pdf',
+
+      const svc = getServiceClient()
+      // Tolerate a database where the archive-path columns aren't there yet, so
+      // the app and the SQL bundle can be deployed in either order: fall back to
+      // the base columns and take the fetch-from-BoldSign path below.
+      let { data: record, error: recErr } = await svc.from('boldsign_documents')
+        .select('id, deal_id, document_name, signed_storage_path, audit_storage_path')
+        .eq('document_id', id).maybeSingle()
+      if (recErr) {
+        console.warn(`[boldsign] archive-path columns unavailable (${recErr.message}) — falling back; apply 2026-07-31_boldsign_hardening.sql`)
+        ;({ data: record } = await svc.from('boldsign_documents')
+          .select('id, deal_id, document_name')
+          .eq('document_id', id).maybeSingle())
+      }
+      if (!record) return res.status(404).json({ error: 'Document not found' })
+      if (!record.deal_id) return res.status(400).json({ error: 'This document is not attached to a deal' })
+
+      const column  = isAudit ? 'audit_storage_path' : 'signed_storage_path'
+      const sign    = (path) => svc.storage.from(DEAL_BUCKET).createSignedUrl(path, 300, { download: path.split('/').pop() })
+
+      // 1. Already archived → sign the stored copy.
+      if (record[column]) {
+        const { data, error } = await sign(record[column])
+        if (data?.signedUrl) return res.json({ url: data.signedUrl, filename: record[column].split('/').pop() })
+        console.warn(`[boldsign] stored ${column} unreadable (${error?.message}) — re-archiving ${id}`)
+      }
+
+      // 2. Not archived (or the object went missing) → pull, archive, sign.
+      const storagePath = archivePath({
+        dealId: record.deal_id, documentId: id,
+        baseName: record.document_name, kind: isAudit ? 'audit' : 'signed',
       })
+      const archived = await archiveBoldsignPdf(svc, {
+        path: isAudit
+          ? `/document/downloadAuditLog?documentId=${encodeURIComponent(id)}`
+          : `/document/download?documentId=${encodeURIComponent(id)}`,
+        storagePath,
+      })
+      if (!archived) {
+        return res.status(400).json({
+          error: isAudit
+            ? 'Audit trail not available yet — BoldSign generates it shortly after the last signature.'
+            : 'Completed PDF not available yet.',
+        })
+      }
+      const { error: pathErr } = await svc.from('boldsign_documents').update({
+        [column]: archived.storagePath,
+        ...(isAudit ? { audit_trail_saved: true } : {}),
+      }).eq('id', record.id)
+      if (pathErr) console.warn(`[boldsign] could not record ${column} for ${id}: ${pathErr.message}`)
+
+      const { data } = await sign(archived.storagePath)
+      if (!data?.signedUrl) return res.status(500).json({ error: 'Archived the file but could not create a download link' })
+      return res.json({ url: data.signedUrl, filename: archived.storagePath.split('/').pop() })
     }
 
-    if (body.action === 'audit-download') {
-      const id = body.envelopeId || body.documentId
-      if (!id) return res.status(400).json({ error: 'documentId required' })
-      // Compliance audit trail (who/when/IP/hash). Ready once the doc completes.
-      const r = await boldsign(`/document/downloadAuditLog?documentId=${encodeURIComponent(id)}`, { raw: true })
-      if (!r.ok) return res.status(400).json({ error: 'Audit trail not available yet' })
-      const buffer = await r.arrayBuffer()
-      return res.json({ base64: Buffer.from(buffer).toString('base64'), contentType: 'application/pdf' })
-    }
-
+    // Nudge outstanding signers. Records the nudge so the nightly auto-reminder
+    // sweep and the UI both know when this document was last chased.
     if (body.action === 'remind') {
       const id = body.envelopeId || body.documentId
       if (!id) return res.status(400).json({ error: 'documentId required' })
+      const svc = getServiceClient()
+      const { data: record } = await svc.from('boldsign_documents')
+        .select('id, status, reminder_count').eq('document_id', id).maybeSingle()
+      if (record && !['sent', 'delivered'].includes(record.status)) {
+        return res.status(400).json({ error: `This document is ${record.status} — there is nobody left to remind.` })
+      }
       await boldsign(`/document/remind?documentId=${encodeURIComponent(id)}`, { method: 'POST', json: {} })
-      return res.json({ ok: true })
+      if (record) {
+        await svc.from('boldsign_documents').update({
+          last_reminded_at: new Date().toISOString(),
+          reminder_count:   (record.reminder_count || 0) + 1,
+        }).eq('id', record.id)
+      }
+      return res.json({ ok: true, remindedAt: new Date().toISOString() })
     }
 
     // Delete a draft/unsigned/expired document to keep the Signatures tab tidy.
@@ -533,13 +800,29 @@ export default async function handler(req, res) {
     if (body.action === 'identity-create') {
       if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
       const { agentId, name, email } = body
-      if (!email) return res.status(400).json({ error: 'email required' })
+      if (!email)   return res.status(400).json({ error: 'email required' })
+      // agent_id is NOT NULL and is the upsert's conflict target. Passing null
+      // (as this did on `agentId || null`) violated the constraint, and because
+      // the result was never inspected the API still answered { ok: true } —
+      // BoldSign emailed the agent an approval link while the CRM kept showing
+      // "not registered", so admins re-invited in a loop and every send from
+      // that agent went out from the raw API account instead of their name.
+      if (!agentId) return res.status(400).json({ error: 'agentId required — an identity must belong to an agent' })
+
       await boldsign('/senderIdentities/create', { method: 'POST', json: { Name: name || email, Email: email } })
+
       const svc = getServiceClient()
-      await svc.from('boldsign_sender_identities').upsert({
-        agent_id: agentId || null, email, name: name || null,
+      const { error } = await svc.from('boldsign_sender_identities').upsert({
+        agent_id: agentId, email, name: name || null,
         status: 'pending', updated_at: new Date().toISOString(),
       }, { onConflict: 'agent_id' })
+      if (error) {
+        // BoldSign accepted the invitation but we couldn't record it. Say so
+        // plainly — silence here is what made this bug invisible for so long.
+        return res.status(500).json({
+          error: `BoldSign sent the approval email to ${email}, but the CRM could not save the identity: ${error.message}`,
+        })
+      }
       return res.json({ ok: true, email, status: 'pending' })
     }
 
@@ -618,8 +901,8 @@ export default async function handler(req, res) {
 
     // ─── Templates ────────────────────────────────────────────────────────────
     if (body.action === 'template-list') {
-      const data = await boldsign('/template/list?page=1&pageSize=100')
-      return res.json({ templates: data.result || data.templates || [] })
+      const { templates, complete } = await listAllTemplates()
+      return res.json({ templates, complete })
     }
 
     // Read a template's roles + form fields so the app can render one signer
@@ -718,20 +1001,21 @@ export default async function handler(req, res) {
       }
       const data = await boldsign(`/template/send?templateId=${encodeURIComponent(templateId)}`, { method: 'POST', json: payload })
 
-      if (deal_id) {
-        await svc.from('boldsign_documents').insert([{
-          deal_id,
-          agent_id:      actor.agent.id,
-          document_id:   data.documentId,
-          signer_name:   roles.map(r => r.signerName).filter(Boolean).join(', '),
-          signer_email:  roles.map(r => r.signerEmail).filter(Boolean).join(', '),
-          document_name: documentName || emailSubject || 'Document',
-          subject:       emailSubject || null,
-          signers:       roles,
-          status:        'sent',
-        }])
+      // Already sent at this point, so a tracking failure can't be undone by
+      // deleting the document — surface it instead of failing silently, and tell
+      // the agent the client DOES have it.
+      let tracked = true
+      if (deal_id && data.documentId) {
+        tracked = await trackDocument(svc, {
+          dealId: deal_id, agentId: actor.agent.id, documentId: data.documentId,
+          signers: roles, documentName: documentName || emailSubject || 'Document',
+          subject: emailSubject || null, status: 'sent',
+        })
       }
-      return res.json({ documentId: data.documentId, envelopeId: data.documentId, status: 'sent' })
+      return res.json({
+        documentId: data.documentId, envelopeId: data.documentId, status: 'sent', tracked,
+        ...(tracked ? {} : { warning: 'Sent to the signers, but it could not be recorded on this deal — it will not appear in the Signatures tab. Tell your admin.' }),
+      })
     }
 
     // Like template-send, but returns an embedded BoldSign "prepare" URL where
@@ -761,17 +1045,18 @@ export default async function handler(req, res) {
       // A draft document may be created immediately; track it so status updates
       // land when the agent finishes and BoldSign fires the Sent webhook.
       if (deal_id && data.documentId) {
-        await svc.from('boldsign_documents').insert([{
-          deal_id,
-          agent_id:      actor.agent.id,
-          document_id:   data.documentId,
-          signer_name:   roles.map(r => r.signerName).filter(Boolean).join(', '),
-          signer_email:  roles.map(r => r.signerEmail).filter(Boolean).join(', '),
-          document_name: documentName || emailSubject || 'Document',
-          subject:       emailSubject || null,
-          signers:       roles,
-          status:        'draft',
-        }])
+        const tracked = await trackDocument(svc, {
+          dealId: deal_id, agentId: actor.agent.id, documentId: data.documentId,
+          signers: roles, documentName: documentName || emailSubject || 'Document',
+          subject: emailSubject || null, status: 'draft',
+        })
+        if (!tracked) {
+          try { await boldsign(`/document/delete?documentId=${encodeURIComponent(data.documentId)}&deletePermanently=true`, { method: 'DELETE' }) }
+          catch { /* best-effort cleanup of the untrackable draft */ }
+          return res.status(500).json({
+            error: 'Could not record this document against the deal, so it was not opened for sending. Nothing was sent — please try again.',
+          })
+        }
       }
       return res.json({ url: data.sendUrl || data.embeddedSendUrl || data.url || null, documentId: data.documentId || null })
     }
@@ -824,7 +1109,10 @@ async function handleWebhook(req, res) {
 
     const documentId = doc?.documentId || doc?.id || body?.documentId
     const rawStatus  = doc?.status || eventName
-    if (!documentId) return res.status(200).json({ received: true, note: 'No document id' })
+    if (!documentId) {
+      console.error('[boldsign] webhook with no document id — payload shape may have changed', { eventName })
+      return res.status(200).json({ received: true, note: 'No document id' })
+    }
 
     const status      = normalizeStatus(rawStatus)
     const completedAt = toIso(doc?.completedDate || doc?.signedDate || null)
@@ -835,11 +1123,48 @@ async function handleWebhook(req, res) {
       .eq('document_id', documentId)
       .maybeSingle()
 
-    if (!record) return res.status(200).json({ received: true, note: 'Document not tracked' })
+    if (!record) {
+      // Every CRM send path now writes its row server-side BEFORE handing out a
+      // send URL, so this should only be a document created directly in the
+      // BoldSign dashboard. Logged loudly because the alternative reading is
+      // that a send path regressed — and BoldSign will not redeliver after a 200.
+      console.error(`[boldsign] webhook for untracked document ${documentId} (${eventName}) — not created by this CRM, or a send path failed to track`)
+      return res.status(200).json({ received: true, note: 'Document not tracked' })
+    }
+
+    // IDEMPOTENCE GATE. BoldSign redelivers on any non-2xx, and this handler
+    // does enough work (two PDF downloads + two uploads) to exceed the function
+    // timeout on a large packet — which guaranteed a retry, which previously
+    // duplicated every archive, version row and notification. Completed is
+    // terminal: once recorded, later deliveries are acknowledged and dropped.
+    if (record.status === 'completed' && status === 'completed') {
+      return res.status(200).json({ received: true, documentId, status, note: 'Already processed' })
+    }
 
     const patch = { status }
     if (completedAt) patch.completed_at = completedAt
     await supabase.from('boldsign_documents').update(patch).eq('document_id', documentId)
+
+    // A decline or expiry needs the agent's attention as much as a completion
+    // does — previously both updated the row and told nobody, so a declined
+    // listing agreement sat silently and an expired one was indistinguishable
+    // from one the agent had cancelled themselves.
+    if (status === 'declined' || status === 'expired') {
+      const deal = record.deals
+      if (deal?.agent_id) {
+        const declined = status === 'declined'
+        await supabase.from('agent_notifications').insert([{
+          agent_id:    deal.agent_id,
+          deal_id:     record.deal_id,
+          envelope_id: documentId,
+          title:       declined ? 'Document Declined' : 'Signature Request Expired',
+          message:     declined
+            ? `${record.signer_name || 'A signer'} declined "${record.document_name || 'Document'}" for ${deal.title || 'your deal'}. Follow up with them and send a corrected copy.`
+            : `"${record.document_name || 'Document'}" for ${deal.title || 'your deal'} expired before everyone signed. Send it again to restart.`,
+          type:        declined ? 'document_declined' : 'document_expired',
+        }])
+      }
+    }
 
     if (status === 'completed') {
       // Archive the signed PDF AND the compliance audit trail into deal-documents
@@ -852,9 +1177,16 @@ async function handleWebhook(req, res) {
       const baseName   = (record.document_name || 'document').replace(/\.pdf$/i, '')
       const signerNote = `Signed by ${record.signer_name || 'signer'} on ${(completedAt || new Date().toISOString()).slice(0, 10)}`
 
+      // A document not attached to a deal has nowhere to be archived — the old
+      // code happily uploaded to a "deal-null/" folder no deal would ever list.
+      if (!record.deal_id) {
+        console.warn(`[boldsign] completed document ${documentId} has no deal_id — skipping archive`)
+        return res.status(200).json({ received: true, documentId, status, note: 'No deal to archive into' })
+      }
+
       const signed = await archiveBoldsignPdf(supabase, {
         path: `/document/download?documentId=${encodeURIComponent(documentId)}`,
-        dealId: record.deal_id, filename: `signed-${baseName}.pdf`,
+        storagePath: archivePath({ dealId: record.deal_id, documentId, baseName, kind: 'signed' }),
       })
       if (signed) {
         await recordDocumentVersion(supabase, {
@@ -866,7 +1198,7 @@ async function handleWebhook(req, res) {
 
       const audit = await archiveBoldsignPdf(supabase, {
         path: `/document/downloadAuditLog?documentId=${encodeURIComponent(documentId)}`,
-        dealId: record.deal_id, filename: `audit-${baseName}.pdf`,
+        storagePath: archivePath({ dealId: record.deal_id, documentId, baseName, kind: 'audit' }),
       })
       if (audit) {
         await recordDocumentVersion(supabase, {
@@ -876,11 +1208,26 @@ async function handleWebhook(req, res) {
         })
       }
 
-      // Record whether the audit trail is on file so the UI can offer a manual
-      // fetch if it wasn't ready at webhook time.
-      await supabase.from('boldsign_documents')
-        .update({ audit_trail_saved: Boolean(audit) })
+      // Record WHERE each file landed, not just that it did. The Signatures tab
+      // resolves a download from these columns; it used to pattern-match
+      // "signed-" against the deal's whole storage folder and returned the first
+      // hit, i.e. the wrong contract on any deal with more than one signed doc.
+      const { error: pathErr } = await supabase.from('boldsign_documents')
+        .update({
+          audit_trail_saved:   Boolean(audit),
+          ...(signed ? { signed_storage_path: signed.storagePath } : {}),
+          ...(audit  ? { audit_storage_path:  audit.storagePath }  : {}),
+        })
         .eq('document_id', documentId)
+      if (pathErr) {
+        // Non-fatal: the PDFs are archived and the download path re-resolves
+        // them on demand. Almost always "column does not exist" on a database
+        // that hasn't had 2026-07-31_boldsign_hardening.sql applied yet.
+        console.warn(`[boldsign] could not record archive paths for ${documentId}: ${pathErr.message}`)
+        await supabase.from('boldsign_documents')
+          .update({ audit_trail_saved: Boolean(audit) })
+          .eq('document_id', documentId)
+      }
 
       const deal = record.deals
       if (deal?.agent_id) {

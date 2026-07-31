@@ -3,6 +3,10 @@
   "outputDirectory": "dist",
   "installCommand": "npm ci --no-audit --no-fund",
   "framework": "vite",
+  "functions": {
+    "api/boldsign.js": { "maxDuration": 60 },
+    "api/cron.js":     { "maxDuration": 60 }
+  },
   "crons": [
     { "path": "/api/cron?task=sequence",       "schedule": "0 9 * * *" },
     { "path": "/api/cron?task=reminders",      "schedule": "0 8 * * *" },
