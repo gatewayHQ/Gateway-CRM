@@ -230,6 +230,32 @@ SQL degrades rather than breaks. Apply the SQL first anyway.
 - Ledger: `boldsign_documents.last_reminded_at` / `reminder_count`. Tested in
   `api/__tests__/cron-boldsign-sync.test.js`.
 
+## Skipping a role — BoldSign's post-removal index shift
+A template role the agent leaves blank is dropped via `roleRemovalIndices`.
+**BoldSign applies those removals first and then expects each supplied role's
+`roleIndex` to be its position in the REMAINING list**, not its original index in
+the template. Verified against the live API on the 5-role Iowa Agency Packet
+(Seller, Listing Agent, Co-seller, Co-listing agent, Buyer):
+
+| sent | result |
+|---|---|
+| `roles [1,2]` + `removals [3,4,5]` | accepted |
+| `roles [1,2,4]` + `removals [3,5]` | `SignerName or SignerEmail is missing in roles` |
+
+In the second case role 3 is dropped, so only three roles remain and index 4
+addresses nothing — the third remaining role ends up with no signer. Removal
+indices stay in the template's original numbering (that's how BoldSign identifies
+what to drop); surviving roles are shifted down by the number of removals below
+them, so `[1,2,4]` becomes `[1,2,3]`.
+
+`buildTemplateRoles()` (`src/lib/services/boldsign.js`) owns this and is
+property-tested across all 31 skip patterns of a 5-role template: the emitted
+indices must always be a dense `1..N`. Roles before the first removal are
+unchanged, so payloads that already worked are unaffected.
+
+This only became reachable once co-agent seeding started filling a *middle* role
+(#56) — before that, blanks were always trailing.
+
 ## Signing order
 Parallel is the **default**. `signerOrder` was previously hard-wired to the role
 index, which forced strictly sequential signing on every template send — two

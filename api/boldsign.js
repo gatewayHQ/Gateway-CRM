@@ -101,11 +101,21 @@ export async function boldsign(path, { method = 'GET', form, json, raw = false, 
     let data = {}
     try { data = text ? JSON.parse(text) : {} } catch { data = { message: text } }
     if (!r.ok) {
-      const msg = data?.error
-                || data?.message
-                || (data?.errors && JSON.stringify(data.errors))
-                || `BoldSign API ${r.status}`
-      const err = new Error(msg)
+      // Keep BoldSign's per-field validation map, not just its summary line. A
+      // message like "SignerName or SignerEmail is missing in roles" says nothing
+      // about WHICH role; the `errors` object does, and losing it turned a
+      // one-look diagnosis into guesswork.
+      const summary = data?.error
+                   || data?.message
+                   || (data?.errors && JSON.stringify(data.errors))
+                   || `BoldSign API ${r.status}`
+      const detail = (data?.errors && (data?.error || data?.message))
+        ? ` — ${JSON.stringify(data.errors)}`
+        : ''
+      // Full body to the function log; 4xx is never retried, so this is the only
+      // record of what BoldSign objected to.
+      console.error(`[boldsign] ${r.status} on ${method} ${path}: ${text?.slice(0, 2000)}`)
+      const err = new Error(`${summary}${detail}`)
       err.status = r.status
       err.data   = data
       throw err
