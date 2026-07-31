@@ -262,36 +262,64 @@ end $$;
 
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- 8. VERIFICATION — run these and check the output before deploying the app
+-- 8. VERIFICATION
+--
+-- ONE query on purpose. The Supabase SQL Editor only renders the result of the
+-- LAST statement in a multi-statement run, so separate verification SELECTs
+-- execute invisibly — including the deal_contacts legacy check, which is the one
+-- that most needs eyeballing. Everything is unioned into a single result set.
+--
+-- Read the `result` column: every row should say 'ok' (or a count). Anything
+-- reading MISSING / PUBLIC needs action before the app is trusted.
 -- ═════════════════════════════════════════════════════════════════════════════
-
--- (a) Every column this deploy needs. Expect 9 rows, all 'OK'.
-select 'OK' as status, table_name, column_name
-from information_schema.columns
-where table_schema = 'public'
-  and (table_name, column_name) in (
-    ('form_packets','boldsign_template_id'), ('form_packets','doc_type'),
-    ('form_packets','field_tokens'),         ('form_packets','active'),
+with expected(tbl, col) as (
+  values
+    ('form_packets','boldsign_template_id'),
+    ('form_packets','doc_type'),
+    ('form_packets','field_tokens'),
+    ('form_packets','active'),
     ('form_packets','storage_paths'),
     ('boldsign_sender_identities','is_default'),
     ('boldsign_documents','signed_storage_path'),
     ('boldsign_documents','audit_storage_path'),
-    ('boldsign_documents','last_reminded_at')
-  )
-order by table_name, column_name;
+    ('boldsign_documents','last_reminded_at'),
+    ('boldsign_documents','reminder_count')
+)
+select '1. column' as area, e.tbl || '.' || e.col as item,
+       case when c.column_name is null then 'MISSING — re-run sections 2-6' else 'ok' end as result
+from expected e
+left join information_schema.columns c
+  on c.table_schema = 'public' and c.table_name = e.tbl and c.column_name = e.col
 
--- (b) LEGACY CHECK — confirm deal_contacts really is (deal_id, contact_id).
-select column_name, data_type, is_nullable
+union all
+-- Legacy shape check: production carried a pre-existing deal_contacts of unknown
+-- shape, and `create table if not exists` does not alter it. The app inserts
+-- exactly { deal_id, contact_id } and relies on the unique pair for re-links.
+select '2. deal_contacts', 'columns',
+       coalesce(string_agg(column_name, ', ' order by ordinal_position), 'TABLE MISSING')
 from information_schema.columns
 where table_schema = 'public' and table_name = 'deal_contacts'
-order by ordinal_position;
 
--- (c) How many packets are now sendable. If this is 0 and you expected
---     templates, they still need a BoldSign template id attached in Form Library.
-select count(*) as sendable_packets
-from form_packets
-where boldsign_template_id is not null and active;
+union all
+select '2. deal_contacts', 'unique(deal_id, contact_id)',
+       case when exists (
+         select 1 from pg_constraint con
+         join pg_class rel     on rel.oid = con.conrelid
+         join pg_namespace ns  on ns.oid  = rel.relnamespace
+         where ns.nspname = 'public' and rel.relname = 'deal_contacts' and con.contype = 'u'
+       ) then 'ok' else 'MISSING — legacy table, reconcile by hand' end
 
--- (d) Storage buckets the e-sign flow writes to. Both must exist and be
---     PRIVATE. Create any missing one in Dashboard → Storage → New bucket.
-select id, public from storage.buckets where id in ('deal-documents','form-packets');
+union all
+-- If this is 0 and you expected templates, the packets exist but still need a
+-- BoldSign template id attached in Form Library.
+select '3. catalog', 'sendable packets', count(*)::text
+from form_packets where boldsign_template_id is not null and active
+
+union all
+-- Signed PDFs and audit trails live in deal-documents; both buckets must exist
+-- and must NOT be public. Create a missing one in Dashboard → Storage.
+select '4. bucket', b.id,
+       case when b.public then 'PUBLIC — make this private!' else 'ok (private)' end
+from storage.buckets b where b.id in ('deal-documents','form-packets')
+
+order by 1, 2;
