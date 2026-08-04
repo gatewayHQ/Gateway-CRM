@@ -1,6 +1,6 @@
 import { applyJsonCors, requireAgent, errorResponse, getServiceClient, getUserClient, SUPABASE_URL } from './_lib/auth.js'
 import closingPacketHandler from './_handlers/closing-packet.js'
-import { sendResend, emailEnv, appBaseUrl, brandedEmail, brandedEmailText } from './_lib/email.js'
+import { sendEmail, emailConfigured, appBaseUrl, brandedEmail, brandedEmailText } from './_lib/email.js'
 import crypto from 'node:crypto'
 
 // We verify webhook signatures against the RAW request body, so the automatic
@@ -1232,10 +1232,9 @@ async function announceSignatureEvent(supabase, { status, record, documentId, co
     console.error(`[boldsign] agent_notifications insert failed for ${documentId}: ${notifErr.message}`)
   }
 
-  // 2. Email. Skipped silently when this deployment has no Resend config —
+  // 2. Email. Skipped silently when this deployment has no mail provider —
   //    that's a valid state (preview builds), not an error worth logging loudly.
-  const { key, from } = emailEnv()
-  if (!key || !from) return
+  if (!emailConfigured()) return
 
   const { data: agent, error: agentErr } = await supabase
     .from('agents')
@@ -1252,11 +1251,13 @@ async function announceSignatureEvent(supabase, { status, record, documentId, co
   }
 
   const mail = buildSignatureEmail(copy, appBaseUrl())
-  // Keyed on document + status so a redelivered webhook cannot double-send.
-  const result = await sendResend(
-    key, from, agent.email, mail.subject, mail.html, mail.text,
-    `boldsign-${status}-${documentId}`,
-  )
+  // The idempotency key only binds on Resend — Graph has no equivalent. The real
+  // guard against a double-send is the status gate in handleWebhook, which skips
+  // announcing when the row already sits at the incoming status.
+  const result = await sendEmail({
+    to: agent.email, subject: mail.subject, html: mail.html, text: mail.text,
+    idempotencyKey: `boldsign-${status}-${documentId}`,
+  })
   if (!result.ok) {
     console.error(`[boldsign] signature email (${status}) to ${agent.email} failed: ${result.error || result.reason}`)
   }
@@ -1326,6 +1327,14 @@ async function handleWebhook(req, res) {
       return res.status(200).json({ received: true, documentId, status, note: 'Already processed' })
     }
 
+    // Was this row ALREADY at the incoming status? BoldSign redelivers on any
+    // non-2xx, and can send the same terminal event more than once. The gate
+    // above only covers completed→completed; a repeated 'declined' would
+    // otherwise re-notify the agent every time. Resend's idempotency key used to
+    // absorb that, but Microsoft Graph has no equivalent, so the guard has to
+    // live here rather than in the transport.
+    const alreadyAtStatus = record.status === status
+
     const patch = { status }
     if (completedAt) patch.completed_at = completedAt
     const { error: statusErr } = await supabase
@@ -1344,7 +1353,7 @@ async function handleWebhook(req, res) {
     // does — previously both updated the row and told nobody, so a declined
     // listing agreement sat silently and an expired one was indistinguishable
     // from one the agent had cancelled themselves.
-    if (status === 'declined' || status === 'expired') {
+    if ((status === 'declined' || status === 'expired') && !alreadyAtStatus) {
       await announceSignatureEvent(supabase, {
         status, record, documentId, completedAt, deal: record.deals,
       })

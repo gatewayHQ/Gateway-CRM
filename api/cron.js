@@ -24,7 +24,7 @@
 
 import { createClient } from '@supabase/supabase-js'
 import { boldsign, listAllTemplates } from './boldsign.js'
-import { sendResend } from './_lib/email.js'
+import { sendEmail, emailConfigured } from './_lib/email.js'
 import { OPERATING_STATES } from '../src/lib/constants.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -108,8 +108,7 @@ function smsBody(deal, dateName, threshold, propertyAddress) {
 }
 
 async function runReminders(supabase) {
-  const resendKey  = process.env.RESEND_API_KEY  || ''
-  const resendFrom = process.env.RESEND_FROM     || ''
+  const mailEnabled = emailConfigured()
   const twilioSid  = process.env.TWILIO_ACCOUNT_SID  || ''
   const twilioToken= process.env.TWILIO_AUTH_TOKEN   || ''
   const smsEnabled = !!(twilioSid && twilioToken)
@@ -178,12 +177,12 @@ async function runReminders(supabase) {
 
         const sends = []
 
-        if (agent?.email && resendKey && resendFrom) {
+        if (agent?.email && mailEnabled) {
           const subjectEmoji = threshold === 'today' ? '🚨' : threshold === '24h' ? '⚠️' : '📅'
           const subject = `${subjectEmoji} ${entry.type} ${threshold === 'today' ? 'is TODAY' : threshold === '24h' ? 'is TOMORROW' : 'in 3 days'} — ${deal.title}`
           const html  = emailHtml(deal.title, entry.type, entry.date, threshold, agent.name, contactName, propertyAddress)
           const text  = smsBody(deal.title, entry.type, threshold, propertyAddress)
-          const result = await sendResend(resendKey, resendFrom, agent.email, subject, html, text)
+          const result = await sendEmail({ to: agent.email, subject, html, text })
           sends.push({ channel: 'email:agent', ...result })
         }
 
@@ -251,10 +250,11 @@ function htmlFromText(text) {
 }
 
 async function runSequences(supabase) {
-  const resendKey = process.env.RESEND_API_KEY
-  const resendFrom = process.env.RESEND_FROM
-  if (!resendKey || !resendFrom) {
-    return { status: 500, body: { error: 'RESEND_API_KEY or RESEND_FROM missing' } }
+  // Any configured transport will do (Microsoft 365 or Resend) — see
+  // api/_lib/email.js. Sequences are the one task that cannot degrade: their
+  // whole job is sending mail, so a missing provider is a hard error.
+  if (!emailConfigured()) {
+    return { status: 500, body: { error: 'No email provider configured — set MS365_* or RESEND_* env vars' } }
   }
 
   const { data: enrollments, error: enrollErr } = await supabase
@@ -315,7 +315,7 @@ async function runSequences(supabase) {
     const bodyHtml = htmlFromText(bodyText)
     const idempotencyKey = `seq-${e.id}-step-${step.id}`
 
-    const sendResult = await sendResend(resendKey, resendFrom, contact.email, subject, bodyHtml, bodyText, idempotencyKey)
+    const sendResult = await sendEmail({ to: contact.email, subject, html: bodyHtml, text: bodyText, idempotencyKey })
 
     await supabase.from('email_log').insert({
       enrollment_id:    e.id,
@@ -442,16 +442,14 @@ async function dispatchNudge(supabase, { agent, deal, kind, title, detail }) {
     .limit(1)
   if (dupe?.length) return { skipped: true, reason: 'already sent today' }
 
-  const resendKey  = process.env.RESEND_API_KEY  || ''
-  const resendFrom = process.env.RESEND_FROM     || ''
   let emailOk = false
-  if (agent.email && resendKey && resendFrom) {
-    const r = await sendResend(
-      resendKey, resendFrom, agent.email,
-      `${kind === 'review_overdue' ? '🛂 ' : kind === 'closing_soon' ? '⏳ ' : '⏰ '}${title}`,
-      nudgeEmailHtml({ title, deal: deal.title, agent: agent.name, reason: kind, detail }),
-      detail || title,
-    )
+  if (agent.email && emailConfigured()) {
+    const r = await sendEmail({
+      to:      agent.email,
+      subject: `${kind === 'review_overdue' ? '🛂 ' : kind === 'closing_soon' ? '⏳ ' : '⏰ '}${title}`,
+      html:    nudgeEmailHtml({ title, deal: deal.title, agent: agent.name, reason: kind, detail }),
+      text:    detail || title,
+    })
     emailOk = !!r.ok
   }
 

@@ -10,6 +10,8 @@
  * and redirects real users to the full listing; POST creates/links a contact.
  */
 
+import { sendEmail, emailConfigured } from './_lib/email.js'
+
 const TYPE_LABELS = {
   residential: 'Residential', rental: 'Rental', multifamily: 'Multifamily',
   office: 'Office', land: 'Land', retail: 'Retail',
@@ -244,8 +246,11 @@ async function handleGate(req, res) {
       }),
     }).catch(() => {})
 
-    const RESEND_KEY = process.env.RESEND_API_KEY
-    if (RESEND_KEY) {
+    // A new lead is the most time-sensitive email this CRM sends — speed to
+    // first contact is the whole game. Routed through the shared sender so it
+    // works on whichever provider is configured (Microsoft 365 or Resend); this
+    // used to call Resend directly and went silent on a tenant without it.
+    if (emailConfigured()) {
       try {
         const agentRes = await fetch(
           `${SUPABASE_URL}/rest/v1/agents?id=eq.${assignedAgentId}&select=name,email&limit=1`,
@@ -253,18 +258,14 @@ async function handleGate(req, res) {
         )
         const [agentRow] = agentRes.ok ? await agentRes.json() : []
         if (agentRow?.email) {
-          await fetch('https://api.resend.com/emails', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RESEND_KEY}` },
-            body: JSON.stringify({
-              from: process.env.RESEND_FROM || 'Gateway CRM <noreply@gatewayreadvisors.com>',
-              to: agentRow.email,
-              subject: `🔔 New website lead: ${leadName}`,
-              html: `<p>Hi ${agentRow.name?.split(' ')[0] || ''},</p>
+          await sendEmail({
+            to:      agentRow.email,
+            subject: `🔔 New website lead: ${leadName}`,
+            html: `<p>Hi ${agentRow.name?.split(' ')[0] || ''},</p>
 <p>A new website lead was just assigned to you:</p>
 <p><strong>${leadName}</strong><br/>${detail.join('<br/>')}</p>
 <p>They're in your CRM contacts now — reach out while it's hot.</p>`,
-            }),
+            text: `New website lead: ${leadName}\n${detail.join('\n')}\n\nThey're in your CRM contacts now — reach out while it's hot.`,
           })
         }
       } catch { /* email is best-effort */ }
