@@ -16,14 +16,22 @@
  *   }
  *
  * Headers (optional):
- *   x-resend-key                       - per-user/agent override of API key
+ *   x-resend-key                       - pins this request to Resend using the
+ *                                        caller's own key, bypassing the
+ *                                        deployment's configured provider
  *
  * Why this exists:
- *  • Keeps the Resend API key out of the browser (security)
+ *  • Keeps the provider API key/secret out of the browser (security)
  *  • Provides a server-side audit point for compliance / logging
- *  • Enables sequence automation (a cron worker can call this internally)
  *  • Centralized rate limiting + retry logic
+ *
+ * Transport: requests without an x-resend-key go through api/_lib/email.js, so
+ * they use whichever provider the deployment is configured for (Microsoft 365 via
+ * Graph, or Resend). `from` is only honored on the Resend path — Graph always
+ * sends as the mailbox its Azure app is scoped to.
  */
+
+import { sendEmail, emailConfigured } from './_lib/email.js'
 
 const SHARED_HEADERS = {
   'Access-Control-Allow-Origin':  '*',
@@ -65,13 +73,14 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: 'Rate limit exceeded. Try again in a minute.' })
   }
 
-  // ── Resolve API key ───────────────────────────────────────────────────────
-  // Priority: per-request header (for power users with their own Resend account)
-  //           → server env var (for default workspace key)
-  const apiKey = req.headers['x-resend-key'] || process.env.RESEND_API_KEY
-  if (!apiKey) {
+  // ── Resolve transport ─────────────────────────────────────────────────────
+  // An explicit x-resend-key still pins this request to Resend (power users with
+  // their own account). Without it, the deployment's configured provider is used
+  // — Microsoft 365 or Resend, see api/_lib/email.js.
+  const pinnedResendKey = req.headers['x-resend-key'] || ''
+  if (!pinnedResendKey && !emailConfigured()) {
     return res.status(500).json({
-      error: 'No Resend API key configured. Set RESEND_API_KEY in Vercel env vars or pass x-resend-key header.',
+      error: 'No email provider configured. Set MS365_* or RESEND_* env vars in Vercel, or pass an x-resend-key header.',
     })
   }
 
@@ -88,14 +97,18 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Provide either "html" or "text" body' })
   }
 
+  // A `from` is only required on the Resend path. Graph sends as the mailbox the
+  // Azure app is scoped to (MS365_SENDER), so the sender is not the caller's to
+  // choose — passing one would be silently ignored, which is worse than not
+  // accepting it.
   const fromAddr = from || process.env.RESEND_FROM
-  if (!fromAddr) {
+  if (pinnedResendKey && !fromAddr) {
     return res.status(400).json({
       error: 'No "from" address. Pass `from` in the request body or set RESEND_FROM env var.',
     })
   }
 
-  // Basic email sanity check — catches obvious typos before hitting Resend
+  // Basic email sanity check — catches obvious typos before hitting the provider
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
   const toList = Array.isArray(to) ? to : [to]
   for (const addr of toList) {
@@ -104,7 +117,15 @@ export default async function handler(req, res) {
     }
   }
 
-  // ── Build Resend payload ──────────────────────────────────────────────────
+  // ── Send via the shared sender, unless this request pinned a Resend key ────
+  if (!pinnedResendKey) {
+    const result = await sendEmail({ to: toList, subject, html, text, replyTo, idempotencyKey })
+    if (result.ok) return res.status(200).json({ ok: true, id: result.id, provider: result.provider })
+    return res.status(502).json({ error: result.error || result.reason || 'Email send failed' })
+  }
+
+  // ── Pinned-Resend path: build payload for the caller's own key ────────────
+  const apiKey = pinnedResendKey
   const payload = {
     from:    fromAddr,
     to:      toList,

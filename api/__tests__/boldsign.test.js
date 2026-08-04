@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl } from '../boldsign.js'
+import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, signatureEventCopy, buildSignatureEmail } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -281,5 +281,108 @@ describe('resolveOnBehalfOf — agent identity with org-default fallback', () =>
   it('returns null with no agentId and no default set', async () => {
     const svc = fakeSupabase({})
     expect(await resolveOnBehalfOf(svc, null)).toBeNull()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Signature lifecycle notifications
+//
+// The in-app notification and the agent email are built from ONE copy function
+// so they can't drift. Before these existed, a completed signature wrote a row
+// in agent_notifications and nothing else — an agent not looking at the CRM at
+// that moment never learned their deal had moved.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('signatureEventCopy', () => {
+  const base = {
+    documentName: 'Iowa Listing Agreement',
+    dealTitle:    '123 Main St',
+    signerName:   'Jane Seller',
+    completedAt:  '2026-08-04T15:22:00Z',
+  }
+
+  it('returns null for statuses not worth interrupting an agent for', () => {
+    for (const status of ['sent', 'delivered', 'draft', 'voided', 'unknown']) {
+      expect(signatureEventCopy({ ...base, status })).toBeNull()
+    }
+  })
+
+  it('builds completed copy with the signer, deal and date', () => {
+    const c = signatureEventCopy({ ...base, status: 'completed' })
+    expect(c.type).toBe('document_signed')
+    expect(c.subject).toBe('Signed: "Iowa Listing Agreement" — 123 Main St')
+    expect(c.message).toContain('Jane Seller')
+    expect(c.message).toContain('123 Main St')
+    // The date row is trimmed to a plain day — an ISO timestamp in an email
+    // detail block reads like a machine log.
+    expect(c.rows.find(r => r.label === 'Completed').value).toBe('2026-08-04')
+  })
+
+  it('builds declined copy that names the decliner and prompts a follow-up', () => {
+    const c = signatureEventCopy({ ...base, status: 'declined' })
+    expect(c.type).toBe('document_declined')
+    expect(c.subject).toContain('Action needed')
+    expect(c.subject).toContain('Jane Seller')
+    expect(c.note).toMatch(/corrected copy/i)
+  })
+
+  it('builds expired copy that prompts a resend', () => {
+    const c = signatureEventCopy({ ...base, status: 'expired' })
+    expect(c.type).toBe('document_expired')
+    expect(c.subject).toContain('expired')
+    expect(c.note).toMatch(/send it again/i)
+  })
+
+  it('degrades to readable copy when the document, deal and signer are unknown', () => {
+    // Every one of these can legitimately be null on a real row: an ad-hoc send
+    // with no title, a document not yet attached to a deal, a signer BoldSign
+    // hasn't named yet. The copy must never render "undefined" to an agent.
+    const c = signatureEventCopy({ status: 'completed' })
+    expect(c.subject).toBe('Signed: "Document" — your deal')
+    expect(c.message).toContain('the signer')
+    expect(JSON.stringify(c)).not.toMatch(/undefined|null/)
+  })
+
+  it('gives each event a distinct accent so the three never look alike', () => {
+    const accents = ['completed', 'declined', 'expired']
+      .map(status => signatureEventCopy({ ...base, status }).accent)
+    expect(new Set(accents).size).toBe(3)
+  })
+})
+
+describe('buildSignatureEmail', () => {
+  const copy = signatureEventCopy({
+    status: 'completed', documentName: 'Listing Agreement',
+    dealTitle: '9 Oak Ave', signerName: 'Sam Buyer', completedAt: '2026-08-04T00:00:00Z',
+  })
+
+  it('returns null when there is no copy to render', () => {
+    expect(buildSignatureEmail(null, 'https://crm.example.com')).toBeNull()
+  })
+
+  it('renders subject, html and text together', () => {
+    const mail = buildSignatureEmail(copy, 'https://crm.example.com')
+    expect(mail.subject).toBe(copy.subject)
+    expect(mail.html).toContain('Gateway')
+    expect(mail.html).toContain('9 Oak Ave')
+    expect(mail.text).toContain('9 Oak Ave')
+    expect(mail.html).toContain('https://crm.example.com')
+  })
+
+  it('omits the button entirely when no base URL is resolvable', () => {
+    // appBaseUrl() returns '' on a deployment with no Vercel/APP_BASE_URL vars.
+    // A button pointing at "" would render as a dead link in the agent's inbox.
+    const mail = buildSignatureEmail(copy, '')
+    expect(mail.html).not.toContain('<a href')
+    expect(mail.text).not.toContain('Open the CRM')
+  })
+
+  it('escapes html-unsafe characters from user-entered names', () => {
+    const hostile = signatureEventCopy({
+      status: 'completed', documentName: 'Smith & Co <Listing>',
+      dealTitle: '"Quoted" Deal', signerName: 'A & B', completedAt: '2026-08-04T00:00:00Z',
+    })
+    const mail = buildSignatureEmail(hostile, 'https://crm.example.com')
+    expect(mail.html).toContain('Smith &amp; Co &lt;Listing&gt;')
+    expect(mail.html).not.toContain('<Listing>')
   })
 })
