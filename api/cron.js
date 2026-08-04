@@ -24,6 +24,7 @@
 
 import { createClient } from '@supabase/supabase-js'
 import { boldsign, listAllTemplates } from './boldsign.js'
+import { sendResend } from './_lib/email.js'
 import { OPERATING_STATES } from '../src/lib/constants.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,17 +34,8 @@ function basicTwilioAuth(sid, token) {
   return 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64')
 }
 
-async function sendResend(apiKey, from, to, subject, html, text, idempotencyKey) {
-  if (!apiKey || !from || !to) return { ok: false, reason: 'missing email config' }
-  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }
-  if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey
-  const r = await fetch('https://api.resend.com/emails', {
-    method: 'POST', headers,
-    body: JSON.stringify({ from, to: Array.isArray(to) ? to : [to], subject, html, text }),
-  })
-  const body = await r.json().catch(() => ({}))
-  return { ok: r.ok, status: r.status, id: body?.id, error: body?.message || body?.error, body }
-}
+// sendResend now lives in api/_lib/email.js so the BoldSign webhook can send the
+// same branded mail. Re-exported here is unnecessary — call sites are unchanged.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Task: deadline reminders (formerly /api/reminders)

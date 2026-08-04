@@ -1,5 +1,6 @@
 import { applyJsonCors, requireAgent, errorResponse, getServiceClient, getUserClient, SUPABASE_URL } from './_lib/auth.js'
 import closingPacketHandler from './_handlers/closing-packet.js'
+import { sendResend, emailEnv, appBaseUrl, brandedEmail, brandedEmailText } from './_lib/email.js'
 import crypto from 'node:crypto'
 
 // We verify webhook signatures against the RAW request body, so the automatic
@@ -294,11 +295,19 @@ async function recordDocumentVersion(supabase, { dealId, documentName, storagePa
         .update({ pinned_as: null })
         .eq('deal_id', dealId).eq('document_name', documentName).eq('pinned_as', pinnedAs)
     }
-    await supabase.from('document_versions').insert([{
+    const { error: insertErr } = await supabase.from('document_versions').insert([{
       deal_id: dealId, document_name: documentName, storage_path: storagePath,
       size, mime_type: 'application/pdf', version_num: nextVersion,
       pinned_as: pinnedAs || null, source: 'boldsign', note: note || null,
     }])
+    // The catch below only fires on a THROWN error, and the supabase client
+    // returns its errors instead of throwing — so a rejected insert used to leave
+    // no trace at all. The PDF is safely in storage either way, but without this
+    // row the document never appears in the deal's Documents tab, which for a
+    // signed contract reads as "the signature vanished".
+    if (insertErr) {
+      console.error(`[boldsign] CRITICAL: document_versions insert failed for ${storagePath}: ${insertErr.message}`)
+    }
   } catch (e) {
     // Best-effort by design — the storage upload already succeeded, and a
     // metadata-only problem must never 500 a webhook (BoldSign would retry).
@@ -1087,6 +1096,172 @@ export default async function handler(req, res) {
 // endpoint's signing secret and set BOLDSIGN_WEBHOOK_SECRET so inbound events
 // are HMAC-verified (X-BoldSign-Signature) — unverified events are ignored.
 //
+// ─── Signature lifecycle announcements ───────────────────────────────────────
+// An agent finds out that a client signed, declined, or let a request expire in
+// exactly two places: the in-app notification bell and their inbox. Both are
+// built from ONE copy function so they can never drift, and so the wording only
+// has to be got right once.
+//
+// Email matters more than it looks: before this existed, a completed signature
+// wrote an `agent_notifications` row and nothing else, so an agent who wasn't
+// looking at the CRM at that moment simply never learned their deal had moved.
+// That is the gap that trains a team to chase signatures over text message.
+
+/** Statuses worth interrupting an agent for. Anything else is bookkeeping. */
+const NOTIFIABLE = new Set(['completed', 'declined', 'expired'])
+
+/**
+ * Copy for one signature event, shared by the in-app row and the email.
+ * Pure — takes plain values, returns plain strings. Unit-tested.
+ */
+export function signatureEventCopy({ status, documentName, dealTitle, signerName, completedAt }) {
+  if (!NOTIFIABLE.has(status)) return null
+
+  const doc      = documentName || 'Document'
+  const deal     = dealTitle    || 'your deal'
+  const signer   = signerName   || 'the signer'
+  const someone  = signerName   || 'A signer'
+  const dateOnly = (completedAt || '').slice(0, 10)
+
+  if (status === 'completed') {
+    return {
+      type:    'document_signed',
+      title:   'Document Signed',
+      message: `"${doc}" for ${deal} has been fully signed by ${signer}. The signed copy has been saved to the deal's Documents tab.`,
+      subject: `Signed: "${doc}" — ${deal}`,
+      eyebrow: 'Signature complete',
+      // Semantic green: this one is good news and should read that way at a glance.
+      accent:  '#2f7d4f',
+      headline: `"${doc}" is fully signed.`,
+      rows: [
+        { label: 'Deal',      value: deal },
+        { label: 'Signed by', value: signerName || '' },
+        { label: 'Completed', value: dateOnly },
+      ],
+      note: "The signed copy and its compliance audit trail have been saved to the deal's Documents tab automatically — there's nothing to download and re-upload.",
+    }
+  }
+
+  if (status === 'declined') {
+    return {
+      type:    'document_declined',
+      title:   'Document Declined',
+      message: `${someone} declined "${doc}" for ${deal}. Follow up with them and send a corrected copy.`,
+      subject: `Action needed: ${someone} declined "${doc}"`,
+      eyebrow: 'Action needed',
+      accent:  '#b3382c',
+      headline: `${someone} declined "${doc}".`,
+      rows: [
+        { label: 'Deal',        value: deal },
+        { label: 'Declined by', value: signerName || '' },
+      ],
+      note: 'Reach out to them before resending. Once you know what needs to change, send a corrected copy from the deal\'s Signatures tab.',
+    }
+  }
+
+  return {
+    type:    'document_expired',
+    title:   'Signature Request Expired',
+    message: `"${doc}" for ${deal} expired before everyone signed. Send it again to restart.`,
+    subject: `Action needed: "${doc}" expired before signing`,
+    eyebrow: 'Action needed',
+    accent:  '#95681d',
+    headline: `"${doc}" expired before everyone signed.`,
+    rows: [
+      { label: 'Deal',        value: deal },
+      { label: 'Sent to',     value: signerName || '' },
+    ],
+    note: 'Nobody signed in time, so the request closed itself. Send it again from the deal\'s Signatures tab to restart.',
+  }
+}
+
+/**
+ * Render the agent email for a signature event. Separated from sending so the
+ * subject/body can be asserted in tests without a Resend key.
+ */
+export function buildSignatureEmail(copy, baseUrl) {
+  if (!copy) return null
+  const shell = {
+    eyebrow: copy.eyebrow,
+    headline: copy.headline,
+    accent:  copy.accent,
+    rows:    copy.rows,
+    note:    copy.note,
+    ctaLabel: 'Open Gateway CRM',
+    ctaUrl:   baseUrl || '',
+    footNote: 'You received this because you are the agent on this deal.',
+  }
+  return {
+    subject: copy.subject,
+    html:    brandedEmail(shell),
+    text:    brandedEmailText({ headline: copy.headline, rows: copy.rows, note: copy.note, ctaUrl: baseUrl || '' }),
+  }
+}
+
+/**
+ * Write the in-app notification AND email the agent for one signature event.
+ *
+ * Entirely best-effort: every failure is logged and swallowed. A webhook that
+ * throws here would return non-200, BoldSign would redeliver, and the retry
+ * would re-run the archive work — so a notification problem must never be
+ * allowed to become a duplicate-archive problem.
+ */
+async function announceSignatureEvent(supabase, { status, record, documentId, completedAt, deal }) {
+  const agentId = deal?.agent_id
+  if (!agentId) return
+
+  const copy = signatureEventCopy({
+    status,
+    documentName: record.document_name,
+    dealTitle:    deal.title,
+    signerName:   record.signer_name,
+    completedAt,
+  })
+  if (!copy) return
+
+  // 1. In-app notification (the bell + realtime toast).
+  const { error: notifErr } = await supabase.from('agent_notifications').insert([{
+    agent_id:    agentId,
+    deal_id:     record.deal_id,
+    envelope_id: documentId,
+    title:       copy.title,
+    message:     copy.message,
+    type:        copy.type,
+  }])
+  if (notifErr) {
+    console.error(`[boldsign] agent_notifications insert failed for ${documentId}: ${notifErr.message}`)
+  }
+
+  // 2. Email. Skipped silently when this deployment has no Resend config —
+  //    that's a valid state (preview builds), not an error worth logging loudly.
+  const { key, from } = emailEnv()
+  if (!key || !from) return
+
+  const { data: agent, error: agentErr } = await supabase
+    .from('agents')
+    .select('email, name')
+    .eq('id', agentId)
+    .maybeSingle()
+  if (agentErr) {
+    console.error(`[boldsign] could not load agent ${agentId} for signature email: ${agentErr.message}`)
+    return
+  }
+  if (!agent?.email) {
+    console.warn(`[boldsign] agent ${agentId} has no email — skipping ${status} notification for ${documentId}`)
+    return
+  }
+
+  const mail = buildSignatureEmail(copy, appBaseUrl())
+  // Keyed on document + status so a redelivered webhook cannot double-send.
+  const result = await sendResend(
+    key, from, agent.email, mail.subject, mail.html, mail.text,
+    `boldsign-${status}-${documentId}`,
+  )
+  if (!result.ok) {
+    console.error(`[boldsign] signature email (${status}) to ${agent.email} failed: ${result.error || result.reason}`)
+  }
+}
+
 async function handleWebhook(req, res) {
   // Reject forged/replayed events when a signing secret is configured. We still
   // answer 200 so BoldSign doesn't retry-storm a request we're deliberately
@@ -1153,27 +1328,26 @@ async function handleWebhook(req, res) {
 
     const patch = { status }
     if (completedAt) patch.completed_at = completedAt
-    await supabase.from('boldsign_documents').update(patch).eq('document_id', documentId)
+    const { error: statusErr } = await supabase
+      .from('boldsign_documents').update(patch).eq('document_id', documentId)
+    if (statusErr) {
+      // This is the one failure in this handler that silently strands a document.
+      // The supabase client RETURNS errors rather than throwing, so this never
+      // reached the catch block below: the write failed, the handler carried on,
+      // answered 200, and BoldSign — which stops redelivering after a 200 — never
+      // told us again. The row stays 'sent' forever while the client has actually
+      // signed, and the Signatures tab shows an outstanding document that isn't.
+      console.error(`[boldsign] CRITICAL: status update to '${status}' failed for ${documentId}: ${statusErr.message}`)
+    }
 
     // A decline or expiry needs the agent's attention as much as a completion
     // does — previously both updated the row and told nobody, so a declined
     // listing agreement sat silently and an expired one was indistinguishable
     // from one the agent had cancelled themselves.
     if (status === 'declined' || status === 'expired') {
-      const deal = record.deals
-      if (deal?.agent_id) {
-        const declined = status === 'declined'
-        await supabase.from('agent_notifications').insert([{
-          agent_id:    deal.agent_id,
-          deal_id:     record.deal_id,
-          envelope_id: documentId,
-          title:       declined ? 'Document Declined' : 'Signature Request Expired',
-          message:     declined
-            ? `${record.signer_name || 'A signer'} declined "${record.document_name || 'Document'}" for ${deal.title || 'your deal'}. Follow up with them and send a corrected copy.`
-            : `"${record.document_name || 'Document'}" for ${deal.title || 'your deal'} expired before everyone signed. Send it again to restart.`,
-          type:        declined ? 'document_declined' : 'document_expired',
-        }])
-      }
+      await announceSignatureEvent(supabase, {
+        status, record, documentId, completedAt, deal: record.deals,
+      })
     }
 
     if (status === 'completed') {
@@ -1239,17 +1413,9 @@ async function handleWebhook(req, res) {
           .eq('document_id', documentId)
       }
 
-      const deal = record.deals
-      if (deal?.agent_id) {
-        await supabase.from('agent_notifications').insert([{
-          agent_id:    deal.agent_id,
-          deal_id:     record.deal_id,
-          envelope_id: documentId,
-          title:       'Document Signed',
-          message:     `"${record.document_name || 'Document'}" for ${deal.title || 'your deal'} has been fully signed by ${record.signer_name || 'the signer'}. The signed copy has been saved to the deal's Documents tab.`,
-          type:        'document_signed',
-        }])
-      }
+      await announceSignatureEvent(supabase, {
+        status, record, documentId, completedAt, deal: record.deals,
+      })
     }
 
     return res.status(200).json({ received: true, documentId, status })
