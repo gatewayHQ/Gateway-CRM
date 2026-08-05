@@ -7,6 +7,7 @@ import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
 import { findMatchingBuyers } from '../lib/matching.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
+import { coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
 import OptionSelect from '../components/OptionSelect.jsx'
@@ -861,17 +862,32 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
 
   const startDeal = async () => {
     setStartingDeal(true)
+    const primaryAgentId = activeAgent?.id || form.assigned_agent_id || null
     const dealPayload = {
       title:       form.address,
       property_id: property.id,
       contact_id:  form.linked_contact_id || null,
-      agent_id:    activeAgent?.id || form.assigned_agent_id || null,
+      agent_id:    primaryAgentId,
       stage:       'lead',
       value:       form.list_price ? Number(form.list_price) : null,
+      // Co-agents ride along with the property (the primary agent owns the deal
+      // and is never listed twice) so the new deal's team and its commission
+      // split start out complete — see src/lib/coAgents.js.
+      co_agent_ids: coAgentIdsForNewDeal(form, primaryAgentId),
     }
-    const { data, error } = await supabase.from('deals').insert([dealPayload]).select().single()
+    let { data, error } = await supabase.from('deals').insert([dealPayload]).select().single()
+    // Migration 0025 adds deals.co_agent_ids. Until it's applied, create the
+    // deal without the co-agents rather than blocking the conversion — the
+    // deal page still resolves them from the linked property.
+    let coAgentsDropped = false
+    if (error && isMissingCoAgentColumn(error)) {
+      const { co_agent_ids, ...rest } = dealPayload
+      ;({ data, error } = await supabase.from('deals').insert([rest]).select().single())
+      coAgentsDropped = !error && co_agent_ids.length > 0
+    }
     setStartingDeal(false)
     if (error) { pushToast(error.message, 'error'); return }
+    if (coAgentsDropped) pushToast('Co-agents not carried over — run migration 0025', 'error')
     // Carry the property's additional contacts onto the new deal.
     if (data?.id && additionalContactIds.length) await syncDealContactsFromProperty(data.id, additionalContactIds)
     if (setDb) setDb(p => ({ ...p, deals: [data, ...(p.deals || [])] }))

@@ -5,6 +5,7 @@ import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx
 import { formatCurrency, formatDate, formatPhone, STAGE_LABELS } from '../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
+import { dealAgentIds } from '../lib/coAgents.js'
 import { DealDrawer } from './Pipeline.jsx'
 import { getClosingGate, gateBadge } from '../lib/compliance.js'
 import { audit, useDealAudit } from '../lib/audit.js'
@@ -143,17 +144,18 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     return () => { alive = false }
   }, [dealId, isAdmin])
 
-  // Everyone on the deal: owner + legacy co-agents, deduped (participants are
-  // admin-only data, so non-admins see owner + co_agent_ids)
+  // Everyone on the deal: owner + the co-agents carried over from the property
+  // at conversion + commission participants, deduped. Participants are
+  // admin-only data, so a non-admin sees owner + co-agents — which, since the
+  // conversion copies them, is the same team.
   const team = useMemo(() => {
     if (!deal) return []
     const ids = [
-      deal.agent_id,
-      ...(deal.co_agent_ids || []),
+      ...dealAgentIds(deal, property),
       ...((breakdown?.participants || []).map(p => p.agent_id)),
     ].filter(Boolean)
     return [...new Set(ids)].map(id => agents.find(a => a.id === id)).filter(Boolean)
-  }, [deal, breakdown, agents])
+  }, [deal, property, breakdown, agents])
   const myTake = useMemo(() => {
     if (isAdmin && breakdown && activeAgent) {
       return breakdown.participants.filter(p => p.agent_id === activeAgent.id).reduce((s, p) => s + p.agent_take, 0)

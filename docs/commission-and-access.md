@@ -39,6 +39,17 @@ A transaction is two stacked concepts:
   referred co-agent who owes the house nothing); others split with the house.
   Participants are independent — a co-agent never carves down the primary's take.
 
+  **Where the list comes from before the back office touches it.** Co-agents are
+  picked on the *property* (Co-Agents section → `properties.details.co_agent_ids`)
+  and copied onto the deal at conversion (`deals.co_agent_ids`, migration 0025).
+  Until an admin saves a structured split, `normalizeCommission` seeds one
+  participant per co-agent on an even allocation, each with their own stored
+  arrangement — so a co-listed deal opens the editor with the whole team on it.
+  A saved `sides`/`participants` row always wins, and legacy `co_agent_pct` rows
+  keep their exact dollars. Reads go through `src/lib/coAgents.js`, which falls
+  back to the linked property for deals converted before 0025 — no backfill
+  needed for historical pipelines.
+
 - **Transaction fee** — a flat per-deal brokerage fee (default $100), split
   evenly across the agents on the deal ($50 each for two). It is charged **on
   top** of the split and is **excluded from the annual cap** — the cap measures

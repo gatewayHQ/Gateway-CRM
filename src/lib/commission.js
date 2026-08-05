@@ -21,6 +21,9 @@
  *      OWN brokerage arrangement: some agents split with the house (e.g. 60/40),
  *      others keep 100% (capped out, or simply no split). A co-agent who keeps
  *      100% never touches the primary agent's take — they're independent.
+ *      Until the back office saves a split, the participant list is seeded from
+ *      the deal: the assigned agent plus the co-agents carried over from the
+ *      property at conversion (`deals.co_agent_ids`), allocated evenly.
  *
  * Net commission = Σ(side.gross − side.referral). Each participant is allocated a
  * share of that net and applies their own split (or none) to it. The house total
@@ -52,6 +55,8 @@
  * rendering identically until someone re-saves them in the new editor.
  */
 
+import { dealCoAgentIds } from './coAgents.js'
+
 export const DEFAULTS = {
   GROSS_PCT: 3.0,        // typical one-side rate
   SPLIT_PCT: 70.0,       // agent's share of their allocation (house keeps the rest)
@@ -63,6 +68,9 @@ const num = (v, fallback = 0) => {
   return Number.isFinite(n) ? n : fallback
 }
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100
+// Allocation percentages are edited to one decimal in the UI — match that here
+// so a seeded split reads the same as a hand-typed one.
+const round1 = (n) => Math.round((n + Number.EPSILON) * 10) / 10
 
 /** Stable id for new participants/sides created in the UI. */
 export const uid = () => Math.random().toString(36).slice(2, 10)
@@ -171,6 +179,29 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
     const co = makeParticipant({ role: 'co', allocation_pct: 0 })
     co._legacy_co_pct = co_agent_pct   // marker consumed below
     participants.push(co)
+  }
+  // Co-agents carried over from the property at conversion (deals.co_agent_ids).
+  // Until the back office saves an explicit structured split, seed one
+  // participant each on an even allocation, so a co-listed deal opens the
+  // editor with the whole team already on it instead of the owner alone. Each
+  // co-agent brings their OWN stored brokerage arrangement — a capped agent
+  // still keeps 100%. Skipped when the legacy carve-out above is in play, whose
+  // saved dollars must not move.
+  else {
+    const coAgentIds = dealCoAgentIds(deal)
+    if (coAgentIds.length) {
+      const evenly = round1(100 / (coAgentIds.length + 1))
+      for (const id of coAgentIds) {
+        participants.push(makeParticipant({
+          agent: agents.find(a => a.id === id) || { id },
+          role: 'co',
+          allocation_pct: evenly,
+        }))
+      }
+      // The primary absorbs the rounding remainder so allocations total exactly
+      // 100% and the editor never opens on a spurious warning.
+      primary.allocation_pct = round1(100 - evenly * coAgentIds.length)
+    }
   }
 
   // The legacy flat `transaction_fee` was a single deal-level fee — carry it

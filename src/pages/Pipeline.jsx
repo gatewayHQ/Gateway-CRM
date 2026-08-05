@@ -10,6 +10,7 @@ import {
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
 import { describeDealCommission } from '../lib/commission.js'
+import { dealAgentIds, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
@@ -2143,8 +2144,18 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
     if (Object.keys(e).length > 0) return
     setSaving(true)
     try {
+      // Linking a NEW deal to a property is a conversion too, so its co-agents
+      // come along exactly as they do from the property's "Start Deal" button.
+      // An existing deal keeps the team it already has — nothing here should
+      // quietly rewrite a split the back office has been working on.
+      const linkedProperty = form.property_id
+        ? (properties || []).find(p => p.id === form.property_id)
+        : null
+      const seededCoAgents = deal?.id ? [] : coAgentIdsForNewDeal(linkedProperty, form.agent_id || null)
+
       // Explicit whitelist — never spread full form object (prevents unknown-column schema errors)
-      const payload = {
+      let payload = {
+        ...(seededCoAgents.length ? { co_agent_ids: seededCoAgents } : {}),
         title:               form.title.trim(),
         stage:               form.stage,
         value:               form.value !== '' && form.value !== null ? Number(form.value) : null,
@@ -2175,6 +2186,17 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
       let { error, savedId } = await write(payload)
       let degraded = false
+      let coAgentsDropped = false
+
+      // deals.co_agent_ids arrives with migration 0025. Until it's applied the
+      // deal saves without it and the team still resolves from the linked
+      // property, so this degrades quietly rather than failing the save.
+      if (error && isMissingCoAgentColumn(error)) {
+        const { co_agent_ids, ...rest } = payload
+        payload = rest
+        coAgentsDropped = true
+        ;({ error, savedId } = await write(payload))
+      }
 
       // The commission columns arrive with migration 0024. Until it's applied,
       // drop them and save the rest rather than blocking the whole deal — the
@@ -2192,11 +2214,14 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       // Sync additional contacts (best-effort — the deal itself is already saved).
       if (savedId) await syncDealContacts(savedId, additionalContactIds)
 
+      const coAgentWarning = coAgentsDropped && seededCoAgents.length
+        ? 'Deal saved, but its co-agents were not — ask an admin to apply database migration 0025.'
+        : null
       pushToast(
         degraded
           ? 'Deal saved, but the commission was not — ask an admin to apply database migration 0024.'
-          : (deal?.id ? 'Deal updated' : 'Deal added'),
-        degraded ? 'error' : undefined,
+          : coAgentWarning || (deal?.id ? 'Deal updated' : 'Deal added'),
+        degraded || coAgentWarning ? 'error' : undefined,
       )
       await onSave()
       onClose()
@@ -2838,10 +2863,11 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                     const contact    = contactMap[deal.contact_id]
                     const agent      = agentMap[deal.agent_id]
                     const dealProp   = deal.property_id ? propertyMap[deal.property_id] : null
-                    const coAgIds    = dealProp?.details?.co_agent_ids || []
-                    const allAgents  = [deal.agent_id, ...coAgIds].filter(Boolean)
+                    // The deal's own co-agents (copied over at conversion), with
+                    // the linked property as the fallback for deals converted
+                    // before migration 0025.
+                    const allAgents  = dealAgentIds(deal, dealProp)
                       .map(id => agentMap[id]).filter(Boolean)
-                      .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
                     const overdue    = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
                     const urgency    = getKeyDateUrgency(deal)
                     const nearestKD  = urgency ? getNearestKeyDate(deal) : null
@@ -2944,9 +2970,8 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
               <tbody>
                 {listRows.map(({ deal, contact, weighted, dis, rotting, activity, keyDate }) => {
                   const col = boardStageFor(deal, resolvedTrack)
-                  const teamAgents = [deal.agent_id, ...((propertyMap[deal.property_id]?.details?.co_agent_ids) || [])]
-                    .filter(Boolean).map(id => agentMap[id]).filter(Boolean)
-                    .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
+                  const teamAgents = dealAgentIds(deal, propertyMap[deal.property_id])
+                    .map(id => agentMap[id]).filter(Boolean)
                   const kdColor = keyDate == null ? 'var(--gw-mist)' : keyDate.daysUntil <= 2 ? '#dc2626' : keyDate.daysUntil <= 7 ? '#d97706' : 'var(--gw-ink)'
                   return (
                     <tr key={deal.id} onClick={() => go(`deal/${deal.id}`)}

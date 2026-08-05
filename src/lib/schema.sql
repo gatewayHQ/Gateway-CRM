@@ -107,6 +107,10 @@ create table if not exists deals (
   contact_id          uuid references contacts(id) on delete set null,
   property_id         uuid references properties(id) on delete set null,
   agent_id            uuid references agents(id) on delete set null,
+  -- Agents sharing this deal's commission alongside `agent_id` (never includes
+  -- it). Copied from properties.details.co_agent_ids when a property is
+  -- converted into a deal — see migration 0025 and src/lib/coAgents.js.
+  co_agent_ids        uuid[] not null default '{}',
   -- stage tokens cover all three boards (src/lib/stages.js): shared/legacy,
   -- the commercial track, and the residential seller track (Milestone 1)
   stage               text check (stage in (
@@ -718,6 +722,8 @@ create index if not exists idx_deals_created  on deals(created_at desc);
 create index if not exists idx_deals_contact  on deals(contact_id);
 create index if not exists idx_deals_property on deals(property_id);
 create index if not exists idx_deals_close    on deals(expected_close_date) where stage not in ('closed','lost');
+-- co-listing lookups run as array containment (RLS + fetchCoListedDealIds)
+create index if not exists idx_deals_co_agents on deals using gin (co_agent_ids);
 
 -- tasks — always queried by agent + completion state
 create index if not exists idx_tasks_agent          on tasks(agent_id);
@@ -1418,7 +1424,9 @@ language sql stable security definer set search_path = public as $$
 $$;
 
 -- Every deal the current user may see: all (admin), own + team-shared, or
--- co-listed (they appear as a participant on the deal's commission).
+-- co-listed — either named in deals.co_agent_ids (copied from the property at
+-- conversion, migration 0025) or appearing as a participant on the deal's
+-- commission.
 create or replace function app_visible_deal_ids()
 returns setof uuid
 language sql stable security definer set search_path = public as $$
@@ -1427,6 +1435,11 @@ language sql stable security definer set search_path = public as $$
   select d.id from deals d
   where d.agent_id in (select app_visible_agent_ids('deals'))
   union
+  -- co-listed via the co-agents carried over from the property
+  select d.id from deals d
+  where app_current_agent_id() = any(coalesce(d.co_agent_ids, '{}'))
+  union
+  -- co-listed via structured commission participants
   select c.deal_id
   from commissions c
   cross join lateral jsonb_array_elements(coalesce(c.participants, '[]'::jsonb)) p
