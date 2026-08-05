@@ -5,7 +5,7 @@ import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx
 import { formatCurrency, formatDate, formatPhone, STAGE_LABELS } from '../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
-import { dealAgentIds } from '../lib/coAgents.js'
+import { agentIdsOnDeal } from '../lib/coAgents.js'
 import { DealDrawer } from './Pipeline.jsx'
 import { getClosingGate, gateBadge } from '../lib/compliance.js'
 import { audit, useDealAudit } from '../lib/audit.js'
@@ -151,7 +151,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   const team = useMemo(() => {
     if (!deal) return []
     const ids = [
-      ...dealAgentIds(deal, property),
+      ...agentIdsOnDeal(deal, property),
       ...((breakdown?.participants || []).map(p => p.agent_id)),
     ].filter(Boolean)
     return [...new Set(ids)].map(id => agents.find(a => a.id === id)).filter(Boolean)
