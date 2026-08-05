@@ -61,8 +61,13 @@ export function dealCoAgentIds(deal, property = null) {
 /**
  * Primary agent first, then co-agents — the canonical ordering used by the
  * "Agents on deal" card, the pipeline cards, and the signer prefill.
+ *
+ * NOT named `dealAgentIds`: that is already an unrelated PROP threaded through
+ * App.jsx → PipelinePage / CommissionPage (the array of agent ids a user may
+ * see deals for). Importing this under that name shadowed the prop inside
+ * PipelinePage and crashed the board with "not a function".
  */
-export function dealAgentIds(deal, property = null) {
+export function agentIdsOnDeal(deal, property = null) {
   return uniqueIds([deal?.agent_id, ...dealCoAgentIds(deal, property)])
 }
 

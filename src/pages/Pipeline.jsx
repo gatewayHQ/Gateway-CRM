@@ -10,7 +10,7 @@ import {
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
 import { describeDealCommission } from '../lib/commission.js'
-import { dealAgentIds, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
+import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
@@ -2866,7 +2866,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                     // The deal's own co-agents (copied over at conversion), with
                     // the linked property as the fallback for deals converted
                     // before migration 0025.
-                    const allAgents  = dealAgentIds(deal, dealProp)
+                    const allAgents  = agentIdsOnDeal(deal, dealProp)
                       .map(id => agentMap[id]).filter(Boolean)
                     const overdue    = deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && stage !== 'closed' && stage !== 'lost'
                     const urgency    = getKeyDateUrgency(deal)
@@ -2970,7 +2970,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
               <tbody>
                 {listRows.map(({ deal, contact, weighted, dis, rotting, activity, keyDate }) => {
                   const col = boardStageFor(deal, resolvedTrack)
-                  const teamAgents = dealAgentIds(deal, propertyMap[deal.property_id])
+                  const teamAgents = agentIdsOnDeal(deal, propertyMap[deal.property_id])
                     .map(id => agentMap[id]).filter(Boolean)
                   const kdColor = keyDate == null ? 'var(--gw-mist)' : keyDate.daysUntil <= 2 ? '#dc2626' : keyDate.daysUntil <= 7 ? '#d97706' : 'var(--gw-ink)'
                   return (

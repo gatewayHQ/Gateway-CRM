@@ -3,7 +3,7 @@ import {
   propertyCoAgentIds,
   coAgentIdsForNewDeal,
   dealCoAgentIds,
-  dealAgentIds,
+  agentIdsOnDeal,
   isMissingCoAgentColumn,
 } from '../coAgents.js'
 
@@ -69,18 +69,18 @@ describe('dealCoAgentIds', () => {
   })
 })
 
-describe('dealAgentIds', () => {
+describe('agentIdsOnDeal', () => {
   it('puts the primary agent first, then the co-agents', () => {
     const deal = { agent_id: 'a1', co_agent_ids: ['a3', 'a2'] }
-    expect(dealAgentIds(deal)).toEqual(['a1', 'a3', 'a2'])
+    expect(agentIdsOnDeal(deal)).toEqual(['a1', 'a3', 'a2'])
   })
 
   it('never repeats an agent who is on the deal twice', () => {
-    expect(dealAgentIds({ agent_id: 'a1', co_agent_ids: ['a1', 'a2', 'a2'] })).toEqual(['a1', 'a2'])
+    expect(agentIdsOnDeal({ agent_id: 'a1', co_agent_ids: ['a1', 'a2', 'a2'] })).toEqual(['a1', 'a2'])
   })
 
   it('handles an unassigned deal', () => {
-    expect(dealAgentIds({ agent_id: null, co_agent_ids: ['a2'] })).toEqual(['a2'])
+    expect(agentIdsOnDeal({ agent_id: null, co_agent_ids: ['a2'] })).toEqual(['a2'])
   })
 })
 
@@ -92,5 +92,18 @@ describe('isMissingCoAgentColumn', () => {
   it('leaves every other failure to the caller', () => {
     expect(isMissingCoAgentColumn({ message: 'permission denied for table deals' })).toBe(false)
     expect(isMissingCoAgentColumn(null)).toBe(false)
+  })
+})
+
+// Regression guard for the crash that took the pipeline board down: the helper
+// was originally exported as `dealAgentIds`, which is ALSO the name of an
+// unrelated prop (an array of agent ids) that App.jsx threads into PipelinePage
+// and CommissionPage. The import was shadowed by the prop inside the component,
+// so calling it blew up with "not a function" the moment the board rendered.
+describe('module surface', () => {
+  it('does not export names that collide with the shared props of its callers', async () => {
+    const mod = await import('../coAgents.js')
+    const PROP_NAMES = ['dealAgentIds', 'visibleAgentIds', 'activeAgent', 'isAdmin', 'agents', 'deal', 'db']
+    expect(Object.keys(mod).filter(name => PROP_NAMES.includes(name))).toEqual([])
   })
 })
