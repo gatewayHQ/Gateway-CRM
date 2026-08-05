@@ -35,9 +35,10 @@ async function selectInChunks(client, table, column, ids, order) {
 // IDs of deals the agent is co-listed on, from both sources:
 //   1. structured commission participants (jsonb containment:
 //      participants @> [{"agent_id": "..."}]) — the canonical model, and
-//   2. the legacy deals.co_agent_ids uuid[] that exists only in the original
-//      production database (its query errors harmlessly where the column
-//      doesn't exist, e.g. fresh installs).
+//   2. deals.co_agent_ids uuid[] — the co-agents carried over from the property
+//      at conversion (migration 0025; before that, a legacy column present only
+//      in the original production database). Its query errors harmlessly on a
+//      database where 0025 hasn't been applied yet.
 // Returns an error only when BOTH sources fail.
 export async function fetchCoListedDealIds(client, agentId) {
   if (!agentId) return { data: [], error: null }
