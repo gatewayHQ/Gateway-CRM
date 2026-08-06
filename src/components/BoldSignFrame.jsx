@@ -77,7 +77,12 @@ export function classifyBoldSignMessage({ origin, data, selfOrigin }) {
   return null
 }
 
-export default function BoldSignFrame({ url, onDone, onDraft, onError, height = 640, returnUrlMarker }) {
+// `fill` makes the iframe take all remaining space in a flex-column parent instead
+// of a fixed pixel height — used by the workspace-sized modals, where the document
+// should be as large as the viewport allows. `minHeight: 0` is required for that:
+// an iframe's default min-height would refuse to shrink and push the modal's footer
+// off screen. `height` remains for the fixed-height callers.
+export default function BoldSignFrame({ url, onDone, onDraft, onError, height = 640, fill = false, returnUrlMarker }) {
   useEffect(() => {
     function handler(e) {
       const verdict = classifyBoldSignMessage({ origin: e.origin, data: e.data, selfOrigin: window.location.origin })
@@ -107,7 +112,9 @@ export default function BoldSignFrame({ url, onDone, onDraft, onError, height = 
       title="BoldSign"
       src={url}
       onLoad={handleLoad}
-      style={{ width: '100%', height, border: 'none', borderRadius: 'var(--radius)' }}
+      style={fill
+        ? { width: '100%', flex: 1, minHeight: 0, border: 'none', display: 'block' }
+        : { width: '100%', height, border: 'none', borderRadius: 'var(--radius)' }}
       allow="camera; microphone; geolocation"
     />
   )

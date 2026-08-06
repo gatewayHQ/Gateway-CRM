@@ -222,6 +222,33 @@ rendering, not in it.
   document — there is no client DPI knob. What's left on our side is viewport size,
   covered by the enlarged modal.
 
+## Modal size — the embedded editor is a workspace, not a form
+Field placement and review happen on a US Letter page. At the old 900 × 640 box that
+page rendered small enough that agents zoomed BoldSign in and then scrolled a page
+they could see a third of at a time — and the brokerage's older agents were the ones
+paying for it.
+
+- `.modal--workspace` (`src/styles/app.css`): **95vw × 94vh**, no max-width, with the
+  body as a flush flex column (`padding: 0; overflow: hidden; min-height: 0`) so the
+  **iframe scrolls the document and nothing else scrolls**. Two nested scrollbars is
+  what made placing a field feel slippery. Measured: 95% × 94% at 1512×945, 1280×720
+  and 900×1200; the phone breakpoint (≤768px) keeps the bottom-sheet treatment at
+  100% × 92**dvh** — dvh, so a collapsing mobile address bar can't push the footer
+  controls out of reach.
+- Document area goes from 900 × 640 to ~1436 × 790 on a 1512-wide laptop — about
+  **2× the rendered page**, which is the other half of the readability fix (the first
+  half being "stop compressing the source PDF", above).
+- `Modal` takes `className` and accepts `width={null}`: an inline pixel width would
+  beat the stylesheet and silently defeat both the class and its phone fallback. All
+  other `Modal` callers are untouched — the default is still 520px.
+- `BoldSignFrame` gains `fill`, which swaps its fixed pixel height for
+  `flex: 1; min-height: 0`. The `min-height` matters: an iframe's default minimum
+  would refuse to shrink and push the modal footer off screen.
+- Applied to the deal's Edit Draft / prepare modal **and** Form Library's template
+  editor — the same BoldSign editor, the same people, the same page to read.
+- Keyboard and mouse behavior is unchanged: `Modal`'s Escape and backdrop handling
+  were not touched, so Escape still routes through the confirm-before-close guard.
+
 ## Per-deal field layouts (placements that stick)
 Field placement happens inside BoldSign's embedded editor, and BoldSign keeps it on
 the **document**. So the arrangement an agent builds for a deal — the co-seller's
