@@ -222,6 +222,29 @@ rendering, not in it.
   document — there is no client DPI knob. What's left on our side is viewport size,
   covered by the enlarged modal.
 
+## Leaving the editor — confirm, and save what can be saved
+- **`ConfirmDialog`** ("Leave the editor?" / Cancel / **Leave**) replaces the
+  `window.confirm` on the close path. Escape, the backdrop and the X all route
+  through it; Escape *inside* the dialog cancels the leave, which is the safe
+  direction, and a repeat Escape can't re-open it.
+- **The prompt only appears when work plausibly exists.** Nothing inside a
+  cross-origin iframe is observable — not a click, not a drag, not a half-placed
+  field. But when focus moves INTO the frame our window fires `blur` and
+  `document.activeElement` becomes the iframe element (`frameTookFocus()`, unit
+  tested). That flag sets on focus-in and clears whenever BoldSign reports a save,
+  because at that instant nothing is outstanding. An agent who opens the editor and
+  closes it immediately is not warned about losing nothing — a prompt that cries wolf
+  is one agents dismiss without reading.
+- **The dialog names what survives and what doesn't**, including the time of the last
+  save: the draft stays on the deal, the field layout is captured on the way out, and
+  what's at risk is only what BoldSign hasn't saved since then. "Unsaved changes will
+  be lost" on its own leaves an agent guessing whether the whole packet is going.
+- **Leave saves before closing** — `captureFieldLayout` runs on the way out (the
+  "persist auto-saved state" half), with the confirm button showing a busy state.
+- **`beforeunload`** covers tab close, reload and navigation away, which no in-app
+  guard can reach. Registered only while work is outstanding. Browsers show their own
+  generic wording — the point is the pause, not the words.
+
 ## Print before Send
 Agents want to read a packet on paper before a client ever sees it, at any point
 before Send. The browser can't do it for them: the document is in a **cross-origin

@@ -1110,10 +1110,31 @@ async function printBoldSignDocument(documentId) {
 function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone, onDraft, onLayoutSaved }) {
   const [savingLayout, setSavingLayout] = React.useState(false)
   const [printing,     setPrinting]     = React.useState(false)
+  const [leaveAsk,     setLeaveAsk]     = React.useState(false)
+  // Work may exist that BoldSign hasn't been told to save. Set when focus enters the
+  // editor (see BoldSignFrame's onInteract — the only honest cross-origin signal),
+  // cleared when BoldSign reports a save, because at that instant nothing is
+  // outstanding. This is what keeps the leave prompt meaningful: an agent who opened
+  // the editor and immediately closed it is not warned about losing nothing.
+  const [unsaved,      setUnsaved]      = React.useState(false)
+  const [lastSavedAt,  setLastSavedAt]  = React.useState(null)
   // Set before an async close so a late unmount can't push state into a dead
   // component (React logs that as a leak, and it hides real errors).
   const alive = React.useRef(true)
   React.useEffect(() => () => { alive.current = false }, [])
+
+  // Closing the TAB, reloading, or navigating away entirely bypasses every in-app
+  // guard — the modal's confirm never runs and the work is simply gone. Only
+  // beforeunload reaches that path. The browser shows its own generic wording (all
+  // of them ignore a custom message now), which is fine: the point is the pause.
+  // Registered only while work is plausibly outstanding, so an agent who has saved
+  // isn't nagged for closing their browser.
+  React.useEffect(() => {
+    if (!unsaved) return
+    const warn = (e) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [unsaved])
 
   // Ask BoldSign what this document now holds and store it on the deal.
   // `silent` suppresses the "nothing to save" chatter for automatic captures —
@@ -1123,6 +1144,7 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
     if (alive.current) setSavingLayout(true)
     try {
       const res = await captureLayout(documentId)
+      if (res?.saved) { setLastSavedAt(new Date()) }
       if (res?.saved && res.fieldCount) {
         pushToast(`Field layout saved for this deal — ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} will come back next time.`, 'success')
         onLayoutSaved?.(res)
@@ -1162,16 +1184,24 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
     }
   }
 
-  const requestClose = async () => {
-    const ok = window.confirm(
-      'Close BoldSign?\n\nThis document stays on the deal as a draft — nothing is sent. '
-      + 'Reopen it from the Signatures tab with "Edit & Send" to pick up where you left off.'
-    )
-    if (!ok) return
-    // Capture BEFORE unmounting the frame: once the modal is gone the agent has no
-    // way to trigger this, and the arrangement they just built is the thing worth
-    // keeping. Silent, because closing is not the moment to explain a subsystem.
-    await saveLayout({ silent: true })
+  // Escape, the backdrop and the X all land here. With nothing outstanding this just
+  // closes — the draft is safe in BoldSign either way, and a confirm on every close
+  // is a confirm nobody reads. With work outstanding it asks, in the words the
+  // situation deserves.
+  const requestClose = () => {
+    if (leaveAsk) return          // already asking; a second Escape must not re-ask
+    if (!unsaved) { leaveNow({ silent: true }); return }
+    setLeaveAsk(true)
+  }
+
+  // Capture BEFORE unmounting the frame: once the modal is gone the agent has no way
+  // to trigger this, and the arrangement they just built is the thing worth keeping.
+  // This is the "persist what can be persisted" half of leaving — whatever BoldSign
+  // reports as placed is stored against the deal on the way out.
+  const leaveNow = async ({ silent = false } = {}) => {
+    setSavingLayout(true)
+    await saveLayout({ silent })
+    setLeaveAsk(false)
     onClose()
   }
 
@@ -1211,22 +1241,56 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
         <BoldSignFrame
           fill
           url={url}
-          onDone={(e) => { saveLayout({ silent: true }); onDone?.(e) }}
+          onInteract={() => setUnsaved(true)}
+          onDone={(e) => { setUnsaved(false); saveLayout({ silent: true }); onDone?.(e) }}
           // Saved-as-draft is NOT sent. Reporting it as sent (which is what
           // happened when both events shared one handler) left the agent
           // believing the client had the document. It IS the natural moment to
           // record the layout, though — the agent explicitly saved their work.
-          onDraft={(e) => { saveLayout(); onDraft?.(e) }}
+          // A BoldSign save means nothing is outstanding as of this instant. Any
+          // further work in the frame sets the flag again via onInteract.
+          onDraft={(e) => { setUnsaved(false); setLastSavedAt(new Date()); saveLayout(); onDraft?.(e) }}
           onError={() => pushToast('BoldSign reported the send was cancelled — the draft is still on this deal.', 'info')}
         />
       </div>
       {/* flexShrink:0 — the body is flex:1 and would otherwise squeeze this hint
           (and its saving state) down to nothing on a short viewport. */}
+      {/* NOTE: rendered inside the workspace Modal so it stacks above it. Modal's
+          own Escape handling means Escape here cancels the leave — the safe
+          direction — and requestClose() ignores a repeat while this is open. */}
       <div style={{ padding:'8px 12px', borderTop:'1px solid var(--gw-border)', fontSize:11, color:'var(--gw-mist)', lineHeight:1.5, flexShrink:0 }}>
         {savingLayout
           ? <span aria-live="polite">Saving this deal’s field layout…</span>
           : <>Not ready to send? Use <strong>Preview</strong> inside BoldSign, or <strong>Print</strong> above for a paper copy with a summary of who signs what — nothing goes out until you click Send. Fields you place are remembered for this deal.</>}
       </div>
+
+      {leaveAsk && (
+        <ConfirmDialog
+          eyebrow="BoldSign"
+          title="Leave the editor?"
+          confirmLabel="Leave"
+          confirmVariant="btn--danger"
+          busy={savingLayout}
+          onCancel={() => setLeaveAsk(false)}
+          onConfirm={() => leaveNow()}
+          message={
+            <>
+              <p style={{ margin:'0 0 10px' }}>Are you sure you want to leave? Unsaved changes will be lost.</p>
+              {/* Precision is the point. "Unsaved changes" alone leaves an agent
+                  guessing whether the whole packet is about to disappear; naming
+                  what survives is what makes Leave a safe button to press. */}
+              <p style={{ margin:'0 0 6px', color:'var(--gw-ink)' }}><strong>What is kept:</strong> the document stays on this deal as a draft, and the field layout is saved for next time as you leave.</p>
+              <p style={{ margin:0 }}>
+                <strong style={{ color:'var(--gw-ink)' }}>What may be lost:</strong> anything placed in BoldSign since
+                {lastSavedAt
+                  ? ` your last save at ${lastSavedAt.toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' })}`
+                  : ' you opened the editor'}
+                {' '}that BoldSign hasn’t saved. To keep it, choose Cancel and click <strong>Save</strong> inside BoldSign first.
+              </p>
+            </>
+          }
+        />
+      )}
     </Modal>
   )
 }

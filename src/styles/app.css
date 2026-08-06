@@ -288,8 +288,11 @@ select.form-control { cursor: pointer; }
    `min-height: 0` is what lets a flex child actually shrink inside it; without it
    the iframe would push the footer off the bottom of the modal. */
 .modal--workspace { width: 95vw; height: 94vh; max-width: none; max-height: 94vh; }
-.modal--workspace .modal__body { padding: 0; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
-.modal--workspace .modal__head { padding: 14px 20px; }
+/* DIRECT children only. A nested dialog (the leave confirmation) renders inside
+   this modal, and a descendant selector would strip ITS body padding and turn it
+   into a flex column too. */
+.modal--workspace > .modal__body { padding: 0; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+.modal--workspace > .modal__head { padding: 14px 20px; }
 .modal__foot { padding: 16px 24px; border-top: 1px solid var(--gw-border); display: flex; gap: 8px; justify-content: flex-end; }
 .eyebrow-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--gw-mist); margin-bottom: 4px; }
 
