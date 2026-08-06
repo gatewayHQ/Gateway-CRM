@@ -66,6 +66,7 @@ Signed PDFs + audit-trail PDFs are archived to the `deal-documents` bucket.
 |---|---|---|
 | `send` | agent | Ad-hoc immediate send (multipart). Requires `useTextTags: true` or per-signer `tabs` — no auto-placement. |
 | `document-embed-url` | agent | Ad-hoc → embedded prepare/send URL (iframe). `useTextTags` optional; otherwise the agent places fields in BoldSign. Writes the tracking row **before** returning the URL. |
+| `document-edit-url` | agent (sender) / admin | **Reopen an existing DRAFT** in the embedded prepare editor (`/document/createEmbeddedEditUrl`) — same signers, same field placement. Verifies against BoldSign that the document really is a draft (and self-heals a stale row if it isn't), then clears a stale edit lock and retries once if BoldSign refuses. See "Editing a draft" below. |
 | `status` / `remind` | agent | Doc status; nudge outstanding signers (records `last_reminded_at` / `reminder_count`) |
 | `download` / `audit-download` | agent | Returns `{ url, filename }` — a 5-minute signed **storage** URL, never base64 |
 | `document-delete` | agent (sender) / admin | Remove a draft/unsigned/expired document — revokes if in-progress, then deletes in BoldSign, then removes the local row. Refuses `completed` records. |
@@ -139,8 +140,40 @@ Two bugs made this flow unusable/unreliable, both fixed in `src/pages/FormLibrar
 - **Auto-save on completion.** `onDone` now calls the existing `save()` function automatically — no separate click needed. State + Packet Name are validated *before* the editor opens (so a template is never built for an unnamed/unsaved packet), and the same PDF selected for "Build in BoldSign" now also backs the packet's own storage upload (previously that file only fed the BoldSign template and a *second*, separate file choice was needed to satisfy Save's "Upload a PDF file" check for a brand-new packet).
 - **"Rebuild in BoldSign" now actually edits the existing template.** It previously re-ran the *create* path unconditionally — re-uploading the PDF and minting a brand-new BoldSign template id every time, silently orphaning the old one. It now calls `template-editor-url` with the existing `templateId`, which hits BoldSign's `getEmbeddedTemplateEditUrl` (already implemented server-side, just never called from here) and reopens the same template for editing.
 
+## Editing a draft (the way back into an unfinished send)
+An embedded send stays a **draft** in BoldSign until the agent clicks Send. Agents
+routinely lose that screen — they switch tabs, click outside the modal, or hit
+Escape — and before this the draft was a dead end: it showed in the Signatures tab
+with a "Draft" chip, no way back in, and the only route forward was deleting it and
+rebuilding the whole send.
+
+- **`Edit & Send`** on any `draft` row (`SignaturesTab`, `Pipeline.jsx`) calls
+  `document-edit-url` → `POST /v1/document/createEmbeddedEditUrl?documentId=…`
+  (`{ editUrl }`) and reopens the same document on `sendViewOption: 'PreparePage'`
+  with the toolbar, Preview and Send buttons on. Signers and placed fields are
+  whatever the agent left behind.
+- **Sender identity.** The edit URL is minted with the `onBehalfOf` of the
+  document's *recorded* `agent_id`, not the person clicking. An admin reopening an
+  agent's draft must not change who the client hears from mid-send.
+- **The edit lock.** A document opened for editing stays flagged in-edit-mode on
+  BoldSign's side; an agent who closed the browser instead of saving leaves the
+  flag set, and the next `createEmbeddedEditUrl` returns **400**. `createDraftEditUrl()`
+  treats a 400 as a possible stale lock: it calls `/document/cancelEditing` and
+  retries once. If the retry also fails, *its* error surfaces (so a genuinely
+  un-editable document still says why). Unit-tested in `api/__tests__/boldsign.test.js`.
+- **The CRM's status is not the gate.** A missed `Sent` webhook leaves a row reading
+  `draft` for a document the client already has, and offering "Edit" for that is a
+  lie. The action asks BoldSign for the live status first, writes the correction to
+  the row, and refuses with a message naming the real status.
+- **Accidental close is guarded.** Every embedded BoldSign step now renders through
+  `BoldSignStepModal`, which confirms before closing (`Modal` closes on backdrop
+  click *and* Escape) and says the work is kept as a draft. A draft-save event no
+  longer tears the iframe down — the agent is mid-prep. And `Drawer` ignores Escape
+  while a modal is open (`modalIsOpen()` in `UI.jsx`), so one keypress can't close
+  the prep frame *and* the deal drawer behind it.
+
 ## Drafts cleanup (Signatures tab)
-- **Filter dropdown**: Active (default — hides completed) / Drafts only / Completed only / All.
+- **Filter dropdown**: Active (default — hides completed, so drafts are visible) / Drafts only / Completed only / All.
 - **Delete** (trash icon, shown on any non-`completed` row): calls `document-delete`, which **revokes** the document in BoldSign first if it's still in progress (BoldSign requires `completed`/`revoked`/`declined` before `DELETE`), then deletes it there, writes an `audit_log` entry, and removes the local `boldsign_documents` row. Completed (signed) records are refused — they're the legal record and aren't deletable from this action.
 
 ## Embedded signing/sending (iFrame)
