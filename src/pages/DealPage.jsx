@@ -6,6 +6,7 @@ import { formatCurrency, formatDate, formatPhone, STAGE_LABELS } from '../lib/he
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
 import { agentIdsOnDeal } from '../lib/coAgents.js'
+import { additionalContactsForDeal } from '../lib/dealPeople.js'
 import { DealDrawer } from './Pipeline.jsx'
 import { getClosingGate, gateBadge } from '../lib/compliance.js'
 import { audit, useDealAudit } from '../lib/audit.js'
@@ -117,6 +118,17 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   const agent    = deal?.agent_id ? agents.find(a => a.id === deal.agent_id) : null
   const track    = deal ? TRACKS[UNIFIED] : null
   const cd       = deal?.comp_data || {}
+
+  // Co-buyers / co-owners / spouses — picked on the deal OR carried by the
+  // linked property, so a co-owner entered on the property shows up here too.
+  const extraContacts = useMemo(
+    () => additionalContactsForDeal({
+      deal, contacts,
+      dealContacts:     db.dealContacts     || [],
+      propertyContacts: db.propertyContacts || [],
+    }),
+    [deal, contacts, db.dealContacts, db.propertyContacts]
+  )
 
   // Commission numbers are back-office data (2026-06-12): admins compute from
   // raw rows; everyone else gets ONLY their own slice from the server, so a
@@ -491,6 +503,22 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
             ) : (
               <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>No contact linked.</div>
             )}
+            {/* Additional contacts — co-buyers, co-owners, husband & wife. Some
+                are picked on the deal, some ride along from the property. */}
+            {extraContacts.map(({ contact: c, source }) => (
+              <div key={c.id}>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
+                  <span style={{ fontWeight: 700, fontSize: 13 }}>{c.first_name} {c.last_name}</span>
+                  <span style={{ fontSize: 10.5, color: 'var(--gw-mist)' }}>
+                    {source === 'property' ? 'also on property' : 'additional contact'}
+                  </span>
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--gw-mist)', display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 2 }}>
+                  {c.phone && <a href={`tel:${c.phone}`} style={{ color: 'inherit' }}>{formatPhone(c.phone)}</a>}
+                  {c.email && <a href={`mailto:${c.email}`} style={{ color: 'inherit' }}>{c.email}</a>}
+                </div>
+              </div>
+            ))}
             <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8 }}>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>Agents on deal</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
