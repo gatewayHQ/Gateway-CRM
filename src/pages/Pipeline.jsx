@@ -2089,6 +2089,8 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [sending,    setSending]    = React.useState(false)
   const [details,    setDetails]    = React.useState(null)   // { roles, fields }
   const [loadingDet, setLoadingDet] = React.useState(false)
+  const [detailsErr, setDetailsErr] = React.useState('')     // why the roles/fields could not be read
+  const [reloadKey,  setReloadKey]  = React.useState(0)      // bumped by Retry
   const [signers,    setSigners]    = React.useState({})     // roleIndex → { name, email }
   // Signing order. Parallel is the DEFAULT: this used to be hard-wired to
   // sequential (signerOrder = role index), so two co-buyers sitting at the same
@@ -2104,9 +2106,10 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // Load the template's roles + fields whenever the selection changes, and seed
   // signer/field inputs from the deal.
   React.useEffect(() => {
-    if (!templateId) { setDetails(null); return }
+    if (!templateId) { setDetails(null); setDetailsErr(''); return }
     let cancelled = false
     setLoadingDet(true)
+    setDetailsErr('')
     templateDetails(templateId)
       .then(det => {
         if (cancelled) return
@@ -2123,10 +2126,20 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         for (const f of fields) seededValues[f.id] = tokenVals[f.id] || ''
         setValues(seededValues)
       })
-      .catch(err => { if (!cancelled) { setDetails({ roles: [{ index: 1, name: 'Signer' }], fields: [] }); pushToast(`Couldn't load template fields: ${err.message}`, 'error') } })
+      // A FAILED LOAD MUST NOT LOOK LIKE A LOADED TEMPLATE. This used to fall back to
+      // a single generic "Signer" row — which, next to "Roles left blank are removed
+      // from this send", reads as a one-signer packet and sends as one. A listing
+      // agreement that reaches only the seller because a network call failed is far
+      // worse than a modal that refuses to continue and says why.
+      .catch(err => {
+        if (cancelled) return
+        setDetails(null)
+        setDetailsErr(err.message || 'The template’s roles and fields could not be read.')
+        pushToast(`Couldn't load template fields: ${err.message}`, 'error')
+      })
       .finally(() => { if (!cancelled) setLoadingDet(false) })
     return () => { cancelled = true }
-  }, [templateId])
+  }, [templateId, reloadKey])
 
   const setSigner = (idx, k, v) => setSigners(p => ({ ...p, [idx]: { ...(p[idx] || {}), [k]: v } }))
   const setValue  = (id, v)     => setValues(p => ({ ...p, [id]: v }))
@@ -2229,6 +2242,16 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
         {loadingDet && <div style={{ fontSize:13, color:'var(--gw-mist)', padding:'8px 0' }}>Loading template…</div>}
 
+        {!loadingDet && detailsErr && (
+          <div style={{ background:'#fff5f5', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:12, fontSize:12, lineHeight:1.6 }} role="alert">
+            <strong>This template’s signers and fields could not be read, so it can’t be sent yet.</strong>
+            <div style={{ color:'var(--gw-mist)', marginTop:4 }}>{detailsErr}</div>
+            <button className="btn btn--secondary btn--sm" style={{ marginTop:8 }} onClick={() => setReloadKey(k => k + 1)}>
+              <Icon name="refresh" size={12}/> Try again
+            </button>
+          </div>
+        )}
+
         {!loadingDet && details && (
           <>
             {/* One signer input per template role; leave a role blank to omit it. */}
@@ -2278,7 +2301,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-        <button className="btn btn--primary" onClick={submit} disabled={sending || loadingDet}>
+        <button className="btn btn--primary" onClick={submit} disabled={sending || loadingDet || Boolean(detailsErr) || !details}>
           {sending ? 'Opening…' : 'Continue in BoldSign'}
         </button>
       </div>

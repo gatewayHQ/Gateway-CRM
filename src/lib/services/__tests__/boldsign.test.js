@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
+import { describeTransportFailure, buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
 
 describe('buildTextTag', () => {
   it('builds the {{fieldType|signerIndex|required|label|fieldId}} syntax', () => {
@@ -374,5 +374,42 @@ describe('buildTemplateRoles — index shift after role removal', () => {
   it('handles an empty role list and an empty signer map', () => {
     expect(buildTemplateRoles({})).toEqual({ roles: [], roleRemovalIndices: [], filledCount: 0 })
     expect(buildTemplateRoles({ roleList: IOWA_PACKET, signers: {} }).roleRemovalIndices).toEqual([1, 2, 3, 4, 5])
+  })
+})
+
+describe('describeTransportFailure — turning "Failed to fetch" into something actionable', () => {
+  const err = new TypeError('Failed to fetch')
+
+  it('says so plainly when the browser is offline', () => {
+    const msg = describeTransportFailure(err, { online: false })
+    expect(msg).toMatch(/No network connection/)
+    expect(msg).toMatch(/Reconnect/)
+  })
+
+  it('states that nothing was sent — the agent needs to know a send did not half-happen', () => {
+    expect(describeTransportFailure(err, { online: true })).toMatch(/never reached the server, so nothing was sent/)
+  })
+
+  it('names all three causes rather than guessing, because the browser hides which it was', () => {
+    const msg = describeTransportFailure(err, { online: true })
+    expect(msg).toMatch(/preview deployment/i)   // Vercel SSO redirect
+    expect(msg).toMatch(/extension/i)            // ad/privacy blocker
+    expect(msg).toMatch(/VPN|proxy/i)            // dropped connection
+  })
+
+  it('tells the agent exactly where to look to tell them apart', () => {
+    const msg = describeTransportFailure(err, { online: true })
+    expect(msg).toMatch(/DevTools/)
+    expect(msg).toMatch(/vercel\.com/)
+  })
+
+  it('keeps the original browser message, and survives one without a message', () => {
+    expect(describeTransportFailure(err, { online: true })).toMatch(/Failed to fetch/)
+    expect(describeTransportFailure({}, { online: true })).toMatch(/network error/)
+    expect(describeTransportFailure(undefined, { online: true })).toMatch(/network error/)
+  })
+
+  it('names the endpoint it could not reach', () => {
+    expect(describeTransportFailure(err, { online: true, url: '/api/portal' })).toMatch(/\/api\/portal/)
   })
 })
