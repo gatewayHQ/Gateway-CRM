@@ -94,6 +94,10 @@ export function frameTookFocus(activeElement, frameEl) {
 export default function BoldSignFrame({ url, onDone, onDraft, onError, onInteract, height = 640, fill = false, returnUrlMarker }) {
   const frameRef = React.useRef(null)
 
+  // Whether focus was inside the editor when we last lost it — read on return, to
+  // hand focus back (see the visibilitychange effect below).
+  const hadFocus = React.useRef(false)
+
   // HAS THE AGENT ACTUALLY BEEN WORKING IN THERE?
   // Nothing inside a cross-origin iframe is observable — not a click, not a drag,
   // not a half-placed field. But when focus moves INTO the frame, our window fires
@@ -105,13 +109,33 @@ export default function BoldSignFrame({ url, onDone, onDraft, onError, onInterac
   // exists and stays quiet when it doesn't — a prompt that cries wolf on every
   // close is one agents learn to dismiss without reading.
   useEffect(() => {
-    if (!onInteract) return
     const onBlur = () => {
-      if (frameTookFocus(document.activeElement, frameRef.current)) onInteract()
+      if (frameTookFocus(document.activeElement, frameRef.current)) {
+        hadFocus.current = true
+        onInteract?.()
+      }
     }
     window.addEventListener('blur', onBlur)
     return () => window.removeEventListener('blur', onBlur)
   }, [onInteract])
+
+  // RETURNING TO THE TAB. The frame and its document are untouched by a tab switch —
+  // an iframe isn't reloaded for being backgrounded — but keyboard focus is not
+  // restored to it automatically, so an agent who was typing in a field came back to
+  // a page that swallowed their keystrokes. If the editor held focus when they left,
+  // it gets it back. Only then: stealing focus from someone who deliberately clicked
+  // elsewhere before switching away would be its own small rudeness.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      if (!hadFocus.current || !frameRef.current) return
+      // A frame after the paint that follows the tab becoming visible; focusing
+      // during the transition is unreliable in Chrome.
+      requestAnimationFrame(() => frameRef.current?.focus?.())
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [])
 
   useEffect(() => {
     function handler(e) {

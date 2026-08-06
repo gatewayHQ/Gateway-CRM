@@ -2465,6 +2465,19 @@ function CommissionFields({ form, set }) {
   )
 }
 
+// The contacts linked to a deal, as a SORTED id list — a stable content key, so a
+// refetch that returns the same people in a different order (or simply a new array)
+// doesn't read as a change. Pure and exported for testing: the whole tab-switch bug
+// lived in treating array identity as meaning.
+export function dealContactIdsFor(dealContacts, dealId) {
+  if (!dealId) return []
+  return (dealContacts || [])
+    .filter(dc => dc?.deal_id === dealId)
+    .map(dc => dc?.contact_id)
+    .filter(Boolean)
+    .sort()
+}
+
 export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, onSave, initialTab = 'details' }) {
   const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, commission_type:'percent', commission_pct:'', commission_flat:'' }
   const [form, setForm]     = useState(deal || blank)
@@ -2473,6 +2486,25 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const [tab, setTab]       = useState(initialTab)
   // Additional contacts (husband & wife, co-buyers) — the primary stays contact_id.
   const [additionalContactIds, setAdditionalContactIds] = useState([])
+
+  // WHY THE DEPS ARE CONTENT, NOT OBJECTS — this is the "the modal closed when I
+  // switched tabs" bug.
+  //
+  // This effect re-seeds the form AND resets the visible tab. It used to depend on
+  // the `deal` OBJECT and the `dealContacts` ARRAY, both of which arrive from App's
+  // `db` state. Switching browser tabs makes Supabase refresh the auth token, which
+  // hands App a new session object, which re-runs its loader, which calls setDb with
+  // freshly-built arrays. Same data, new identities — so this effect fired and
+  // `setTab()` threw the agent back to Details, unmounting the Signatures tab and
+  // destroying the open BoldSign editor with it. The draft survived in BoldSign; the
+  // agent's place in it did not.
+  //
+  // Seeding belongs to "the drawer opened on this deal", so that is what it depends
+  // on: the deal's ID, not its object identity, and a content KEY for the linked
+  // contacts rather than the array they came in. A refetch that changes nothing now
+  // changes nothing. It also means an agent's half-typed edits are no longer wiped
+  // by a background refetch — the same bug wearing different clothes.
+  const dealContactKey = dealContactIdsFor(dealContacts, deal?.id).join(',')
 
   React.useEffect(() => {
     setForm(deal ? {
@@ -2487,10 +2519,10 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
     } : blank)
     setErrors({})
     setTab(deal?.id ? initialTab : 'details')
-    setAdditionalContactIds(
-      deal?.id ? (dealContacts || []).filter(dc => dc.deal_id === deal.id).map(dc => dc.contact_id) : []
-    )
-  }, [deal, open, initialTab, dealContacts])
+    setAdditionalContactIds(dealContactIdsFor(dealContacts, deal?.id))
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately keyed on
+    // the deal's IDENTITY and its contacts' CONTENT; see the comment above.
+  }, [deal?.id, open, initialTab, dealContactKey])
 
   // Resolved additional-contact objects — used for the "Send from Template"
   // signer prefill on the Signatures tab (co-signers get their own rows).

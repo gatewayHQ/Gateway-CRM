@@ -290,6 +290,21 @@ export default function App() {
     return () => subscription?.unsubscribe()
   }, [])
 
+  // The whole database is refetched when the SIGNED-IN USER changes — not whenever a
+  // new session OBJECT arrives.
+  //
+  // Supabase refreshes the access token on its own schedule, and notably when a
+  // backgrounded tab is brought back to the front. Each refresh fires
+  // onAuthStateChange with a fresh session object, and while the dependency here was
+  // `session` that object identity alone re-ran this loader and called setDb with
+  // newly-built arrays. Nothing had changed, but every component keyed on those
+  // arrays behaved as though it had — which is how switching browser tabs used to
+  // slam the deal drawer back to its Details tab and take an open BoldSign editor
+  // down with it (see the comment on DealDrawer's seeding effect).
+  //
+  // Keyed on the user id, a token refresh is now what it should be: invisible.
+  const sessionUserId = session?.user?.id || null
+
   useEffect(() => {
     if (!session) return
     const load = async () => {
@@ -419,7 +434,9 @@ export default function App() {
       setLoading(false)
     }
     load()
-  }, [session])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on WHO is signed
+    // in, deliberately not on the session object; see the comment above.
+  }, [sessionUserId])
 
   // Realtime: listen for new agent_notifications for the active agent
   useEffect(() => {
