@@ -77,12 +77,42 @@ export function classifyBoldSignMessage({ origin, data, selfOrigin }) {
   return null
 }
 
+// Did focus land INSIDE the frame? Pure so the rule can be stated once and tested:
+// the only element that can be the active one when a cross-origin iframe takes focus
+// is the iframe element itself. Anything else means the agent is still on our side
+// of the boundary (clicked our Print button, tabbed to the header) and no editor work
+// has begun.
+export function frameTookFocus(activeElement, frameEl) {
+  return Boolean(frameEl) && activeElement === frameEl
+}
+
 // `fill` makes the iframe take all remaining space in a flex-column parent instead
 // of a fixed pixel height — used by the workspace-sized modals, where the document
-// should be as large as the viewport allows. `minHeight: 0` is required for that:
-// an iframe's default min-height would refuse to shrink and push the modal's footer
-// off screen. `height` remains for the fixed-height callers.
-export default function BoldSignFrame({ url, onDone, onDraft, onError, height = 640, fill = false, returnUrlMarker }) {
+// should be as large as the viewport allows. `minHeight: 0` is required for that: an
+// iframe's default min-height would refuse to shrink and push the modal's footer off
+// screen. `height` remains for the fixed-height callers.
+export default function BoldSignFrame({ url, onDone, onDraft, onError, onInteract, height = 640, fill = false, returnUrlMarker }) {
+  const frameRef = React.useRef(null)
+
+  // HAS THE AGENT ACTUALLY BEEN WORKING IN THERE?
+  // Nothing inside a cross-origin iframe is observable — not a click, not a drag,
+  // not a half-placed field. But when focus moves INTO the frame, our window fires
+  // `blur` and `document.activeElement` becomes the iframe element. That is a real
+  // signal, from the browser rather than from a guess: if it never fires, the agent
+  // never touched the editor and there is nothing to warn them about losing.
+  //
+  // Used by the leave confirmation, so the warning appears when work plausibly
+  // exists and stays quiet when it doesn't — a prompt that cries wolf on every
+  // close is one agents learn to dismiss without reading.
+  useEffect(() => {
+    if (!onInteract) return
+    const onBlur = () => {
+      if (frameTookFocus(document.activeElement, frameRef.current)) onInteract()
+    }
+    window.addEventListener('blur', onBlur)
+    return () => window.removeEventListener('blur', onBlur)
+  }, [onInteract])
+
   useEffect(() => {
     function handler(e) {
       const verdict = classifyBoldSignMessage({ origin: e.origin, data: e.data, selfOrigin: window.location.origin })
@@ -109,6 +139,7 @@ export default function BoldSignFrame({ url, onDone, onDraft, onError, height = 
   if (!url) return null
   return (
     <iframe
+      ref={frameRef}
       title="BoldSign"
       src={url}
       onLoad={handleLoad}

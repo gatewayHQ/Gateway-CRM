@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { classifyBoldSignMessage } from '../BoldSignFrame.jsx'
+import { classifyBoldSignMessage, frameTookFocus } from '../BoldSignFrame.jsx'
 
 const BOLDSIGN = 'https://app.boldsign.com'
 const SELF     = 'https://crm.example.com'
@@ -63,5 +63,29 @@ describe('classifyBoldSignMessage — origin trust', () => {
   it('ignores empty / unrecognized payloads', () => {
     expect(classifyBoldSignMessage({ origin: BOLDSIGN, data: {}, selfOrigin: SELF })).toBeNull()
     expect(classifyBoldSignMessage({ origin: BOLDSIGN, data: { status: 'somethingElse' }, selfOrigin: SELF })).toBeNull()
+  })
+})
+
+describe('frameTookFocus — the only honest "the agent is working in there" signal', () => {
+  const frame = { tagName: 'IFRAME' }
+
+  it('is true when the iframe itself holds focus', () => {
+    // A cross-origin iframe cannot report a click, a drag or a half-placed field.
+    // When focus crosses into it, our window blurs and the iframe becomes the active
+    // element — that is the whole basis of the unsaved-work warning.
+    expect(frameTookFocus(frame, frame)).toBe(true)
+  })
+
+  it('is false when focus went somewhere else on our side of the boundary', () => {
+    // Clicking Print, or tabbing to the header, must NOT mark work as unsaved —
+    // otherwise the leave prompt fires on a session where nothing was touched, and a
+    // prompt that cries wolf is one agents dismiss without reading.
+    expect(frameTookFocus({ tagName: 'BUTTON' }, frame)).toBe(false)
+    expect(frameTookFocus(null, frame)).toBe(false)
+  })
+
+  it('is false before the frame exists', () => {
+    expect(frameTookFocus(frame, null)).toBe(false)
+    expect(frameTookFocus(null, null)).toBe(false)
   })
 })

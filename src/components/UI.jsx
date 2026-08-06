@@ -156,22 +156,32 @@ export function EmptyState({ icon = 'alert', title, message, action }) {
 }
 
 // ─── CONFIRM DIALOG ───────────────────────────────────────────────────────────
-export function ConfirmDialog({ message, onConfirm, onCancel }) {
+// Defaults are the delete confirmation this started as, so existing callers are
+// unchanged. `title` / `confirmLabel` / `eyebrow` let it speak plainly for other
+// decisions — "Leave" reads very differently from "Delete" when what's at stake is
+// half an hour of field placement.
+export function ConfirmDialog({
+  message, onConfirm, onCancel,
+  title = 'Are you sure?', confirmLabel = 'Delete', eyebrow = 'Confirm Action',
+  confirmVariant = 'btn--danger', cancelLabel = 'Cancel', busy = false,
+}) {
   return (
-    <Modal open={true} onClose={onCancel} width={400}>
+    <Modal open={true} onClose={onCancel} width={420}>
       <div className="modal__head">
         <div>
-          <div className="eyebrow-label">Confirm Action</div>
-          <h3 style={{ margin: 0, fontSize: 18, fontFamily: 'var(--font-display)' }}>Are you sure?</h3>
+          <div className="eyebrow-label">{eyebrow}</div>
+          <h3 style={{ margin: 0, fontSize: 18, fontFamily: 'var(--font-display)' }}>{title}</h3>
         </div>
         <button className="drawer__close" onClick={onCancel}><Icon name="x" size={18} /></button>
       </div>
       <div className="modal__body">
-        <p style={{ fontSize: 14, color: 'var(--gw-mist)', lineHeight: 1.6 }}>{message}</p>
+        <div style={{ fontSize: 14, color: 'var(--gw-mist)', lineHeight: 1.6 }}>{message}</div>
       </div>
       <div className="modal__foot">
-        <button className="btn btn--secondary" onClick={onCancel}>Cancel</button>
-        <button className="btn btn--danger" onClick={onConfirm}>Delete</button>
+        <button className="btn btn--secondary" onClick={onCancel} disabled={busy}>{cancelLabel}</button>
+        <button className={`btn ${confirmVariant}`} onClick={onConfirm} disabled={busy}>
+          {busy ? 'Saving…' : confirmLabel}
+        </button>
       </div>
     </Modal>
   )
