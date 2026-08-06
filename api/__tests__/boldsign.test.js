@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload } from '../boldsign.js'
+import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -69,6 +69,74 @@ describe('boldsign() retry + idempotency', () => {
   it('throws with status after exhausting retries', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(errResp(500))))
     await expect(boldsign('/x', { method: 'GET', maxRetries: 1 })).rejects.toMatchObject({ status: 500 })
+  })
+})
+
+describe('formatByteSize', () => {
+  it('reads the way a person would say it', () => {
+    expect(formatByteSize(512)).toBe('512 B')
+    expect(formatByteSize(2048)).toBe('2 KB')
+    expect(formatByteSize(5 * 1048576)).toBe('5.0 MB')
+    expect(formatByteSize(null)).toBe('0 B')
+  })
+})
+
+describe('optimizePdfLossless — shrink the container, never the content', () => {
+  // A PDF built here rather than fixtured, so the test proves the real pdf-lib
+  // round trip rather than a stub of it.
+  const makePdf = async (pages = 30) => {
+    const { PDFDocument, StandardFonts } = await import('pdf-lib')
+    const doc  = await PDFDocument.create()
+    const font = await doc.embedFont(StandardFonts.Helvetica)
+    for (let i = 0; i < pages; i++) {
+      const page = doc.addPage([612, 792])
+      page.drawText(`EXCLUSIVE LISTING AGREEMENT — page ${i + 1}`, { x: 40, y: 720, size: 12, font })
+    }
+    return Buffer.from(await doc.save({ useObjectStreams: false }))
+  }
+
+  it('keeps the page count and the text — nothing is rasterized away', async () => {
+    const original = await makePdf(12)
+    const { buffer } = await optimizePdfLossless(original, 'listing.pdf')
+    const { PDFDocument } = await import('pdf-lib')
+    const reloaded = await PDFDocument.load(buffer)
+    expect(reloaded.getPageCount()).toBe(12)
+    // Same page geometry: no downscaling of the page box, which is how a
+    // "compressed" PDF ends up looking soft when it is rendered back up to size.
+    expect(reloaded.getPage(0).getSize()).toEqual({ width: 612, height: 792 })
+  })
+
+  it('never returns something bigger than what it was given', async () => {
+    const original = await makePdf(4)
+    const { buffer, before, after } = await optimizePdfLossless(original, 'small.pdf')
+    expect(after).toBeLessThanOrEqual(before)
+    expect(buffer.length).toBe(after)
+  })
+
+  it('returns the original untouched when the bytes are not a readable PDF', async () => {
+    const junk = Buffer.from('not a pdf at all')
+    const { buffer, saved } = await optimizePdfLossless(junk, 'junk.pdf')
+    expect(buffer).toBe(junk)     // same object — nothing was substituted
+    expect(saved).toBe(0)
+  })
+})
+
+describe('fitForBoldSign — a file too big is split, never re-compressed', () => {
+  it('passes a normal file straight through, untouched', async () => {
+    const small = Buffer.from('%PDF-1.7 tiny')
+    const res = await fitForBoldSign(small, 'small.pdf')
+    expect(res.buffer).toBe(small)
+    expect(res.optimized).toBe(false)
+  })
+
+  it('refuses an oversized file with the sizes and the real remedy', async () => {
+    // 26 MB of unreadable bytes: nothing to optimize, so it must fail loudly
+    // rather than quietly degrading the page images — the exact operation that
+    // produced the blurry packets in the first place.
+    const huge = Buffer.alloc(26 * 1024 * 1024, 0x41)
+    await expect(fitForBoldSign(huge, 'packet.pdf')).rejects.toThrow(/26\.0 MB.*25\.0 MB/s)
+    await expect(fitForBoldSign(huge, 'packet.pdf')).rejects.toThrow(/Split the packet/)
+    await expect(fitForBoldSign(huge, 'packet.pdf')).rejects.toMatchObject({ status: 400 })
   })
 })
 
@@ -627,5 +695,27 @@ describe('isMissingLayoutStorage — un-migrated database is a provisioning stat
     expect(isMissingLayoutStorage({ code: '23505', message: 'duplicate key value violates unique constraint' })).toBe(false)
     expect(isMissingLayoutStorage({ message: 'permission denied for table deal_field_layouts' })).toBe(false)
     expect(isMissingLayoutStorage(null)).toBe(false)
+  })
+})
+
+describe('isOwnSignedStorageUrl — bucket allow-list', () => {
+  const PROJECT = 'https://twgwemkihpwlgliftagg.supabase.co'
+  const packetUrl = `${PROJECT}/storage/v1/object/sign/form-packets/IA/seller/1-0-listing.pdf?token=abc`
+  const dealUrl   = `${PROJECT}/storage/v1/object/sign/deal-documents/deal-1111/contract.pdf?token=abc`
+
+  it('rejects a form-packets URL by default — widening it for templates must not widen it for sends', () => {
+    expect(isOwnSignedStorageUrl(packetUrl, PROJECT)).toBe(false)
+  })
+
+  it('accepts a form-packets URL only when that bucket is asked for', () => {
+    expect(isOwnSignedStorageUrl(packetUrl, PROJECT, ['form-packets'])).toBe(true)
+  })
+
+  it('does not let the packet allow-list smuggle in a deal document', () => {
+    expect(isOwnSignedStorageUrl(dealUrl, PROJECT, ['form-packets'])).toBe(false)
+  })
+
+  it('still refuses another host wearing the right path', () => {
+    expect(isOwnSignedStorageUrl('https://evil.example.com/storage/v1/object/sign/form-packets/x.pdf', PROJECT, ['form-packets'])).toBe(false)
   })
 })

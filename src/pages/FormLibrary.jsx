@@ -14,12 +14,21 @@ const TRANSACTION_TYPES = [
 
 const BUCKET = 'form-packets'
 
-const fileToBase64 = f => new Promise((res, rej) => {
-  const r = new FileReader()
-  r.onload = e => res(e.target.result.split(',')[1])
-  r.onerror = rej
-  r.readAsDataURL(f)
-})
+// BoldSign's own per-file ceiling. The app used to impose a far lower one without
+// saying so: template PDFs travelled to the API as base64 inside a JSON body, and a
+// serverless request is capped at 4.5 MB (base64 inflates ~33% → ~3.3 MB of PDF).
+// A real listing packet with scanned disclosures exceeds that, so the only way to
+// get one in was to compress it until the text went soft — and BoldSign then holds
+// those degraded bytes forever, in the editor, the preview, the sent document and
+// the signed PDF. Now the original goes to the form-packets bucket and only a
+// signed URL travels through the API, so the honest limit is BoldSign's 25 MB.
+const MAX_PACKET_BYTES = 25 * 1024 * 1024
+
+// Where a packet's source files live in the bucket. One scheme, used by both the
+// build path and save() — they must agree, or building would upload a file save()
+// then orphans.
+const packetStoragePath = (state, txType, file, i) =>
+  `${String(state).trim().toUpperCase()}/${txType}/${Date.now()}-${i}-${file.name}`
 
 function formatBytes(b) {
   if (!b) return ''
@@ -48,11 +57,34 @@ function UploadModal({ packet, onClose, onSaved }) {
   const fileRef = useRef()
   const savedFromEditorRef = useRef(false)   // guards against the editor firing "done" twice (message + redirect)
   const savedPacketIdRef   = useRef(null)    // row created by an intermediate editor save, so the next save updates it
+  // Files already uploaded to the bucket by "Build in BoldSign" — save() reuses
+  // them instead of uploading the same bytes again under a second set of paths.
+  const [builtPaths, setBuiltPaths] = useState([])
 
   // Takes an ALREADY-materialized array — the caller must Array.from() the live
   // FileList before resetting the input's value, or the files vanish (the state
   // updater runs after value='' has cleared the FileList).
-  const addFiles   = (picked) => setFiles(p => [...p, ...(picked || [])])
+  // Validated at PICK time against BoldSign's real 25 MB per-file ceiling. This is
+  // deliberately loud: an admin who has been shrinking packets to get them past the
+  // old ~3.3 MB request cap needs to know they can stop, and a genuinely oversized
+  // file should be split rather than compressed until the text is unreadable.
+  const addFiles = (picked) => {
+    const ok = []
+    for (const f of (picked || [])) {
+      if (!/\.pdf$/i.test(f.name) && f.type !== 'application/pdf') {
+        pushToast(`"${f.name}" is not a PDF — BoldSign templates must be PDFs.`, 'error'); continue
+      }
+      if (f.size > MAX_PACKET_BYTES) {
+        pushToast(
+          `"${f.name}" is ${formatBytes(f.size)} — over BoldSign's ${formatBytes(MAX_PACKET_BYTES)} per-file limit. `
+          + 'Split it into two PDFs and add both; they are combined into one template. Do not compress it — that is what makes the text blurry.',
+          'error',
+        ); continue
+      }
+      ok.push(f)
+    }
+    if (ok.length) setFiles(p => [...p, ...ok])
+  }
   const removeFile = (i) => setFiles(p => p.filter((_, j) => j !== i))
   // Files already stored on an existing packet (multi-file, with single-file back-compat).
   const existingFiles = (Array.isArray(packet?.storage_paths) && packet.storage_paths.length)
@@ -77,8 +109,27 @@ function UploadModal({ packet, onClose, onSaved }) {
   const buildInBoldSign = async () => {
     if (!form.state.trim()) { pushToast('State is required before building a template', 'error'); return }
     if (!form.name.trim())  { pushToast('Packet name is required before building a template', 'error'); return }
-    const rebuilding = !!form.boldsign_template_id
+    // Reopening the EXISTING template is right when the admin only wants to adjust
+    // fields. But when they have selected new PDFs, they are replacing the source —
+    // most often precisely to fix a packet built from a compressed file, where no
+    // amount of field editing will sharpen the text. Reopening the old template
+    // there (which is what happened before) silently ignored the better file.
+    const replacingSource = !!form.boldsign_template_id && files.length > 0
+    const rebuilding      = !!form.boldsign_template_id && !files.length
     if (!rebuilding && !files.length) { pushToast('Add at least one PDF first', 'error'); return }
+    if (replacingSource) {
+      // Explicit, because it points the packet at a NEW BoldSign template and
+      // leaves the old one behind in the account — never something to do quietly.
+      const ok = window.confirm(
+        'Replace this packet’s BoldSign template with the newly selected PDF'
+        + (files.length > 1 ? 's' : '') + '?\n\n'
+        + 'A new template is built from the file you just added and this packet points at it. '
+        + 'The old template stays in BoldSign (documents already sent from it are unaffected), '
+        + 'and you will need to place fields again.\n\n'
+        + 'This is how you fix a packet whose text is blurry: rebuild it from the original, uncompressed PDF.'
+      )
+      if (!ok) return
+    }
     savedFromEditorRef.current = false
     setEditorBusy(true)
     try {
@@ -91,9 +142,33 @@ function UploadModal({ packet, onClose, onSaved }) {
       // Every selected PDF becomes part of the one template document, in order —
       // BoldSign merges them (listing agreement + disclosures + addenda → one packet).
       const templateTitle = form.name.trim() || files[0].name.replace(/\.pdf$/i, '')
+
+      // Upload the ORIGINALS to storage and send BoldSign signed URLs, not base64.
+      // This is what keeps the text sharp: the bytes never pass through a
+      // request-body size cap, so nobody has to compress a packet to make it fit.
+      // Uploading here (rather than only in save()) also means the source file is
+      // preserved even if the admin never gets as far as clicking Save, and the
+      // paths match the ones save() writes so nothing is orphaned.
       const documents = []
-      for (const f of files) documents.push({ base64: await fileToBase64(f), name: f.name })
-      const { url, templateId } = await templateEditorUrl({
+      const uploadedPaths = []
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i]
+        const path = packetStoragePath(form.state, form.transaction_type, f, i)
+        const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, f, {
+          upsert: true, contentType: 'application/pdf',
+        })
+        if (upErr) { pushToast(`Could not upload "${f.name}": ${upErr.message}`, 'error'); return }
+        // 10 minutes: long enough for BoldSign to pull a 25 MB packet, short enough
+        // that the link is useless if it ever leaks.
+        const { data: signed, error: signErr } = await supabase.storage.from(BUCKET).createSignedUrl(path, 600)
+        if (signErr || !signed?.signedUrl) {
+          pushToast(`Could not prepare "${f.name}" for BoldSign${signErr?.message ? `: ${signErr.message}` : ''}`, 'error'); return
+        }
+        documents.push({ url: signed.signedUrl, name: f.name })
+        uploadedPaths.push({ path, name: f.name })
+      }
+
+      const { url, templateId, uploaded, optimized } = await templateEditorUrl({
         title: templateTitle, documentTitle: templateTitle,
         documents,
         redirectUrl: editorReturnUrl,
@@ -102,6 +177,18 @@ function UploadModal({ packet, onClose, onSaved }) {
       })
       if (!url) { pushToast('BoldSign did not return an editor URL', 'error'); return }
       if (templateId) set('boldsign_template_id', templateId)
+      // Remember what was uploaded so save() reuses these files instead of
+      // re-uploading them under new paths.
+      setBuiltPaths(uploadedPaths)
+      // Confirm the real size that reached BoldSign — an admin who has spent months
+      // compressing packets to get them through deserves to see that it stopped.
+      const totalBytes = (uploaded || []).reduce((t, u) => t + (u.bytes || 0), 0)
+      if (totalBytes) {
+        pushToast(
+          `Uploaded ${formatBytes(totalBytes)} at full quality${optimized ? ' (losslessly optimized to fit BoldSign\'s 25 MB limit — no image re-compression)' : ''}.`,
+          'success',
+        )
+      }
       setEditorUrl(url)
     } catch (e) { pushToast(e.message, 'error') } finally { setEditorBusy(false) }
   }
@@ -139,13 +226,20 @@ function UploadModal({ packet, onClose, onSaved }) {
     setSaving(true)
     try {
       // Newly selected files replace the package; otherwise keep what's on file.
+      // "Build in BoldSign" has already uploaded the originals (that's how they
+      // reach BoldSign at full quality now), so reuse those paths rather than
+      // pushing the same 20 MB packet a second time and orphaning the first copy.
       let storagePaths = existingFiles
-      if (files.length) {
+      if (builtPaths.length && builtPaths.length === files.length) {
+        storagePaths = builtPaths
+      } else if (files.length) {
         const uploaded = []
         for (let i = 0; i < files.length; i++) {
           const f = files[i]
-          const path = `${form.state.trim().toUpperCase()}/${form.transaction_type}/${Date.now()}-${i}-${f.name}`
-          const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, f, { upsert: true })
+          const path = packetStoragePath(form.state, form.transaction_type, f, i)
+          const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, f, {
+            upsert: true, contentType: 'application/pdf',
+          })
           if (upErr) { pushToast(upErr.message, 'error'); setSaving(false); return }
           uploaded.push({ path, name: f.name })
         }
@@ -251,6 +345,10 @@ function UploadModal({ packet, onClose, onSaved }) {
             <span style={{ color: 'var(--gw-mist)', fontSize: 13 }}>
               {files.length ? 'Add more PDFs…' : (existingFiles.length ? 'Click to replace with new PDFs' : 'Click to choose one or more PDFs')}
             </span>
+            <div style={{ color: 'var(--gw-mist)', fontSize: 11, marginTop: 4 }}>
+              Upload the <strong>original, uncompressed</strong> PDF — up to {formatBytes(MAX_PACKET_BYTES)} each.
+              Whatever is uploaded here is exactly what signers see, so a pre-compressed file stays blurry forever.
+            </div>
           </div>
 
           {/* Newly selected files (in the order they'll appear in the template). */}
@@ -265,7 +363,10 @@ function UploadModal({ packet, onClose, onSaved }) {
                   <button type="button" className="btn btn--ghost btn--sm btn--icon" onClick={() => removeFile(i)}><Icon name="x" size={11}/></button>
                 </div>
               ))}
-              <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2 }}>Multiple PDFs are combined into one template, in this order.</div>
+              <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2 }}>
+                Multiple PDFs are combined into one template, in this order.
+                {' '}Total {formatBytes(files.reduce((t, f) => t + f.size, 0))}.
+              </div>
             </div>
           )}
 
@@ -310,7 +411,11 @@ function UploadModal({ packet, onClose, onSaved }) {
               onClick={() => buildInBoldSign()}
               disabled={editorBusy}
             >
-              <Icon name="upload" size={13}/> {editorBusy ? 'Opening…' : form.boldsign_template_id ? 'Rebuild in BoldSign' : 'Build in BoldSign'}
+              <Icon name="upload" size={13}/> {editorBusy
+                ? 'Opening…'
+                : !form.boldsign_template_id ? 'Build in BoldSign'
+                : files.length ? 'Replace PDF & Rebuild'
+                : 'Rebuild in BoldSign'}
             </button>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--gw-mist)', cursor: 'pointer' }}>
               <input type="checkbox" checked={useTextTags} onChange={e => setUseTextTags(e.target.checked)} style={{ width: 13, height: 13 }}/>

@@ -181,6 +181,47 @@ rebuilding the whole send.
   while a modal is open (`modalIsOpen()` in `UI.jsx`), so one keypress can't close
   the prep frame *and* the deal drawer behind it.
 
+## Document quality — why template PDFs were blurry
+**Nothing in this app ever compressed a PDF.** But `template-editor-url` used to
+carry template sources as **base64 inside the JSON request body**, and a serverless
+request is capped at 4.5 MB — base64 inflates by ~33%, so ~3.3 MB of PDF. A real
+listing packet with scanned disclosures is bigger than that, so the only way to get
+one in was to run it through a compressor until it fit. BoldSign then holds those
+degraded bytes forever: the embedded editor, the preview, the sent document and the
+signed PDF all render the same stored file. **No preview or DPI setting can recover
+detail the stored file no longer has** — which is why the fix is upstream of
+rendering, not in it.
+
+- **Template sources now travel like send documents do.** The browser uploads the
+  ORIGINAL to the `form-packets` bucket and passes a 10-minute **signed URL**; the
+  API streams the bytes to BoldSign server-side, where the 4.5 MB cap doesn't apply.
+  The honest ceiling becomes BoldSign's own **25 MB per file** — ~7× the headroom.
+- `resolveDocumentBytes(req, { …, source: 'packet' })` reads from `form-packets`
+  instead of `deal-documents`. The bucket is a coarse `'deal' | 'packet'` switch, not
+  a caller-supplied bucket name, and `isOwnSignedStorageUrl()` takes an explicit
+  allow-list — so widening this for templates cannot widen the SSRF surface for
+  sends. Both directions are unit-tested.
+- **Build uploads before opening the editor**, using the same path scheme `save()`
+  writes, so the source is preserved even if the admin never clicks Save and no
+  second copy is orphaned.
+- **Oversized files are shrunk losslessly or refused — never re-compressed.**
+  `fitForBoldSign()` only engages above 25 MB and only calls
+  `optimizePdfLossless()` (pdf-lib re-serialize with object streams: structure and
+  orphaned objects, images copied byte-for-byte, no resampling). Still too big → a
+  400 naming both sizes and telling the admin to split the packet, because
+  re-encoding page images is the operation that caused this bug.
+- **Fixing an already-blurry packet:** selecting new PDFs on a packet that already
+  has a template now **replaces the source** — it builds a new template from the
+  better file and repoints the packet, behind an explicit confirm (the old template
+  stays in BoldSign; sent documents are unaffected; fields must be placed again).
+  Previously "Rebuild in BoldSign" reopened the old template and silently ignored
+  the newly selected file, so there was no way to un-blur a packet at all.
+- The **ad-hoc send** path already streamed from storage, so it was never subject to
+  this; the pick-time check there is BoldSign's real 25 MB.
+- The in-modal editor/preview is rendered by BoldSign server-side from the stored
+  document — there is no client DPI knob. What's left on our side is viewport size,
+  covered by the enlarged modal.
+
 ## Per-deal field layouts (placements that stick)
 Field placement happens inside BoldSign's embedded editor, and BoldSign keeps it on
 the **document**. So the arrangement an agent builds for a deal — the co-seller's
