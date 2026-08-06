@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl } from '../boldsign.js'
+import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -411,5 +411,221 @@ describe('createDraftEditUrl — getting an agent back into an abandoned draft',
     await createDraftEditUrl({ documentId: 'd1' })
     expect(body.onBehalfOf).toBeUndefined()
     expect(body.redirectUrl).toBe('')
+  })
+})
+
+// ─── Per-deal field layouts ───────────────────────────────────────────────────
+const field = (over = {}) => ({
+  id: 'f1', type: 'Signature', pageNumber: 2,
+  bounds: { x: 100, y: 200, width: 180, height: 35 },
+  isRequired: true, ...over,
+})
+
+describe('normalizeFieldType — read spelling → write enum', () => {
+  it('passes through the types BoldSign accepts verbatim', () => {
+    expect(normalizeFieldType('Signature')).toBe('Signature')
+    expect(normalizeFieldType('DateSigned')).toBe('DateSigned')
+  })
+
+  it('maps the spellings BoldSign READS BACK but does not accept on write', () => {
+    // Read as "Textbox", written as "TextBox". Unmapped, every text box an agent
+    // placed would be dropped from the saved layout without a word.
+    expect(normalizeFieldType('Textbox')).toBe('TextBox')
+    expect(normalizeFieldType('initials')).toBe('Initial')
+    expect(normalizeFieldType('editabledate')).toBe('EditableDate')
+  })
+
+  it('is case-insensitive', () => {
+    expect(normalizeFieldType('CHECKBOX')).toBe('CheckBox')
+  })
+
+  it('returns null for a type it cannot re-create', () => {
+    expect(normalizeFieldType('QuantumFlux')).toBeNull()
+    expect(normalizeFieldType('')).toBeNull()
+    expect(normalizeFieldType(undefined)).toBeNull()
+  })
+})
+
+describe('normalizeCapturedField', () => {
+  it('keeps type, page, bounds and the flags needed to re-create the field', () => {
+    expect(normalizeCapturedField(field())).toEqual({
+      id: 'f1', fieldType: 'Signature', pageNumber: 2,
+      bounds: { x: 100, y: 200, width: 180, height: 35 },
+      isRequired: true, isReadOnly: false,
+    })
+  })
+
+  it('drops a field with no usable bounds rather than stacking it at (0,0)', () => {
+    expect(normalizeCapturedField(field({ bounds: null }))).toBeNull()
+    expect(normalizeCapturedField(field({ bounds: { x: 10, y: 10, width: 0, height: 20 } }))).toBeNull()
+  })
+
+  it('keeps x/y of 0 — a field at the page origin is legitimate', () => {
+    const f = normalizeCapturedField(field({ bounds: { x: 0, y: 0, width: 100, height: 20 } }))
+    expect(f.bounds).toEqual({ x: 0, y: 0, width: 100, height: 20 })
+  })
+
+  it('carries label, value and placeholder — the hand-typed content of a packet', () => {
+    const f = normalizeCapturedField(field({ type: 'Textbox', label: 'County', value: 'Polk', placeholder: 'County' }))
+    expect(f).toMatchObject({ fieldType: 'TextBox', label: 'County', value: 'Polk', placeHolder: 'County' })
+  })
+
+  it('omits a font outside BoldSign\'s enum, which would fail the whole request', () => {
+    expect(normalizeCapturedField(field({ font: 'Comic Sans' })).font).toBeUndefined()
+    expect(normalizeCapturedField(field({ font: 'Helvetica' })).font).toBe('Helvetica')
+  })
+})
+
+describe('normalizeCapturedLayout', () => {
+  const props = {
+    signerDetails: [
+      { id: 's1', signerRole: 'Seller', signerName: 'Curtis Epling', signerEmail: 'c@x.com', order: 1,
+        formFields: [field(), field({ id: 'f2', type: 'Initial' })] },
+      { id: 's2', signerRole: 'Listing Agent', signerEmail: 'a@x.com', order: 2,
+        formFields: [field({ id: 'f3', type: 'Textbox' })] },
+    ],
+    commonFields: [field({ id: 'c1', type: 'Label' })],
+  }
+
+  it("captures every signer's fields, counting only what a restore can put back", () => {
+    // 3 signer fields + 1 common field. Common fields are recorded but not
+    // counted: /document/edit only accepts fields nested under a signer, so
+    // counting them would promise the agent a field that never comes back.
+    const { layout, fieldCount, dropped } = normalizeCapturedLayout(props)
+    expect(fieldCount).toBe(3)
+    expect(dropped).toBe(0)
+    expect(layout.signers).toHaveLength(2)
+    expect(layout.signers[0]).toMatchObject({ signerRole: 'Seller', signerEmail: 'c@x.com', order: 1 })
+    expect(layout.signers[0].formFields.map(f => f.id)).toEqual(['f1', 'f2'])
+    expect(layout.commonFields.map(f => f.fieldType)).toEqual(['Label'])
+  })
+
+  it('reports unrestorable fields instead of silently shrinking the layout', () => {
+    const { fieldCount, dropped } = normalizeCapturedLayout({
+      signerDetails: [{ id: 's1', formFields: [field(), field({ id: 'x', type: 'QuantumFlux' })] }],
+    })
+    expect(fieldCount).toBe(1)
+    expect(dropped).toBe(1)
+  })
+
+  it('handles an empty or malformed properties payload without throwing', () => {
+    expect(normalizeCapturedLayout({}).fieldCount).toBe(0)
+    expect(normalizeCapturedLayout(null).fieldCount).toBe(0)
+  })
+})
+
+describe('matchLayoutSigner — the saved arrangement finds the new document\'s signers', () => {
+  const live = [
+    { id: 'n1', signerRole: 'Seller', signerEmail: 'new-seller@x.com', order: 1 },
+    { id: 'n2', signerRole: 'Listing Agent', signerEmail: 'agent@x.com', order: 2 },
+  ]
+
+  it('matches on ROLE first — the client changed, the role did not', () => {
+    // This is the whole point: a listing packet re-sent to a different seller must
+    // still put the seller's signature where the agent put it.
+    const m = matchLayoutSigner({ signerRole: 'Seller', signerEmail: 'old-seller@x.com', order: 2 }, live)
+    expect(m.id).toBe('n1')
+  })
+
+  it('falls back to email when the role is blank', () => {
+    expect(matchLayoutSigner({ signerRole: '', signerEmail: 'agent@x.com' }, live).id).toBe('n2')
+  })
+
+  it('falls back to position when neither role nor email matches', () => {
+    expect(matchLayoutSigner({ signerRole: 'Witness', signerEmail: 'w@x.com', order: 2 }, live).id).toBe('n2')
+  })
+
+  it('returns null rather than guessing when nothing lines up', () => {
+    expect(matchLayoutSigner({ signerRole: 'Witness', order: 9 }, live)).toBeNull()
+  })
+})
+
+describe('buildLayoutEditPayload — restoring a layout onto a fresh draft', () => {
+  const savedLayout = {
+    signers: [{
+      signerRole: 'Seller', signerEmail: 'old@x.com', order: 1,
+      formFields: [
+        { id: 'tplSig', fieldType: 'Signature', pageNumber: 1, bounds: { x: 50, y: 60, width: 180, height: 35 } },
+        { id: 'agentAdded', fieldType: 'Initial', pageNumber: 3, bounds: { x: 20, y: 30, width: 60, height: 25 } },
+      ],
+    }],
+  }
+
+  it('UPDATES a field the new draft already has, and ADDS one it lacks', () => {
+    const payload = buildLayoutEditPayload({
+      layout: savedLayout,
+      signerDetails: [{ id: 'n1', signerRole: 'Seller', formFields: [{ id: 'tplSig' }] }],
+    })
+    expect(payload.signers).toHaveLength(1)
+    expect(payload.signers[0]).toMatchObject({ editAction: 'Update', id: 'n1' })
+    const byId = Object.fromEntries(payload.signers[0].formFields.map(f => [f.id, f]))
+    expect(byId.tplSig.editAction).toBe('Update')       // reposition the template's own field
+    expect(byId.agentAdded.editAction).toBe('Add')       // the initials the agent added last time
+    expect(byId.agentAdded.bounds).toEqual({ x: 20, y: 30, width: 60, height: 25 })
+  })
+
+  it('REMOVES a template field the agent had deleted — it must not creep back', () => {
+    const payload = buildLayoutEditPayload({
+      layout: savedLayout,
+      signerDetails: [{ id: 'n1', signerRole: 'Seller', formFields: [{ id: 'tplSig' }, { id: 'unwantedDate' }] }],
+    })
+    const removed = payload.signers[0].formFields.filter(f => f.editAction === 'Remove')
+    expect(removed).toEqual([{ editAction: 'Remove', id: 'unwantedDate' }])
+  })
+
+  it('does NOT clobber a value the new draft already carries (fresh CRM prefill)', () => {
+    // The saved copy of list_price is from the last send. Restoring it would
+    // reprint a stale price on a live listing agreement.
+    const layout = { signers: [{ signerRole: 'Seller', formFields: [
+      { id: 'price', fieldType: 'TextBox', pageNumber: 1, bounds: { x: 1, y: 2, width: 80, height: 20 }, value: '$1,200,000' },
+    ] }] }
+    const payload = buildLayoutEditPayload({
+      layout,
+      signerDetails: [{ id: 'n1', signerRole: 'Seller', formFields: [{ id: 'price', value: '$1,350,000' }] }],
+    })
+    expect(payload.signers[0].formFields[0].value).toBe('$1,350,000')
+  })
+
+  it('DOES restore a saved value into a field the new draft left empty', () => {
+    // The hand-typed label the CRM knows nothing about — the case the layout exists for.
+    const layout = { signers: [{ signerRole: 'Seller', formFields: [
+      { id: 'county', fieldType: 'TextBox', pageNumber: 1, bounds: { x: 1, y: 2, width: 80, height: 20 }, value: 'Polk' },
+    ] }] }
+    const payload = buildLayoutEditPayload({
+      layout,
+      signerDetails: [{ id: 'n1', signerRole: 'Seller', formFields: [{ id: 'county', value: '' }] }],
+    })
+    expect(payload.signers[0].formFields[0].value).toBe('Polk')
+  })
+
+  it('skips a saved signer that matches nobody instead of failing the whole apply', () => {
+    const payload = buildLayoutEditPayload({
+      layout: { signers: [
+        { signerRole: 'Seller', order: 1, formFields: [{ id: 'a', fieldType: 'Signature', pageNumber: 1, bounds: { x: 1, y: 1, width: 10, height: 10 } }] },
+        { signerRole: 'Witness', order: 7, formFields: [{ id: 'b', fieldType: 'Signature', pageNumber: 1, bounds: { x: 1, y: 1, width: 10, height: 10 } }] },
+      ] },
+      signerDetails: [{ id: 'n1', signerRole: 'Seller', formFields: [] }],
+    })
+    expect(payload.signers).toHaveLength(1)
+    expect(payload.signers[0].id).toBe('n1')
+  })
+
+  it('returns null when there is nothing to apply, so no API call is made', () => {
+    expect(buildLayoutEditPayload({ layout: { signers: [] } })).toBeNull()
+    expect(buildLayoutEditPayload({})).toBeNull()
+    expect(buildLayoutEditPayload({ layout: savedLayout, signerDetails: [] })).toBeNull()
+  })
+})
+
+describe('isMissingLayoutStorage — un-migrated database is a provisioning state', () => {
+  it('recognizes the missing table by code and by message', () => {
+    expect(isMissingLayoutStorage({ code: '42P01', message: 'relation "deal_field_layouts" does not exist' })).toBe(true)
+    expect(isMissingLayoutStorage({ message: "Could not find the table 'public.deal_field_layouts' in the schema cache" })).toBe(true)
+  })
+
+  it('does NOT swallow a real failure — those must still surface', () => {
+    expect(isMissingLayoutStorage({ code: '23505', message: 'duplicate key value violates unique constraint' })).toBe(false)
+    expect(isMissingLayoutStorage({ message: 'permission denied for table deal_field_layouts' })).toBe(false)
+    expect(isMissingLayoutStorage(null)).toBe(false)
   })
 })

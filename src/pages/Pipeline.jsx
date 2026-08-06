@@ -12,7 +12,7 @@ import { OPERATING_STATES } from '../lib/constants.js'
 import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, documentEditUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
@@ -1070,13 +1070,61 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
 // way back into it. So closing always asks first, and always says where the work
 // went — and the frame stays mounted through a draft save, since saving a draft
 // mid-prep means the agent is still working.
-function BoldSignStepModal({ url, eyebrow, heading, onClose, onDone, onDraft }) {
-  const requestClose = () => {
+//
+// It is also where a deal's FIELD LAYOUT gets saved. Placement happens inside
+// BoldSign's iframe, on another origin, so the app cannot watch the agent drag a
+// field — it can only ask BoldSign afterwards what the document ended up holding.
+// Every way an editing session can end (saved, sent, closed) therefore triggers a
+// capture, which stores the arrangement against the deal so the NEXT packet built
+// from the same template opens already arranged. See captureFieldLayout() in
+// api/boldsign.js.
+function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone, onDraft, onLayoutSaved }) {
+  const [savingLayout, setSavingLayout] = React.useState(false)
+  // Set before an async close so a late unmount can't push state into a dead
+  // component (React logs that as a leak, and it hides real errors).
+  const alive = React.useRef(true)
+  React.useEffect(() => () => { alive.current = false }, [])
+
+  // Ask BoldSign what this document now holds and store it on the deal.
+  // `silent` suppresses the "nothing to save" chatter for automatic captures —
+  // an agent who placed no fields doesn't need to be told about a subsystem.
+  const saveLayout = async ({ silent = false } = {}) => {
+    if (!documentId) return
+    if (alive.current) setSavingLayout(true)
+    try {
+      const res = await captureLayout(documentId)
+      if (res?.saved && res.fieldCount) {
+        pushToast(`Field layout saved for this deal — ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} will come back next time.`, 'success')
+        onLayoutSaved?.(res)
+      } else if (res?.unavailable) {
+        // Provisioning, not a failure — but the agent should know why this deal
+        // will not remember anything, and who can fix it.
+        pushToast(`Field layouts are not stored yet — ${res.reason}`, 'info')
+      } else if (!silent) {
+        pushToast(res?.reason
+          ? `Field layout not saved: ${res.reason}`
+          : 'No fields to save yet — place fields in BoldSign and they will be remembered for this deal.', 'info')
+      }
+    } catch (err) {
+      // Never fatal: the document itself is fine, only the convenience of
+      // remembering its layout is lost, and the agent should know that.
+      pushToast(`Could not save this deal's field layout: ${err.message}`, 'error')
+    } finally {
+      if (alive.current) setSavingLayout(false)
+    }
+  }
+
+  const requestClose = async () => {
     const ok = window.confirm(
       'Close BoldSign?\n\nThis document stays on the deal as a draft — nothing is sent. '
       + 'Reopen it from the Signatures tab with "Edit & Send" to pick up where you left off.'
     )
-    if (ok) onClose()
+    if (!ok) return
+    // Capture BEFORE unmounting the frame: once the modal is gone the agent has no
+    // way to trigger this, and the arrangement they just built is the thing worth
+    // keeping. Silent, because closing is not the moment to explain a subsystem.
+    await saveLayout({ silent: true })
+    onClose()
   }
 
   return (
@@ -1086,21 +1134,31 @@ function BoldSignStepModal({ url, eyebrow, heading, onClose, onDone, onDraft }) 
           <div className="eyebrow-label">{eyebrow}</div>
           <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{heading}</h3>
         </div>
-        <button className="drawer__close" onClick={requestClose} title="Close BoldSign"><Icon name="x" size={18}/></button>
+        <button
+          className="drawer__close"
+          onClick={requestClose}
+          disabled={savingLayout}
+          title={savingLayout ? 'Saving this deal’s field layout…' : 'Close BoldSign'}
+        >
+          <Icon name="x" size={18}/>
+        </button>
       </div>
       <div className="modal__body" style={{ padding: 0 }}>
         <BoldSignFrame
           url={url}
-          onDone={onDone}
+          onDone={(e) => { saveLayout({ silent: true }); onDone?.(e) }}
           // Saved-as-draft is NOT sent. Reporting it as sent (which is what
           // happened when both events shared one handler) left the agent
-          // believing the client had the document.
-          onDraft={onDraft}
+          // believing the client had the document. It IS the natural moment to
+          // record the layout, though — the agent explicitly saved their work.
+          onDraft={(e) => { saveLayout(); onDraft?.(e) }}
           onError={() => pushToast('BoldSign reported the send was cancelled — the draft is still on this deal.', 'info')}
         />
       </div>
       <div style={{ padding:'8px 12px', borderTop:'1px solid var(--gw-border)', fontSize:11, color:'var(--gw-mist)', lineHeight:1.5 }}>
-        Not ready to send? Use <strong>Preview</strong> inside BoldSign to check it, or save it and reopen the draft here any time — nothing goes out until you click Send.
+        {savingLayout
+          ? <span aria-live="polite">Saving this deal’s field layout…</span>
+          : <>Not ready to send? Use <strong>Preview</strong> inside BoldSign to check it, or save it and reopen the draft here any time — nothing goes out until you click Send. Fields you place are remembered for this deal.</>}
       </div>
     </Modal>
   )
@@ -1135,6 +1193,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const [sending,    setSending]   = React.useState(false)
   const [dragOver,   setDragOver]  = React.useState(false)
   const [embedUrl,   setEmbedUrl]  = React.useState(null)   // BoldSign prepare/send iframe URL
+  const [embedDocId, setEmbedDocId]= React.useState(null)   // its document id — needed to capture the field layout
   const [useTextTags, setUseTextTags] = React.useState(false)   // PDF already has {{...}} text tags baked in
   const fileRef = React.useRef()
 
@@ -1240,6 +1299,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     }
     setSending(false)
     if (!data.url) { pushToast('BoldSign did not return a send URL', 'error'); return }
+    setEmbedDocId(data.documentId || null)
     setEmbedUrl(data.url)
   }
 
@@ -1250,6 +1310,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     return (
       <BoldSignStepModal
         url={embedUrl}
+        documentId={embedDocId}
         eyebrow="BoldSign · Review & Send"
         heading="Place fields & send"
         onClose={onClose}
@@ -1374,6 +1435,7 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
   const [statusFilter, setStatusFilter] = React.useState('active')   // active | drafts | completed | all
   const [opening,     setOpening]     = React.useState({})    // env.id → fetching its edit URL
   const [editDraft,   setEditDraft]   = React.useState(null)  // { url, env } — draft reopened in BoldSign
+  const [layouts,     setLayouts]     = React.useState([])    // saved per-deal field arrangements
 
   React.useEffect(() => {
     if (!deal?.id) return
@@ -1381,6 +1443,7 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
     loadDealFiles()
     loadTemplates()
     loadParticipants()
+    loadLayouts()
 
     // Realtime subscription — auto-update status when webhook fires
     const channel = supabase.channel(`sig-documents-${deal.id}`)
@@ -1434,6 +1497,22 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
     }
     setTemplateErr('')
     setTemplates(data || [])
+  }
+
+  // The field arrangements remembered for this deal, one per template. Read
+  // directly (RLS-scoped) rather than through the API — it's a plain per-deal read
+  // and the agent already has permission to see their own deal's rows.
+  //
+  // Errors are swallowed on purpose: on a database where migration 0026 hasn't been
+  // applied this table doesn't exist, and the whole feature should degrade to "no
+  // saved layouts" rather than break the Signatures tab.
+  const loadLayouts = async () => {
+    const { data, error } = await supabase
+      .from('deal_field_layouts')
+      .select('template_id, field_count, document_name, updated_at')
+      .eq('deal_id', deal.id)
+    if (error) { setLayouts([]); return }
+    setLayouts((data || []).filter(l => l.field_count > 0))
   }
 
   const loadDealFiles = async () => {
@@ -1644,6 +1723,33 @@ create policy "agent_notifications_policy" on agent_notifications
         </div>
       </div>
 
+      {/* What this deal remembers. Field placement is invisible work — the agent
+          who arranged a packet last month has no way to know it was kept unless
+          the tab says so, and a silent restore would read as the template being
+          wrong. `templates` is the sendable-form catalog, so a layout whose
+          template has since been retired still names itself honestly. */}
+      {layouts.length > 0 && (
+        <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'8px 12px', fontSize:12, lineHeight:1.6, marginBottom:12, display:'flex', alignItems:'flex-start', gap:8 }}>
+          <Icon name="check" size={13} style={{ color:'var(--gw-green)', flexShrink:0, marginTop:2 }}/>
+          <div>
+            <strong>Field layout remembered for this deal.</strong>{' '}
+            {layouts.map((l, i) => {
+              const tpl = templates.find(t => t.template_id === l.template_id)
+              const name = tpl?.name || l.document_name || (l.template_id ? 'a template' : 'an uploaded PDF')
+              return (
+                <span key={l.template_id || 'adhoc'}>
+                  {i > 0 && ' · '}
+                  {name} <span style={{ color:'var(--gw-mist)' }}>({l.field_count} field{l.field_count === 1 ? '' : 's'})</span>
+                </span>
+              )
+            })}
+            <div style={{ color:'var(--gw-mist)' }}>
+              Signature, initial and label placements are restored automatically the next time you send this form for this deal.
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Why "Send from Template" isn't here — never fail silently. */}
       {templateErr && (
         <div style={{ background:'#fff8ec', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, lineHeight:1.6, marginBottom:12 }}>
@@ -1763,8 +1869,8 @@ create policy "agent_notifications_policy" on agent_notifications
       {sendOpen && (
         <SendSignatureModal
           deal={deal} contacts={contacts} properties={properties} dealFiles={dealFiles} activeAgent={activeAgent}
-          onClose={() => { setSendOpen(false); loadEnvelopes() }}
-          onSent={() => { setSendOpen(false); loadEnvelopes() }}
+          onClose={() => { setSendOpen(false); loadEnvelopes(); loadLayouts() }}
+          onSent={() => { setSendOpen(false); loadEnvelopes(); loadLayouts() }}
         />
       )}
 
@@ -1772,10 +1878,12 @@ create policy "agent_notifications_policy" on agent_notifications
       {editDraft && (
         <BoldSignStepModal
           url={editDraft.url}
+          documentId={editDraft.env.document_id}
           eyebrow="BoldSign · Edit Draft"
           heading={editDraft.env.document_name || 'Edit draft'}
-          onClose={() => { setEditDraft(null); loadEnvelopes() }}
-          onDone={() => { pushToast('Sent for signature', 'success'); setEditDraft(null); loadEnvelopes() }}
+          onLayoutSaved={loadLayouts}
+          onClose={() => { setEditDraft(null); loadEnvelopes(); loadLayouts() }}
+          onDone={() => { pushToast('Sent for signature', 'success'); setEditDraft(null); loadEnvelopes(); loadLayouts() }}
           onDraft={() => pushToast('Draft saved — nothing sent. Reopen it here any time to finish.', 'info')}
         />
       )}
@@ -1783,8 +1891,8 @@ create policy "agent_notifications_policy" on agent_notifications
       {tplOpen && (
         <SendFromTemplateModal
           deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} dealAgents={dealAgents} templates={templates} activeAgent={activeAgent}
-          onClose={() => { setTplOpen(false); loadEnvelopes() }}
-          onSent={() => { setTplOpen(false); loadEnvelopes() }}
+          onClose={() => { setTplOpen(false); loadEnvelopes(); loadLayouts() }}
+          onSent={() => { setTplOpen(false); loadEnvelopes(); loadLayouts() }}
         />
       )}
     </div>
@@ -1809,6 +1917,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [templateId, setTemplateId] = React.useState(visible[0]?.template_id || '')
   const [subject,    setSubject]    = React.useState(`Please sign: ${deal?.title || 'Document'}`)
   const [embedUrl,   setEmbedUrl]   = React.useState(null)   // BoldSign prepare/send iframe URL
+  const [embedDocId, setEmbedDocId] = React.useState(null)   // its document id — needed to capture the field layout
   const [sending,    setSending]    = React.useState(false)
   const [details,    setDetails]    = React.useState(null)   // { roles, fields }
   const [loadingDet, setLoadingDet] = React.useState(false)
@@ -1887,9 +1996,18 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     try {
       // Open BoldSign's embedded prepare/send UI in-frame with the signers +
       // prefilled values passed through; the agent reviews and sends there.
-      const { url } = await templateEmbedUrl({ ...args, redirectUrl: window.location.href })
-      if (!url) { pushToast('BoldSign did not return a send URL', 'error'); return }
-      setEmbedUrl(url)
+      const data = await templateEmbedUrl({ ...args, redirectUrl: window.location.href })
+      if (!data?.url) { pushToast('BoldSign did not return a send URL', 'error'); return }
+      // This deal's remembered arrangement was restored over the template's
+      // defaults — say so, because the form the agent is about to see will not
+      // match the blank template and that should read as intentional.
+      if (data.layoutApplied) {
+        pushToast(`Restored this deal's saved field layout — ${data.layoutFieldCount} field${data.layoutFieldCount === 1 ? '' : 's'}.`, 'success')
+      } else if (data.layoutWarning) {
+        pushToast(data.layoutWarning, 'error')
+      }
+      setEmbedDocId(data.documentId || null)
+      setEmbedUrl(data.url)
     } catch (err) {
       pushToast(err.message, 'error')
     } finally {
@@ -1904,6 +2022,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     return (
       <BoldSignStepModal
         url={embedUrl}
+        documentId={embedDocId}
         eyebrow="BoldSign · Review & Send"
         heading="Place fields & send"
         onClose={onClose}
