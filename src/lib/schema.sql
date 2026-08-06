@@ -492,6 +492,10 @@ create table if not exists boldsign_documents (
   -- Reminder ledger — nightly auto-reminder sweep + the manual Remind button.
   last_reminded_at  timestamptz,
   reminder_count    integer default 0,
+  -- Which form_packets/BoldSign template this document was built from. The key a
+  -- saved per-deal field layout hangs on (see deal_field_layouts); null for an
+  -- ad-hoc PDF send.
+  boldsign_template_id text,
   created_at        timestamptz default now()
 );
 -- Status values written by the app (deliberately NOT a check constraint: an
@@ -500,6 +504,40 @@ create table if not exists boldsign_documents (
 --   draft | sent | delivered | completed | declined | expired | voided
 
 alter table boldsign_documents enable row level security;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DEAL FIELD LAYOUTS  (per-deal BoldSign field placement, so it stops evaporating)
+-- Field placement happens inside BoldSign's embedded editor and lives on the
+-- DOCUMENT — so it survived only as long as one draft, and the next packet for
+-- the same deal came back with the blank template's defaults. This table holds
+-- the arrangement per (deal, template): captured from BoldSign's own document
+-- properties when an editing session ends, re-applied to the next draft built
+-- for that deal. Deliberately NOT written back to the shared template, which is
+-- brokerage-wide and compliance-relevant.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists deal_field_layouts (
+  id            uuid primary key default uuid_generate_v4(),
+  deal_id       uuid not null references deals(id) on delete cascade,
+  -- '' for an ad-hoc (uploaded PDF) send. NOT NULL because the unique key below
+  -- is (deal_id, template_id) and Postgres treats every NULL as distinct — a
+  -- nullable column would add a row per capture instead of updating one.
+  template_id   text not null default '',
+  document_name text,
+  -- { signers: [{ signerRole, signerName, signerEmail, order, formFields: [...] }],
+  --   commonFields: [...] } — shape defined by normalizeCapturedLayout() in
+  --   api/boldsign.js. JSON because it is read and written whole.
+  layout        jsonb not null default '{}'::jsonb,
+  field_count   integer not null default 0,
+  captured_from text,                                    -- BoldSign document id it was read from
+  captured_by   uuid references agents(id) on delete set null,
+  created_at    timestamptz default now(),
+  updated_at    timestamptz default now()
+);
+create unique index if not exists idx_deal_field_layouts_key
+  on deal_field_layouts(deal_id, template_id);
+
+alter table deal_field_layouts enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -1570,6 +1608,12 @@ create policy audit_log_scope on audit_log for all to authenticated
   with check (app_is_admin() or deal_id in (select app_visible_deal_ids()) or actor_id = app_current_agent_id());
 
 -- DOCUMENT VERSIONS — follow the deal.
+-- deal_field_layouts — per-deal BoldSign field placement (deal-scoped child)
+drop policy if exists deal_field_layouts_deal_scope on deal_field_layouts;
+create policy deal_field_layouts_deal_scope on deal_field_layouts for all to authenticated
+  using      (app_is_admin() or deal_id in (select app_visible_deal_ids()))
+  with check (app_is_admin() or deal_id in (select app_visible_deal_ids()));
+
 drop policy if exists document_versions_scope on document_versions;
 create policy document_versions_scope on document_versions for all to authenticated
   using      (app_is_admin() or deal_id in (select app_visible_deal_ids()))

@@ -37,6 +37,11 @@ export const documentEmbedUrl = (p)          => call({ action: 'document-embed-u
 // that was started and abandoned (tab closed, agent switched screens). Returns
 // { url } for the same document, signers and field placement intact.
 export const documentEditUrl  = (p)          => call({ action: 'document-edit-url', ...p })
+// Save the field arrangement an agent just built in BoldSign against the deal, so
+// the next packet for that deal opens already arranged instead of reverting to the
+// blank template's defaults. Resolves { saved, fieldCount, reason? } — `saved:
+// false` is a normal outcome (nothing placed yet), not an error.
+export const captureLayout    = (documentId) => call({ action: 'layout-capture', documentId })
 export const signLink         = (p)          => call({ action: 'sign-link', ...p })
 export const getDocStatus    = (documentId) => call({ action: 'status',   documentId })
 // download/audit-download return { url, filename } — a short-lived signed

@@ -66,6 +66,7 @@ Signed PDFs + audit-trail PDFs are archived to the `deal-documents` bucket.
 |---|---|---|
 | `send` | agent | Ad-hoc immediate send (multipart). Requires `useTextTags: true` or per-signer `tabs` — no auto-placement. |
 | `document-embed-url` | agent | Ad-hoc → embedded prepare/send URL (iframe). `useTextTags` optional; otherwise the agent places fields in BoldSign. Writes the tracking row **before** returning the URL. |
+| `layout-capture` | agent (sender) / admin | Read a document's current field placement back from BoldSign and store it against the deal (`deal_field_layouts`). Answers 200 with `{ saved:false, reason }` when there is nothing to store — it rides along with the agent's real work and must never present as a failed send. See "Per-deal field layouts" below. |
 | `document-edit-url` | agent (sender) / admin | **Reopen an existing DRAFT** in the embedded prepare editor (`/document/createEmbeddedEditUrl`) — same signers, same field placement. Verifies against BoldSign that the document really is a draft (and self-heals a stale row if it isn't), then clears a stale edit lock and retries once if BoldSign refuses. See "Editing a draft" below. |
 | `status` / `remind` | agent | Doc status; nudge outstanding signers (records `last_reminded_at` / `reminder_count`) |
 | `download` / `audit-download` | agent | Returns `{ url, filename }` — a 5-minute signed **storage** URL, never base64 |
@@ -179,6 +180,55 @@ rebuilding the whole send.
   longer tears the iframe down — the agent is mid-prep. And `Drawer` ignores Escape
   while a modal is open (`modalIsOpen()` in `UI.jsx`), so one keypress can't close
   the prep frame *and* the deal drawer behind it.
+
+## Per-deal field layouts (placements that stick)
+Field placement happens inside BoldSign's embedded editor, and BoldSign keeps it on
+the **document**. So the arrangement an agent builds for a deal — the co-seller's
+initials on page 3, a label the Iowa packet needs typed in — lived exactly as long
+as that one draft. Send it, and the next packet for the same deal came back from the
+template with the template's defaults and the agent re-did the work from memory.
+
+`deal_field_layouts` (migration 0026) stores it per **(deal, template)**.
+
+- **Not written back to the shared template.** `form_packets` entries are
+  brokerage-wide and compliance-relevant; one deal's arrangement must never rewrite
+  the form every other deal sends. `boldsign_documents.boldsign_template_id` is the
+  key a layout hangs on.
+- **Capture** (`captureFieldLayout`) reads `/document/properties` and normalizes
+  `signerDetails[].formFields` — type, page, `bounds`, required/read-only, value,
+  label. It reads from BoldSign rather than from what the app *thinks* it sent,
+  because the placement being saved is the agent's, made on another origin where the
+  app cannot observe it. Triggered from every way a session ends (draft saved, sent,
+  closed) **and** from the Sent webhook, so a send completed after the tab closed
+  still teaches the next packet.
+- **Apply** (`applyFieldLayout`) runs inside `template-embed-url`, after the draft
+  exists and before the editor URL is returned, via `/document/edit`. The response
+  carries `layoutApplied` / `layoutFieldCount` / `layoutWarning` so the UI can say
+  the form was deliberately rearranged.
+- **The saved layout is authoritative for that deal**: a field it names is
+  repositioned (`Update`) or created (`Add`), and a field the new draft has that the
+  layout does *not* name is `Remove`d — otherwise a field the agent deliberately
+  deleted would reappear on every send.
+- **Values are not clobbered.** A field that already has a value on the new draft
+  keeps it (that's the CRM's fresh prefill — price, dates, names); the saved value
+  only fills a field the new draft left empty, which is the hand-typed-label case
+  the layout exists for.
+- **`fieldCount` counts only what a restore can put back.** Sender-filled
+  `commonFields` are recorded but not counted: `/document/edit` only accepts fields
+  nested under a signer.
+- **Type spelling.** BoldSign reads back some types under a different spelling than
+  it accepts on write (`Textbox` → `TextBox`, `initials` → `Initial`);
+  `normalizeFieldType()` maps them, and a type it can't re-create is dropped from the
+  layout rather than stored — one bad entry would fail the whole re-apply request. A
+  field with no usable `bounds` is dropped too (BoldSign would stack it at 0,0).
+- **Never fatal, either direction.** Capture and apply both swallow their own
+  failures: a capture failure loses only the convenience, and an apply failure means
+  the draft opens with the template's default placement — the behavior that existed
+  before layouts. A database without migration 0026 reads as "this deal remembers
+  nothing" (`isMissingLayoutStorage()`), so no send is decorated with a provisioning
+  error the agent can't act on.
+- Unit-tested in `api/__tests__/boldsign.test.js` (normalize, signer matching,
+  Update/Add/Remove, both value-precedence rules).
 
 ## Drafts cleanup (Signatures tab)
 - **Filter dropdown**: Active (default — hides completed, so drafts are visible) / Drafts only / Completed only / All.

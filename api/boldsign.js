@@ -318,7 +318,7 @@ async function recordDocumentVersion(supabase, { dealId, documentName, storagePa
 // `signers` is the normalized signer array; both naming conventions are accepted
 // because the ad-hoc flow uses {name,email} and the template flow uses
 // {signerName,signerEmail}.
-export async function trackDocument(supabase, { dealId, agentId, documentId, signers, documentName, subject, status }) {
+export async function trackDocument(supabase, { dealId, agentId, documentId, signers, documentName, subject, status, templateId }) {
   const list  = Array.isArray(signers) ? signers : []
   const names = list.map(s => s?.name || s?.signerName).filter(Boolean)
   const mails = list.map(s => s?.email || s?.signerEmail).filter(Boolean)
@@ -332,12 +332,299 @@ export async function trackDocument(supabase, { dealId, agentId, documentId, sig
     subject:       subject || null,
     signers:       list,
     status:        status || 'sent',
+    // Which template this came from — the key a per-deal field layout hangs on
+    // (see captureFieldLayout). Null for an ad-hoc PDF send.
+    boldsign_template_id: templateId || null,
   }])
   if (error) {
+    // A database without the column yet (0026 not applied) must not lose the
+    // tracking row — an untracked document is the worst outcome in this file.
+    // Retry once without it; the layout feature degrades, the send does not.
+    if (/boldsign_template_id/.test(error.message || '')) {
+      console.warn(`[boldsign] boldsign_template_id column missing — tracking ${documentId} without it; apply migration 0026`)
+      const { error: retryErr } = await supabase.from('boldsign_documents').insert([{
+        deal_id: dealId, agent_id: agentId || null, document_id: documentId,
+        signer_name: names.join(', '), signer_email: mails.join(', '),
+        document_name: documentName || 'Document', subject: subject || null,
+        signers: list, status: status || 'sent',
+      }])
+      if (!retryErr) return true
+      console.error(`[boldsign] FAILED to track document ${documentId} on deal ${dealId}: ${retryErr.message}`)
+      return false
+    }
     console.error(`[boldsign] FAILED to track document ${documentId} on deal ${dealId}: ${error.message}`)
     return false
   }
   return true
+}
+
+// ─── Per-deal field layouts ───────────────────────────────────────────────────
+// Field placement happens inside BoldSign's embedded editor, and BoldSign keeps
+// it on the DOCUMENT. So the arrangement an agent builds for a deal — the
+// co-seller's initials on page 3, the label the Iowa packet needs typed in —
+// lived exactly as long as that one draft. Send it, and the next packet for the
+// same deal came back from the template with the template's defaults.
+//
+// These helpers move that arrangement into the CRM, per deal:
+//   • CAPTURE reads it back from BoldSign (`/document/properties`), so what gets
+//     stored is what the agent actually left behind rather than what the app
+//     believes it sent.
+//   • APPLY pushes it onto the next draft for that deal (`/document/edit`).
+//
+// Deliberately NOT saved back to the shared BoldSign template: `form_packets`
+// entries are brokerage-wide and compliance-relevant, so one deal's arrangement
+// must never rewrite the form every other deal sends.
+
+// Field types BoldSign can re-create through /document/edit (EditFormField.
+// fieldType). A field of any other type is dropped from a captured layout rather
+// than stored — storing one would make the re-apply request fail as a whole and
+// lose the entire arrangement, which is far worse than losing one exotic field.
+const EDITABLE_FIELD_TYPES = Object.freeze([
+  'Signature', 'Initial', 'CheckBox', 'TextBox', 'Label', 'DateSigned',
+  'RadioButton', 'Image', 'Attachment', 'EditableDate', 'Hyperlink', 'Dropdown',
+  'Title', 'Company', 'Formula', 'Drawing',
+])
+const FIELD_TYPE_BY_LOWER = new Map(EDITABLE_FIELD_TYPES.map(t => [t.toLowerCase(), t]))
+// BoldSign reads back some types under a different spelling than it accepts on
+// write. Mapped explicitly so a captured Textbox doesn't silently vanish.
+const FIELD_TYPE_ALIASES = Object.freeze({
+  textbox: 'TextBox', text: 'TextBox', checkbox: 'CheckBox', initials: 'Initial',
+  datesigned: 'DateSigned', radiobutton: 'RadioButton', editabledate: 'EditableDate',
+  signaturedate: 'DateSigned',
+})
+export function normalizeFieldType(type) {
+  const key = String(type || '').trim().toLowerCase()
+  return FIELD_TYPE_BY_LOWER.get(key) || FIELD_TYPE_ALIASES[key] || null
+}
+
+// Fonts are an enum on write; a value outside it fails the request. Anything
+// unrecognized is simply omitted, leaving BoldSign's default.
+const EDIT_FONTS = new Set(['Helvetica', 'Courier', 'TimesRoman', 'NotoSans', 'Carlito'])
+
+const num = (v, fallback = null) => (Number.isFinite(Number(v)) ? Number(v) : fallback)
+
+// A database where migration 0026 hasn't been applied yet has no layouts table.
+// That is a provisioning state, not a fault in the send the agent is doing — it
+// must degrade to "this deal remembers nothing" with one actionable sentence,
+// never a Postgres error string in a toast on every single send.
+export function isMissingLayoutStorage(error) {
+  const msg = String(error?.message || error || '')
+  return error?.code === '42P01' || error?.code === 'PGRST205'
+    || /deal_field_layouts/.test(msg) && /does not exist|schema cache|find the table/i.test(msg)
+}
+const LAYOUT_STORAGE_MISSING = 'field-layout storage is not set up on this database yet — ask your admin to run migrations/production/2026-08-06_deal_field_layouts.sql'
+
+// One captured field, reduced to what re-creating it requires. Returns null for a
+// field that can't be re-created (unknown type, or no position to put it back).
+export function normalizeCapturedField(f) {
+  const fieldType = normalizeFieldType(f?.type || f?.fieldType)
+  if (!fieldType) return null
+  const b = f?.bounds || {}
+  const x = num(b.x), y = num(b.y), width = num(b.width), height = num(b.height)
+  // Without bounds there is no placement to restore — and BoldSign would drop the
+  // field at (0,0), stacking every such field in the page corner.
+  if (x == null || y == null || !width || !height) return null
+
+  const out = {
+    id:         f?.id || f?.formFieldId || null,
+    fieldType,
+    pageNumber: num(f?.pageNumber, 1),
+    bounds:     { x, y, width, height },
+    isRequired: Boolean(f?.isRequired),
+    isReadOnly: Boolean(f?.isReadOnly),
+  }
+  if (f?.value != null && f.value !== '')       out.value = String(f.value)
+  if (f?.label)                                  out.label = String(f.label)
+  if (f?.placeholder || f?.placeHolder)          out.placeHolder = String(f.placeholder || f.placeHolder)
+  if (num(f?.fontSize))                          out.fontSize = num(f.fontSize)
+  if (EDIT_FONTS.has(f?.font))                   out.font = f.font
+  if (f?.groupName)                              out.groupName = String(f.groupName)
+  if (f?.dateFormat)                             out.dateFormat = String(f.dateFormat)
+  if (Array.isArray(f?.dropdownOptions) && f.dropdownOptions.length) out.dropdownOptions = f.dropdownOptions
+  if (typeof f?.isBold === 'boolean')            out.isBoldFont = f.isBold
+  if (typeof f?.isItalic === 'boolean')          out.isItalicFont = f.isItalic
+  if (typeof f?.isUnderline === 'boolean')       out.isUnderLineFont = f.isUnderline
+  return out
+}
+
+// A BoldSign document's properties → the layout we store on the deal.
+// `dropped` is reported (not swallowed) so a form full of types we can't restore
+// is visible in the logs instead of looking like a successful empty capture.
+export function normalizeCapturedLayout(props) {
+  const signers = []
+  let dropped = 0
+  for (const [i, s] of (props?.signerDetails || []).entries()) {
+    const fields = []
+    for (const f of (s?.formFields || [])) {
+      const n = normalizeCapturedField(f)
+      if (n) fields.push(n); else dropped++
+    }
+    signers.push({
+      signerRole:  s?.signerRole || '',
+      signerName:  s?.signerName || '',
+      signerEmail: s?.signerEmail || '',
+      order:       num(s?.order, i + 1),
+      formFields:  fields,
+    })
+  }
+  // Sender-filled "common" fields belong to no signer, and BoldSign's
+  // /document/edit only accepts fields nested under a signer — so these are
+  // recorded (they cost nothing, and describe the arrangement faithfully) but
+  // they are NOT counted. `fieldCount` is what will actually come back next
+  // time, and it is the number the agent is shown; inflating it with fields the
+  // restore silently skips would make the feature look broken.
+  const commonFields = []
+  for (const f of (props?.commonFields || [])) {
+    const n = normalizeCapturedField(f)
+    if (n) commonFields.push(n); else dropped++
+  }
+  const fieldCount = signers.reduce((t, s) => t + s.formFields.length, 0)
+  return { layout: { signers, commonFields }, fieldCount, dropped }
+}
+
+// Match a saved signer entry to a signer on the NEW document. Role first (the
+// template's own role name — "Seller", "Listing Agent" — which is stable across
+// sends even when the people change), then email, then position. Position alone
+// is the last resort: it's right for the common case and wrong only if roles were
+// reordered between sends, where role/email matching has already caught it.
+export function matchLayoutSigner(saved, signerDetails = []) {
+  const norm = (v) => String(v || '').trim().toLowerCase()
+  const byRole = saved?.signerRole
+    ? signerDetails.find(s => norm(s?.signerRole) && norm(s.signerRole) === norm(saved.signerRole))
+    : null
+  if (byRole) return byRole
+  const byEmail = saved?.signerEmail
+    ? signerDetails.find(s => norm(s?.signerEmail) === norm(saved.signerEmail))
+    : null
+  if (byEmail) return byEmail
+  return signerDetails.find(s => num(s?.order) === num(saved?.order)) || null
+}
+
+// Turn a saved layout + the new document's signers into a /document/edit payload.
+//
+// THE SAVED LAYOUT IS AUTHORITATIVE for this deal: a field it names is moved to
+// where the agent put it (Update) or created if the new draft lacks it (Add), and
+// a field the new draft has that the layout does NOT name is removed — otherwise a
+// field the agent deliberately deleted last time would reappear on every send.
+//
+// VALUES ARE NOT CLOBBERED. A field that already carries a value on the new draft
+// keeps it: that value is the CRM's fresh prefill (list price, dates, names), and
+// the saved layout's copy is by definition from the previous send. The saved value
+// is only used to fill a field the new draft left EMPTY — which is exactly the
+// hand-typed label case the layout exists to preserve.
+//
+// Returns null when there is nothing to do, so callers can skip the API call.
+export function buildLayoutEditPayload({ layout, signerDetails = [] } = {}) {
+  const savedSigners = layout?.signers || []
+  if (!savedSigners.length && !(layout?.commonFields || []).length) return null
+
+  const signers = []
+  for (const saved of savedSigners) {
+    const target = matchLayoutSigner(saved, signerDetails)
+    if (!target?.id) continue
+
+    const existing   = target.formFields || []
+    const byId       = new Map(existing.filter(f => f?.id).map(f => [String(f.id), f]))
+    const savedIds   = new Set((saved.formFields || []).map(f => f.id).filter(Boolean))
+    const formFields = []
+
+    for (const f of (saved.formFields || [])) {
+      const live = f.id ? byId.get(String(f.id)) : null
+      const { id, ...rest } = f
+      const field = { editAction: live ? 'Update' : 'Add', ...(id ? { id } : {}), ...rest }
+      // Live value wins — see VALUES ARE NOT CLOBBERED above.
+      if (live?.value != null && live.value !== '') field.value = String(live.value)
+      formFields.push(field)
+    }
+    // Fields on the new draft the agent had removed last time.
+    for (const f of existing) {
+      if (f?.id && !savedIds.has(String(f.id))) formFields.push({ editAction: 'Remove', id: f.id })
+    }
+    if (formFields.length) signers.push({ editAction: 'Update', id: target.id, formFields })
+  }
+
+  return signers.length ? { signers } : null
+}
+
+// Read a document's current arrangement out of BoldSign and store it against the
+// deal. Never throws: a capture failure must not fail the send or the editing
+// session it rode in on — the agent's document is unaffected either way.
+// Returns { saved, fieldCount, reason? } for callers that want to report it.
+export async function captureFieldLayout(supabase, { documentId, record, agentId }) {
+  try {
+    const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(documentId)}`)
+    const { layout, fieldCount, dropped } = normalizeCapturedLayout(props)
+    if (dropped) console.warn(`[boldsign] layout capture for ${documentId}: dropped ${dropped} unrestorable field(s)`)
+
+    const templateId = record?.boldsign_template_id || ''
+    if (!record?.deal_id) return { saved: false, fieldCount, reason: 'not attached to a deal' }
+
+    // An empty capture must not erase a good saved layout. BoldSign returns no
+    // form fields for a document still processing, and an unconditional overwrite
+    // there would silently wipe the arrangement it was meant to protect.
+    if (!fieldCount) {
+      const { data: existing, error: readErr } = await supabase.from('deal_field_layouts')
+        .select('id, field_count').eq('deal_id', record.deal_id).eq('template_id', templateId).maybeSingle()
+      if (isMissingLayoutStorage(readErr)) return { saved: false, fieldCount: 0, unavailable: true, reason: LAYOUT_STORAGE_MISSING }
+      if (existing?.field_count) return { saved: false, fieldCount: 0, reason: 'no fields returned — kept the existing layout' }
+    }
+
+    const { error } = await supabase.from('deal_field_layouts').upsert([{
+      deal_id:       record.deal_id,
+      template_id:   templateId,
+      document_name: record.document_name || null,
+      layout,
+      field_count:   fieldCount,
+      captured_from: documentId,
+      captured_by:   agentId || record.agent_id || null,
+      updated_at:    new Date().toISOString(),
+    }], { onConflict: 'deal_id,template_id' })
+    if (error) {
+      if (isMissingLayoutStorage(error)) {
+        console.warn(`[boldsign] ${LAYOUT_STORAGE_MISSING}`)
+        return { saved: false, fieldCount, unavailable: true, reason: LAYOUT_STORAGE_MISSING }
+      }
+      console.error(`[boldsign] layout capture upsert failed for ${documentId}: ${error.message}`)
+      return { saved: false, fieldCount, reason: error.message }
+    }
+    return { saved: true, fieldCount }
+  } catch (err) {
+    console.error(`[boldsign] layout capture failed for ${documentId}: ${err.message}`)
+    return { saved: false, fieldCount: 0, reason: err.message }
+  }
+}
+
+// Apply a deal's saved layout to a freshly created draft. Also never throws: if
+// this fails the draft simply opens with the template's default placement, which
+// is the behavior that existed before layouts — a degraded send beats no send.
+// Returns { applied, fieldCount, reason? }.
+export async function applyFieldLayout(supabase, { documentId, dealId, templateId, onBehalfOf }) {
+  try {
+    if (!dealId || !documentId) return { applied: false, reason: 'missing deal or document' }
+    const { data: saved, error } = await supabase.from('deal_field_layouts')
+      .select('layout, field_count')
+      .eq('deal_id', dealId).eq('template_id', templateId || '').maybeSingle()
+    // A database without the table yet (migration not applied) reads as "this deal
+    // remembers nothing" — the same quiet path as a deal with no saved layout, so
+    // no send is decorated with a provisioning message the agent can't act on.
+    if (isMissingLayoutStorage(error)) return { applied: false, reason: 'no saved layout' }
+    if (error) return { applied: false, reason: error.message }
+    if (!saved?.field_count) return { applied: false, reason: 'no saved layout' }
+
+    // The new draft's signer ids are only knowable after it exists.
+    const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(documentId)}`)
+    const payload = buildLayoutEditPayload({ layout: saved.layout, signerDetails: props?.signerDetails || [] })
+    if (!payload) return { applied: false, reason: 'saved layout matched none of this document\'s signers' }
+
+    await boldsign(`/document/edit?documentId=${encodeURIComponent(documentId)}`, {
+      method: 'POST',
+      json: { ...payload, ...(onBehalfOf ? { onBehalfOf } : {}) },
+    })
+    return { applied: true, fieldCount: saved.field_count }
+  } catch (err) {
+    console.error(`[boldsign] layout apply failed for ${documentId}: ${err.message}`)
+    return { applied: false, reason: err.message }
+  }
 }
 
 // ─── Draft editing ────────────────────────────────────────────────────────────
@@ -736,6 +1023,49 @@ export default async function handler(req, res) {
       return res.json({ url, documentId: data.documentId || null, tracked })
     }
 
+    // Which document row this action is about, and whether the caller may touch it:
+    // the sender, an admin, or — for rows predating agent attribution (agent_id
+    // null) — anyone whose own RLS lets them see the deal. Without that last
+    // branch the draft features would skip exactly the older documents agents are
+    // stuck on. Throws a tagged error the catch below turns into a status code.
+    const resolveDocumentRecord = async (svc, documentId, { verb }) => {
+      const { data: record } = await svc.from('boldsign_documents')
+        .select('id, deal_id, agent_id, status, document_name, boldsign_template_id')
+        .eq('document_id', documentId).maybeSingle()
+      if (!record) { const e = new Error('Document not found'); e.status = 404; throw e }
+      let allowed = actor.isAdmin || (record.agent_id && record.agent_id === actor.agent.id)
+      if (!allowed && !record.agent_id && record.deal_id) {
+        const { data: visible } = await getUserClient(req)
+          .from('deals').select('id').eq('id', record.deal_id).maybeSingle()
+        allowed = Boolean(visible)
+      }
+      if (!allowed) {
+        const e = new Error(`Only the sender or an admin can ${verb} this document`); e.status = 403; throw e
+      }
+      return record
+    }
+
+    // Save this deal's CURRENT field arrangement, read back from BoldSign, so the
+    // next packet built for the deal opens the way the agent left this one. Called
+    // when an editing session ends (draft saved, sent, or closed) and by the Sent
+    // webhook. Deliberately answers 200 with { saved: false, reason } rather than
+    // an error status when there is simply nothing to store — this rides along
+    // with the agent's real work and must never present as a failed send.
+    if (body.action === 'layout-capture') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+      const svc    = getServiceClient()
+      const record = await resolveDocumentRecord(svc, id, { verb: 'save the field layout for' })
+      const result = await captureFieldLayout(svc, { documentId: id, record, agentId: actor.agent.id })
+      return res.json({
+        saved:      result.saved,
+        fieldCount: result.fieldCount,
+        templateId: record.boldsign_template_id || '',
+        ...(result.unavailable ? { unavailable: true } : {}),
+        ...(result.reason ? { reason: result.reason } : {}),
+      })
+    }
+
     // Reopen a DRAFT for editing: hand back an embedded BoldSign prepare URL for a
     // document that already exists. This is the way back into a send an agent
     // started and walked away from — same signers, same field placement, still
@@ -749,23 +1079,8 @@ export default async function handler(req, res) {
       const id = body.envelopeId || body.documentId
       if (!id) return res.status(400).json({ error: 'documentId required' })
 
-      const svc = getServiceClient()
-      const { data: record } = await svc.from('boldsign_documents')
-        .select('id, deal_id, agent_id, status, document_name')
-        .eq('document_id', id).maybeSingle()
-      if (!record) return res.status(404).json({ error: 'Document not found' })
-      // The sender or an admin — plus, for rows predating agent attribution
-      // (agent_id null), anyone whose own RLS lets them see the deal. Without that
-      // fallback the fix would skip exactly the older drafts agents are stuck on.
-      let mayEdit = actor.isAdmin || (record.agent_id && record.agent_id === actor.agent.id)
-      if (!mayEdit && !record.agent_id && record.deal_id) {
-        const { data: visible } = await getUserClient(req)
-          .from('deals').select('id').eq('id', record.deal_id).maybeSingle()
-        mayEdit = Boolean(visible)
-      }
-      if (!mayEdit) {
-        return res.status(403).json({ error: 'Only the sender or an admin can edit this draft' })
-      }
+      const svc    = getServiceClient()
+      const record = await resolveDocumentRecord(svc, id, { verb: 'edit' })
 
       const props  = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
       const live   = normalizeStatus(props.status)
@@ -1159,7 +1474,7 @@ export default async function handler(req, res) {
         tracked = await trackDocument(svc, {
           dealId: deal_id, agentId: actor.agent.id, documentId: data.documentId,
           signers: roles, documentName: documentName || emailSubject || 'Document',
-          subject: emailSubject || null, status: 'sent',
+          subject: emailSubject || null, status: 'sent', templateId,
         })
       }
       return res.json({
@@ -1194,11 +1509,12 @@ export default async function handler(req, res) {
 
       // A draft document may be created immediately; track it so status updates
       // land when the agent finishes and BoldSign fires the Sent webhook.
+      let layout = null
       if (deal_id && data.documentId) {
         const tracked = await trackDocument(svc, {
           dealId: deal_id, agentId: actor.agent.id, documentId: data.documentId,
           signers: roles, documentName: documentName || emailSubject || 'Document',
-          subject: emailSubject || null, status: 'draft',
+          subject: emailSubject || null, status: 'draft', templateId,
         })
         if (!tracked) {
           try { await boldsign(`/document/delete?documentId=${encodeURIComponent(data.documentId)}&deletePermanently=true`, { method: 'DELETE' }) }
@@ -1207,8 +1523,24 @@ export default async function handler(req, res) {
             error: 'Could not record this document against the deal, so it was not opened for sending. Nothing was sent — please try again.',
           })
         }
+        // Restore this deal's own field arrangement over the template's defaults,
+        // BEFORE the editor URL is handed back, so the packet opens already
+        // arranged instead of asking the agent to redo last time's work. Failure
+        // is reported, never fatal — the draft is still perfectly sendable with
+        // the template's placement.
+        layout = await applyFieldLayout(svc, {
+          documentId: data.documentId, dealId: deal_id, templateId, onBehalfOf,
+        })
       }
-      return res.json({ url: data.sendUrl || data.embeddedSendUrl || data.url || null, documentId: data.documentId || null })
+      return res.json({
+        url: data.sendUrl || data.embeddedSendUrl || data.url || null,
+        documentId: data.documentId || null,
+        layoutApplied:    Boolean(layout?.applied),
+        layoutFieldCount: layout?.applied ? layout.fieldCount : 0,
+        ...(layout && !layout.applied && layout.reason && layout.reason !== 'no saved layout'
+          ? { layoutWarning: `This deal's saved field layout could not be applied (${layout.reason}). The form opened with its default fields.` }
+          : {}),
+      })
     }
 
     return res.status(400).json({ error: 'Unknown action' })
@@ -1294,6 +1626,19 @@ async function handleWebhook(req, res) {
     const patch = { status }
     if (completedAt) patch.completed_at = completedAt
     await supabase.from('boldsign_documents').update(patch).eq('document_id', documentId)
+
+    // A SEND is the moment the arrangement is final: whatever the agent placed is
+    // what the signers are looking at. Capture it against the deal here, not only
+    // from the browser, so a send that happened after the tab was closed (or from
+    // BoldSign's own UI) still teaches the next packet where the fields go.
+    // Best-effort by contract — captureFieldLayout never throws, and this must not
+    // put a webhook at risk of a retry storm.
+    if (status === 'sent' && record.deal_id) {
+      const captured = await captureFieldLayout(supabase, {
+        documentId, record, agentId: record.agent_id,
+      })
+      if (captured.saved) console.log(`[boldsign] captured ${captured.fieldCount} field placement(s) for deal ${record.deal_id}`)
+    }
 
     // A decline or expiry needs the agent's attention as much as a completion
     // does — previously both updated the row and told nobody, so a declined
