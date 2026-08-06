@@ -33,6 +33,10 @@ async function call(payload) {
 // uploadSendablePdf) and pass the path; the API streams it to BoldSign.
 export const sendDocument     = (p)          => call({ action: 'send', ...p })
 export const documentEmbedUrl = (p)          => call({ action: 'document-embed-url', ...p })
+// Reopen an unsent draft in BoldSign's embedded editor — the way back into a send
+// that was started and abandoned (tab closed, agent switched screens). Returns
+// { url } for the same document, signers and field placement intact.
+export const documentEditUrl  = (p)          => call({ action: 'document-edit-url', ...p })
 export const signLink         = (p)          => call({ action: 'sign-link', ...p })
 export const getDocStatus    = (documentId) => call({ action: 'status',   documentId })
 // download/audit-download return { url, filename } — a short-lived signed

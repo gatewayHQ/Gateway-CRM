@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl } from '../boldsign.js'
+import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -281,5 +281,85 @@ describe('resolveOnBehalfOf — agent identity with org-default fallback', () =>
   it('returns null with no agentId and no default set', async () => {
     const svc = fakeSupabase({})
     expect(await resolveOnBehalfOf(svc, null)).toBeNull()
+  })
+})
+
+describe('createDraftEditUrl — getting an agent back into an abandoned draft', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  const editResp = (url) => okResp(JSON.stringify({ editUrl: url }))
+  // 400s are never retried by boldsign(), so these tests don't sleep.
+  const status = (code, msg) => ({
+    ok: false, status: code,
+    text: () => Promise.resolve(JSON.stringify({ message: msg })),
+    headers: { get: () => null },
+  })
+
+  it('opens the draft on the prepare page, as the original sender', async () => {
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn((url, opts) => {
+      calls.push({ url, body: JSON.parse(opts.body) })
+      return Promise.resolve(editResp('https://app.boldsign.com/edit/abc'))
+    }))
+    const url = await createDraftEditUrl({ documentId: 'doc 1', redirectUrl: 'https://crm/x', onBehalfOf: 'agent@x.com' })
+
+    expect(url).toBe('https://app.boldsign.com/edit/abc')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toContain('/document/createEmbeddedEditUrl?documentId=doc%201')
+    expect(calls[0].body).toMatchObject({
+      sendViewOption:    'PreparePage',
+      showSendButton:    true,
+      showPreviewButton: true,
+      redirectUrl:       'https://crm/x',
+      onBehalfOf:        'agent@x.com',
+    })
+  })
+
+  it('clears a stale edit lock and retries — the closed-the-tab case', async () => {
+    const paths = []
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      paths.push(String(url).replace('https://api.boldsign.com/v1', '').split('?')[0])
+      if (paths.length === 1) return Promise.resolve(status(400, 'Document is in edit mode'))
+      if (paths.length === 2) return Promise.resolve(okResp())
+      return Promise.resolve(editResp('https://app.boldsign.com/edit/retry'))
+    }))
+    const url = await createDraftEditUrl({ documentId: 'd1', onBehalfOf: 'agent@x.com' })
+
+    expect(url).toBe('https://app.boldsign.com/edit/retry')
+    expect(paths).toEqual([
+      '/document/createEmbeddedEditUrl',
+      '/document/cancelEditing',
+      '/document/createEmbeddedEditUrl',
+    ])
+  })
+
+  it('surfaces the retry\'s own refusal when the document really cannot be edited', async () => {
+    let n = 0
+    vi.stubGlobal('fetch', vi.fn(() => {
+      n++
+      if (n === 2) return Promise.resolve(okResp())                        // cancelEditing
+      return Promise.resolve(status(400, 'Document is already sent'))       // both edit attempts
+    }))
+    await expect(createDraftEditUrl({ documentId: 'd1' })).rejects.toThrow(/already sent/)
+  })
+
+  it('reports the original error when the lock cannot be cleared', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => Promise.resolve(
+      String(url).includes('cancelEditing')
+        ? status(403, 'Not permitted')
+        : status(400, 'Document is in edit mode')
+    )))
+    await expect(createDraftEditUrl({ documentId: 'd1' })).rejects.toThrow(/edit mode/)
+  })
+
+  it('omits onBehalfOf when there is no approved sender identity', async () => {
+    let body
+    vi.stubGlobal('fetch', vi.fn((_u, opts) => {
+      body = JSON.parse(opts.body)
+      return Promise.resolve(editResp('https://app.boldsign.com/edit/x'))
+    }))
+    await createDraftEditUrl({ documentId: 'd1' })
+    expect(body.onBehalfOf).toBeUndefined()
+    expect(body.redirectUrl).toBe('')
   })
 })

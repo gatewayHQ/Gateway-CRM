@@ -12,7 +12,7 @@ import { OPERATING_STATES } from '../lib/constants.js'
 import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
@@ -1062,6 +1062,50 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
   )
 }
 
+// ── Embedded BoldSign step (prepare a new send, or edit an existing draft) ───
+// One shell for every in-app BoldSign screen, because they all share the same
+// failure mode: the iframe holds field placement the agent is part-way through,
+// and Modal closes on a backdrop click or Escape with no warning. A click a few
+// pixels outside the frame threw that work away, and the resulting draft had no
+// way back into it. So closing always asks first, and always says where the work
+// went — and the frame stays mounted through a draft save, since saving a draft
+// mid-prep means the agent is still working.
+function BoldSignStepModal({ url, eyebrow, heading, onClose, onDone, onDraft }) {
+  const requestClose = () => {
+    const ok = window.confirm(
+      'Close BoldSign?\n\nThis document stays on the deal as a draft — nothing is sent. '
+      + 'Reopen it from the Signatures tab with "Edit & Send" to pick up where you left off.'
+    )
+    if (ok) onClose()
+  }
+
+  return (
+    <Modal open={true} onClose={requestClose} width={900}>
+      <div className="modal__head">
+        <div>
+          <div className="eyebrow-label">{eyebrow}</div>
+          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{heading}</h3>
+        </div>
+        <button className="drawer__close" onClick={requestClose} title="Close BoldSign"><Icon name="x" size={18}/></button>
+      </div>
+      <div className="modal__body" style={{ padding: 0 }}>
+        <BoldSignFrame
+          url={url}
+          onDone={onDone}
+          // Saved-as-draft is NOT sent. Reporting it as sent (which is what
+          // happened when both events shared one handler) left the agent
+          // believing the client had the document.
+          onDraft={onDraft}
+          onError={() => pushToast('BoldSign reported the send was cancelled — the draft is still on this deal.', 'info')}
+        />
+      </div>
+      <div style={{ padding:'8px 12px', borderTop:'1px solid var(--gw-border)', fontSize:11, color:'var(--gw-mist)', lineHeight:1.5 }}>
+        Not ready to send? Use <strong>Preview</strong> inside BoldSign to check it, or save it and reopen the draft here any time — nothing goes out until you click Send.
+      </div>
+    </Modal>
+  )
+}
+
 // ── Send for Signature modal — drives BoldSign document creation ────────────
 // Flow:
 //   1. Agent fills in signers + picks a PDF here in the CRM
@@ -1199,29 +1243,19 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     setEmbedUrl(data.url)
   }
 
-  // Step 2 — BoldSign's embedded prepare/send UI in-frame.
+  // Step 2 — BoldSign's embedded prepare/send UI in-frame. A draft save leaves the
+  // frame open (the agent is mid-prep); it's reopenable from the Signatures tab
+  // either way, so closing this no longer loses the work.
   if (embedUrl) {
     return (
-      <Modal open={true} onClose={onClose} width={900}>
-        <div className="modal__head">
-          <div>
-            <div className="eyebrow-label">BoldSign · Review &amp; Send</div>
-            <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Place fields &amp; send</h3>
-          </div>
-          <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
-        </div>
-        <div className="modal__body" style={{ padding: 0 }}>
-          <BoldSignFrame
-            url={embedUrl}
-            onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
-            // Saved-as-draft is NOT sent. Reporting it as sent (which is what
-            // happened when both events shared one handler) left the agent
-            // believing the client had the document.
-            onDraft={() => { pushToast('Saved as a draft in BoldSign — nothing has been sent yet. Reopen it from the Drafts filter to finish.', 'info'); onSent() }}
-            onError={() => pushToast('Send was cancelled in BoldSign', 'info')}
-          />
-        </div>
-      </Modal>
+      <BoldSignStepModal
+        url={embedUrl}
+        eyebrow="BoldSign · Review & Send"
+        heading="Place fields & send"
+        onClose={onClose}
+        onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
+        onDraft={() => pushToast('Saved as a draft — nothing has been sent yet. You can keep working, or reopen it from the Signatures tab with "Edit & Send".', 'info')}
+      />
     )
   }
 
@@ -1338,6 +1372,8 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
   const [templateErr, setTemplateErr] = React.useState('')   // set when the catalog can't be read (e.g. migration not applied)
   const [participantIds, setParticipantIds] = React.useState([])   // co-agents paid on the deal (admin-visible only)
   const [statusFilter, setStatusFilter] = React.useState('active')   // active | drafts | completed | all
+  const [opening,     setOpening]     = React.useState({})    // env.id → fetching its edit URL
+  const [editDraft,   setEditDraft]   = React.useState(null)  // { url, env } — draft reopened in BoldSign
 
   React.useEffect(() => {
     if (!deal?.id) return
@@ -1491,6 +1527,30 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
     }
   }
 
+  // Reopen an unsent draft in BoldSign, at the point the agent left it — same
+  // signers, same field placement. This is the way out of the trap where an agent
+  // switched screens mid-prep: the document became a draft they could see and
+  // could not touch, so finishing a started send meant deleting it and redoing the
+  // whole thing.
+  //
+  // A failure here usually means the document is no longer a draft (a missed Sent
+  // webhook left the row stale). The API corrects the row when it detects that, so
+  // reload afterwards — the agent sees the real status instead of an Edit button
+  // that keeps failing.
+  const openDraft = async (env) => {
+    setOpening(p => ({ ...p, [env.id]: true }))
+    try {
+      const data = await documentEditUrl({ documentId: env.document_id, redirectUrl: window.location.href })
+      if (!data?.url) { pushToast('BoldSign did not return an edit link for this draft', 'error'); return }
+      setEditDraft({ url: data.url, env })
+    } catch (err) {
+      pushToast(err.message, 'error')
+      loadEnvelopes()
+    } finally {
+      setOpening(p => ({ ...p, [env.id]: false }))
+    }
+  }
+
   // Remove a draft/unsigned/expired document to keep this tab tidy. The API
   // refuses to delete a completed record (that's the signed legal record), so
   // this action is only ever offered for non-completed statuses (see render).
@@ -1600,6 +1660,7 @@ create policy "agent_notifications_policy" on agent_notifications
           : visibleEnvelopes.map(env => {
               const sc        = DS_STATUS[env.status] || DS_STATUS.sent
               const completed = env.status === 'completed'
+              const isDraft   = env.status === 'draft'
               // Chasing signatures is the job — surface how long this has been
               // outstanding, and offer a nudge, right on the row.
               const awaiting  = ['sent', 'delivered'].includes(env.status)
@@ -1648,6 +1709,26 @@ create policy "agent_notifications_policy" on agent_notifications
                       </button>
                     )}
                   </div>
+                  {/* A draft is unfinished work, not a sent document — say so, and
+                      give the agent the door back into it. Before this the row
+                      showed a "Draft" chip and nothing else, so a send interrupted
+                      by a screen change could only be restarted from scratch. */}
+                  {isDraft && (
+                    <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'#fff8ec', display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+                      <Icon name="alert" size={13} style={{ color:'var(--gw-amber)', flexShrink:0 }}/>
+                      <span style={{ fontSize:12, flex:1, minWidth:180, color:'var(--gw-ink)' }}>
+                        <strong>Not sent yet.</strong> Pick up where you left off — edit signers &amp; fields, preview, then send.
+                      </span>
+                      <button
+                        className="btn btn--primary btn--sm"
+                        style={{ fontSize:11, flexShrink:0 }}
+                        onClick={() => openDraft(env)}
+                        disabled={opening[env.id]}
+                      >
+                        <Icon name="edit" size={12}/> {opening[env.id] ? 'Opening…' : 'Edit & Send'}
+                      </button>
+                    </div>
+                  )}
                   {completed && (
                     <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'var(--gw-green-light)', display:'flex', alignItems:'center', gap:8 }}>
                       <Icon name="check" size={13} style={{ color:'var(--gw-green)', flexShrink:0 }}/>
@@ -1676,18 +1757,33 @@ create policy "agent_notifications_policy" on agent_notifications
             })
       }
 
+      {/* Both send modals reload on CLOSE as well as on send: the draft row is
+          written server-side the moment BoldSign hands back a prepare URL, so an
+          agent who backs out mid-prep has to see that draft here to reopen it. */}
       {sendOpen && (
         <SendSignatureModal
           deal={deal} contacts={contacts} properties={properties} dealFiles={dealFiles} activeAgent={activeAgent}
-          onClose={() => setSendOpen(false)}
+          onClose={() => { setSendOpen(false); loadEnvelopes() }}
           onSent={() => { setSendOpen(false); loadEnvelopes() }}
+        />
+      )}
+
+      {/* A reopened draft — the same BoldSign prepare screen the send started in. */}
+      {editDraft && (
+        <BoldSignStepModal
+          url={editDraft.url}
+          eyebrow="BoldSign · Edit Draft"
+          heading={editDraft.env.document_name || 'Edit draft'}
+          onClose={() => { setEditDraft(null); loadEnvelopes() }}
+          onDone={() => { pushToast('Sent for signature', 'success'); setEditDraft(null); loadEnvelopes() }}
+          onDraft={() => pushToast('Draft saved — nothing sent. Reopen it here any time to finish.', 'info')}
         />
       )}
 
       {tplOpen && (
         <SendFromTemplateModal
           deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} dealAgents={dealAgents} templates={templates} activeAgent={activeAgent}
-          onClose={() => setTplOpen(false)}
+          onClose={() => { setTplOpen(false); loadEnvelopes() }}
           onSent={() => { setTplOpen(false); loadEnvelopes() }}
         />
       )}
@@ -1806,23 +1902,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // Step 2 — BoldSign's embedded prepare/send UI (replaces our own send popup).
   if (embedUrl) {
     return (
-      <Modal open={true} onClose={onClose} width={900}>
-        <div className="modal__head">
-          <div>
-            <div className="eyebrow-label">BoldSign · Review &amp; Send</div>
-            <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Place fields &amp; send</h3>
-          </div>
-          <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
-        </div>
-        <div className="modal__body" style={{ padding: 0 }}>
-          <BoldSignFrame
-            url={embedUrl}
-            onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
-            onDraft={() => { pushToast('Saved as a draft in BoldSign — nothing has been sent yet. Reopen it from the Drafts filter to finish.', 'info'); onSent() }}
-            onError={() => pushToast('Send was cancelled in BoldSign', 'info')}
-          />
-        </div>
-      </Modal>
+      <BoldSignStepModal
+        url={embedUrl}
+        eyebrow="BoldSign · Review & Send"
+        heading="Place fields & send"
+        onClose={onClose}
+        onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
+        onDraft={() => pushToast('Saved as a draft — nothing has been sent yet. You can keep working, or reopen it from the Signatures tab with "Edit & Send".', 'info')}
+      />
     )
   }
 

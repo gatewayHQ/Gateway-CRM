@@ -340,6 +340,51 @@ export async function trackDocument(supabase, { dealId, agentId, documentId, sig
   return true
 }
 
+// ─── Draft editing ────────────────────────────────────────────────────────────
+// Reopen an existing DRAFT document in BoldSign's embedded prepare editor, so an
+// agent who navigated away (or closed the tab) mid-prep can pick up exactly where
+// they left off and finish the send. Without this a draft was a dead end: the row
+// showed in the Signatures tab with no way back into it, and the only "fix" was to
+// delete it and start over.
+//
+// POST /document/createEmbeddedEditUrl?documentId=… → { editUrl }
+//
+// THE EDIT LOCK. A document that was opened for editing stays flagged as
+// in-edit-mode on BoldSign's side. An agent who closed the browser instead of
+// clicking Save/Send leaves that flag set, and the next createEmbeddedEditUrl for
+// the same document comes back 400 — the exact agent, on the exact document, who
+// most needs to get back in. So a 400 is treated as a possible stale lock: clear
+// it with /document/cancelEditing and try once more. If the retry also fails, its
+// error is what surfaces (a genuinely un-editable document still reports itself).
+export async function createDraftEditUrl({ documentId, redirectUrl, onBehalfOf } = {}) {
+  const payload = {
+    redirectUrl:           redirectUrl || '',
+    sendViewOption:        'PreparePage',   // land on field placement, not a bare review
+    showToolbar:           true,
+    showSendButton:        true,
+    showPreviewButton:     true,            // agents want to eyeball it before it goes
+    showNavigationButtons: true,
+    ...(onBehalfOf ? { onBehalfOf } : {}),
+  }
+  const editPath = `/document/createEmbeddedEditUrl?documentId=${encodeURIComponent(documentId)}`
+  const ask  = () => boldsign(editPath, { method: 'POST', json: payload })
+  const pick = (data) => data?.editUrl || data?.sendUrl || data?.url || null
+
+  try {
+    return pick(await ask())
+  } catch (err) {
+    if (err.status !== 400) throw err
+    const cancelQs = new URLSearchParams({ documentId })
+    if (onBehalfOf) cancelQs.set('onBehalfOf', onBehalfOf)
+    try {
+      await boldsign(`/document/cancelEditing?${cancelQs.toString()}`, { method: 'POST', json: {} })
+    } catch {
+      throw err   // couldn't clear a lock — report the original refusal, not this
+    }
+    return pick(await ask())
+  }
+}
+
 // ─── Field placement ─────────────────────────────────────────────────────────
 // RETIRED: pixel/point coordinate auto-placement. It guessed field position from
 // page dimensions read via pdf-lib, but BoldSign's `bounds` unit/origin couldn't
@@ -654,6 +699,66 @@ export default async function handler(req, res) {
         }
       }
       return res.json({ url, documentId: data.documentId || null, tracked })
+    }
+
+    // Reopen a DRAFT for editing: hand back an embedded BoldSign prepare URL for a
+    // document that already exists. This is the way back into a send an agent
+    // started and walked away from — same signers, same field placement, still
+    // unsent — instead of deleting the draft and rebuilding it from scratch.
+    //
+    // The CRM's own status is not trusted as the gate. A missed Sent webhook leaves
+    // a row saying 'draft' for a document the client already has, and offering
+    // "Edit" for that is a lie. BoldSign is asked what the document actually is,
+    // the row is corrected from the answer, and only a real draft is opened.
+    if (body.action === 'document-edit-url') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+
+      const svc = getServiceClient()
+      const { data: record } = await svc.from('boldsign_documents')
+        .select('id, deal_id, agent_id, status, document_name')
+        .eq('document_id', id).maybeSingle()
+      if (!record) return res.status(404).json({ error: 'Document not found' })
+      // The sender or an admin — plus, for rows predating agent attribution
+      // (agent_id null), anyone whose own RLS lets them see the deal. Without that
+      // fallback the fix would skip exactly the older drafts agents are stuck on.
+      let mayEdit = actor.isAdmin || (record.agent_id && record.agent_id === actor.agent.id)
+      if (!mayEdit && !record.agent_id && record.deal_id) {
+        const { data: visible } = await getUserClient(req)
+          .from('deals').select('id').eq('id', record.deal_id).maybeSingle()
+        mayEdit = Boolean(visible)
+      }
+      if (!mayEdit) {
+        return res.status(403).json({ error: 'Only the sender or an admin can edit this draft' })
+      }
+
+      const props  = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+      const live   = normalizeStatus(props.status)
+      if (live !== 'draft') {
+        // Correct the row so the tab stops advertising a draft that isn't one.
+        const patch = { status: live }
+        const done  = toIso(props.completedDate || props.signedDate || null)
+        if (done) patch.completed_at = done
+        await svc.from('boldsign_documents').update(patch).eq('id', record.id)
+        return res.status(400).json({
+          error: live === 'completed'
+            ? 'This document is already fully signed — it can no longer be edited.'
+            : `This document is ${live}, not a draft, so it can no longer be edited. Its status here has been updated.`,
+          status: live,
+        })
+      }
+
+      // Edit as the identity the draft was CREATED under (the deal's sending
+      // agent), not whoever happens to be clicking. BoldSign scopes a document to
+      // its sender, and an admin reopening an agent's draft under their own
+      // identity would either be refused or quietly change who the client hears
+      // from mid-send.
+      let onBehalfOf = null
+      try { onBehalfOf = await resolveOnBehalfOf(svc, record.agent_id || actor.agent.id) } catch { /* account default */ }
+
+      const url = await createDraftEditUrl({ documentId: id, redirectUrl: body.redirectUrl, onBehalfOf })
+      if (!url) return res.status(502).json({ error: 'BoldSign did not return an edit URL for this draft' })
+      return res.json({ url, documentId: id, status: 'draft' })
     }
 
     // Embedded SIGNING: a URL to load in an iframe so a signer completes the

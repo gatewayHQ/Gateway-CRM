@@ -80,7 +80,22 @@ export function Badge({ variant, children }) {
 }
 
 // ─── MODAL ────────────────────────────────────────────────────────────────────
+// Escape is handled by the TOPMOST layer only. Modals open on top of drawers (the
+// deal drawer's Signatures tab, for one), and both used to listen on window, so
+// one Escape closed the modal AND the drawer behind it. For an embedded
+// signature-prep iframe that meant unfinished work vanished with a stray keypress
+// and the tab it lived in was gone too. A shared counter tracks how many modals
+// are mounted; Drawer ignores Escape while any of them is.
+let openModalCount = 0
+export const modalIsOpen = () => openModalCount > 0
+
 export function Modal({ open, onClose, children, width = 520 }) {
+  useEffect(() => {
+    if (!open) return
+    openModalCount++
+    return () => { openModalCount = Math.max(0, openModalCount - 1) }
+  }, [open])
+
   useEffect(() => {
     const handler = (e) => { if (e.key === 'Escape') onClose() }
     if (open) window.addEventListener('keydown', handler)
@@ -100,7 +115,8 @@ export function Modal({ open, onClose, children, width = 520 }) {
 // ─── DRAWER ───────────────────────────────────────────────────────────────────
 export function Drawer({ open, onClose, title, children, width = 480 }) {
   useEffect(() => {
-    const handler = (e) => { if (e.key === 'Escape') onClose() }
+    // Let the modal on top of us take the Escape (see modalIsOpen above).
+    const handler = (e) => { if (e.key === 'Escape' && !modalIsOpen()) onClose() }
     if (open) window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [open, onClose])
