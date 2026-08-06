@@ -295,7 +295,7 @@ describe('createDraftEditUrl — getting an agent back into an abandoned draft',
     headers: { get: () => null },
   })
 
-  it('opens the draft on the prepare page, as the original sender', async () => {
+  it('opens the draft on the filling page, as the original sender', async () => {
     const calls = []
     vi.stubGlobal('fetch', vi.fn((url, opts) => {
       calls.push({ url, body: JSON.parse(opts.body) })
@@ -307,12 +307,62 @@ describe('createDraftEditUrl — getting an agent back into an abandoned draft',
     expect(calls).toHaveLength(1)
     expect(calls[0].url).toContain('/document/createEmbeddedEditUrl?documentId=doc%201')
     expect(calls[0].body).toMatchObject({
-      sendViewOption:    'PreparePage',
+      // A draft MUST open on FillingPage — BoldSign refuses PreparePage outright
+      // for a draft ("...because the document is in the draft state").
+      sendViewOption:    'FillingPage',
       showSendButton:    true,
       showPreviewButton: true,
       redirectUrl:       'https://crm/x',
       onBehalfOf:        'agent@x.com',
     })
+  })
+
+  it('falls back to the other view option when BoldSign refuses this one', async () => {
+    const views = []
+    vi.stubGlobal('fetch', vi.fn((_u, opts) => {
+      const view = JSON.parse(opts.body).sendViewOption
+      views.push(view)
+      // Mirror of the real refusal, with the states swapped — proves the fallback
+      // is driven by BoldSign's answer, not by a hard-coded state→view guess.
+      return Promise.resolve(view === 'FillingPage'
+        ? status(400, "The embedded editing link cannot be generated when SendViewOption is set to 'FillingPage'.")
+        : editResp('https://app.boldsign.com/edit/prep'))
+    }))
+    const url = await createDraftEditUrl({ documentId: 'd1' })
+
+    expect(url).toBe('https://app.boldsign.com/edit/prep')
+    expect(views).toEqual(['FillingPage', 'PreparePage'])
+  })
+
+  it('does not mistake a view-option refusal for an edit lock', async () => {
+    const paths = []
+    vi.stubGlobal('fetch', vi.fn((url, opts) => {
+      paths.push(String(url).replace('https://api.boldsign.com/v1', '').split('?')[0])
+      return Promise.resolve(JSON.parse(opts.body || '{}').sendViewOption === 'FillingPage'
+        ? status(400, 'SendViewOption is not valid for this document')
+        : editResp('https://app.boldsign.com/edit/prep'))
+    }))
+    await createDraftEditUrl({ documentId: 'd1' })
+    // No cancelEditing — clearing an edit lock would not have fixed this, and
+    // cancelling editing on someone else's in-flight session is not free.
+    expect(paths).not.toContain('/document/cancelEditing')
+  })
+
+  it('honors a caller-specified view option first', async () => {
+    const views = []
+    vi.stubGlobal('fetch', vi.fn((_u, opts) => {
+      views.push(JSON.parse(opts.body).sendViewOption)
+      return Promise.resolve(editResp('https://app.boldsign.com/edit/x'))
+    }))
+    await createDraftEditUrl({ documentId: 'd1', sendViewOption: 'PreparePage' })
+    expect(views).toEqual(['PreparePage'])
+  })
+
+  it('surfaces the last refusal when neither view option is accepted', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(
+      status(400, 'SendViewOption cannot be used for this document')
+    )))
+    await expect(createDraftEditUrl({ documentId: 'd1' })).rejects.toThrow(/SendViewOption/)
   })
 
   it('clears a stale edit lock and retries — the closed-the-tab case', async () => {

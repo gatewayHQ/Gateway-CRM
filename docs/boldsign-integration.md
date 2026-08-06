@@ -149,9 +149,17 @@ rebuilding the whole send.
 
 - **`Edit & Send`** on any `draft` row (`SignaturesTab`, `Pipeline.jsx`) calls
   `document-edit-url` → `POST /v1/document/createEmbeddedEditUrl?documentId=…`
-  (`{ editUrl }`) and reopens the same document on `sendViewOption: 'PreparePage'`
-  with the toolbar, Preview and Send buttons on. Signers and placed fields are
-  whatever the agent left behind.
+  (`{ editUrl }`) and reopens the same document with the toolbar, Preview and Send
+  buttons on. Signers and placed fields are whatever the agent left behind.
+- **`sendViewOption` is state-dependent — a draft needs `FillingPage`.** Asking for
+  `PreparePage` on a draft is refused outright: *"The embedded editing link cannot
+  be generated when SendViewOption is set to 'PreparePage' because the document is
+  in the draft state."* `FillingPage` is the page we want anyway (the document with
+  its recipients and fields, ready to adjust and send); `PreparePage` is for a
+  document already in flight. `createDraftEditUrl()` doesn't hard-wire the mapping
+  off that one message — a 400 that *names* `SendViewOption` retries with the other
+  option, so neither state can dead-end. A 400 that doesn't name it is treated as an
+  edit lock instead (below), so the two failure modes never get confused.
 - **Sender identity.** The edit URL is minted with the `onBehalfOf` of the
   document's *recorded* `agent_id`, not the person clicking. An admin reopening an
   agent's draft must not change who the client hears from mid-send.
