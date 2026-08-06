@@ -349,40 +349,75 @@ export async function trackDocument(supabase, { dealId, agentId, documentId, sig
 //
 // POST /document/createEmbeddedEditUrl?documentId=… → { editUrl }
 //
+// THE VIEW OPTION IS STATE-DEPENDENT. `sendViewOption` accepts 'FillingPage' or
+// 'PreparePage', and BoldSign rejects the wrong one for the document's state:
+//   "The embedded editing link cannot be generated when SendViewOption is set to
+//    'PreparePage' because the document is in the draft state."
+// So a draft opens on FillingPage — which is the page we actually want anyway: the
+// document with its recipients and fields, ready to adjust and send. PreparePage
+// is for a document that is already in flight. Rather than hard-wire the mapping
+// off one observed message, a refusal that names SendViewOption retries with the
+// other option, so neither state can dead-end.
+//
 // THE EDIT LOCK. A document that was opened for editing stays flagged as
 // in-edit-mode on BoldSign's side. An agent who closed the browser instead of
 // clicking Save/Send leaves that flag set, and the next createEmbeddedEditUrl for
 // the same document comes back 400 — the exact agent, on the exact document, who
-// most needs to get back in. So a 400 is treated as a possible stale lock: clear
-// it with /document/cancelEditing and try once more. If the retry also fails, its
-// error is what surfaces (a genuinely un-editable document still reports itself).
-export async function createDraftEditUrl({ documentId, redirectUrl, onBehalfOf } = {}) {
-  const payload = {
-    redirectUrl:           redirectUrl || '',
-    sendViewOption:        'PreparePage',   // land on field placement, not a bare review
-    showToolbar:           true,
-    showSendButton:        true,
-    showPreviewButton:     true,            // agents want to eyeball it before it goes
-    showNavigationButtons: true,
-    ...(onBehalfOf ? { onBehalfOf } : {}),
-  }
+// most needs to get back in. So a 400 that ISN'T about the view option is treated
+// as a possible stale lock: clear it with /document/cancelEditing and try once
+// more. If the retry also fails, its error is what surfaces (a genuinely
+// un-editable document still reports itself).
+const EDIT_VIEW_OPTIONS = ['FillingPage', 'PreparePage']
+const isViewOptionRefusal = (err) => /sendviewoption/i.test(err?.message || '')
+
+export async function createDraftEditUrl({ documentId, redirectUrl, onBehalfOf, sendViewOption } = {}) {
+  // Caller-preferred view first (if any), then the remaining option as fallback.
+  const views = sendViewOption
+    ? [sendViewOption, ...EDIT_VIEW_OPTIONS.filter(v => v !== sendViewOption)]
+    : EDIT_VIEW_OPTIONS
+
   const editPath = `/document/createEmbeddedEditUrl?documentId=${encodeURIComponent(documentId)}`
-  const ask  = () => boldsign(editPath, { method: 'POST', json: payload })
+  const ask = (view) => boldsign(editPath, {
+    method: 'POST',
+    json: {
+      redirectUrl:           redirectUrl || '',
+      sendViewOption:        view,
+      showToolbar:           true,
+      showSendButton:        true,
+      showPreviewButton:     true,          // agents want to eyeball it before it goes
+      showNavigationButtons: true,
+      ...(onBehalfOf ? { onBehalfOf } : {}),
+    },
+  })
   const pick = (data) => data?.editUrl || data?.sendUrl || data?.url || null
 
-  try {
-    return pick(await ask())
-  } catch (err) {
-    if (err.status !== 400) throw err
-    const cancelQs = new URLSearchParams({ documentId })
-    if (onBehalfOf) cancelQs.set('onBehalfOf', onBehalfOf)
-    try {
-      await boldsign(`/document/cancelEditing?${cancelQs.toString()}`, { method: 'POST', json: {} })
-    } catch {
-      throw err   // couldn't clear a lock — report the original refusal, not this
-    }
-    return pick(await ask())
+  const clearEditLock = async () => {
+    const qs = new URLSearchParams({ documentId })
+    if (onBehalfOf) qs.set('onBehalfOf', onBehalfOf)
+    try { await boldsign(`/document/cancelEditing?${qs.toString()}`, { method: 'POST', json: {} }); return true }
+    catch { return false }
   }
+
+  let lastErr
+  for (const view of views) {
+    try {
+      return pick(await ask(view))
+    } catch (err) {
+      if (err.status !== 400) throw err
+      lastErr = err
+      if (isViewOptionRefusal(err)) continue            // wrong page for this state — try the other
+      if (!await clearEditLock()) throw err             // not a lock we can clear — report as-is
+      try {
+        return pick(await ask(view))
+      } catch (retryErr) {
+        if (retryErr.status !== 400) throw retryErr
+        lastErr = retryErr
+        if (isViewOptionRefusal(retryErr)) continue      // lock cleared, view still wrong
+        throw retryErr
+      }
+    }
+  }
+  throw lastErr
 }
 
 // ─── Field placement ─────────────────────────────────────────────────────────
