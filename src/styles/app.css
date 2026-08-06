@@ -278,6 +278,18 @@ select.form-control { cursor: pointer; }
   padding: 20px 24px; border-bottom: 1px solid var(--gw-border);
 }
 .modal__body { padding: 24px; overflow-y: auto; flex: 1; }
+/* A modal that is a WORKSPACE rather than a form: the embedded BoldSign editor,
+   where the document IS the content and every line of it is being read by someone
+   who would rather not squint at a 900px box. Sized to the viewport instead of to
+   a form's natural width, so the page renders larger and BoldSign's own thumbnail
+   rail and field toolbar get room to be usable. Its body is a flush flex column
+   (no padding, no scroll of its own) so the iframe fills it exactly — the iframe
+   scrolls the document, which is the only scrollbar that should exist here.
+   `min-height: 0` is what lets a flex child actually shrink inside it; without it
+   the iframe would push the footer off the bottom of the modal. */
+.modal--workspace { width: 95vw; height: 94vh; max-width: none; max-height: 94vh; }
+.modal--workspace .modal__body { padding: 0; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+.modal--workspace .modal__head { padding: 14px 20px; }
 .modal__foot { padding: 16px 24px; border-top: 1px solid var(--gw-border); display: flex; gap: 8px; justify-content: flex-end; }
 .eyebrow-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--gw-mist); margin-bottom: 4px; }
 
@@ -525,6 +537,10 @@ select.form-control { cursor: pointer; }
     border-radius: var(--radius-lg) var(--radius-lg) 0 0;
     max-height: 90dvh;
   }
+  /* The workspace modal keeps the sheet treatment on a phone, but takes the whole
+     sheet: dvh (not vh) so the mobile browser's collapsing address bar can't push
+     the footer controls out of reach. */
+  .modal--workspace { height: 92dvh; max-height: 92dvh; }
 
   /* ── Filters bar ── */
   .filters-bar { gap: 8px; }

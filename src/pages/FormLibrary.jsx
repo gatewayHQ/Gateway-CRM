@@ -294,7 +294,15 @@ function UploadModal({ packet, onClose, onSaved }) {
   }
 
   return (
-    <Modal open onClose={editorUrl ? handleEditorError : onClose} width={editorUrl ? 900 : 480}>
+    // While the BoldSign editor is open this is a workspace, not a form: the admin
+    // is placing fields on a Letter-size page and needs to see it. Reverts to the
+    // normal form width once the editor closes.
+    <Modal
+      open
+      onClose={editorUrl ? handleEditorError : onClose}
+      width={editorUrl ? null : 480}
+      className={editorUrl ? 'modal--workspace' : ''}
+    >
       <div className="modal__head">
         <div>
           <div className="eyebrow-label">Form Library</div>
@@ -306,11 +314,14 @@ function UploadModal({ packet, onClose, onSaved }) {
       </div>
 
       {editorUrl ? (
-        <div className="modal__body" style={{ padding: 0, maxHeight: 'calc(90vh - 80px)', overflowY: 'auto' }}>
-          <div style={{ padding: '10px 24px', fontSize: 12, color: 'var(--gw-mist)', borderBottom: '1px solid var(--gw-border)' }}>
+        // No maxHeight/overflow of its own — .modal--workspace makes this a flush
+        // flex column and the iframe scrolls the document. Two nested scrollbars is
+        // what made field placement feel slippery here.
+        <div className="modal__body">
+          <div style={{ padding: '8px 20px', fontSize: 12, color: 'var(--gw-mist)', borderBottom: '1px solid var(--gw-border)', flexShrink: 0 }}>
             Place fields, then click <strong>Finish</strong> in BoldSign — the template saves back to this packet automatically.
           </div>
-          <BoldSignFrame url={editorUrl} onDone={handleEditorDone} onDraft={handleEditorDraftSave} onError={handleEditorError} returnUrlMarker="boldsign-return" />
+          <BoldSignFrame fill url={editorUrl} onDone={handleEditorDone} onDraft={handleEditorDraftSave} onError={handleEditorError} returnUrlMarker="boldsign-return" />
         </div>
       ) : (
       <>

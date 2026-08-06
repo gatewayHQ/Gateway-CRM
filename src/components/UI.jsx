@@ -89,7 +89,11 @@ export function Badge({ variant, children }) {
 let openModalCount = 0
 export const modalIsOpen = () => openModalCount > 0
 
-export function Modal({ open, onClose, children, width = 520 }) {
+// `width` is the usual inline pixel width for a form-shaped dialog. Pass
+// `width={null}` together with a sizing `className` (e.g. "modal--workspace") when
+// the size belongs in CSS instead — an inline width would beat the stylesheet and
+// silently defeat both the class and its responsive fallbacks.
+export function Modal({ open, onClose, children, width = 520, className = '' }) {
   useEffect(() => {
     if (!open) return
     openModalCount++
@@ -105,7 +109,10 @@ export function Modal({ open, onClose, children, width = 520 }) {
   if (!open) return null
   return (
     <div className="modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" style={{ width, maxWidth: 'calc(100vw - 48px)' }}>
+      <div
+        className={`modal${className ? ` ${className}` : ''}`}
+        style={width != null ? { width, maxWidth: 'calc(100vw - 48px)' } : undefined}
+      >
         {children}
       </div>
     </div>

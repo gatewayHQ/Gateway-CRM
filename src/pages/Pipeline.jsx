@@ -1128,9 +1128,15 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
   }
 
   return (
-    <Modal open={true} onClose={requestClose} width={900}>
+    // Workspace-sized (see .modal--workspace): ~95% of the viewport, because this is
+    // a document being read and arranged, not a form being filled in. The old 900 ×
+    // 640 box rendered a US Letter page small enough that agents were zooming
+    // BoldSign in and then scrolling a page they could only see a third of at a
+    // time. `width={null}` hands sizing to CSS — an inline width would override the
+    // class and its phone fallback.
+    <Modal open={true} onClose={requestClose} width={null} className="modal--workspace">
       <div className="modal__head">
-        <div>
+        <div style={{ minWidth: 0 }}>
           <div className="eyebrow-label">{eyebrow}</div>
           <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{heading}</h3>
         </div>
@@ -1143,8 +1149,9 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
           <Icon name="x" size={18}/>
         </button>
       </div>
-      <div className="modal__body" style={{ padding: 0 }}>
+      <div className="modal__body">
         <BoldSignFrame
+          fill
           url={url}
           onDone={(e) => { saveLayout({ silent: true }); onDone?.(e) }}
           // Saved-as-draft is NOT sent. Reporting it as sent (which is what
@@ -1155,7 +1162,9 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
           onError={() => pushToast('BoldSign reported the send was cancelled — the draft is still on this deal.', 'info')}
         />
       </div>
-      <div style={{ padding:'8px 12px', borderTop:'1px solid var(--gw-border)', fontSize:11, color:'var(--gw-mist)', lineHeight:1.5 }}>
+      {/* flexShrink:0 — the body is flex:1 and would otherwise squeeze this hint
+          (and its saving state) down to nothing on a short viewport. */}
+      <div style={{ padding:'8px 12px', borderTop:'1px solid var(--gw-border)', fontSize:11, color:'var(--gw-mist)', lineHeight:1.5, flexShrink:0 }}>
         {savingLayout
           ? <span aria-live="polite">Saving this deal’s field layout…</span>
           : <>Not ready to send? Use <strong>Preview</strong> inside BoldSign to check it, or save it and reopen the draft here any time — nothing goes out until you click Send. Fields you place are remembered for this deal.</>}
