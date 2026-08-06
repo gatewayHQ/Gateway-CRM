@@ -150,6 +150,80 @@ const DEAL_BUCKET = 'deal-documents'
 //     no other bucket.
 const DEAL_DOC_PATH_RE = /^deal-[0-9a-f-]{36}\/[^/\\]{1,255}$/i
 
+// ─── Document quality ─────────────────────────────────────────────────────────
+// WHY TEMPLATE PDFs WERE BLURRY. Nothing in this app ever compressed a PDF — but
+// "Build in BoldSign" used to carry the source files as base64 inside the JSON
+// request body, and a serverless request is capped at 4.5 MB (base64 inflates by
+// ~33%, so ~3.3 MB of PDF). A real Iowa listing packet with scanned disclosures
+// is bigger than that, so the only way to get one through was to run it through a
+// compressor until it fit — and every downstream view renders those degraded
+// bytes forever: the embedded editor, the preview, the sent document, the signed
+// PDF. No preview or DPI setting can recover detail the stored file no longer has.
+//
+// So template sources travel the same way send documents already do: the browser
+// puts the ORIGINAL in the form-packets bucket and hands over a short-lived signed
+// URL, and the bytes are streamed to BoldSign server-side where the 4.5 MB cap
+// doesn't apply. The practical ceiling becomes BoldSign's own 25 MB per file
+// instead of 3.3 MB — roughly 7× the headroom, which is the difference between
+// "compress until the text goes soft" and "upload the original".
+const PACKET_BUCKET = 'form-packets'
+// <STATE>/<transaction_type>/<timestamp>-<i>-<filename> — the scheme FormLibrary
+// uploads with. Shape-restricted for the same reason deal paths are: no traversal,
+// no reaching into another bucket.
+const PACKET_PATH_RE = /^[A-Z]{2}\/[a-z]+\/[^/\\]{1,255}$/
+// BoldSign's own per-file ceiling. Mirrors MAX_SEND_BYTES in the client service.
+const MAX_BOLDSIGN_FILE_BYTES = 25 * 1024 * 1024
+
+export function formatByteSize(b) {
+  const n = Number(b) || 0
+  if (n < 1024) return `${n} B`
+  if (n < 1048576) return `${(n / 1024).toFixed(0)} KB`
+  return `${(n / 1048576).toFixed(1)} MB`
+}
+
+// Shrink a PDF WITHOUT touching image or text quality: re-serialize through
+// pdf-lib with object streams, which compresses the file's structure (the object
+// table and cross-reference data) and drops orphaned objects. Images are copied
+// byte-for-byte — there is no resampling here, on purpose. Rasterizing or
+// re-encoding images is exactly the operation that produced the blurry packets
+// this function exists to avoid; it can only be a last resort a human chooses,
+// never something the pipeline does quietly.
+//
+// Returns { buffer, before, after, saved } — and the ORIGINAL buffer if the
+// rewrite came out no smaller (or failed), so this can never make things worse.
+export async function optimizePdfLossless(buffer, label) {
+  const before = buffer.length
+  try {
+    const { PDFDocument } = await import('pdf-lib')
+    // ignoreEncryption: a locked-down state form still needs to reach BoldSign;
+    // if it truly can't be re-serialized the catch below returns it untouched.
+    const doc   = await PDFDocument.load(buffer, { ignoreEncryption: true, updateMetadata: false })
+    const bytes = await doc.save({ useObjectStreams: true })
+    const out   = Buffer.from(bytes)
+    if (out.length >= before) return { buffer, before, after: before, saved: 0 }
+    return { buffer: out, before, after: out.length, saved: before - out.length }
+  } catch (err) {
+    console.warn(`[boldsign] lossless optimize skipped for ${label || 'document'}: ${err.message}`)
+    return { buffer, before, after: before, saved: 0 }
+  }
+}
+
+// Get a file under BoldSign's per-file limit without degrading it, or explain
+// precisely why that isn't possible. Never silently rasterizes.
+export async function fitForBoldSign(buffer, label) {
+  if (buffer.length <= MAX_BOLDSIGN_FILE_BYTES) return { buffer, optimized: false }
+  const { buffer: out, before, after, saved } = await optimizePdfLossless(buffer, label)
+  if (after <= MAX_BOLDSIGN_FILE_BYTES) {
+    console.log(`[boldsign] "${label}" losslessly reduced ${formatByteSize(before)} → ${formatByteSize(after)}`)
+    return { buffer: out, optimized: saved > 0, before, after }
+  }
+  throw badRequest(
+    `"${label || 'That file'}" is ${formatByteSize(after)} — BoldSign's limit is ${formatByteSize(MAX_BOLDSIGN_FILE_BYTES)}, `
+    + 'and it cannot be reduced further without re-compressing the page images, which is what makes text blurry. '
+    + 'Split the packet into two files instead — they can both be added to the same template.'
+  )
+}
+
 function badRequest(message) { const e = new Error(message); e.status = 400; return e }
 
 // BoldSign rejects a non-PDF with an opaque error, and the ad-hoc send modal's
@@ -163,16 +237,26 @@ function assertPdf(buffer, label) {
   return buffer
 }
 
-// Exported for unit tests: is this a signed URL on our own deal-documents bucket?
-export function isOwnSignedStorageUrl(url, supabaseUrl = SUPABASE_URL) {
-  const prefix = `${String(supabaseUrl).replace(/\/$/, '')}/storage/v1/object/sign/${DEAL_BUCKET}/`
-  return typeof url === 'string' && url.startsWith(prefix)
+// Exported for unit tests: is this a signed URL on one of OUR OWN buckets? The
+// allow-list is explicit and defaults to deal-documents, so widening it for
+// template sources can't accidentally widen it for sends — this is the check that
+// stops a caller-supplied URL from turning the send payload into an SSRF.
+export function isOwnSignedStorageUrl(url, supabaseUrl = SUPABASE_URL, buckets = [DEAL_BUCKET]) {
+  if (typeof url !== 'string') return false
+  const base = String(supabaseUrl).replace(/\/$/, '')
+  return buckets.some(b => url.startsWith(`${base}/storage/v1/object/sign/${b}/`))
 }
 
-async function resolveDocumentBytes(req, { documentUrl, documentPath, documentBase64, documentName }) {
+// `source` picks which bucket a caller may read from: 'deal' (a send, default) or
+// 'packet' (a Form Library template source). Kept as a coarse switch rather than a
+// free-form bucket name so no caller can name a bucket of its own.
+async function resolveDocumentBytes(req, { documentUrl, documentPath, documentBase64, documentName, source = 'deal' }) {
+  const bucket   = source === 'packet' ? PACKET_BUCKET : DEAL_BUCKET
+  const pathRe   = source === 'packet' ? PACKET_PATH_RE : DEAL_DOC_PATH_RE
+  const pathHint = source === 'packet' ? '<STATE>/<type>/<filename>' : 'deal-<uuid>/<filename>'
   if (documentUrl) {
-    if (!isOwnSignedStorageUrl(documentUrl)) {
-      throw badRequest('documentUrl must be a signed URL for this project\'s deal-documents bucket')
+    if (!isOwnSignedStorageUrl(documentUrl, SUPABASE_URL, [bucket])) {
+      throw badRequest(`documentUrl must be a signed URL for this project's ${bucket} bucket`)
     }
     let r
     try { r = await fetch(documentUrl) }
@@ -181,11 +265,11 @@ async function resolveDocumentBytes(req, { documentUrl, documentPath, documentBa
     return assertPdf(Buffer.from(await r.arrayBuffer()), documentName)
   }
   if (documentPath) {
-    if (!DEAL_DOC_PATH_RE.test(documentPath)) {
-      throw badRequest('documentPath must be a deal document path (deal-<uuid>/<filename>)')
+    if (!pathRe.test(documentPath)) {
+      throw badRequest(`documentPath must be a ${bucket} path (${pathHint})`)
     }
     const asCaller = getUserClient(req)
-    const { data, error } = await asCaller.storage.from(DEAL_BUCKET).download(documentPath)
+    const { data, error } = await asCaller.storage.from(bucket).download(documentPath)
     if (error || !data) {
       throw badRequest(`Could not read that document from storage${error?.message ? `: ${error.message}` : ''}`)
     }
@@ -1414,6 +1498,29 @@ export default async function handler(req, res) {
         : (documentBase64 ? [{ base64: documentBase64, name: documentName }] : [])
       if (!fileList.length) return res.status(400).json({ error: 'documents (or documentBase64) or templateId required' })
 
+      // Resolve every source to bytes HERE, server-side. A `url`/`path` entry is
+      // streamed from the form-packets bucket at full quality; `base64` is still
+      // accepted for older callers but is capped by the platform's 4.5 MB request
+      // limit — the cap that forced admins to compress packets until the text went
+      // blurry (see "Document quality" at the top of this file).
+      const resolved = []
+      let optimizedAny = false
+      for (const [i, d] of fileList.entries()) {
+        const name = d?.name || `document-${i + 1}.pdf`
+        const bytes = await resolveDocumentBytes(req, {
+          documentUrl:    d?.url,
+          documentPath:   d?.path,
+          documentBase64: d?.base64,
+          documentName:   name,
+          source:         'packet',
+        })
+        // Only touched if it exceeds BoldSign's own per-file limit, and even then
+        // only losslessly — never by re-compressing page images.
+        const fitted = await fitForBoldSign(bytes, name)
+        if (fitted.optimized) optimizedAny = true
+        resolved.push({ name, bytes: fitted.buffer })
+      }
+
       const roleList = normalizeTemplateRoles(roles)
       const templateTitle = (title || 'New Template').trim()
 
@@ -1435,12 +1542,17 @@ export default async function handler(req, res) {
       }
       // One repeated `Files` field per source PDF — BoldSign merges them into the
       // single template document in the order appended.
-      fileList.forEach((d, i) => {
-        if (!d?.base64) return
-        form.append('Files', new Blob([Buffer.from(d.base64, 'base64')], { type: 'application/pdf' }), d.name || `document-${i + 1}.pdf`)
+      resolved.forEach(d => {
+        form.append('Files', new Blob([d.bytes], { type: 'application/pdf' }), d.name)
       })
       const data = await boldsign('/template/createEmbeddedTemplateUrl', { method: 'POST', form })
-      return res.json({ url: data.createUrl, templateId: data.templateId, roles: roleList })
+      return res.json({
+        url: data.createUrl, templateId: data.templateId, roles: roleList,
+        // What actually reached BoldSign, so the admin can see the packet went up
+        // at full size rather than wondering whether something shrank it.
+        uploaded: resolved.map(d => ({ name: d.name, bytes: d.bytes.length })),
+        ...(optimizedAny ? { optimized: true } : {}),
+      })
     }
 
     // Send a document generated from a template, with CRM-prefilled fields.
