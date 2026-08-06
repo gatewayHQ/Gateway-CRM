@@ -222,6 +222,39 @@ rendering, not in it.
   document — there is no client DPI knob. What's left on our side is viewport size,
   covered by the enlarged modal.
 
+## Switching browser tabs must not close the editor
+The reported symptom — "the agent clicked out of the tab and the form closed and went
+as a draft" — was real, and the cause was three layers up from BoldSign:
+
+1. Switching tabs makes Supabase refresh the auth token when the tab comes back.
+2. `onAuthStateChange` handed `App` a **new session object** (same user, same token
+   contents), and its loader depended on `[session]` — so it re-ran and called
+   `setDb()` with freshly-built arrays. Same data, new identities.
+3. `DealDrawer`'s seeding effect depended on the `deal` **object** and the
+   `dealContacts` **array**. New identities read as a change, so it fired
+   `setTab(initialTab)` — throwing the agent back to Details, unmounting the
+   Signatures tab and destroying the open BoldSign editor with it. The draft survived
+   in BoldSign; the agent's place in it did not.
+
+Fixed at both layers, because either one alone would leave the other as a trap:
+
+- **`DealDrawer`** now keys seeding on `deal?.id`, `open`, `initialTab` and a CONTENT
+  key from `dealContactIdsFor()` (sorted ids joined) — not on object identity. A
+  refetch that changes nothing changes nothing. Side effect worth having: a background
+  refetch can no longer wipe an agent's half-typed edits, which was the same bug
+  wearing different clothes. Unit-tested in
+  `src/lib/__tests__/dealDrawerSeeding.test.js` — the key must be identical for a
+  DIFFERENT array with the same contents, and for the same rows in a different order
+  (Postgres promises no order without `ORDER BY`), while a genuine add or remove must
+  still change it.
+- **`App`** keys its data load on `session?.user?.id` rather than the session object,
+  so a token refresh is invisible instead of triggering a full database refetch.
+- **Focus comes back.** An iframe isn't reloaded for being backgrounded, but keyboard
+  focus isn't restored to it either — an agent who was typing came back to a page that
+  swallowed keystrokes. `BoldSignFrame` re-focuses the frame on `visibilitychange`,
+  but only if the frame held focus when the tab was left: stealing it from someone who
+  had deliberately clicked elsewhere would be its own small rudeness.
+
 ## Leaving the editor — confirm, and save what can be saved
 - **`ConfirmDialog`** ("Leave the editor?" / Cancel / **Leave**) replaces the
   `window.confirm` on the close path. Escape, the backdrop and the X all route
