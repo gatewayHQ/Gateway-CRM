@@ -442,6 +442,114 @@ export async function trackDocument(supabase, { dealId, agentId, documentId, sig
   return true
 }
 
+// ─── Printable copy (review on paper before sending) ─────────────────────────
+// Agents want to read a packet on paper before it goes to a client — and the
+// browser cannot do it for them: the document lives in a cross-origin iframe, so
+// window.print() prints OUR page chrome, not BoldSign's canvas. The printable copy
+// has to be built from BoldSign's own bytes.
+//
+// WHAT THIS DOES NOT DO: draw the field boxes onto the page. BoldSign's `bounds`
+// origin and units could not be confirmed (their docs are WAF-blocked from here),
+// and this file already retired one coordinate-guessing feature for exactly that
+// reason — see "RETIRED: pixel/point coordinate auto-placement" below. A printout
+// with signature boxes in almost-the-right-place is worse than none: it looks
+// authoritative and is quietly wrong. Instead the copy carries a SIGNING SUMMARY
+// page listing every field by page, signer and type, which is derived from data
+// BoldSign states outright and so cannot be subtly incorrect.
+//
+// Appended rather than prepended: page 1 of the printout stays page 1 of the
+// agreement, so a printed packet still matches what everyone refers to as "page 1".
+
+// Per-signer order → a stable label. Colors are not used (this prints, often in
+// black and white); the summary is ordered and labeled instead.
+export function buildSigningSummary(props) {
+  const signers = (props?.signerDetails || []).map((s, i) => {
+    const rows = (s?.formFields || []).map(f => ({
+      page:  Number(f?.pageNumber) || 1,
+      type:  normalizeFieldType(f?.type || f?.fieldType) || String(f?.type || 'Field'),
+      label: f?.label || f?.placeholder || '',
+      value: f?.value || '',
+      required: Boolean(f?.isRequired),
+    })).sort((a, b) => a.page - b.page || a.type.localeCompare(b.type))
+    return {
+      order: Number(s?.order) || i + 1,
+      role:  s?.signerRole || '',
+      name:  s?.signerName || '',
+      email: s?.signerEmail || '',
+      fields: rows,
+    }
+  }).sort((a, b) => a.order - b.order)
+  const total = signers.reduce((t, s) => t + s.fields.length, 0)
+  return { signers, total }
+}
+
+// Draw the summary onto one or more appended US Letter pages. Plain Helvetica at
+// 10-11pt: this is a working document an agent marks up, not a brand surface.
+async function appendSigningSummary(pdfDoc, { summary, documentName, status }) {
+  const { StandardFonts, rgb } = await import('pdf-lib')
+  const font     = await pdfDoc.embedFont(StandardFonts.Helvetica)
+  const bold     = await pdfDoc.embedFont(StandardFonts.HelveticaBold)
+  const [W, H]   = [612, 792]
+  const margin   = 54
+  const ink      = rgb(0.1, 0.1, 0.12)
+  const muted    = rgb(0.42, 0.44, 0.48)
+
+  let page = pdfDoc.addPage([W, H])
+  let y = H - margin
+  const line = (text, { size = 10.5, f = font, color = ink, gap = 14, indent = 0 } = {}) => {
+    // A new page when the current one runs out — a packet with many fields must not
+    // silently lose the tail of its own summary.
+    if (y < margin + 40) { page = pdfDoc.addPage([W, H]); y = H - margin }
+    page.drawText(String(text).slice(0, 120), { x: margin + indent, y, size, font: f, color })
+    y -= gap
+  }
+
+  line('SIGNING SUMMARY', { size: 15, f: bold, gap: 20 })
+  line(documentName || 'Document', { size: 11, color: muted, gap: 12 })
+  line(`Status: ${status || 'draft'} · ${summary.total} field${summary.total === 1 ? '' : 's'} across ${summary.signers.length} signer${summary.signers.length === 1 ? '' : 's'}`,
+    { size: 10, color: muted, gap: 22 })
+
+  if (!summary.total) {
+    line('No fields have been placed yet.', { size: 11 })
+    line('Nothing will be requested from a signer until fields are placed in BoldSign.', { size: 10, color: muted })
+  }
+
+  for (const s of summary.signers) {
+    const who = [s.name, s.email && `<${s.email}>`].filter(Boolean).join(' ') || '(no signer assigned)'
+    line(`${s.order}. ${s.role || 'Signer'} — ${who}`, { size: 11.5, f: bold, gap: 16 })
+    if (!s.fields.length) {
+      line('no fields assigned', { size: 10, color: muted, indent: 14, gap: 18 })
+      continue
+    }
+    for (const f of s.fields) {
+      const bits = [`Page ${f.page}`, f.type, f.label && `“${f.label}”`, f.value && `= ${f.value}`, !f.required && '(optional)']
+        .filter(Boolean).join(' · ')
+      line(bits, { size: 10, indent: 14, gap: 13 })
+    }
+    y -= 6
+  }
+
+  // Said once, at the end, where someone holding the paper will read it.
+  if (y < margin + 30) { page = pdfDoc.addPage([W, H]); y = H - margin }
+  page.drawText('Printed from Gateway CRM for review. This copy is not a signed record.',
+    { x: margin, y: margin - 18, size: 8.5, font, color: muted })
+  return pdfDoc
+}
+
+// Build the print copy: the document exactly as BoldSign holds it, plus the
+// summary. Returns a Buffer. Throws with a usable message if BoldSign won't hand
+// over the bytes.
+export async function buildPrintablePdf({ pdfBytes, props, documentName }) {
+  const { PDFDocument } = await import('pdf-lib')
+  const doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true })
+  await appendSigningSummary(doc, {
+    summary: buildSigningSummary(props),
+    documentName,
+    status: normalizeStatus(props?.status),
+  })
+  return Buffer.from(await doc.save({ useObjectStreams: true }))
+}
+
 // ─── Per-deal field layouts ───────────────────────────────────────────────────
 // Field placement happens inside BoldSign's embedded editor, and BoldSign keeps
 // it on the DOCUMENT. So the arrangement an agent builds for a deal — the
@@ -1113,9 +1221,17 @@ export default async function handler(req, res) {
     // branch the draft features would skip exactly the older documents agents are
     // stuck on. Throws a tagged error the catch below turns into a status code.
     const resolveDocumentRecord = async (svc, documentId, { verb }) => {
-      const { data: record } = await svc.from('boldsign_documents')
-        .select('id, deal_id, agent_id, status, document_name, boldsign_template_id')
+      const base = 'id, deal_id, agent_id, status, document_name'
+      let { data: record, error } = await svc.from('boldsign_documents')
+        .select(`${base}, boldsign_template_id, signed_storage_path`)
         .eq('document_id', documentId).maybeSingle()
+      // A database missing one of the newer columns must not turn every draft
+      // action into a 404 — fall back to the columns that have always existed.
+      if (error) {
+        console.warn(`[boldsign] document row read fell back to base columns (${error.message})`)
+        ;({ data: record } = await svc.from('boldsign_documents')
+          .select(base).eq('document_id', documentId).maybeSingle())
+      }
       if (!record) { const e = new Error('Document not found'); e.status = 404; throw e }
       let allowed = actor.isAdmin || (record.agent_id && record.agent_id === actor.agent.id)
       if (!allowed && !record.agent_id && record.deal_id) {
@@ -1147,6 +1263,75 @@ export default async function handler(req, res) {
         templateId: record.boldsign_template_id || '',
         ...(result.unavailable ? { unavailable: true } : {}),
         ...(result.reason ? { reason: result.reason } : {}),
+      })
+    }
+
+    // A printable copy of the document AS IT STANDS — available at any point before
+    // the send, which is the whole point: an agent reviewing a listing packet wants
+    // it on paper before a client ever sees it.
+    //
+    // Returns a short-lived signed storage URL, never base64: a serverless response
+    // is capped at 4.5 MB and a scanned packet is bigger than that, so base64 would
+    // work in testing and fail on exactly the documents worth printing.
+    if (body.action === 'document-print') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+      const svc    = getServiceClient()
+      const record = await resolveDocumentRecord(svc, id, { verb: 'print' })
+      if (!record.deal_id) return res.status(400).json({ error: 'This document is not attached to a deal' })
+
+      const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+
+      // BoldSign's /document/download is the only source of the current bytes. It is
+      // NOT guaranteed to serve a document that hasn't been sent, so a refusal falls
+      // back to the copy this deal already holds — for an ad-hoc send that is the
+      // exact PDF that was uploaded, and for a completed document it's the archived
+      // signed copy. Only when neither exists does this fail, and then it says which
+      // door was locked rather than "could not print".
+      let pdfBytes = null
+      try {
+        const r = await boldsign(`/document/download?documentId=${encodeURIComponent(id)}`, { raw: true })
+        if (r.ok) {
+          const buf = await r.arrayBuffer()
+          if (buf.byteLength) pdfBytes = Buffer.from(buf)
+        }
+      } catch (err) {
+        console.warn(`[boldsign] print: /document/download refused ${id} (${err.message}) — trying the deal's own copy`)
+      }
+      if (!pdfBytes) {
+        const stored = record.signed_storage_path
+        if (stored) {
+          const { data } = await svc.storage.from(DEAL_BUCKET).download(stored)
+          if (data) pdfBytes = Buffer.from(await data.arrayBuffer())
+        }
+      }
+      if (!pdfBytes) {
+        return res.status(400).json({
+          error: 'BoldSign will not release this document\'s pages yet, and no copy is stored on the deal. '
+            + 'Use Preview inside BoldSign to review it, or print it after sending.',
+        })
+      }
+
+      const printable = await buildPrintablePdf({ pdfBytes, props, documentName: record.document_name })
+      // A print artifact is a convenience copy, not a deal document: kept under a
+      // `print/` prefix so it never appears in the Documents tab as if it were a
+      // real filing, and overwritten each time rather than accumulating.
+      const path = `deal-${record.deal_id}/print/${String(id).slice(0, 8)}-review.pdf`
+      const { error: upErr } = await svc.storage.from(DEAL_BUCKET)
+        .upload(path, printable, { contentType: 'application/pdf', upsert: true })
+      if (upErr) return res.status(500).json({ error: `Could not prepare the print copy: ${upErr.message}` })
+
+      const filename = `${String(record.document_name || 'document').replace(/\.pdf$/i, '')} (review).pdf`
+      const { data: signed, error: signErr } = await svc.storage.from(DEAL_BUCKET)
+        .createSignedUrl(path, 300, { download: filename })
+      if (signErr || !signed?.signedUrl) {
+        return res.status(500).json({ error: `Could not create a link to the print copy${signErr?.message ? `: ${signErr.message}` : ''}` })
+      }
+      return res.json({
+        url:        signed.signedUrl,
+        filename,
+        status:     normalizeStatus(props?.status),
+        fieldCount: buildSigningSummary(props).total,
       })
     }
 

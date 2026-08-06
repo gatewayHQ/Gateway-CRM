@@ -222,6 +222,39 @@ rendering, not in it.
   document — there is no client DPI knob. What's left on our side is viewport size,
   covered by the enlarged modal.
 
+## Print before Send
+Agents want to read a packet on paper before a client ever sees it, at any point
+before Send. The browser can't do it for them: the document is in a **cross-origin
+iframe**, so `window.print()` prints the CRM's own chrome and calling `print()` on
+BoldSign's frame throws.
+
+- **`document-print`** builds the copy server-side: the document exactly as BoldSign
+  holds it (`/document/download`), plus an appended **SIGNING SUMMARY** page listing
+  every field by page, signer, type, label and prefilled value.
+- **Returns a signed storage URL, never base64** — a serverless response caps at
+  4.5 MB, so base64 would work in testing and fail on the scanned packets worth
+  printing. Written to `deal-<id>/print/` and overwritten per document; the Documents
+  tab and the send picker now filter storage **folder** rows (entries with no `id`),
+  so a review copy never appears as if it were a filing.
+- **`printPdfFromUrl()`** (`src/lib/print.js`) fetches the bytes, wraps them in a
+  blob URL (same-origin, so printable) and prints from a hidden iframe. The iframe
+  is inserted before its `src` is set — an iframe outside the document isn't
+  guaranteed to fire `load`, and the whole helper hangs off that event. Blob URLs are
+  revoked on teardown. A blocked print dialog **rejects**, so the caller falls back
+  to downloading the copy rather than silently losing it.
+- **No field boxes are drawn on the page, on purpose.** BoldSign's `bounds` origin
+  and units could not be confirmed (docs WAF-blocked), and this file already retired
+  one coordinate-guessing feature for that reason — a printout with signature boxes
+  in almost-the-right-place looks authoritative and is quietly wrong. The summary is
+  derived from what BoldSign states outright, so it cannot be subtly incorrect. A
+  visual overlay becomes safe to add once the origin is confirmed against one live
+  document.
+- **Fallback for bytes:** if BoldSign refuses to release an unsent document's pages,
+  the deal's own archived copy is used; if neither exists the error names which door
+  was locked rather than saying "could not print".
+- Reachable from the editor header (including while BoldSign's Preview is open), from
+  every document row, and from the draft strip next to Edit & Send.
+
 ## Modal size — the embedded editor is a workspace, not a form
 Field placement and review happen on a US Letter page. At the old 900 × 640 box that
 page rendered small enough that agents zoomed BoldSign in and then scrolled a page

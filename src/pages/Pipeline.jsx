@@ -12,8 +12,9 @@ import { OPERATING_STATES } from '../lib/constants.js'
 import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPrintUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
+import { printPdfFromUrl } from '../lib/print.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 
@@ -750,7 +751,10 @@ function DocumentsTab({ deal }) {
     if (error?.message?.includes('not found') || error?.message?.includes('does not exist')) {
       setBucketReady(false); setLoading(false); return
     }
-    setFiles((data || []).filter(f => f.name !== '.emptyFolderPlaceholder'))
+    // Storage lists sub-folders as entries with no id. Filter those out: the
+    // `print/` prefix holds throwaway review copies, and showing it here would put
+    // a fake "print" document in the deal's filing list.
+    setFiles((data || []).filter(f => f.name !== '.emptyFolderPlaceholder' && f.id))
     setLoading(false)
   }
 
@@ -1078,8 +1082,34 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
 // capture, which stores the arrangement against the deal so the NEXT packet built
 // from the same template opens already arranged. See captureFieldLayout() in
 // api/boldsign.js.
+// Print the document as it stands. Shared by the editor header and the Signatures
+// tab rows so both behave identically — the same copy, the same failure messages.
+//
+// Two failure modes are worth distinguishing. The API can refuse (BoldSign won't
+// release an unsent document's pages, say), which is informative and gets its own
+// message; or the browser can block the print dialog, in which case the copy exists
+// and is worth handing over as a download rather than losing.
+async function printBoldSignDocument(documentId) {
+  const { url, filename, fieldCount } = await documentPrintUrl(documentId)
+  if (!url) throw new Error('No print copy was returned')
+  try {
+    await printPdfFromUrl(url)
+    return { printed: true, fieldCount }
+  } catch (err) {
+    // Fall back to a download so the agent still gets the paper they asked for.
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename || 'document (review).pdf'
+    a.target = '_blank'
+    a.rel = 'noopener'
+    document.body.appendChild(a); a.click(); a.remove()
+    return { printed: false, downloaded: true, reason: err.message, fieldCount }
+  }
+}
+
 function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone, onDraft, onLayoutSaved }) {
   const [savingLayout, setSavingLayout] = React.useState(false)
+  const [printing,     setPrinting]     = React.useState(false)
   // Set before an async close so a late unmount can't push state into a dead
   // component (React logs that as a leak, and it hides real errors).
   const alive = React.useRef(true)
@@ -1114,6 +1144,24 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
     }
   }
 
+  // Deliberately available the whole time the editor is open — including while
+  // BoldSign's own Preview is showing — because "let me read it on paper first" is
+  // a step BEFORE deciding to send, not after.
+  const print = async () => {
+    if (!documentId) { pushToast('This document has to exist in BoldSign before it can be printed.', 'info'); return }
+    setPrinting(true)
+    try {
+      const res = await printBoldSignDocument(documentId)
+      if (res.downloaded) {
+        pushToast(`Print dialog was blocked (${res.reason}) — the review copy was downloaded instead.`, 'info')
+      }
+    } catch (err) {
+      pushToast(`Could not print: ${err.message}`, 'error')
+    } finally {
+      setPrinting(false)
+    }
+  }
+
   const requestClose = async () => {
     const ok = window.confirm(
       'Close BoldSign?\n\nThis document stays on the deal as a draft — nothing is sent. '
@@ -1140,14 +1188,24 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
           <div className="eyebrow-label">{eyebrow}</div>
           <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{heading}</h3>
         </div>
-        <button
-          className="drawer__close"
-          onClick={requestClose}
-          disabled={savingLayout}
-          title={savingLayout ? 'Saving this deal’s field layout…' : 'Close BoldSign'}
-        >
-          <Icon name="x" size={18}/>
-        </button>
+        <div style={{ display:'flex', alignItems:'center', gap:8, flexShrink:0 }}>
+          <button
+            className="btn btn--secondary btn--sm"
+            onClick={print}
+            disabled={printing || !documentId}
+            title="Print a review copy of this document, including a summary of who signs what"
+          >
+            <Icon name="document" size={13}/> {printing ? 'Preparing…' : 'Print'}
+          </button>
+          <button
+            className="drawer__close"
+            onClick={requestClose}
+            disabled={savingLayout}
+            title={savingLayout ? 'Saving this deal’s field layout…' : 'Close BoldSign'}
+          >
+            <Icon name="x" size={18}/>
+          </button>
+        </div>
       </div>
       <div className="modal__body">
         <BoldSignFrame
@@ -1167,7 +1225,7 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
       <div style={{ padding:'8px 12px', borderTop:'1px solid var(--gw-border)', fontSize:11, color:'var(--gw-mist)', lineHeight:1.5, flexShrink:0 }}>
         {savingLayout
           ? <span aria-live="polite">Saving this deal’s field layout…</span>
-          : <>Not ready to send? Use <strong>Preview</strong> inside BoldSign to check it, or save it and reopen the draft here any time — nothing goes out until you click Send. Fields you place are remembered for this deal.</>}
+          : <>Not ready to send? Use <strong>Preview</strong> inside BoldSign, or <strong>Print</strong> above for a paper copy with a summary of who signs what — nothing goes out until you click Send. Fields you place are remembered for this deal.</>}
       </div>
     </Modal>
   )
@@ -1445,6 +1503,7 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
   const [opening,     setOpening]     = React.useState({})    // env.id → fetching its edit URL
   const [editDraft,   setEditDraft]   = React.useState(null)  // { url, env } — draft reopened in BoldSign
   const [layouts,     setLayouts]     = React.useState([])    // saved per-deal field arrangements
+  const [printing,    setPrinting]    = React.useState({})    // env.id → building its print copy
 
   React.useEffect(() => {
     if (!deal?.id) return
@@ -1526,7 +1585,9 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
 
   const loadDealFiles = async () => {
     const { data } = await supabase.storage.from(BUCKET).list(`deal-${deal.id}`, { sortBy: { column: 'created_at', order: 'desc' } })
-    setDealFiles((data || []).filter(f => f.name !== '.emptyFolderPlaceholder'))
+    // Same folder filter as the Documents tab — a `print/` entry is not a sendable
+    // document and must not appear in the "pick from deal documents" list.
+    setDealFiles((data || []).filter(f => f.name !== '.emptyFolderPlaceholder' && f.id))
   }
 
   // Co-agents who are paid participants on the deal. Commissions are admin-only
@@ -1636,6 +1697,23 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
       loadEnvelopes()
     } finally {
       setOpening(p => ({ ...p, [env.id]: false }))
+    }
+  }
+
+  // Print a review copy from the row — reachable without opening the editor, which
+  // matters for the common case: an agent who wants the packet on paper before
+  // deciding whether it is ready to go out at all.
+  const print = async (env) => {
+    setPrinting(p => ({ ...p, [env.id]: true }))
+    try {
+      const res = await printBoldSignDocument(env.document_id)
+      if (res.downloaded) {
+        pushToast(`Print dialog was blocked (${res.reason}) — the review copy was downloaded instead.`, 'info')
+      }
+    } catch (err) {
+      pushToast(`Could not print: ${err.message}`, 'error')
+    } finally {
+      setPrinting(p => ({ ...p, [env.id]: false }))
     }
   }
 
@@ -1815,6 +1893,14 @@ create policy "agent_notifications_policy" on agent_notifications
                         {reminding[env.id] ? 'Sending…' : 'Remind'}
                       </button>
                     )}
+                    <button
+                      className="btn btn--ghost btn--icon btn--sm"
+                      title="Print a review copy (pages plus a summary of who signs what)"
+                      onClick={() => print(env)}
+                      disabled={printing[env.id]}
+                    >
+                      <Icon name="document" size={12}/>
+                    </button>
                     <button className="btn btn--ghost btn--icon btn--sm" title="Refresh status" onClick={() => refreshStatus(env)}>
                       <Icon name="refresh" size={12}/>
                     </button>
@@ -1834,6 +1920,15 @@ create policy "agent_notifications_policy" on agent_notifications
                       <span style={{ fontSize:12, flex:1, minWidth:180, color:'var(--gw-ink)' }}>
                         <strong>Not sent yet.</strong> Pick up where you left off — edit signers &amp; fields, preview, then send.
                       </span>
+                      <button
+                        className="btn btn--secondary btn--sm"
+                        style={{ fontSize:11, flexShrink:0 }}
+                        onClick={() => print(env)}
+                        disabled={printing[env.id]}
+                        title="Read it on paper before it goes anywhere"
+                      >
+                        <Icon name="document" size={12}/> {printing[env.id] ? 'Preparing…' : 'Print'}
+                      </button>
                       <button
                         className="btn btn--primary btn--sm"
                         style={{ fontSize:11, flexShrink:0 }}

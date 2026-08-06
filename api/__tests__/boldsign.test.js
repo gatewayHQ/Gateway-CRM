@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload } from '../boldsign.js'
+import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -717,5 +717,98 @@ describe('isOwnSignedStorageUrl — bucket allow-list', () => {
 
   it('still refuses another host wearing the right path', () => {
     expect(isOwnSignedStorageUrl('https://evil.example.com/storage/v1/object/sign/form-packets/x.pdf', PROJECT, ['form-packets'])).toBe(false)
+  })
+})
+
+// ─── Printable review copy ────────────────────────────────────────────────────
+describe('buildSigningSummary — what the paper copy tells the agent', () => {
+  const props = {
+    status: 'Draft',
+    signerDetails: [
+      { signerRole: 'Listing Agent', signerName: 'Daniel Stillson', signerEmail: 'd@x.com', order: 2,
+        formFields: [{ type: 'Signature', pageNumber: 1, bounds: {}, isRequired: true }] },
+      { signerRole: 'Seller', signerName: 'Curtis Epling', signerEmail: 'c@x.com', order: 1,
+        formFields: [
+          { type: 'Initial', pageNumber: 3, isRequired: true },
+          { type: 'Signature', pageNumber: 1, isRequired: true },
+          { type: 'Textbox', pageNumber: 1, label: 'County', value: 'Polk', isRequired: false },
+        ] },
+    ],
+  }
+
+  it('orders signers by signing order, not by however the API listed them', () => {
+    const { signers } = buildSigningSummary(props)
+    expect(signers.map(s => s.role)).toEqual(['Seller', 'Listing Agent'])
+  })
+
+  it('orders each signer\'s fields by page — the order someone reads the packet in', () => {
+    const { signers } = buildSigningSummary(props)
+    expect(signers[0].fields.map(f => f.page)).toEqual([1, 1, 3])
+  })
+
+  it('normalizes the field type so the printout says TextBox, not Textbox', () => {
+    const { signers } = buildSigningSummary(props)
+    expect(signers[0].fields.find(f => f.label === 'County').type).toBe('TextBox')
+  })
+
+  it('carries label, value and optionality — what will be asked, and what is prefilled', () => {
+    const county = buildSigningSummary(props).signers[0].fields.find(f => f.label === 'County')
+    expect(county).toMatchObject({ label: 'County', value: 'Polk', required: false })
+  })
+
+  it('counts every field across every signer', () => {
+    expect(buildSigningSummary(props).total).toBe(4)
+  })
+
+  it('survives a document with no signers or no fields', () => {
+    expect(buildSigningSummary({}).total).toBe(0)
+    expect(buildSigningSummary({ signerDetails: [{ signerRole: 'Seller' }] }).signers[0].fields).toEqual([])
+  })
+
+  it('does not invent a type for a field BoldSign named oddly', () => {
+    const { signers } = buildSigningSummary({ signerDetails: [{ formFields: [{ type: 'MysteryBox', pageNumber: 2 }] }] })
+    expect(signers[0].fields[0].type).toBe('MysteryBox')
+  })
+})
+
+describe('buildPrintablePdf — the document, plus a summary that cannot be subtly wrong', () => {
+  const sourcePdf = async (pages = 3) => {
+    const { PDFDocument, StandardFonts } = await import('pdf-lib')
+    const doc = await PDFDocument.create()
+    const font = await doc.embedFont(StandardFonts.Helvetica)
+    for (let i = 0; i < pages; i++) {
+      doc.addPage([612, 792]).drawText(`AGREEMENT PAGE ${i + 1}`, { x: 40, y: 720, size: 12, font })
+    }
+    return Buffer.from(await doc.save())
+  }
+  const props = {
+    status: 'Draft',
+    signerDetails: [{ signerRole: 'Seller', signerName: 'Curtis Epling', order: 1,
+      formFields: [{ type: 'Signature', pageNumber: 1, isRequired: true }, { type: 'Initial', pageNumber: 3, isRequired: true }] }],
+  }
+
+  it('keeps every original page and appends the summary AFTER them', async () => {
+    // Appended, not prepended: page 1 of the printout must still be page 1 of the
+    // agreement, or "initial page 3" stops meaning anything.
+    const out = await buildPrintablePdf({ pdfBytes: await sourcePdf(3), props, documentName: 'Iowa Listing' })
+    const { PDFDocument } = await import('pdf-lib')
+    const doc = await PDFDocument.load(out)
+    expect(doc.getPageCount()).toBe(4)
+    expect(doc.getPage(0).getSize()).toEqual({ width: 612, height: 792 })
+  })
+
+  it('adds more summary pages rather than truncating a packet full of fields', async () => {
+    const many = { signerDetails: [{ signerRole: 'Seller', order: 1,
+      formFields: Array.from({ length: 120 }, (_, i) => ({ type: 'Initial', pageNumber: i + 1, isRequired: true })) }] }
+    const out = await buildPrintablePdf({ pdfBytes: await sourcePdf(1), props: many, documentName: 'Big packet' })
+    const { PDFDocument } = await import('pdf-lib')
+    const doc = await PDFDocument.load(out)
+    expect(doc.getPageCount()).toBeGreaterThan(3)   // 1 source + several summary pages
+  })
+
+  it('still produces a printable copy for a document with no fields placed yet', async () => {
+    const out = await buildPrintablePdf({ pdfBytes: await sourcePdf(2), props: { status: 'Draft' }, documentName: 'Empty' })
+    const { PDFDocument } = await import('pdf-lib')
+    expect((await PDFDocument.load(out)).getPageCount()).toBe(3)
   })
 })
