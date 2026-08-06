@@ -16,11 +16,48 @@ async function authHeaders() {
   }
 }
 
+// A transport failure — fetch() rejecting rather than returning a response — used
+// to reach the agent as the browser's bare "Failed to fetch", which names no cause
+// and suggests no action. It is worth translating, because the causes are few,
+// distinguishable, and each has a different fix:
+//   • offline / dropped connection      → navigator.onLine says so outright
+//   • a protected preview deployment    → /api/* redirects to the Vercel SSO login,
+//     and a cross-origin redirect mid-fetch surfaces as exactly this rejection
+//   • a blocking browser extension      → a privacy/ad blocker cancelling the POST
+// The message names all three rather than guessing between them, since the browser
+// deliberately hides which one it was (that's why the original error is so bare).
+export function describeTransportFailure(err, { online = true, url = '/api/boldsign' } = {}) {
+  if (!online) {
+    return `No network connection — ${url} could not be reached. Reconnect and try again.`
+  }
+  return `Could not reach ${url} (${err?.message || 'network error'}). `
+    + 'The request never reached the server, so nothing was sent. Common causes: you are on a '
+    + 'protected preview deployment that requires a Vercel login, a browser extension is blocking '
+    + 'the request, or a VPN/proxy dropped it. Open DevTools → Network and check the status on that '
+    + 'row — a redirect to vercel.com means the first, "blocked" means the second.'
+}
+
 async function call(payload) {
-  const res  = await fetch('/api/boldsign', {
-    method: 'POST', headers: await authHeaders(), body: JSON.stringify(payload),
-  })
-  const data = await res.json().catch(() => ({}))
+  let res
+  try {
+    res = await fetch('/api/boldsign', {
+      method: 'POST', headers: await authHeaders(), body: JSON.stringify(payload),
+    })
+  } catch (err) {
+    throw new Error(describeTransportFailure(err, {
+      online: typeof navigator === 'undefined' ? true : navigator.onLine !== false,
+    }))
+  }
+
+  // A non-JSON body means something other than our handler answered — a platform
+  // error page, an auth wall, a gateway timeout. Surfacing its status and a snippet
+  // beats "HTTP 500" with no clue as to who produced it.
+  const text = await res.text().catch(() => '')
+  let data = {}
+  try { data = text ? JSON.parse(text) : {} } catch {
+    const snippet = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160)
+    throw new Error(`The server returned a non-JSON response (HTTP ${res.status})${snippet ? `: ${snippet}` : ''}`)
+  }
   if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`)
   return data
 }
