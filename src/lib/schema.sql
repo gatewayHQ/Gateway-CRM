@@ -26,6 +26,10 @@ create table if not exists agents (
   no_brokerage_split boolean default false,-- true = keeps 100% (capped / no split)
   is_admin   boolean default false,        -- office admin: sees all deals/docs/commissions
   nav_hidden text[] default '{}',          -- nav item IDs hidden from this agent's sidebar
+  -- Personal pipeline column headers: { stage_token: 'Custom Label' }. Display
+  -- only — deals.stage always keeps its canonical token (src/lib/stageLabels.js).
+  stage_labels jsonb not null default '{}'::jsonb
+    constraint agents_stage_labels_object check (jsonb_typeof(stage_labels) = 'object'),
   cap_amount      numeric,                 -- brokerage cap in dollars; null = no cap configured
   cap_anniversary date,                    -- cap year resets on this month/day; null = calendar year
   created_at timestamptz default now()
@@ -386,11 +390,27 @@ end $$;
 -- settings — on INSERT (self-onboarding) or UPDATE (editing own row) — so nobody
 -- can self-promote to admin. The service-key API (which does its own role checks)
 -- and existing admins are trusted and pass through untouched.
+--
+-- Trusted-caller detection must not depend on the API key FORMAT. Checking only
+-- `auth.jwt() ->> 'role'` worked for the legacy service_role JWT but returned
+-- null for the newer `sb_secret_…` keys, which made the guard freeze commission
+-- splits written by the brokerage's own admin endpoint — a silent no-op UPDATE
+-- that still reported success. `current_user` reflects PostgREST's
+-- `SET LOCAL ROLE service_role` regardless of key format. (Migration 0027.)
 create or replace function agents_guard_privileged()
 returns trigger language plpgsql as $$
+declare
+  is_service boolean;
 begin
+  is_service :=
+       current_user = 'service_role'
+    or coalesce(current_setting('role', true), '') = 'service_role'
+    or coalesce(auth.jwt() ->> 'role', '') = 'service_role'
+    or coalesce(current_setting('request.jwt.claim.role', true), '') = 'service_role'
+    or auth.uid() is null and current_user in ('postgres', 'supabase_admin');
+
   -- Trusted callers: the service role (server API) and existing office admins.
-  if coalesce(auth.jwt() ->> 'role', '') = 'service_role' or app_is_admin() then
+  if is_service or app_is_admin() then
     return new;
   end if;
   if tg_op = 'INSERT' then
@@ -400,6 +420,8 @@ begin
     return new;
   end if;
   -- UPDATE by a non-admin (incl. their own row): privileged fields are frozen.
+  -- stage_labels is deliberately NOT frozen — renaming your own pipeline column
+  -- headers is a display preference, not a permission.
   new.is_admin           := old.is_admin;
   new.role               := old.role;
   new.default_split_pct  := old.default_split_pct;

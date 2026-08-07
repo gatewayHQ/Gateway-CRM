@@ -1,16 +1,30 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../../lib/imageCompress.js'
+import { saveAgentProfile } from '../../lib/services/agentProfile.js'
 import { Icon, Drawer, pushToast } from '../../components/UI.jsx'
 
 const COLORS = ['#2d3561','#4a6fa5','#2e7d5e','#c9a84c','#6b4fa5','#c0392b','#d4820a','#1a1a2e']
+const DEFAULT_SPLIT = 70
 const BLANK  = { name: '', initials: '', role: '', email: '', phone: '', color: '#2d3561', photo_url: '', bio: '',
                  tagline: '', stats: [],
-                 default_split_pct: 70, no_brokerage_split: false, is_admin: false }
+                 default_split_pct: DEFAULT_SPLIT, no_brokerage_split: false, is_admin: false }
 const BIO_MAX = 600
 
 const autoInitials = (name) =>
   name.trim().split(/\s+/).map(w => w[0] || '').join('').toUpperCase().slice(0, 2)
+
+// The split is edited as free text so the field can be emptied mid-keystroke.
+// Valid = a number in 0-100; blank is invalid rather than a silent 0, because
+// "" coerced to 0 is how an agent's 70% quietly became a 0% take.
+const splitError = (raw) => {
+  const s = String(raw ?? '').trim()
+  if (!s) return 'Enter the agent’s split percentage.'
+  const n = Number(s)
+  if (!Number.isFinite(n)) return 'Split must be a number.'
+  if (n < 0 || n > 100)    return 'Split must be between 0 and 100.'
+  return null
+}
 
 export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = false, activeAgent }) {
   // RBAC: privileged fields (role, admin flag, commission split) are editable
@@ -25,7 +39,16 @@ export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = fa
   const fileRef = useRef(null)
 
   useEffect(() => {
-    setForm(agent ? { ...BLANK, ...agent, stats: Array.isArray(agent.stats) ? agent.stats : [] } : BLANK)
+    setForm(agent
+      ? {
+          ...BLANK,
+          ...agent,
+          stats: Array.isArray(agent.stats) ? agent.stats : [],
+          // A null split in the database would make this a controlled→
+          // uncontrolled input; show the house default instead of blank.
+          default_split_pct: agent.default_split_pct ?? DEFAULT_SPLIT,
+        }
+      : BLANK)
     setErrors({})
   }, [agent, open])
 
@@ -82,14 +105,19 @@ export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = fa
     const e = {}
     if (!form.name.trim())  e.name  = true
     if (!form.email.trim()) e.email = true
+    // Only an admin can send the split at all, so only validate what we'll send.
+    const splitMsg = isAdmin && !form.no_brokerage_split ? splitError(form.default_split_pct) : null
+    if (splitMsg) e.split = splitMsg
     setErrors(e)
-    if (Object.keys(e).length) return
+    if (Object.keys(e).length) {
+      if (splitMsg) pushToast(splitMsg, 'error')
+      return
+    }
 
     setSaving(true)
     // Send the full form; the server whitelists columns by role, so privileged
     // fields sent by a non-admin are simply ignored (never trusted client-side).
     const payload = {
-      action:   'profile-save',
       id:        agent?.id || undefined,
       name:      form.name.trim(),
       initials:  form.initials || autoInitials(form.name),
@@ -102,24 +130,28 @@ export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = fa
       stats: (Array.isArray(form.stats) ? form.stats : [])
         .map(s => ({ label: (s.label || '').trim(), value: (s.value || '').trim() }))
         .filter(s => s.label || s.value),
-      // Privileged — only honored by the server when the caller is an admin.
-      role:               form.role,
-      is_admin:           !!form.is_admin,
-      default_split_pct:  Number(form.default_split_pct) || 0,
-      no_brokerage_split: !!form.no_brokerage_split,
+    }
+
+    // Privileged fields only travel when an admin actually edited them. A
+    // non-admin's copy would be dropped by the server anyway, but sending it
+    // would also mean a plain agent saving their bio re-submits a split they
+    // never saw — and any drift in that stale value looks like a silent change.
+    if (isAdmin) {
+      payload.role               = form.role
+      payload.is_admin           = !!form.is_admin
+      payload.no_brokerage_split = !!form.no_brokerage_split
+      // "Keeps 100%" is the split, not an excuse to blank the field: store 100
+      // so reports and the commission editor read the same number the UI shows.
+      payload.default_split_pct  = form.no_brokerage_split ? 100 : Number(form.default_split_pct)
     }
 
     try {
-      const { data: { session } } = await supabase.auth.getSession()
-      const res = await fetch('/api/portal', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
-        body: JSON.stringify(payload),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok || data.error) throw new Error(data.error || 'Could not save profile')
+      const saved = await saveAgentProfile(payload)
       pushToast(agent?.id ? 'Profile updated' : 'Agent added')
-      onSave()
+      // Hand back the row the DATABASE stored, not the values we sent — the
+      // caller mirrors it into state so the UI can't show a save that didn't
+      // land (see src/lib/services/agentProfile.js).
+      onSave(saved)
       onClose()
     } catch (err) {
       pushToast(err.message || 'Could not save profile', 'error')
@@ -251,31 +283,57 @@ export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = fa
           </div>
         )}
 
-        {/* ── Commission & access (admin-only) ────────────────────────────── */}
-        {isAdmin && (
+        {/* ── Commission & access ─────────────────────────────────────────── */}
+        {/* Admins edit; an agent viewing their own profile sees their split
+            read-only. Hiding it entirely was worse than useless — the number
+            drives their pay and they had no way to check what it says. */}
+        {(isAdmin || isSelf) && (
         <div style={{ borderTop: '1px solid var(--gw-border)', margin: '4px 0 16px', paddingTop: 16 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--gw-ink)', marginBottom: 12 }}>Commission & Access</div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--gw-ink)', marginBottom: 12 }}>Commission &amp; Access</div>
 
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, marginBottom: 12, cursor: 'pointer' }}>
-            <input type="checkbox" checked={!!form.no_brokerage_split}
-              onChange={e => set('no_brokerage_split', e.target.checked)} />
-            <span>Keeps <strong>100%</strong> — no brokerage split (capped / special arrangement)</span>
-          </label>
+          {isAdmin ? (
+            <>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, marginBottom: 12, cursor: 'pointer' }}>
+                <input type="checkbox" checked={!!form.no_brokerage_split}
+                  onChange={e => set('no_brokerage_split', e.target.checked)} />
+                <span>Keeps <strong>100%</strong> — no brokerage split (capped / special arrangement)</span>
+              </label>
 
-          {!form.no_brokerage_split && (
-            <div className="form-group">
-              <label className="form-label">Default commission split (%)</label>
-              <input className="form-control" type="number" min="0" max="100" step="1"
-                value={form.default_split_pct} onChange={e => set('default_split_pct', e.target.value)} />
-              <div className="form-hint">This agent's share; the brokerage keeps the rest. Pre-fills the commission editor.</div>
+              {!form.no_brokerage_split && (
+                <div className="form-group">
+                  <label className="form-label">Default commission split (%)</label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <input className={`form-control${errors.split ? ' error' : ''}`} type="number"
+                      min="0" max="100" step="1" style={{ width: 110 }}
+                      value={form.default_split_pct ?? ''}
+                      onChange={e => { set('default_split_pct', e.target.value); if (errors.split) setErrors(p => ({ ...p, split: null })) }}
+                      onBlur={e => setErrors(p => ({ ...p, split: splitError(e.target.value) }))} />
+                    <span style={{ fontSize: 12, color: 'var(--gw-mist)' }}>
+                      {splitError(form.default_split_pct)
+                        ? '—'
+                        : <>agent <strong style={{ color: 'var(--gw-ink)' }}>{Number(form.default_split_pct)}%</strong> · brokerage {100 - Number(form.default_split_pct)}%</>}
+                    </span>
+                  </div>
+                  {errors.split
+                    ? <div className="form-hint" style={{ color: 'var(--gw-red)' }}>{errors.split}</div>
+                    : <div className="form-hint">This agent's share; the brokerage keeps the rest. Pre-fills the commission editor.</div>}
+                </div>
+              )}
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, marginTop: 4, cursor: 'pointer' }}>
+                <input type="checkbox" checked={!!form.is_admin}
+                  onChange={e => set('is_admin', e.target.checked)} />
+                <span><strong>Office admin</strong> — can view every agent's deals, documents, signatures &amp; commissions</span>
+              </label>
+            </>
+          ) : (
+            <div style={{ fontSize: 13, color: 'var(--gw-slate)' }}>
+              {form.no_brokerage_split
+                ? <>You keep <strong>100%</strong> — no brokerage split.</>
+                : <>Your split: <strong>{form.default_split_pct ?? DEFAULT_SPLIT}%</strong> to you, {100 - Number(form.default_split_pct ?? DEFAULT_SPLIT)}% to the brokerage.</>}
+              <div className="form-hint">Only an office admin can change this.</div>
             </div>
           )}
-
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, marginTop: 4, cursor: 'pointer' }}>
-            <input type="checkbox" checked={!!form.is_admin}
-              onChange={e => set('is_admin', e.target.checked)} />
-            <span><strong>Office admin</strong> — can view every agent's deals, documents, signatures & commissions</span>
-          </label>
         </div>
         )}
 

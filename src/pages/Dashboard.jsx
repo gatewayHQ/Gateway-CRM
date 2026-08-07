@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { formatCurrency, formatDate, STAGE_LABELS, STAGE_ORDER, upcomingReminders } from '../lib/helpers.js'
+import { formatCurrency, formatDate, STAGE_ORDER, upcomingReminders } from '../lib/helpers.js'
+import { useStageLabels } from '../lib/stageLabelContext.js'
 import { Icon, Badge, Avatar, Loading, pushToast } from '../components/UI.jsx'
 
 export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
+  // Funnel headings follow the agent's own pipeline column names.
+  const stageLabels = useStageLabels()
   const today = new Date().toDateString()
   const contacts = db.contacts || []
   const deals = db.deals || []
@@ -22,7 +25,7 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
 
   const stageData = STAGE_ORDER.slice(0, 5).map(s => ({
     stage: s,
-    label: STAGE_LABELS[s],
+    label: stageLabels[s],
     count: deals.filter(d => d.stage === s).length,
     value: deals.filter(d => d.stage === s).reduce((sum, d) => sum + (d.value || 0), 0)
   }))

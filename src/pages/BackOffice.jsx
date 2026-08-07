@@ -1,6 +1,5 @@
 import React, { useState, useMemo } from 'react'
-import { supabase } from '../lib/supabase.js'
-import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
+import { saveAgentProfile } from '../lib/services/agentProfile.js'
 import { Icon, Avatar, Badge, pushToast } from '../components/UI.jsx'
 import { formatCurrency, formatDate } from '../lib/helpers.js'
 import { agentSliceForDeal, capWindowStart } from '../lib/commission.js'
@@ -191,20 +190,37 @@ export function CapsEditor({ db, setDb }) {
   }
   const setDraft = (id, patch) => setDrafts(p => ({ ...p, [id]: { ...draftFor(agents.find(a => a.id === id)), ...p[id], ...patch } }))
 
+  // Split/cap columns are guarded in the database, so a direct table write from
+  // the browser is silently frozen for anyone the guard doesn't trust — the
+  // UPDATE returns success having changed nothing. Go through the authenticated
+  // profile API, which writes as the service role AND re-reads the row to
+  // confirm the values landed. Reflect what came back, never what we sent.
   const save = async (a) => {
     const d = draftFor(a)
+    const splitBlank = d.no_brokerage_split ? false : String(d.default_split_pct ?? '').trim() === ''
+    if (splitBlank) { pushToast(`Enter a split percentage for ${a.name}.`, 'error'); return }
+
     setSaving(a.id)
-    const payload = {
-      cap_amount: d.cap_amount === '' ? null : Number(d.cap_amount),
-      cap_anniversary: d.cap_anniversary || null,
-      no_brokerage_split: !!d.no_brokerage_split,
-      default_split_pct: d.default_split_pct === '' ? null : Number(d.default_split_pct),
+    try {
+      const saved = await saveAgentProfile({
+        id: a.id,
+        cap_amount:         d.cap_amount === '' ? null : Number(d.cap_amount),
+        cap_anniversary:    d.cap_anniversary || null,
+        no_brokerage_split: !!d.no_brokerage_split,
+        // "Cap pre-paid" means the agent keeps everything — record 100, not a
+        // stale figure the disabled input is still showing.
+        default_split_pct:  d.no_brokerage_split ? 100 : Number(d.default_split_pct),
+      })
+      setDb(p => ({ ...p, agents: (p.agents || []).map(x => x.id === a.id ? { ...x, ...saved } : x) }))
+      // Drop the draft so the row re-derives from the saved values — a stale
+      // draft would keep showing the typed number even if the server changed it.
+      setDrafts(p => { const next = { ...p }; delete next[a.id]; return next })
+      pushToast(`${a.name} updated`)
+    } catch (e) {
+      pushToast(e.message || `Could not update ${a.name}.`, 'error')
+    } finally {
+      setSaving(null)
     }
-    const { error, status } = await withRetry(() => supabase.from('agents').update(payload).eq('id', a.id))
-    setSaving(null)
-    if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
-    setDb(p => ({ ...p, agents: (p.agents || []).map(x => x.id === a.id ? { ...x, ...payload } : x) }))
-    pushToast(`${a.name} updated`)
   }
 
   return (

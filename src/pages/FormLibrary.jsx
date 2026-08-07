@@ -581,8 +581,10 @@ export default function FormLibraryPage({ isAdmin }) {
   const states = [...new Set(packets.map(p => p.state))].sort()
 
   if (!tableReady) return (
-    <div style={{ padding: 32, maxWidth: 680 }}>
-      <div style={{ background: 'var(--gw-bone)', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', padding: 24 }}>
+    // .page-content is the app's scroll container (flex:1 + overflow-y:auto inside
+    // .main, which is overflow:hidden). Without it the page is simply clipped.
+    <div className="page-content">
+      <div style={{ maxWidth: 680, background: 'var(--gw-bone)', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', padding: 24 }}>
         <div style={{ fontWeight: 700, marginBottom: 8 }}>Setup required</div>
         <div style={{ fontSize: 13, color: 'var(--gw-mist)', marginBottom: 16 }}>Run this SQL in Supabase, then create a <code>form-packets</code> storage bucket (private).</div>
         <pre style={{ fontSize: 11, background: '#f1f3f5', padding: 14, borderRadius: 6, overflowX: 'auto' }}>{`create table if not exists form_packets (
@@ -611,7 +613,11 @@ create unique index if not exists uq_form_packets_boldsign_tid
   )
 
   return (
-    <div style={{ padding: 24, maxWidth: 900, margin: '0 auto' }}>
+    // .page-content owns the vertical scroll (flex:1 + overflow-y:auto inside .main,
+    // which is overflow:hidden). It has to sit on the outermost element — putting the
+    // centring wrapper outside it is what made long form lists unreachable.
+    <div className="page-content">
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
@@ -723,6 +729,7 @@ create unique index if not exists uq_form_packets_boldsign_tid
           onSaved={() => { setModal(null); load() }}
         />
       )}
+      </div>
     </div>
   )
 }

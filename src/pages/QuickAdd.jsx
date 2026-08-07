@@ -1,7 +1,8 @@
 import React, { useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Drawer, pushToast } from '../components/UI.jsx'
-import { STAGE_ORDER, STAGE_LABELS } from '../lib/helpers.js'
+import { STAGE_ORDER } from '../lib/helpers.js'
+import { useStageLabels } from '../lib/stageLabelContext.js'
 import { upsertContact } from '../lib/services/contacts.js'
 import { CONTACT_SOURCES } from '../lib/enums.js'
 
@@ -84,6 +85,7 @@ function QuickContactDrawer({ open, onClose, agents, activeAgent, contacts = [],
 }
 
 function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
+  const stageLabels = useStageLabels()
   const blank = () => ({ title: '', value: '', stage: 'lead', agent_id: activeAgent?.id || '' })
   const [form, setForm] = useState(blank())
   const [saving, setSaving] = useState(false)
@@ -122,7 +124,7 @@ function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
           <div className="form-group">
             <label className="form-label">Stage</label>
             <select className="form-control" value={form.stage} onChange={e => set('stage', e.target.value)}>
-              {STAGE_ORDER.map(s => <option key={s} value={s}>{STAGE_LABELS[s]}</option>)}
+              {STAGE_ORDER.map(s => <option key={s} value={s}>{stageLabels[s]}</option>)}
             </select>
           </div>
         </div>
