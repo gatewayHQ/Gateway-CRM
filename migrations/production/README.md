@@ -44,6 +44,7 @@ applied to production and the findings, so the repo's history matches reality.
 | 2026-07-17 | `2026-07-17_boldsign_identity_default.sql` | **PENDING** — apply with the sender-identity management deploy. Adds `boldsign_sender_identities.is_default` (org-wide OnBehalfOf fallback) with a partial unique index. Idempotent. |
 | 2026-07-17 | `2026-07-17_multi_contacts.sql` | **PENDING** — apply with the multi-contact deploy. Adds `deal_contacts` + `property_contacts` junction tables (additional contacts on a deal/property). ⚠ Production already has a legacy `deal_contacts` of unknown shape — `create table if not exists` won't alter it, so verify it has `(deal_id, contact_id)` + a unique constraint before/after applying (see the file header). Idempotent. |
 | 2026-07-17 | `2026-07-17_form_packet_multi_file.sql` | **PENDING** — apply with the package-template deploy. Adds `form_packets.storage_paths` (jsonb) so a template can hold several source PDFs. Additive; the Form Library save degrades gracefully until it's applied. Idempotent. |
+| 2026-07-23 | `2026-07-23_grant_daniel_admin.sql` | **PENDING** — one-off data fix: sets `agents.is_admin = true` for Daniel, restoring office-admin access. Temporarily disables `agents_guard_privileged_trg` for the single UPDATE (the guard from 0023 would otherwise revert the flag), then re-enables it. Idempotent. Apply via the SQL Editor. |
 
 The bundle: creates `documents` (secure from day one), adds the missing
 `docusign_envelopes` columns, adds `activities.deal_id`, adds the deal value /
