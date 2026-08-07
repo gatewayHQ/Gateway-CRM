@@ -1,7 +1,7 @@
 /**
  * Gateway CRM — Unified Cron Runner
  *
- * GET /api/cron?task=reminders      — daily deadline reminders (email + SMS)
+ * GET /api/cron?task=reminders      — daily deadline reminders (email + in-app)
  * GET /api/cron?task=sequence       — drip-sequence step runner (email)
  * GET /api/cron?task=nudges         — transaction-layer agent nudges
  * GET /api/cron?task=boldsign-sync  — nightly Form Library ↔ BoldSign template drift sync
@@ -18,21 +18,26 @@
  * Env vars:
  *   SUPABASE_URL, SUPABASE_SERVICE_KEY            (required)
  *   RESEND_API_KEY, RESEND_FROM                   (required for sequence; optional for reminders)
- *   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN         (reminders SMS — optional)
  *   GATEWAY_CRON_SECRET                           (recommended in production)
+ *
+ * Notifications are EMAIL and IN-APP only. This runner sends no SMS.
  */
 
 import { createClient } from '@supabase/supabase-js'
 import { boldsign, listAllTemplates } from './boldsign.js'
 import { OPERATING_STATES } from '../src/lib/constants.js'
+import { ALL_DEAL_STAGES, isOpenStage } from '../src/lib/stages.js'
+
+// Every stage a deal can sit in while still in flight — derived from the stage
+// registry rather than hand-listed, because the hand-listed version silently
+// omitted all seven commercial stages (pursuit → due-diligence) and both
+// residential-seller stages, so no commercial or seller deal ever produced a
+// reminder or a nudge. Adding a stage to stages.js now covers it automatically.
+const OPEN_STAGES = ALL_DEAL_STAGES.filter(isOpenStage)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
-function basicTwilioAuth(sid, token) {
-  return 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64')
-}
-
 async function sendResend(apiKey, from, to, subject, html, text, idempotencyKey) {
   if (!apiKey || !from || !to) return { ok: false, reason: 'missing email config' }
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }
@@ -47,8 +52,13 @@ async function sendResend(apiKey, from, to, subject, html, text, idempotencyKey)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Task: deadline reminders (formerly /api/reminders)
+//
+// Channels are EMAIL (to the assigned agent) and IN-APP (agent_notifications).
+// There is deliberately no SMS path: the previous one texted `contact.phone` —
+// the CLIENT — an internal message reading "Log in to review your deal", which
+// was both the wrong recipient and unsolicited automated commercial SMS to a
+// consumer with no captured consent and no STOP handling.
 // ─────────────────────────────────────────────────────────────────────────────
-const ACTIVE_STAGES = ['lead', 'qualified', 'showing', 'offer', 'under-contract']
 
 function daysUntil(dateStr, today) {
   if (!dateStr) return null
@@ -56,21 +66,6 @@ function daysUntil(dateStr, today) {
   const todayMidnight = new Date(today)
   todayMidnight.setHours(0, 0, 0, 0)
   return Math.round((target - todayMidnight) / 86400000)
-}
-
-async function sendSms(sid, token, from, to, body) {
-  if (!sid || !token || !from || !to) return { ok: false, reason: 'missing twilio config' }
-  const url = `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Authorization: basicTwilioAuth(sid, token),
-    },
-    body: new URLSearchParams({ From: from, To: to, Body: body }),
-  })
-  const data = await r.json().catch(() => ({}))
-  return { ok: r.ok, status: r.status, sid: data.sid, error: data.message }
 }
 
 function thresholdLabel(t) {
@@ -109,18 +104,17 @@ function emailHtml(deal, dateName, dateStr, threshold, agentName, contactName, p
 </body></html>`
 }
 
-function smsBody(deal, dateName, threshold, propertyAddress) {
+// Plain-text body — used for the email's text/plain part and as the in-app
+// notification message. Addressed to the AGENT, never to the client.
+function reminderText(deal, dateName, threshold, propertyAddress) {
   const label = thresholdLabel(threshold)
   const addr  = propertyAddress ? ` (${propertyAddress})` : ''
-  return `Gateway CRM reminder: ${dateName} for "${deal}"${addr} is ${label}. Log in to review your deal.`
+  return `${dateName} for "${deal}"${addr} is ${label}.`
 }
 
 async function runReminders(supabase) {
   const resendKey  = process.env.RESEND_API_KEY  || ''
   const resendFrom = process.env.RESEND_FROM     || ''
-  const twilioSid  = process.env.TWILIO_ACCOUNT_SID  || ''
-  const twilioToken= process.env.TWILIO_AUTH_TOKEN   || ''
-  const smsEnabled = !!(twilioSid && twilioToken)
 
   const today = new Date()
   const log   = { sent: [], skipped: [], errors: [] }
@@ -129,7 +123,7 @@ async function runReminders(supabase) {
   const { data: deals, error: dealsErr } = await supabase
     .from('deals')
     .select('id, title, stage, comp_data, agent_id, contact_id, property_id')
-    .in('stage', ACTIVE_STAGES)
+    .in('stage', OPEN_STAGES)
   if (dealsErr) return { status: 500, body: { error: dealsErr.message } }
 
   const dealsWithDates = (deals || []).filter(d => {
@@ -145,7 +139,7 @@ async function runReminders(supabase) {
   const propertyIds = [...new Set(dealsWithDates.map(d => d.property_id).filter(Boolean))]
 
   const [agentsRes, contactsRes, propertiesRes] = await Promise.all([
-    agentIds.length    ? supabase.from('agents').select('id, name, email, twilio_number').in('id', agentIds)              : Promise.resolve({ data: [] }),
+    agentIds.length    ? supabase.from('agents').select('id, name, email').in('id', agentIds)              : Promise.resolve({ data: [] }),
     contactIds.length  ? supabase.from('contacts').select('id, first_name, last_name, phone, email').in('id', contactIds) : Promise.resolve({ data: [] }),
     propertyIds.length ? supabase.from('properties').select('id, address, city, state').in('id', propertyIds)             : Promise.resolve({ data: [] }),
   ])
@@ -186,19 +180,30 @@ async function runReminders(supabase) {
 
         const sends = []
 
+        const text = reminderText(deal.title, entry.type, threshold, propertyAddress)
+
+        // ── Channel 1: email to the ASSIGNED AGENT ──────────────────────────
         if (agent?.email && resendKey && resendFrom) {
           const subjectEmoji = threshold === 'today' ? '🚨' : threshold === '24h' ? '⚠️' : '📅'
           const subject = `${subjectEmoji} ${entry.type} ${threshold === 'today' ? 'is TODAY' : threshold === '24h' ? 'is TOMORROW' : 'in 3 days'} — ${deal.title}`
           const html  = emailHtml(deal.title, entry.type, entry.date, threshold, agent.name, contactName, propertyAddress)
-          const text  = smsBody(deal.title, entry.type, threshold, propertyAddress)
           const result = await sendResend(resendKey, resendFrom, agent.email, subject, html, text)
           sends.push({ channel: 'email:agent', ...result })
         }
 
-        if (smsEnabled && contact?.phone && agent?.twilio_number) {
-          const body   = smsBody(deal.title, entry.type, threshold, propertyAddress)
-          const result = await sendSms(twilioSid, twilioToken, agent.twilio_number, contact.phone, body)
-          sends.push({ channel: 'sms:contact', ...result })
+        // ── Channel 2: in-app notification to the ASSIGNED AGENT ────────────
+        // Sent regardless of the email outcome, matching dispatchNudge(). This
+        // is what makes the reminder land even when Resend is unconfigured,
+        // and it surfaces live via the realtime subscription in App.jsx.
+        if (agent?.id) {
+          const { error: notifErr } = await supabase.from('agent_notifications').insert([{
+            agent_id: agent.id,
+            deal_id:  deal.id,
+            title:    `${entry.type} ${thresholdLabel(threshold) === 'TODAY' ? 'is today' : `is ${thresholdLabel(threshold)}`}`,
+            message:  text,
+            type:     `deadline_${threshold}`,
+          }])
+          sends.push({ channel: 'inapp:agent', ok: !notifErr, error: notifErr?.message })
         }
 
         if (sends.some(s => s.ok)) {
@@ -403,7 +408,10 @@ export default async function handler(req, res) {
 //   • rotting_steps    → primary agent gets pinged when their deal is rotting
 //                        (per pipeline.js thresholds) AND has open steps
 // ─────────────────────────────────────────────────────────────────────────────
-const OPEN_STAGES_FOR_NUDGES = ['lead','qualified','showing','offer','under-contract','psa','due-diligence','loi','active','on-market']
+// Same registry-derived list the reminders use. The previous hand-listed
+// version omitted pursuit, om-marketing, listing-agreement and pre-list, so
+// early-stage commercial and seller deals were never nudged either.
+const OPEN_STAGES_FOR_NUDGES = OPEN_STAGES
 
 // Mirror pipeline.js rotting thresholds (cron has no client-side imports).
 const ROT_DAYS = {
