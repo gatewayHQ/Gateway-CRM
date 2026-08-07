@@ -633,8 +633,15 @@ create table if not exists transaction_steps (
   doc_action    text    default 'manual',  -- manual | upload | forms | sign | admin
   doc_status    text    default 'pending', -- pending | complete | approved | na
   if_applicable boolean default false,     -- conditional document ("if applicable")
+  -- Which BoldSign envelope proves this sign-step (migration 0028). Null on
+  -- legacy rows; the closing gate then falls back to distinct-envelope
+  -- matching. Before this column the gate compared COUNTS, so three copies of
+  -- one disclosure satisfied three separate sign-steps.
+  satisfied_by  uuid references boldsign_documents(id) on delete set null,
   created_at    timestamptz default now()
 );
+create index if not exists idx_txn_steps_satisfied_by
+  on transaction_steps(satisfied_by) where satisfied_by is not null;
 
 alter table transaction_steps enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
@@ -1421,8 +1428,16 @@ create table if not exists form_packets (
   doc_type             text,
   field_tokens         jsonb default '[]',
   active               boolean default true,
+  -- When true, a deal in this (state, transaction_type) cannot reach 'closed'
+  -- until a COMPLETED boldsign_documents row built from this packet's template
+  -- exists on it (migration 0028). This is what makes IA/SD/NE compliance a
+  -- property of the system instead of something the coordinator remembers.
+  required             boolean not null default false,
   created_at           timestamptz default now()
 );
+create index if not exists idx_form_packets_required
+  on form_packets(state, transaction_type)
+  where required and active and boldsign_template_id is not null;
 alter table form_packets enable row level security;
 drop policy if exists "form_packets_all" on form_packets;
 create policy "form_packets_all" on form_packets
