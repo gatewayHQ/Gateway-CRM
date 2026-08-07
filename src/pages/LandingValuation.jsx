@@ -77,11 +77,11 @@ export default function LandingValuation({ mailingId }) {
         [m.agent_id, ...(Array.isArray(cfg.agent_ids) ? cfg.agent_ids : [])].filter(Boolean)
       )]
       if (ids.length) {
-        let { data: rows, error: agErr } = await supabase.from('agents')
+        let { data: rows, error: agErr } = await supabase.from('agents_public')
           .select('id, name, phone, email, photo_url, color, role, bio')
           .in('id', ids)
         if (agErr) {
-          ;({ data: rows } = await supabase.from('agents')
+          ;({ data: rows } = await supabase.from('agents_public')
             .select('id, name, phone, email, photo_url, color, role')
             .in('id', ids))
         }

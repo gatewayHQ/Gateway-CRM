@@ -4,6 +4,8 @@ import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx
 import { formatCurrency, formatDate } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
 import { getClosingGate, gateBadge } from '../lib/compliance.js'
+import { listRequiredForms } from '../lib/services/requiredForms.js'
+import { listDealSteps } from '../lib/services/steps.js'
 import { daysBetween } from '../lib/pipeline.js'
 import { TABLES, REVIEW_STATUS } from '../lib/constants.js'
 import { decideDealReview } from '../lib/services/review.js'
@@ -34,6 +36,7 @@ export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin })
   const [openId, setOpenId] = useState(null)        // expanded deal row
   const [stepsByDeal,    setStepsByDeal]    = useState({})
   const [envByDeal,      setEnvByDeal]      = useState({})
+  const [formsByDeal,    setFormsByDeal]    = useState({})
   const [notes, setNotes] = useState('')
   const [busy,  setBusy]  = useState(null)
 
@@ -41,13 +44,21 @@ export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin })
   // round-trip the world.
   const loadDealDetails = useCallback(async (dealId) => {
     if (!dealId || stepsByDeal[dealId]) return
-    const [s, e] = await Promise.all([
-      supabase.from(TABLES.TRANSACTION_STEPS).select('id, title, completed, if_applicable, doc_action').eq('deal_id', dealId),
-      supabase.from(TABLES.BOLDSIGN_DOCUMENTS).select('id, status, document_name').eq('deal_id', dealId),
+    const deal = deals.find(d => d.id === dealId) || null
+    const [s, e, f] = await Promise.all([
+      // Shared with DealPage so both views judge the gate on identical data —
+      // and so satisfied_by (migration 0028) is fetched with the same fallback.
+      listDealSteps(dealId),
+      // boldsign_template_id is what ties a completed envelope to the state
+      // packet it satisfies.
+      supabase.from(TABLES.BOLDSIGN_DOCUMENTS)
+        .select('id, status, document_name, boldsign_template_id').eq('deal_id', dealId),
+      listRequiredForms(deal),
     ])
-    setStepsByDeal(p => ({ ...p, [dealId]: s.data || [] }))
+    setStepsByDeal(p => ({ ...p, [dealId]: s.steps || [] }))
     setEnvByDeal(p => ({ ...p, [dealId]: e.data || [] }))
-  }, [stepsByDeal])
+    setFormsByDeal(p => ({ ...p, [dealId]: f.forms || [] }))
+  }, [stepsByDeal, deals])
 
   useEffect(() => {
     if (openId) loadDealDetails(openId)
@@ -136,7 +147,8 @@ export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin })
             const isOpen = openId === deal.id
             const steps     = stepsByDeal[deal.id] || []
             const envelopes = envByDeal[deal.id] || []
-            const gate = isOpen ? getClosingGate(deal, { steps, envelopes, commission, hasCommissionVisibility: true }) : null
+            const requiredForms = formsByDeal[deal.id] || []
+            const gate = isOpen ? getClosingGate(deal, { steps, envelopes, commission, hasCommissionVisibility: true, requiredForms }) : null
             const gb   = isOpen ? gateBadge(gate) : null
             return (
               <div key={deal.id} className="card" style={{ padding: 0, overflow: 'hidden' }}>

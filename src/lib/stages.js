@@ -31,34 +31,24 @@ export const STAGE_LABELS = {
   qualified: 'Qualified',
 }
 
+// The single board every deal lives on (decided 2026-06-12: no res/comm split
+// — one pipeline, with List/Focus views layered on top).
+//
+// The commercial / residential-buyer / residential-seller track definitions,
+// TRACK_ORDER, and trackForDeal() were removed once that decision had held for
+// two months: nothing outside this file's own tests ever referenced them, and
+// boardStageFor() was only ever called with UNIFIED. Deals stored with a
+// commercial or seller token still resolve — FOREIGN_STAGE_MAP.unified below is
+// what actually does that work, and it is unchanged. See git history to restore.
 export const TRACKS = {
-  // The single board every deal lives on (decided 2026-06-12: no res/comm
-  // split — one pipeline, with List/Focus views layered on top).
   unified: {
     id: 'unified',
     label: 'Pipeline',
     stages: ['lead', 'qualified', 'showing', 'offer', 'under-contract', 'closed', 'lost'],
   },
-  // Retained for data mapping (deals stored with these tokens still resolve)
-  commercial: {
-    id: 'commercial',
-    label: 'Commercial',
-    stages: ['pursuit', 'om-marketing', 'listing-agreement', 'on-market', 'loi', 'psa', 'due-diligence', 'closed', 'lost'],
-  },
-  'residential-buyer': {
-    id: 'residential-buyer',
-    label: 'Residential · Buyers',
-    stages: ['lead', 'showing', 'offer', 'under-contract', 'closed', 'lost'],
-  },
-  'residential-seller': {
-    id: 'residential-seller',
-    label: 'Residential · Sellers',
-    stages: ['lead', 'pre-list', 'active', 'under-contract', 'closed', 'lost'],
-  },
 }
 
 export const UNIFIED = 'unified'
-export const TRACK_ORDER = ['commercial', 'residential-buyer', 'residential-seller']
 
 // Every storable stage token — drives the deals.stage CHECK constraint
 // (see schema.sql / migration 0012); checked by scripts/check-enums.mjs.
@@ -68,42 +58,15 @@ export const ALL_DEAL_STAGES = [
   'pre-list', 'active',
 ]
 
-// Which board a deal belongs on.
-export function trackForDeal(deal) {
-  if (deal?.prop_category === 'commercial') return 'commercial'
-  // Residential: the Forms tab's buyer/seller field decides the side; deals
-  // without one default to the buyer board (the legacy stage set matches it).
-  return deal?.comp_data?.transaction_type === 'seller'
-    ? 'residential-seller'
-    : 'residential-buyer'
-}
-
-// Nearest-column maps for stage tokens foreign to a track. Used for display
-// grouping only — a deal's stored stage changes only when dragged.
+// Nearest-column map for stage tokens foreign to the board. Used for display
+// grouping only — a deal's stored stage changes only when dragged. Every
+// commercial/seller token lands in the nearest legacy column so no deal
+// vanishes when viewed on the single pipeline.
 const FOREIGN_STAGE_MAP = {
-  // The unified board: every commercial/seller token lands in the nearest
-  // legacy column so no deal vanishes when viewed on the single pipeline.
   unified: {
     pursuit: 'lead', 'om-marketing': 'qualified', 'listing-agreement': 'qualified',
     'pre-list': 'qualified', 'on-market': 'showing', active: 'showing',
     loi: 'offer', psa: 'under-contract', 'due-diligence': 'under-contract',
-  },
-  commercial: {
-    lead: 'pursuit', qualified: 'pursuit', showing: 'om-marketing',
-    'pre-list': 'listing-agreement', active: 'on-market', offer: 'loi',
-    'under-contract': 'psa',
-  },
-  'residential-buyer': {
-    qualified: 'showing', 'pre-list': 'lead', active: 'showing',
-    pursuit: 'lead', 'om-marketing': 'lead', 'listing-agreement': 'lead',
-    'on-market': 'showing', loi: 'offer', psa: 'under-contract',
-    'due-diligence': 'under-contract',
-  },
-  'residential-seller': {
-    qualified: 'lead', showing: 'active', offer: 'active',
-    pursuit: 'lead', 'om-marketing': 'pre-list', 'listing-agreement': 'pre-list',
-    'on-market': 'active', loi: 'active', psa: 'under-contract',
-    'due-diligence': 'under-contract',
   },
 }
 

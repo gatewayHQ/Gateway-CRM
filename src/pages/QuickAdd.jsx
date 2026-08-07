@@ -3,9 +3,11 @@ import { supabase } from '../lib/supabase.js'
 import { Icon, Drawer, pushToast } from '../components/UI.jsx'
 import { STAGE_ORDER } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
+import { upsertContact } from '../lib/services/contacts.js'
+import { CONTACT_SOURCES } from '../lib/enums.js'
 
-function QuickContactDrawer({ open, onClose, agents, activeAgent, onSaved }) {
-  const blank = () => ({ first_name: '', last_name: '', phone: '', email: '', type: 'buyer', assigned_agent_id: activeAgent?.id || '' })
+function QuickContactDrawer({ open, onClose, agents, activeAgent, contacts = [], onSaved }) {
+  const blank = () => ({ first_name: '', last_name: '', phone: '', email: '', type: 'buyer', source: 'referral', assigned_agent_id: activeAgent?.id || '' })
   const [form, setForm] = useState(blank())
   const [saving, setSaving] = useState(false)
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }))
@@ -15,10 +17,19 @@ function QuickContactDrawer({ open, onClose, agents, activeAgent, onSaved }) {
   const save = async () => {
     if (!form.first_name.trim() || !form.last_name.trim()) { pushToast('First and last name required', 'error'); return }
     setSaving(true)
-    const { error } = await supabase.from('contacts').insert([{ ...form, status: 'active', source: 'other', tags: [], assigned_agent_id: form.assigned_agent_id || null }])
+    // `source` is captured, not hardcoded to 'other' — lead-source attribution
+    // is the input every ROI report depends on, and it was being destroyed at
+    // the point of capture.
+    const { created, error } = await upsertContact(
+      supabase,
+      { ...form, status: 'active', tags: [], assigned_agent_id: form.assigned_agent_id || null },
+      contacts,
+    )
     setSaving(false)
-    if (error) { pushToast(error.message, 'error'); return }
-    pushToast(`${form.first_name} ${form.last_name} added to Contacts`)
+    if (error) { pushToast(error, 'error'); return }
+    pushToast(created
+      ? `${form.first_name} ${form.last_name} added to Contacts`
+      : `${form.first_name} ${form.last_name} already existed — record updated`)
     onSaved(); onClose()
   }
 
@@ -51,12 +62,18 @@ function QuickContactDrawer({ open, onClose, agents, activeAgent, onSaved }) {
             </select>
           </div>
           <div className="form-group">
-            <label className="form-label">Assign To</label>
-            <select className="form-control" value={form.assigned_agent_id} onChange={e => set('assigned_agent_id', e.target.value)}>
-              <option value="">Unassigned</option>
-              {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            <label className="form-label">Source</label>
+            <select className="form-control" value={form.source} onChange={e => set('source', e.target.value)}>
+              {CONTACT_SOURCES.map(sc => <option key={sc} value={sc}>{sc.charAt(0).toUpperCase() + sc.slice(1)}</option>)}
             </select>
           </div>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Assign To</label>
+          <select className="form-control" value={form.assigned_agent_id} onChange={e => set('assigned_agent_id', e.target.value)}>
+            <option value="">Unassigned</option>
+            {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
         </div>
       </div>
       <div className="drawer__foot">
@@ -224,7 +241,7 @@ export default function QuickAdd({ db, setDb, activeAgent }) {
       </div>
 
       <QuickContactDrawer open={mode === 'contact'} onClose={() => setMode(null)}
-        agents={db.agents || []} activeAgent={activeAgent}
+        agents={db.agents || []} activeAgent={activeAgent} contacts={db.contacts || []}
         onSaved={reload('contacts', 'contacts')} />
 
       <QuickDealDrawer open={mode === 'deal'} onClose={() => setMode(null)}

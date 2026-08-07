@@ -1448,7 +1448,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
 
 // ─── Properties page ──────────────────────────────────────────────────────────
 
-export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgentIds }) {
+export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgentIds, focusRecord, onFocusHandled }) {
   const [view, setView]               = useState('grid')
   const [search, setSearch]           = useState('')
   const [filterType, setFilterType]   = useState('')
@@ -1456,6 +1456,14 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
   const [filterCounty, setFilterCounty] = useState('')
   const [drawer, setDrawer]           = useState(false)
   const [editing, setEditing]         = useState(null)
+
+  // Same contract as ContactsPage — see the comment there.
+  React.useEffect(() => {
+    if (focusRecord?.type !== 'property') return
+    const hit = (db.properties || []).find(x => x.id === focusRecord.id)
+    if (hit) { setEditing(hit); setDrawer(true) }
+    onFocusHandled?.()
+  }, [focusRecord, db.properties])
   const [confirm, setConfirm]         = useState(null)
   const [radiusProp, setRadiusProp]   = useState(null)
 

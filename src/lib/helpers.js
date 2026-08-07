@@ -28,13 +28,15 @@ export const getInitials = (firstName, lastName) => {
 
 export const contactFullName = (c) => c ? `${c.first_name} ${c.last_name}` : '—'
 
-// Stage definitions live in stages.js (track-aware since Milestone 1);
-// re-exported here so existing imports keep working. STAGE_ORDER remains the
-// legacy residential-buyer-shaped list used by older consumers (QuickAdd,
-// Dashboard funnel) until they go track-aware.
+// Stage definitions live in stages.js — re-exported here so existing imports
+// keep working. STAGE_ORDER is DERIVED from the one live board rather than
+// duplicated: the hand-written copy that used to sit here had already drifted
+// out of anyone's attention, and QuickAdd was picking stages from it while the
+// Pipeline picked them from stages.js.
+import { TRACKS, UNIFIED } from './stages.js'
 export { STAGE_LABELS } from './stages.js'
 
-export const STAGE_ORDER = ['lead','qualified','showing','offer','under-contract','closed','lost']
+export const STAGE_ORDER = TRACKS[UNIFIED].stages
 
 export const isOverdue = (task) => {
   if (task.completed) return false

@@ -296,24 +296,32 @@ alter table activities  enable row level security;
 alter table documents   enable row level security;
 alter table commissions enable row level security;
 
--- Open access for all authenticated users on intentionally-shared tables
+-- Open access for all authenticated users on intentionally-shared tables.
+-- NOTE the `to authenticated` clause on every policy below: omitting it makes
+-- the policy apply to PUBLIC, which includes `anon` — and the anon key ships in
+-- the browser bundle. See migration 0027, which closed exactly that hole on
+-- eight tables. Never write `for all using (true)` without a role here.
 do $$ begin
-  -- properties (read anonymously by the public PropertyLanding page — scope
-  -- only after that read moves behind a service-key API; see migrations/README)
-  if not exists (select 1 from pg_policies where tablename='properties' and policyname='allow_all') then
-    create policy "allow_all" on properties for all using (true) with check (true);
+  -- properties (the public landing pages read these through the service-key
+  -- api/property-public.js, which bypasses RLS — so no anon policy is needed)
+  drop policy if exists allow_all on properties;
+  if not exists (select 1 from pg_policies where tablename='properties' and policyname='allow_all_authenticated') then
+    create policy "allow_all_authenticated" on properties for all to authenticated using (true) with check (true);
   end if;
   -- templates (shared across all agents by design)
-  if not exists (select 1 from pg_policies where tablename='templates' and policyname='allow_all') then
-    create policy "allow_all" on templates for all using (true) with check (true);
+  drop policy if exists allow_all on templates;
+  if not exists (select 1 from pg_policies where tablename='templates' and policyname='allow_all_authenticated') then
+    create policy "allow_all_authenticated" on templates for all to authenticated using (true) with check (true);
   end if;
 end $$;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- AGENTS — role-based access (RBAC). See migration 0023.
 --
--- The roster stays READABLE by everyone (pickers, avatars, and the public
--- landing/advisor pages read agents anonymously). WRITES are locked down:
+-- The roster stays READABLE by every SIGNED-IN user (pickers, avatars). The
+-- public landing/advisor pages read the column-limited `agents_public` view
+-- instead — the base table would hand anon every agent's cap_amount,
+-- default_split_pct and no_brokerage_split (migration 0027). WRITES are locked:
 --   • a user may edit ONLY their own row (auth_id = auth.uid())
 --   • an office admin (app_is_admin()) may edit/insert/delete anyone
 --   • an unclaimed row (auth_id is null) may be claimed by the matching email
@@ -342,9 +350,11 @@ do $$ begin
   -- Drop the legacy wide-open policy if it exists (older installs).
   drop policy if exists allow_all on agents;
 
-  -- READ: roster is public (anon + authenticated) for pickers and landing pages.
-  if not exists (select 1 from pg_policies where tablename='agents' and policyname='agents_public_read') then
-    create policy "agents_public_read" on agents for select using (true);
+  -- READ: roster is readable by signed-in users. Anonymous visitors go through
+  -- the `agents_public` view defined just below.
+  drop policy if exists agents_public_read on agents;
+  if not exists (select 1 from pg_policies where tablename='agents' and policyname='agents_read_authenticated') then
+    create policy "agents_read_authenticated" on agents for select to authenticated using (true);
   end if;
 
   -- INSERT: onboarding creates your own row; admins can add teammates.
@@ -427,6 +437,19 @@ create trigger agents_guard_privileged_trg
   for each row execute function agents_guard_privileged();
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- AGENTS_PUBLIC — the anonymous roster read (advisor cards on /advisor/:id,
+-- /lp/* and /lead). Exactly the ten columns those pages render; everything
+-- else on `agents` — cap_amount, default_split_pct, no_brokerage_split,
+-- is_admin, auth_id, twilio_sid — stays behind authentication.
+-- Deliberately NOT security_invoker: the view runs with the owner's rights so
+-- anon can read it while the base table stays authenticated-only.
+-- ─────────────────────────────────────────────────────────────────────────────
+create or replace view agents_public as
+  select id, name, role, tagline, bio, photo_url, color, phone, email, stats
+  from agents;
+grant select on agents_public to anon, authenticated;
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- TEAMS  (collaboration and split-commission team types)
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists teams (
@@ -439,8 +462,11 @@ create table if not exists teams (
 
 alter table teams enable row level security;
 do $$ begin
-  if not exists (select 1 from pg_policies where tablename='teams' and policyname='allow_all') then
-    create policy "allow_all" on teams for all using (true) with check (true);
+  -- `to authenticated` is load-bearing: without it the policy applies to
+  -- PUBLIC (incl. anon, whose key ships in the bundle). See migration 0027.
+  drop policy if exists allow_all on teams;
+  if not exists (select 1 from pg_policies where tablename='teams' and policyname='allow_all_authenticated') then
+    create policy "allow_all_authenticated" on teams for all to authenticated using (true) with check (true);
   end if;
 end $$;
 
@@ -462,8 +488,11 @@ create table if not exists team_splits (
 
 alter table team_splits enable row level security;
 do $$ begin
-  if not exists (select 1 from pg_policies where tablename='team_splits' and policyname='allow_all') then
-    create policy "allow_all" on team_splits for all using (true) with check (true);
+  -- `to authenticated` is load-bearing: without it the policy applies to
+  -- PUBLIC (incl. anon, whose key ships in the bundle). See migration 0027.
+  drop policy if exists allow_all on team_splits;
+  if not exists (select 1 from pg_policies where tablename='team_splits' and policyname='allow_all_authenticated') then
+    create policy "allow_all_authenticated" on team_splits for all to authenticated using (true) with check (true);
   end if;
 end $$;
 
@@ -626,8 +655,15 @@ create table if not exists transaction_steps (
   doc_action    text    default 'manual',  -- manual | upload | forms | sign | admin
   doc_status    text    default 'pending', -- pending | complete | approved | na
   if_applicable boolean default false,     -- conditional document ("if applicable")
+  -- Which BoldSign envelope proves this sign-step (migration 0028). Null on
+  -- legacy rows; the closing gate then falls back to distinct-envelope
+  -- matching. Before this column the gate compared COUNTS, so three copies of
+  -- one disclosure satisfied three separate sign-steps.
+  satisfied_by  uuid references boldsign_documents(id) on delete set null,
   created_at    timestamptz default now()
 );
+create index if not exists idx_txn_steps_satisfied_by
+  on transaction_steps(satisfied_by) where satisfied_by is not null;
 
 alter table transaction_steps enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
@@ -960,8 +996,11 @@ create trigger mailings_updated_at before update on mailings
 
 alter table mailings enable row level security;
 do $$ begin
-  if not exists (select 1 from pg_policies where tablename='mailings' and policyname='allow_all') then
-    create policy "allow_all" on mailings for all using (true) with check (true);
+  -- `to authenticated` is load-bearing: without it the policy applies to
+  -- PUBLIC (incl. anon, whose key ships in the bundle). See migration 0027.
+  drop policy if exists allow_all on mailings;
+  if not exists (select 1 from pg_policies where tablename='mailings' and policyname='allow_all_authenticated') then
+    create policy "allow_all_authenticated" on mailings for all to authenticated using (true) with check (true);
   end if;
 end $$;
 
@@ -995,8 +1034,11 @@ create index if not exists mailing_recipients_responded_idx on mailing_recipient
 
 alter table mailing_recipients enable row level security;
 do $$ begin
-  if not exists (select 1 from pg_policies where tablename='mailing_recipients' and policyname='allow_all') then
-    create policy "allow_all" on mailing_recipients for all using (true) with check (true);
+  -- `to authenticated` is load-bearing: without it the policy applies to
+  -- PUBLIC (incl. anon, whose key ships in the bundle). See migration 0027.
+  drop policy if exists allow_all on mailing_recipients;
+  if not exists (select 1 from pg_policies where tablename='mailing_recipients' and policyname='allow_all_authenticated') then
+    create policy "allow_all_authenticated" on mailing_recipients for all to authenticated using (true) with check (true);
   end if;
 end $$;
 
@@ -1016,8 +1058,11 @@ create index if not exists mailing_scans_recipient_idx on mailing_scans(recipien
 
 alter table mailing_scans enable row level security;
 do $$ begin
-  if not exists (select 1 from pg_policies where tablename='mailing_scans' and policyname='allow_all') then
-    create policy "allow_all" on mailing_scans for all using (true) with check (true);
+  -- `to authenticated` is load-bearing: without it the policy applies to
+  -- PUBLIC (incl. anon, whose key ships in the bundle). See migration 0027.
+  drop policy if exists allow_all on mailing_scans;
+  if not exists (select 1 from pg_policies where tablename='mailing_scans' and policyname='allow_all_authenticated') then
+    create policy "allow_all_authenticated" on mailing_scans for all to authenticated using (true) with check (true);
   end if;
 end $$;
 
@@ -1042,8 +1087,11 @@ create index if not exists mailing_leads_contact_idx on mailing_leads(contact_id
 
 alter table mailing_leads enable row level security;
 do $$ begin
-  if not exists (select 1 from pg_policies where tablename='mailing_leads' and policyname='allow_all') then
-    create policy "allow_all" on mailing_leads for all using (true) with check (true);
+  -- `to authenticated` is load-bearing: without it the policy applies to
+  -- PUBLIC (incl. anon, whose key ships in the bundle). See migration 0027.
+  drop policy if exists allow_all on mailing_leads;
+  if not exists (select 1 from pg_policies where tablename='mailing_leads' and policyname='allow_all_authenticated') then
+    create policy "allow_all_authenticated" on mailing_leads for all to authenticated using (true) with check (true);
   end if;
 end $$;
 
@@ -1402,8 +1450,16 @@ create table if not exists form_packets (
   doc_type             text,
   field_tokens         jsonb default '[]',
   active               boolean default true,
+  -- When true, a deal in this (state, transaction_type) cannot reach 'closed'
+  -- until a COMPLETED boldsign_documents row built from this packet's template
+  -- exists on it (migration 0028). This is what makes IA/SD/NE compliance a
+  -- property of the system instead of something the coordinator remembers.
+  required             boolean not null default false,
   created_at           timestamptz default now()
 );
+create index if not exists idx_form_packets_required
+  on form_packets(state, transaction_type)
+  where required and active and boldsign_template_id is not null;
 alter table form_packets enable row level security;
 drop policy if exists "form_packets_all" on form_packets;
 create policy "form_packets_all" on form_packets

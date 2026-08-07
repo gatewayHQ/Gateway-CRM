@@ -9,6 +9,7 @@ import { breakdownForDeal } from '../lib/commission.js'
 import { agentIdsOnDeal } from '../lib/coAgents.js'
 import { DealDrawer } from './Pipeline.jsx'
 import { getClosingGate, gateBadge } from '../lib/compliance.js'
+import { listRequiredForms } from '../lib/services/requiredForms.js'
 import { audit, useDealAudit } from '../lib/audit.js'
 import { BUCKETS, TABLES, REVIEW_STATUS } from '../lib/constants.js'
 import { uploadDealDocument, signDealDocumentUrl } from '../lib/services/documents.js'
@@ -179,9 +180,19 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
   // Single source of truth for "is this deal ready to close?". Same shape on
   // Pipeline + AdminReview + the cron nudges. The badge is always visible; the
   // detail card appears under the stage rail when there are open issues.
+  // Packets this deal's state makes mandatory (migration 0028). Loaded per deal
+  // because it depends on comp_data.state, which an agent can change.
+  const [requiredForms, setRequiredForms] = useState([])
+  useEffect(() => {
+    let cancelled = false
+    if (!deal) { setRequiredForms([]); return }
+    listRequiredForms(deal).then(({ forms }) => { if (!cancelled) setRequiredForms(forms) })
+    return () => { cancelled = true }
+  }, [deal?.id, deal?.comp_data?.state, deal?.comp_data?.transaction_type])
+
   const gate = useMemo(
-    () => getClosingGate(deal, { steps, envelopes, commission, hasCommissionVisibility: isAdmin }),
-    [deal, steps, envelopes, commission, isAdmin]
+    () => getClosingGate(deal, { steps, envelopes, commission, hasCommissionVisibility: isAdmin, requiredForms }),
+    [deal, steps, envelopes, commission, isAdmin, requiredForms]
   )
 
   // ── Actions ────────────────────────────────────────────────────────────────

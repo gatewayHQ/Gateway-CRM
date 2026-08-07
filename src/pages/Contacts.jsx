@@ -65,7 +65,7 @@ function compareValues(a, b, dir = 'asc') {
 
 const HEAT_ORDER = { hot: 0, warm: 1, cold: 2 }
 
-export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, visibleAgentIds, isAdmin }) {
+export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, visibleAgentIds, isAdmin, focusRecord, onFocusHandled }) {
   // ── Persistent filter state ─────────────────────────────────────────────
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebounce(search, 150)
@@ -81,6 +81,15 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
   const [confirm, setConfirm] = useState(null)
   const [importModal, setImportModal] = useState(false)
   const [selected, setSelected] = useState(new Set())
+
+  // A global-search hit routes here with the record to open. Resolve it against
+  // the loaded rows and open its drawer, then clear so it fires only once.
+  useEffect(() => {
+    if (focusRecord?.type !== 'contact') return
+    const hit = (db.contacts || []).find(c => c.id === focusRecord.id)
+    if (hit) { setEditing(hit); setDrawerOpen(true) }
+    onFocusHandled?.()
+  }, [focusRecord, db.contacts])
   const [reassignTo, setReassignTo] = useState('')
   const [focusedIndex, setFocusedIndex] = useState(0)
   const searchInputRef = useRef(null)

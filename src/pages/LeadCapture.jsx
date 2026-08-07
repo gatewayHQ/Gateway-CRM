@@ -22,7 +22,7 @@ export default function LeadCapturePage() {
 
   useEffect(() => {
     if (agentId) {
-      supabase.from('agents').select('*').eq('id', agentId).single()
+      supabase.from('agents_public').select('id, name, role, tagline, bio, photo_url, color, phone, email, stats').eq('id', agentId).single()
         .then(({ data }) => { if (data) setAgent(data) })
     }
   }, [agentId])

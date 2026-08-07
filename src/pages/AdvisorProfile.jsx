@@ -31,11 +31,11 @@ export default function AdvisorProfile({ agentId }) {
     let active = true
     ;(async () => {
       // Try the full column set; fall back if migrations 0004/0006 haven't run.
-      let { data, error: e } = await supabase.from('agents')
+      let { data, error: e } = await supabase.from('agents_public')
         .select('id, name, role, tagline, bio, photo_url, color, phone, email, stats')
         .eq('id', agentId).maybeSingle()
       if (e) {
-        ;({ data } = await supabase.from('agents')
+        ;({ data } = await supabase.from('agents_public')
           .select('id, name, role, photo_url, color, phone, email')
           .eq('id', agentId).maybeSingle())
       }
