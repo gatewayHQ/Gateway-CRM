@@ -16,9 +16,9 @@ import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty } from '../lib/dealPeople.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPrintUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
-import { printPdfFromUrl } from '../lib/print.js'
+import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 
@@ -1086,34 +1086,30 @@ function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, se
 // capture, which stores the arrangement against the deal so the NEXT packet built
 // from the same template opens already arranged. See captureFieldLayout() in
 // api/boldsign.js.
-// Print the document as it stands. Shared by the editor header and the Signatures
-// tab rows so both behave identically — the same copy, the same failure messages.
+// Save the document as it stands to a PDF file. Shared by the editor header and the
+// Signatures tab rows so both behave identically — the same copy, the same messages.
 //
-// Two failure modes are worth distinguishing. The API can refuse (BoldSign won't
-// release an unsent document's pages, say), which is informative and gets its own
-// message; or the browser can block the print dialog, in which case the copy exists
-// and is worth handing over as a download rather than losing.
-async function printBoldSignDocument(documentId) {
-  const { url, filename, fieldCount } = await documentPrintUrl(documentId)
-  if (!url) throw new Error('No print copy was returned')
-  try {
-    await printPdfFromUrl(url)
-    return { printed: true, fieldCount }
-  } catch (err) {
-    // Fall back to a download so the agent still gets the paper they asked for.
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename || 'document (review).pdf'
-    a.target = '_blank'
-    a.rel = 'noopener'
-    document.body.appendChild(a); a.click(); a.remove()
-    return { printed: false, downloaded: true, reason: err.message, fieldCount }
-  }
+// This REPLACED a Print button that opened the browser's print dialog on the same
+// copy. Chrome renders a PDF in an iframe through a plugin the page cannot drive, so
+// print() succeeded and produced BLANK paper — silently, with nothing to catch. The
+// file is downloaded instead: the agent gets a complete document they can read, keep
+// and print from their own PDF viewer, which is the workflow anyway (fill it in the
+// preview, take it to the client in person).
+//
+// The PDF itself is composed server-side (api/boldsign.js → buildPrintablePdf): every
+// value the fields carry is drawn onto the pages, the source form is flattened, and a
+// signing summary is appended. The browser never re-renders it — the document lives in
+// BoldSign's cross-origin iframe, where the CRM has no access to its pixels.
+async function saveBoldSignDocumentPdf(documentId) {
+  const { url, filename, fieldCount } = await documentPdfUrl(documentId)
+  if (!url) throw new Error('No PDF copy was returned')
+  const res = await savePdfFromUrl(url, filename || 'document (filled).pdf')
+  return { ...res, fieldCount }
 }
 
 function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone, onDraft, onLayoutSaved }) {
   const [savingLayout, setSavingLayout] = React.useState(false)
-  const [printing,     setPrinting]     = React.useState(false)
+  const [savingPdf,    setSavingPdf]    = React.useState(false)
   const [leaveAsk,     setLeaveAsk]     = React.useState(false)
   // Work may exist that BoldSign hasn't been told to save. Set when focus enters the
   // editor (see BoldSignFrame's onInteract — the only honest cross-origin signal),
@@ -1171,20 +1167,26 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
   }
 
   // Deliberately available the whole time the editor is open — including while
-  // BoldSign's own Preview is showing — because "let me read it on paper first" is
-  // a step BEFORE deciding to send, not after.
-  const print = async () => {
-    if (!documentId) { pushToast('This document has to exist in BoldSign before it can be printed.', 'info'); return }
-    setPrinting(true)
+  // BoldSign's own Preview is showing — because "let me take this to the client on
+  // paper" is a step BEFORE deciding to send, not after.
+  //
+  // The copy is built from what BOLDSIGN holds, which is what its Save button has
+  // written — values typed in the frame and not yet saved there cannot reach the
+  // server. So an agent with outstanding work is told, rather than handed a PDF
+  // that quietly misses the last thing they typed.
+  const savePdf = async () => {
+    if (!documentId) { pushToast('This document has to exist in BoldSign before it can be saved as a PDF.', 'info'); return }
+    if (unsaved) pushToast('Click Save inside BoldSign first if you have just typed in a field — the PDF is built from BoldSign’s saved copy.', 'info')
+    setSavingPdf(true)
     try {
-      const res = await printBoldSignDocument(documentId)
-      if (res.downloaded) {
-        pushToast(`Print dialog was blocked (${res.reason}) — the review copy was downloaded instead.`, 'info')
-      }
+      const res = await saveBoldSignDocumentPdf(documentId)
+      pushToast(res.fieldCount
+        ? `PDF saved — ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} included.`
+        : 'PDF saved.', 'success')
     } catch (err) {
-      pushToast(`Could not print: ${err.message}`, 'error')
+      pushToast(`Could not save the PDF: ${err.message}`, 'error')
     } finally {
-      setPrinting(false)
+      setSavingPdf(false)
     }
   }
 
@@ -1225,11 +1227,11 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
         <div style={{ display:'flex', alignItems:'center', gap:8, flexShrink:0 }}>
           <button
             className="btn btn--secondary btn--sm"
-            onClick={print}
-            disabled={printing || !documentId}
-            title="Print a review copy of this document, including a summary of who signs what"
+            onClick={savePdf}
+            disabled={savingPdf || !documentId}
+            title="Download this document as a PDF — every filled value, plus a summary of who signs what"
           >
-            <Icon name="document" size={13}/> {printing ? 'Preparing…' : 'Print'}
+            <Icon name="document" size={13}/> {savingPdf ? 'Preparing…' : 'Save PDF'}
           </button>
           <button
             className="drawer__close"
@@ -1265,7 +1267,7 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
       <div style={{ padding:'8px 12px', borderTop:'1px solid var(--gw-border)', fontSize:11, color:'var(--gw-mist)', lineHeight:1.5, flexShrink:0 }}>
         {savingLayout
           ? <span aria-live="polite">Saving this deal’s field layout…</span>
-          : <>Not ready to send? Use <strong>Preview</strong> inside BoldSign, or <strong>Print</strong> above for a paper copy with a summary of who signs what — nothing goes out until you click Send. Fields you place are remembered for this deal.</>}
+          : <>Not ready to send? Use <strong>Preview</strong> inside BoldSign, or <strong>Save PDF</strong> above to download the document as it stands — filled values included, with a summary of who signs what — to print or take to the client. Nothing goes out until you click Send. Fields you place are remembered for this deal.</>}
       </div>
 
       {leaveAsk && (
@@ -1571,7 +1573,7 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
   const [opening,     setOpening]     = React.useState({})    // env.id → fetching its edit URL
   const [editDraft,   setEditDraft]   = React.useState(null)  // { url, env } — draft reopened in BoldSign
   const [layouts,     setLayouts]     = React.useState([])    // saved per-deal field arrangements
-  const [printing,    setPrinting]    = React.useState({})    // env.id → building its print copy
+  const [savingPdf,   setSavingPdf]   = React.useState({})    // env.id → building its PDF copy
 
   React.useEffect(() => {
     if (!deal?.id) return
@@ -1768,20 +1770,20 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
     }
   }
 
-  // Print a review copy from the row — reachable without opening the editor, which
-  // matters for the common case: an agent who wants the packet on paper before
+  // Save a filled copy from the row — reachable without opening the editor, which
+  // matters for the common case: an agent who wants the packet as a file before
   // deciding whether it is ready to go out at all.
-  const print = async (env) => {
-    setPrinting(p => ({ ...p, [env.id]: true }))
+  const savePdf = async (env) => {
+    setSavingPdf(p => ({ ...p, [env.id]: true }))
     try {
-      const res = await printBoldSignDocument(env.document_id)
-      if (res.downloaded) {
-        pushToast(`Print dialog was blocked (${res.reason}) — the review copy was downloaded instead.`, 'info')
-      }
+      const res = await saveBoldSignDocumentPdf(env.document_id)
+      pushToast(res.fieldCount
+        ? `PDF saved — ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} included.`
+        : 'PDF saved.', 'success')
     } catch (err) {
-      pushToast(`Could not print: ${err.message}`, 'error')
+      pushToast(`Could not save the PDF: ${err.message}`, 'error')
     } finally {
-      setPrinting(p => ({ ...p, [env.id]: false }))
+      setSavingPdf(p => ({ ...p, [env.id]: false }))
     }
   }
 
@@ -1963,9 +1965,9 @@ create policy "agent_notifications_policy" on agent_notifications
                     )}
                     <button
                       className="btn btn--ghost btn--icon btn--sm"
-                      title="Print a review copy (pages plus a summary of who signs what)"
-                      onClick={() => print(env)}
-                      disabled={printing[env.id]}
+                      title="Save a PDF copy (pages with their filled values, plus a summary of who signs what)"
+                      onClick={() => savePdf(env)}
+                      disabled={savingPdf[env.id]}
                     >
                       <Icon name="document" size={12}/>
                     </button>
@@ -1991,11 +1993,11 @@ create policy "agent_notifications_policy" on agent_notifications
                       <button
                         className="btn btn--secondary btn--sm"
                         style={{ fontSize:11, flexShrink:0 }}
-                        onClick={() => print(env)}
-                        disabled={printing[env.id]}
-                        title="Read it on paper before it goes anywhere"
+                        onClick={() => savePdf(env)}
+                        disabled={savingPdf[env.id]}
+                        title="Download it as a PDF before it goes anywhere"
                       >
-                        <Icon name="document" size={12}/> {printing[env.id] ? 'Preparing…' : 'Print'}
+                        <Icon name="document" size={12}/> {savingPdf[env.id] ? 'Preparing…' : 'Save PDF'}
                       </button>
                       <button
                         className="btn btn--primary btn--sm"

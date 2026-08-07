@@ -278,11 +278,18 @@ Fixed at both layers, because either one alone would leave the other as a trap:
   guard can reach. Registered only while work is outstanding. Browsers show their own
   generic wording — the point is the pause, not the words.
 
-## Print before Send
-Agents want to read a packet on paper before a client ever sees it, at any point
-before Send. The browser can't do it for them: the document is in a **cross-origin
-iframe**, so `window.print()` prints the CRM's own chrome and calling `print()` on
-BoldSign's frame throws.
+## Save PDF before Send
+Agents want the packet as a finished file before a client ever sees it — to read, to
+keep, to print later, or to take to a client in person. The browser can't produce it:
+the document is in a **cross-origin iframe**, so `window.print()` prints the CRM's own
+chrome and calling `print()` on BoldSign's frame throws.
+
+**This used to be a Print button and it produced blank paper.** The copy was loaded
+into a hidden same-origin iframe and printed from there — but Chrome renders a PDF
+through a plugin the parent page cannot drive, so `print()` returned without error and
+the job came out empty, silently, with nothing in the page able to detect it. The
+action is now **Save PDF**: the same server-composed copy is *downloaded*. It either
+arrives as a file or fails loudly, and the agent prints it from their own PDF viewer.
 
 - **`document-print`** builds the copy server-side: the document exactly as BoldSign
   holds it (`/document/download`), plus an appended **SIGNING SUMMARY** page listing
@@ -302,16 +309,17 @@ BoldSign's frame throws.
   printing. Written to `deal-<id>/print/` and overwritten per document; the Documents
   tab and the send picker now filter storage **folder** rows (entries with no `id`),
   so a review copy never appears as if it were a filing.
-- **`printPdfFromUrl()`** (`src/lib/print.js`) fetches the bytes, wraps them in a
-  blob URL (same-origin, so printable) and prints from a hidden iframe. The iframe
-  is inserted before its `src` is set — an iframe outside the document isn't
-  guaranteed to fire `load`, and the whole helper hangs off that event. That insert
-  also fires a `load` for the frame's initial **about:blank**, which used to put an
-  empty sheet in the print dialog first: the agent cancelled it, the blob then
-  loaded, and only the second dialog held the document. A load event now only counts
-  once `contentWindow.location.href` is the blob URL, and it prints exactly once.
-  Blob URLs are revoked on teardown. A blocked print dialog **rejects**, so the caller falls back
-  to downloading the copy rather than silently losing it.
+- **Interactive forms in the source are flattened.** Many county/board PDFs ship as
+  AcroForms whose widgets carry no appearance streams (`NeedAppearances`): they look
+  filled on screen and render blank through a print driver. `buildPrintablePdf()`
+  calls `form.flatten()` before drawing anything, baking each widget's appearance into
+  the page content. Best-effort — a document with no form, or one pdf-lib can't
+  flatten, is used as-is.
+- **`savePdfFromUrl()`** (`src/lib/savePdf.js`) fetches the bytes, wraps them in a blob
+  and clicks a `download` anchor, so the file lands with **our** filename and an
+  expired signature or network failure is reported instead of opening a tab on an
+  error page. The object URL is revoked on a timer, not immediately after `click()`
+  (Safari cancels the download otherwise). Replaces the old `src/lib/print.js`.
 - **No field boxes are drawn on the page, on purpose.** BoldSign's `bounds` origin
   and units could not be confirmed (docs WAF-blocked), and this file already retired
   one coordinate-guessing feature for that reason — a printout with signature boxes
@@ -321,9 +329,13 @@ BoldSign's frame throws.
   document.
 - **Fallback for bytes:** if BoldSign refuses to release an unsent document's pages,
   the deal's own archived copy is used; if neither exists the error names which door
-  was locked rather than saying "could not print".
+  was locked rather than saying "could not save".
+- **The copy is built from what BoldSign has *saved*.** Values typed in the embedded
+  editor but not yet saved there never reach `/document/properties`, so the editor
+  header nudges the agent to click Save inside BoldSign first when work is outstanding.
 - Reachable from the editor header (including while BoldSign's Preview is open), from
-  every document row, and from the draft strip next to Edit & Send.
+  every document row, and from the draft strip next to Edit & Send. The wire action is
+  still `document-print`; the client export is `documentPdfUrl()`.
 
 ## Modal size — the embedded editor is a workspace, not a form
 Field placement and review happen on a US Letter page. At the old 900 × 640 box that
@@ -373,9 +385,25 @@ template with the template's defaults and the agent re-did the work from memory.
   closed) **and** from the Sent webhook, so a send completed after the tab closed
   still teaches the next packet.
 - **Apply** (`applyFieldLayout`) runs inside `template-embed-url`, after the draft
-  exists and before the editor URL is returned, via `/document/edit`. The response
-  carries `layoutApplied` / `layoutFieldCount` / `layoutWarning` so the UI can say
-  the form was deliberately rearranged.
+  exists and before the editor URL is returned, via **`PUT /v1/document/edit`**. The
+  response carries `layoutApplied` / `layoutFieldCount` / `layoutWarning` so the UI can
+  say the form was deliberately rearranged.
+- **The verb matters — this endpoint is a `PUT`.** It was called with `POST`, and
+  BoldSign answers a wrong method with a bare `405` and no body, so *every* send
+  reported "This deal's saved field layout could not be applied (BoldSign API 405).
+  The form opened with its default fields." and no deal ever got its arrangement back.
+  `PUT /v1/document/edit?documentId=…` (JSON) is confirmed against BoldSign's own SDK
+  (`DocumentApi.editDocument`), which is also where the `EditFormField` property names
+  used by `buildLayoutEditPayload()` come from — the docs site is WAF-blocked from CI.
+- **A 200 is not proof.** After the edit the draft is re-read and its fields counted;
+  `layoutFieldCount` is what BoldSign confirms is on the document, not what was stored.
+  Zero fields back is reported as *not applied* rather than as a silent success.
+- **Failures name a cause, not a status code.** `describeLayoutFailure()` turns the
+  bodyless statuses into a sentence (405 → "rejected the request method", 404 → "no
+  longer has this draft", 401/403 → permission, 5xx → server error) and keeps
+  BoldSign's own validation text when it sends one. The full response (status, body,
+  deal, document, template) goes to the function log either way, and the send still
+  proceeds with the template's default placement.
 - **The saved layout is authoritative for that deal**: a field it names is
   repositioned (`Update`) or created (`Add`), and a field the new draft has that the
   layout does *not* name is `Remove`d — otherwise a field the agent deliberately
@@ -385,7 +413,7 @@ template with the template's defaults and the agent re-did the work from memory.
   only fills a field the new draft left empty, which is the hand-typed-label case
   the layout exists for.
 - **`fieldCount` counts only what a restore can put back.** Sender-filled
-  `commonFields` are recorded but not counted: `/document/edit` only accepts fields
+  `commonFields` are recorded but not counted: `PUT /document/edit` only accepts fields
   nested under a signer.
 - **Type spelling.** BoldSign reads back some types under a different spelling than
   it accepts on write (`Textbox` → `TextBox`, `initials` → `Initial`);
