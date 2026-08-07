@@ -347,8 +347,26 @@ select.form-control { cursor: pointer; }
   padding: 10px 12px; border-radius: var(--radius) var(--radius) 0 0;
   background: var(--gw-chalk); border: 1px solid var(--gw-border); border-bottom: none;
 }
-.kanban-col__label { font-size: 12px; font-weight: 600; letter-spacing: 0.04em; }
-.kanban-col__count { font-size: 11px; color: var(--gw-mist); background: var(--gw-bone); padding: 2px 7px; border-radius: 20px; }
+.kanban-col__label {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
+  display: flex; align-items: center; gap: 4px; min-width: 0;
+}
+.kanban-col__label > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Rename affordance: quiet until the header is hovered, so the board still
+   reads as a board — but always reachable by keyboard. */
+.kanban-col__rename-btn {
+  border: none; background: none; padding: 0; margin: 0; cursor: pointer; line-height: 0;
+  color: var(--gw-mist); opacity: 0; transition: opacity 120ms ease, color 120ms ease;
+}
+.kanban-col__head:hover .kanban-col__rename-btn,
+.kanban-col__rename-btn:focus-visible { opacity: 1; }
+.kanban-col__rename-btn:hover { color: var(--gw-azure); }
+.kanban-col__rename {
+  width: 100%; font-family: var(--font-body); font-size: 12px; font-weight: 600;
+  letter-spacing: 0.04em; color: var(--gw-ink); padding: 1px 5px;
+  border: 1px solid var(--gw-azure); border-radius: 4px; background: #fff; outline: none;
+}
+.kanban-col__count { font-size: 11px; color: var(--gw-mist); background: var(--gw-bone); padding: 2px 7px; border-radius: 20px; flex-shrink: 0; }
 .kanban-col__body {
   flex: 1; background: var(--gw-bone); border: 1px solid var(--gw-border);
   border-radius: 0 0 var(--radius) var(--radius); padding: 8px; display: flex;

@@ -297,6 +297,7 @@ async function handlePortalSignLink(req, res) {
 //                      fees, split_pct, gross, closed}] }
 // ─────────────────────────────────────────────────────────────────────────────
 import { agentSliceForDeal, capWindowStart } from '../src/lib/commission.js'
+import { normalizeStageLabels } from '../src/lib/stageLabels.js'
 import { requireAuthUser, requireAgent, getServiceClient, errorResponse } from './_lib/auth.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -311,10 +312,92 @@ import { requireAuthUser, requireAgent, getServiceClient, errorResponse } from '
 // the same rules even if a write bypasses this endpoint.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Fields any owner may edit on their own profile.
-const PROFILE_SELF_FIELDS = ['name', 'initials', 'email', 'phone', 'photo_url', 'bio', 'tagline', 'stats', 'color', 'specialty', 'nav_hidden']
+// Fields any owner may edit on their own profile. `stage_labels` is a display
+// preference (personal pipeline column headers) — never a permission.
+const PROFILE_SELF_FIELDS = ['name', 'initials', 'email', 'phone', 'photo_url', 'bio', 'tagline', 'stats', 'color', 'specialty', 'nav_hidden', 'stage_labels']
 // Fields only an admin may set (role doubles as a legacy admin flag).
 const PROFILE_ADMIN_FIELDS = ['role', 'is_admin', 'default_split_pct', 'no_brokerage_split', 'cap_amount', 'cap_anniversary']
+
+// Money/permission columns the `agents_guard_privileged` trigger freezes for an
+// untrusted caller. If one of these comes back from the write different to what
+// we asked for, the write did NOT take effect and we must say so — see
+// verifyPrivilegedWrite below.
+const PROFILE_VERIFY_FIELDS = ['is_admin', 'default_split_pct', 'no_brokerage_split', 'cap_amount', 'cap_anniversary']
+
+// Numeric coercion that keeps null meaningful: '' / null / undefined clear the
+// column, anything non-numeric is an error rather than a silent 0.
+function coerceNumeric(value, label, { min, max }) {
+  const raw = typeof value === 'string' ? value.trim() : value
+  if (raw === '' || raw === null || raw === undefined) return { value: null }
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return { error: `${label} must be a number.` }
+  if (min != null && n < min) return { error: `${label} cannot be below ${min}.` }
+  if (max != null && n > max) return { error: `${label} cannot be above ${max}.` }
+  return { value: n }
+}
+
+// Validate + normalize the profile payload. Returns { payload } or { error }.
+// Exported for unit tests — this is where a bad split is stopped, not the UI.
+export function sanitizeProfilePayload(fields, { isAdmin }) {
+  const allowed = isAdmin
+    ? [...PROFILE_SELF_FIELDS, ...PROFILE_ADMIN_FIELDS]
+    : PROFILE_SELF_FIELDS
+  const payload = {}
+  for (const k of allowed) if (k in fields) payload[k] = fields[k]
+
+  if ('default_split_pct' in payload) {
+    const r = coerceNumeric(payload.default_split_pct, 'Commission split', { min: 0, max: 100 })
+    if (r.error) return { error: r.error }
+    payload.default_split_pct = r.value
+  }
+  if ('cap_amount' in payload) {
+    const r = coerceNumeric(payload.cap_amount, 'Cap amount', { min: 0 })
+    if (r.error) return { error: r.error }
+    payload.cap_amount = r.value
+  }
+  if ('cap_anniversary' in payload && !payload.cap_anniversary) payload.cap_anniversary = null
+  if ('no_brokerage_split' in payload) payload.no_brokerage_split = !!payload.no_brokerage_split
+  if ('is_admin' in payload) payload.is_admin = !!payload.is_admin
+  if ('stage_labels' in payload) payload.stage_labels = normalizeStageLabels(payload.stage_labels)
+
+  return { payload }
+}
+
+// An unknown column is the signature of an un-run migration. PostgREST words it
+// two ways — PGRST204 ("Could not find the 'x' column … in the schema cache")
+// and the raw Postgres 42703 ("column x … does not exist") — so match both and
+// name the migration instead of leaking schema errors to the agent.
+export function profileDbError(error) {
+  const msg = error?.message || 'Could not save profile'
+  const missing =
+    msg.match(/could not find the ['"`]?([a-z_]+)['"`]? column/i)?.[1] ||
+    msg.match(/column "?([a-z_]+)"? .*does not exist/i)?.[1]
+  if (missing === 'stage_labels') {
+    return 'Custom pipeline headers need migration 0027 — ask an admin to apply it in Supabase, then try again.'
+  }
+  if (missing) {
+    return `The database is missing the "${missing}" column. Ask an admin to apply the latest migration, then try again.`
+  }
+  return msg
+}
+
+// Compare what we asked to write against the row the database handed back.
+// Returns the names of the privileged fields that did NOT persist (empty = the
+// write landed). Exported for unit tests.
+// The `agents` table carries a BEFORE trigger that freezes privileged columns
+// for callers it doesn't recognize as trusted; when that misfires (a Supabase
+// project on the new non-JWT secret keys, say) the UPDATE still reports success
+// with the old values intact. That is exactly how commission splits "saved" and
+// then reappeared unchanged. Detect it and fail loudly instead.
+export function verifyPrivilegedWrite(requested, saved) {
+  const same = (a, b) => {
+    if (a === null || a === undefined) return b === null || b === undefined
+    if (typeof a === 'boolean' || typeof b === 'boolean') return !!a === !!b
+    if (!Number.isNaN(Number(a)) && !Number.isNaN(Number(b))) return Number(a) === Number(b)
+    return String(a) === String(b)
+  }
+  return PROFILE_VERIFY_FIELDS.filter(k => k in requested && !same(requested[k], saved?.[k]))
+}
 
 async function handleProfile(req, res) {
   let ctx
@@ -342,28 +425,40 @@ async function handleProfile(req, res) {
         return res.status(403).json({ error: 'You can only edit your own profile.' })
       }
 
-      // Whitelist columns by role — this is where privilege escalation is stopped.
-      const allowed = isAdmin
-        ? [...PROFILE_SELF_FIELDS, ...PROFILE_ADMIN_FIELDS]
-        : PROFILE_SELF_FIELDS
-      const payload = {}
-      for (const k of allowed) if (k in fields) payload[k] = fields[k]
+      // Whitelist columns by role — this is where privilege escalation is
+      // stopped — then validate the values themselves.
+      const { payload, error: badInput } = sanitizeProfilePayload(fields, { isAdmin })
+      if (badInput) return res.status(400).json({ error: badInput })
+
+      // Trust the row, not the request. If the privilege-guard trigger swallowed
+      // a commission/admin field, the write looks successful but changed
+      // nothing — report the failure rather than letting the UI claim a save.
+      const confirmSaved = (data) => {
+        const rejected = verifyPrivilegedWrite(payload, data)
+        if (!rejected.length) return res.status(200).json({ agent: data })
+        console.error('[profile-save] privileged fields not persisted', { targetId, rejected })
+        return res.status(500).json({
+          error: `The database did not save ${rejected.join(', ')}. Apply migration 0027 (agents privilege-guard fix) and try again.`,
+          agent: data,
+          rejected,
+        })
+      }
 
       if (isCreate) {
         if (!payload.name || !payload.email) {
           return res.status(400).json({ error: 'Name and email are required.' })
         }
         const { data, error } = await svc.from('agents').insert([payload]).select().single()
-        if (error) return res.status(400).json({ error: error.message })
-        return res.status(200).json({ agent: data })
+        if (error) return res.status(400).json({ error: profileDbError(error) })
+        return confirmSaved(data)
       }
 
       if (Object.keys(payload).length === 0) {
         return res.status(400).json({ error: 'No editable fields provided.' })
       }
       const { data, error } = await svc.from('agents').update(payload).eq('id', targetId).select().single()
-      if (error) return res.status(400).json({ error: error.message })
-      return res.status(200).json({ agent: data })
+      if (error) return res.status(400).json({ error: profileDbError(error) })
+      return confirmSaved(data)
     }
 
     if (action === 'profile-delete') {

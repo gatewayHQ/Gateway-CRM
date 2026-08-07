@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
-import { formatCurrency, formatDate, formatPhone, STAGE_LABELS } from '../lib/helpers.js'
+import { formatCurrency, formatDate, formatPhone } from '../lib/helpers.js'
+import { useStageLabels } from '../lib/stageLabelContext.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
 import { agentIdsOnDeal } from '../lib/coAgents.js'
@@ -61,6 +62,7 @@ const drawerLink = (label, onClick) => (
 )
 
 export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }) {
+  const stageLabels = useStageLabels()
   const deals      = db.deals      || []
   const agents     = db.agents     || []
   const contacts   = db.contacts   || []
@@ -202,7 +204,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
     if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
     setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, stage: newStage, comp_data } : d) }))
     setFetched(f => f && f.id === deal.id ? { ...f, stage: newStage, comp_data } : f)
-    pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
+    pushToast(`Moved to ${stageLabels[newStage]}`)
     audit.stageChange(deal, fromStage, newStage, activeAgent?.id)
     const auto = STAGE_AUTO_TASKS[newStage]
     if (!auto) return
@@ -376,7 +378,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
                   : `Residential · ${cd.transaction_type === 'seller' ? 'Seller' : 'Buyer'} side`}
               </Badge>
               {!isOpenStage(deal.stage) && (
-                <Badge variant={deal.stage === 'closed' ? 'closed' : 'lost'}>{STAGE_LABELS[deal.stage]}</Badge>
+                <Badge variant={deal.stage === 'closed' ? 'closed' : 'lost'}>{stageLabels[deal.stage]}</Badge>
               )}
             </div>
             <div style={{ display: 'flex', gap: 16, fontSize: 13, color: 'var(--gw-mist)', flexWrap: 'wrap' }}>
@@ -402,7 +404,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
             const isCurrent = i === currentIdx
             const isPast    = i < currentIdx
             return (
-              <button key={s} onClick={() => setStage(s)} title={`Move to ${STAGE_LABELS[s]}`}
+              <button key={s} onClick={() => setStage(s)} title={`Move to ${stageLabels[s]}`}
                 style={{
                   flex: 1, minWidth: 86, padding: '8px 6px', border: 'none', cursor: 'pointer',
                   fontFamily: 'var(--font-body)', fontSize: 11.5, fontWeight: isCurrent ? 700 : 600,
@@ -411,7 +413,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
                   color: isCurrent ? '#fff' : isPast ? 'var(--gw-green)' : 'var(--gw-mist)',
                   transition: 'all 150ms ease', whiteSpace: 'nowrap',
                 }}>
-                {isPast ? '✓ ' : ''}{STAGE_LABELS[s]}
+                {isPast ? '✓ ' : ''}{stageLabels[s]}
               </button>
             )
           })}
