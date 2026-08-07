@@ -1,7 +1,7 @@
 import React from 'react'
 import { Icon, Avatar } from '../../components/UI.jsx'
 
-export default function AgentCard({ agent, contacts, deals, tasks, activeAgent, isAdmin, onSwitchAgent, onEdit, onDelete }) {
+export default function AgentCard({ agent, contacts, deals, tasks, activeAgent, isAdmin, teamSplit, onSwitchAgent, onEdit, onDelete }) {
   const isActive = agent.id === activeAgent?.id
   // RBAC — what a viewer may do with THIS card:
   //   • view settings (email + book-of-business stats): own card, or admin
@@ -44,6 +44,27 @@ export default function AgentCard({ agent, contacts, deals, tasks, activeAgent, 
       ) : (
         <div className="agent-card__email" style={{ color:'var(--gw-mist)', fontStyle:'italic' }}>
           Private profile
+        </div>
+      )}
+
+      {/* Commission at a glance — so a split can be confirmed from the roster
+          instead of opening the drawer and trusting it saved. */}
+      {canViewSettings && (
+        <div style={{ display:'flex', gap:5, flexWrap:'wrap', justifyContent:'center', marginBottom:10 }}>
+          <span title="Default share of a commission allocation"
+            style={{ fontSize:10, fontWeight:700, padding:'2px 8px', borderRadius:20,
+                     color:'var(--gw-azure)', background:'var(--gw-sky)' }}>
+            {agent.no_brokerage_split
+              ? '100% · no split'
+              : `${agent.default_split_pct ?? 70}% split`}
+          </span>
+          {teamSplit && (
+            <span title="This member's share of the team's commission"
+              style={{ fontSize:10, fontWeight:700, padding:'2px 8px', borderRadius:20,
+                       color:'var(--gw-slate)', background:'var(--gw-bone)' }}>
+              team {Number(teamSplit.split_pct) || 0}%{teamSplit.is_lead ? ' · lead' : ''}
+            </span>
+          )}
         </div>
       )}
 

@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Badge, EmptyState, Loading } from '../components/UI.jsx'
-import { formatCurrency, formatDate, STAGE_LABELS } from '../lib/helpers.js'
+import { formatCurrency, formatDate } from '../lib/helpers.js'
+import { useStageLabels } from '../lib/stageLabelContext.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // My Earnings — what a non-admin agent sees on the Commission page since the
@@ -11,6 +12,7 @@ import { formatCurrency, formatDate, STAGE_LABELS } from '../lib/helpers.js'
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function MyEarnings({ activeAgent }) {
+  const stageLabels       = useStageLabels()
   const [data, setData]   = useState(null)
   const [error, setError] = useState(null)
 
@@ -49,7 +51,7 @@ export default function MyEarnings({ activeAgent }) {
   const dealRow = (d) => (
     <tr key={d.deal_id} style={{ borderTop: '1px solid var(--gw-border)' }}>
       <td style={{ padding: '9px 12px', fontWeight: 600 }}>{d.title}</td>
-      <td style={{ padding: '9px 12px' }}><Badge variant={d.stage === 'closed' ? 'closed' : d.stage === 'lost' ? 'lost' : 'lead'}>{STAGE_LABELS[d.stage] || d.stage}</Badge></td>
+      <td style={{ padding: '9px 12px' }}><Badge variant={d.stage === 'closed' ? 'closed' : d.stage === 'lost' ? 'lost' : 'lead'}>{stageLabels[d.stage] || d.stage}</Badge></td>
       <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{d.value > 0 ? formatCurrency(d.value) : '—'}</td>
       <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', fontWeight: 700, color: 'var(--gw-green)' }}>{formatCurrency(d.take)}</td>
       <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', color: 'var(--gw-mist)' }}>{d.split_pct != null ? `${d.split_pct}%` : '—'}</td>

@@ -1,7 +1,8 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
-import { formatCurrency, formatDate, STAGE_LABELS } from '../lib/helpers.js'
+import { formatCurrency, formatDate } from '../lib/helpers.js'
+import { useStageLabels } from '../lib/stageLabelContext.js'
 import { getClosingGate, gateBadge } from '../lib/compliance.js'
 import { daysBetween } from '../lib/pipeline.js'
 import { TABLES, REVIEW_STATUS } from '../lib/constants.js'
@@ -24,6 +25,7 @@ const STATUS_TABS = [
 ]
 
 export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin }) {
+  const stageLabels = useStageLabels()
   const deals       = db.deals       || []
   const agents      = db.agents      || []
   const commissions = db.commissions || []
@@ -149,7 +151,7 @@ export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin })
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                       <strong style={{ fontSize: 14 }}>{deal.title}</strong>
                       <Badge variant={deal.prop_category === 'commercial' ? 'commercial' : 'residential'}>
-                        {STAGE_LABELS[deal.stage]}
+                        {stageLabels[deal.stage]}
                       </Badge>
                       {deal.value > 0 && <span style={{ fontSize: 12, color: 'var(--gw-mist)' }}>{formatCurrency(deal.value)}</span>}
                       {deal.expected_close_date && <span style={{ fontSize: 12, color: 'var(--gw-mist)' }}>Closes {formatDate(deal.expected_close_date)}</span>}
