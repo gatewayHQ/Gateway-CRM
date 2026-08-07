@@ -45,6 +45,22 @@ export function friendlyDbError(error) {
 
   // 23503 = foreign_key_violation
   if (code === '23503') {
+    // A DELETE that trips this is the other direction from the usual case: rows
+    // elsewhere still point AT the record being removed. That happens when a
+    // referencing table's foreign key predates its `on delete` action — the
+    // classic one being another agent's tasks on a shared deal, which RLS keeps
+    // the deleting agent from clearing themselves. Name the blocking table so
+    // the fix is one migration away rather than a mystery.
+    // Postgres names two tables here — "update or delete on table "deals"
+    // violates ... on table "tasks"". The BLOCKING one is the last, and it is
+    // the only one the agent doesn't already know about.
+    const named = [...msg.matchAll(/on table "([^"]+)"/gi)].map(m => m[1])
+    const blocking = named.length > 1 ? named[named.length - 1] : null
+    if (/still referenced|update or delete/i.test(msg)) {
+      return `This can't be deleted yet — ${blocking ? `records in "${blocking}"` : 'other records'} still link to it, `
+        + 'and some of them belong to another agent. Ask an admin to apply the latest database migration '
+        + '(it makes those links clear themselves).'
+    }
     return 'A linked record (such as the assigned agent) no longer exists. Refresh the page and try again.'
   }
 

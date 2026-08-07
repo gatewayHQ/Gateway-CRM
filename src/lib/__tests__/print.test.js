@@ -69,6 +69,32 @@ describe('printPdfFromUrl', () => {
     expect(events).toContain('remove')
   })
 
+  it('ignores the frame\'s initial about:blank load — that was the blank print dialog', async () => {
+    // An iframe appended to the document fires `load` for about:blank before the
+    // blob arrives. Printing on it put an empty sheet in front of the agent, who
+    // cancelled it and only then saw the real document. One load, one print.
+    const { doc, frame, events } = fakeDom()
+    let href = 'about:blank'
+    frame.contentWindow.location = { get href() { return href } }
+    vi.stubGlobal('URL', { createObjectURL: () => 'blob:abc', revokeObjectURL: () => {} })
+
+    const done = printPdfFromUrl('https://storage/x.pdf', { fetchImpl: okFetch, doc })
+    await new Promise(r => setTimeout(r, 0))   // the fake fires its load here — about:blank
+    expect(events).not.toContain('print')
+    href = 'blob:abc'
+    frame.onload()                       // the blob is now showing
+    await done
+    expect(events.filter(e => e === 'print')).toHaveLength(1)
+  })
+
+  it('prints once even if the frame fires load again', async () => {
+    const { doc, frame, events } = fakeDom()
+    vi.stubGlobal('URL', { createObjectURL: () => 'blob:abc', revokeObjectURL: () => {} })
+    await printPdfFromUrl('https://storage/x.pdf', { fetchImpl: okFetch, doc })
+    frame.onload()
+    expect(events.filter(e => e === 'print')).toHaveLength(1)
+  })
+
   it('marks the frame hidden from assistive tech — it holds bytes, not content', async () => {
     const { doc, frame } = fakeDom()
     vi.stubGlobal('URL', { createObjectURL: () => 'blob:abc', revokeObjectURL: () => {} })

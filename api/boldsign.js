@@ -448,14 +448,25 @@ export async function trackDocument(supabase, { dealId, agentId, documentId, sig
 // window.print() prints OUR page chrome, not BoldSign's canvas. The printable copy
 // has to be built from BoldSign's own bytes.
 //
-// WHAT THIS DOES NOT DO: draw the field boxes onto the page. BoldSign's `bounds`
-// origin and units could not be confirmed (their docs are WAF-blocked from here),
+// WHAT THIS DOES NOT DO: draw EMPTY field boxes onto the page. BoldSign's `bounds`
+// origin and units could not be confirmed from their docs (WAF-blocked from here),
 // and this file already retired one coordinate-guessing feature for exactly that
 // reason — see "RETIRED: pixel/point coordinate auto-placement" below. A printout
 // with signature boxes in almost-the-right-place is worse than none: it looks
-// authoritative and is quietly wrong. Instead the copy carries a SIGNING SUMMARY
-// page listing every field by page, signer and type, which is derived from data
-// BoldSign states outright and so cannot be subtly incorrect.
+// authoritative and is quietly wrong.
+//
+// WHAT IT DOES DO: print the VALUES a field already carries. BoldSign hands back
+// the original file for a document that hasn't been signed — every box the agent
+// ticked and every date they typed is in the properties payload, not in the
+// bytes — so a review copy of a filled-out draft came out completely blank, which
+// is the one thing an agent printing a draft is trying to check. Those values are
+// drawn onto the pages, and the scale is DERIVED rather than assumed:
+//   1. BoldSign's own page dimensions, when the properties payload carries them —
+//      exact, no guessing at all.
+//   2. Otherwise the largest of the two candidate mappings (points 1:1, or pixels
+//      at 96 DPI → 0.75) under which EVERY field still lands inside its page.
+// If neither validates, nothing is drawn — the summary page still lists each
+// field with its value, so the agent loses placement, never information.
 //
 // Appended rather than prepended: page 1 of the printout stays page 1 of the
 // agreement, so a printed packet still matches what everyone refers to as "page 1".
@@ -483,9 +494,144 @@ export function buildSigningSummary(props) {
   return { signers, total }
 }
 
+// A checkbox/radio value comes back in several spellings depending on how it was
+// set (API prefill, the embedded editor, a signer's click). Anything that isn't
+// one of the recognized "on" forms is treated as unticked — a mark printed on a
+// box the client did not agree to is the failure worth avoiding here.
+const CHECKED_VALUES = new Set(['true', 'on', 'yes', 'checked', '1', 'x'])
+export function isCheckedValue(v) {
+  if (v === true) return true
+  return CHECKED_VALUES.has(String(v ?? '').trim().toLowerCase())
+}
+
+const TICKABLE_TYPES = new Set(['CheckBox', 'RadioButton'])
+
+// Every field that carries a value, flattened across signers and sender-filled
+// common fields, with the geometry needed to place it. Fields with no value are
+// skipped outright — an empty box is exactly what this must not draw.
+export function collectFilledFields(props) {
+  const out = []
+  const take = (f) => {
+    const type = normalizeFieldType(f?.type || f?.fieldType) || ''
+    const b = f?.bounds || {}
+    const x = num(b.x), y = num(b.y), width = num(b.width), height = num(b.height)
+    if (x == null || y == null || !width || !height) return
+    const ticked = TICKABLE_TYPES.has(type)
+    const raw = f?.value
+    if (ticked) {
+      if (!isCheckedValue(raw)) return
+    } else if (raw == null || String(raw).trim() === '') return
+    out.push({
+      page: num(f?.pageNumber, 1), type, x, y, width, height,
+      value: ticked ? 'X' : String(raw).trim(),
+      fontSize: num(f?.fontSize),
+      ticked,
+    })
+  }
+  for (const s of (props?.signerDetails || [])) for (const f of (s?.formFields || [])) take(f)
+  for (const f of (props?.commonFields || [])) take(f)
+  return out
+}
+
+// BoldSign's own per-page dimensions, if the properties payload carries them.
+// The key has been seen under a few names across API versions; all of them are a
+// list of { pageNumber, width, height }, so read whichever is present.
+export function boldsignPageSizes(props) {
+  const list = props?.documentPageDetails || props?.pageDetails || props?.pages || []
+  const sizes = new Map()
+  for (const [i, p] of (Array.isArray(list) ? list : []).entries()) {
+    const w = num(p?.width), h = num(p?.height)
+    if (!w || !h) continue
+    sizes.set(num(p?.pageNumber, i + 1), { width: w, height: h })
+  }
+  return sizes
+}
+
+// Points per unit for BoldSign's bounds, decided from evidence rather than
+// assumption. `pdfPages` is [{ width, height }] in PDF points, 0-indexed by page
+// number - 1. Returns a positive scale, or null when nothing validates (and so
+// nothing should be drawn).
+export function resolveBoundsScale({ fields = [], pdfPages = [], boldsignSizes = new Map() } = {}) {
+  if (!fields.length || !pdfPages.length) return null
+
+  // 1. Exact: BoldSign told us how big it thinks the page is.
+  for (const [pageNo, size] of boldsignSizes) {
+    const pdf = pdfPages[pageNo - 1]
+    if (!pdf?.width || !size.width) continue
+    const s = pdf.width / size.width
+    if (s > 0.05 && s < 20) return s
+  }
+
+  // 2. Otherwise the largest candidate under which every field still fits its
+  //    page. Points (1) and pixels-at-96-DPI (0.75) are the only two mappings
+  //    BoldSign is documented to use; a document whose fields reach past the
+  //    right or bottom edge at 1 can only be the second.
+  const fits = (s) => fields.every(f => {
+    const pdf = pdfPages[f.page - 1]
+    if (!pdf) return false
+    const slack = 2   // a field flush with the edge shouldn't disqualify a mapping
+    return f.x * s >= -slack
+      && f.y * s >= -slack
+      && (f.x + f.width)  * s <= pdf.width  + slack
+      && (f.y + f.height) * s <= pdf.height + slack
+  })
+  for (const s of [1, 0.75]) if (fits(s)) return s
+  return null
+}
+
+// Draw each filled value where BoldSign holds it. Returns how many were drawn —
+// 0 means the scale could not be established and the summary is doing all the
+// work, which the caller says out loud on the summary page.
+export async function drawFilledValues(pdfDoc, props) {
+  const { StandardFonts, rgb } = await import('pdf-lib')
+  const fields = collectFilledFields(props)
+  if (!fields.length) return 0
+
+  const pages    = pdfDoc.getPages()
+  const pdfPages = pages.map(p => ({ width: p.getWidth(), height: p.getHeight() }))
+  const scale    = resolveBoundsScale({ fields, pdfPages, boldsignSizes: boldsignPageSizes(props) })
+  if (!scale) {
+    console.warn('[boldsign] print: could not establish a bounds scale — values are listed in the summary only')
+    return 0
+  }
+
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
+  const ink  = rgb(0.05, 0.08, 0.45)   // ink blue: reads as fill-in, not as printed form text
+  let drawn = 0
+
+  for (const f of fields) {
+    const page = pages[f.page - 1]
+    if (!page) continue
+    const h = page.getHeight()
+    const boxW = f.width * scale
+    const boxH = f.height * scale
+    const left = f.x * scale
+    // BoldSign measures from the TOP-left of the page; pdf-lib draws from the
+    // bottom-left, so the box's top edge becomes (page height − y).
+    const top  = h - (f.y * scale)
+
+    // Fit the text to the box: never taller than the box, never wider either.
+    let size = Math.min(f.fontSize ? f.fontSize * scale : 10, Math.max(boxH * 0.8, 5))
+    let text = String(f.value)
+    const widthAt = (s) => font.widthOfTextAtSize(text, s)
+    while (size > 4.5 && widthAt(size) > boxW) size -= 0.5
+    if (widthAt(size) > boxW) {
+      // Still too wide at the floor — truncate rather than spill across the form.
+      while (text.length > 1 && font.widthOfTextAtSize(`${text}…`, size) > boxW) text = text.slice(0, -1)
+      text = `${text}…`
+    }
+
+    const x = f.ticked ? left + Math.max((boxW - widthAt(size)) / 2, 0) : left + 1
+    const y = top - boxH + Math.max((boxH - size) / 2, 0)
+    page.drawText(text, { x, y, size, font, color: ink })
+    drawn++
+  }
+  return drawn
+}
+
 // Draw the summary onto one or more appended US Letter pages. Plain Helvetica at
 // 10-11pt: this is a working document an agent marks up, not a brand surface.
-async function appendSigningSummary(pdfDoc, { summary, documentName, status }) {
+async function appendSigningSummary(pdfDoc, { summary, documentName, status, valuesDrawn = 0, valuesTotal = 0 }) {
   const { StandardFonts, rgb } = await import('pdf-lib')
   const font     = await pdfDoc.embedFont(StandardFonts.Helvetica)
   const bold     = await pdfDoc.embedFont(StandardFonts.HelveticaBold)
@@ -512,6 +658,15 @@ async function appendSigningSummary(pdfDoc, { summary, documentName, status }) {
   if (!summary.total) {
     line('No fields have been placed yet.', { size: 11 })
     line('Nothing will be requested from a signer until fields are placed in BoldSign.', { size: 10, color: muted })
+  }
+
+  // An unsigned document's entries live in BoldSign, not in its pages, so say
+  // which of the two the paper in the agent's hand is showing.
+  if (valuesTotal) {
+    line(valuesDrawn
+      ? `${valuesDrawn} filled value${valuesDrawn === 1 ? '' : 's'} printed on the pages above in blue — these are entries, not part of the form.`
+      : `${valuesTotal} field${valuesTotal === 1 ? ' has' : 's have'} a value that could not be placed on the page. They are listed below instead.`,
+      { size: 10, color: muted, gap: 20 })
   }
 
   for (const s of summary.signers) {
@@ -542,10 +697,16 @@ async function appendSigningSummary(pdfDoc, { summary, documentName, status }) {
 export async function buildPrintablePdf({ pdfBytes, props, documentName }) {
   const { PDFDocument } = await import('pdf-lib')
   const doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true })
+  // Values first, onto the document's OWN pages — the summary is appended after,
+  // so it never gets an overlay of its own.
+  const valuesTotal = collectFilledFields(props).length
+  const valuesDrawn = valuesTotal ? await drawFilledValues(doc, props) : 0
   await appendSigningSummary(doc, {
     summary: buildSigningSummary(props),
     documentName,
     status: normalizeStatus(props?.status),
+    valuesDrawn,
+    valuesTotal,
   })
   return Buffer.from(await doc.save({ useObjectStreams: true }))
 }
@@ -1494,29 +1655,58 @@ export default async function handler(req, res) {
 
     // Delete a draft/unsigned/expired document to keep the Signatures tab tidy.
     // Deliberately refuses to delete a 'completed' record — that's the signed
-    // legal record and shouldn't be casually removable from the CRM. BoldSign
-    // requires a document be completed/revoked/declined before DELETE, so an
-    // in-progress (draft/sent) document is revoked first.
+    // legal record and shouldn't be casually removable from the CRM.
+    //
+    // A DRAFT IS NOT REVOKED FIRST. Revoke means "recall a document that is out
+    // with signers"; BoldSign answers a bare 403 "Forbidden" when it is asked to
+    // revoke a document that was never sent. Only a 400 was tolerated here, so
+    // that 403 propagated and the agent got "Forbidden" for the one status that
+    // is always safe to delete — their own unsent draft. Revocation is now
+    // limited to documents actually in flight, and a refusal from it is never
+    // fatal on its own: what matters is whether the DELETE succeeds.
     if (body.action === 'document-delete') {
       const id = body.envelopeId || body.documentId
       if (!id) return res.status(400).json({ error: 'documentId required' })
-      const svc = getServiceClient()
-      const { data: record } = await svc.from('boldsign_documents')
-        .select('id, deal_id, agent_id, status, document_name').eq('document_id', id).maybeSingle()
-      if (!record) return res.status(404).json({ error: 'Document not found' })
+      const svc    = getServiceClient()
+      const record = await resolveDocumentRecord(svc, id, { verb: 'delete' })
       if (record.status === 'completed') {
         return res.status(400).json({ error: 'Completed documents are the signed record and cannot be deleted here.' })
       }
-      if (!actor.isAdmin && record.agent_id !== actor.agent.id) {
-        return res.status(403).json({ error: 'Only the sender or an admin can delete this document' })
+
+      // Trust BoldSign over our own row for what this document IS — a missed Sent
+      // webhook leaves a row saying 'draft' for something a client already has,
+      // and that one must still be recalled before it is deleted.
+      let live = record.status
+      try {
+        const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+        live = normalizeStatus(props?.status) || record.status
+      } catch (e) {
+        console.warn(`[boldsign] delete: could not read status for ${id} (${e.message}) — using the CRM's "${record.status}"`)
+      }
+      if (live === 'completed') {
+        return res.status(400).json({ error: 'This document is now fully signed — it is the signed record and cannot be deleted here.' })
       }
 
-      if (!['revoked', 'voided', 'declined'].includes(record.status)) {
+      const settled = ['draft', 'revoked', 'voided', 'declined', 'expired'].includes(live)
+      if (!settled) {
         try { await boldsign(`/document/revoke?documentId=${encodeURIComponent(id)}`, { method: 'POST', json: { message: 'Removed from Gateway CRM' } }) }
-        catch (e) { if (e.status !== 400) throw e }   // 400 here typically means "already not in progress" — fine
+        catch (e) {
+          // 400/403 here means BoldSign considers it not-in-progress after all.
+          if (![400, 403].includes(e.status)) throw e
+          console.warn(`[boldsign] delete: revoke of ${id} refused (${e.status}) — deleting anyway`)
+        }
       }
       try { await boldsign(`/document/delete?documentId=${encodeURIComponent(id)}&deletePermanently=false`, { method: 'DELETE' }) }
-      catch (e) { if (e.status !== 404) throw e }
+      catch (e) {
+        // Already gone there, or BoldSign will not let this account remove it. For
+        // a document no signer ever received, the CRM row is the only thing the
+        // agent is actually trying to clear, so a refusal must not strand it in
+        // the Signatures tab — remove the row and note it in the log.
+        if (e.status === 404) { /* already gone in BoldSign */ }
+        else if (live === 'draft' && [400, 403].includes(e.status)) {
+          console.warn(`[boldsign] delete: BoldSign refused to remove draft ${id} (${e.status}: ${e.message}) — clearing the CRM row only`)
+        } else throw e
+      }
 
       await svc.from('audit_log').insert([{
         table_name: 'boldsign_documents', record_id: record.id, deal_id: record.deal_id, actor_id: actor.agent.id,
@@ -1653,10 +1843,17 @@ export default async function handler(req, res) {
         defaultEmail: r.signerEmail || r.defaultSignerEmail || '',
       }))
       const rawFields = data.formFields || data.fields || []
+      // label/options/value ride along so the send modal can render a real control
+      // per field — a tick box for a CheckBox, the template's own choices for a
+      // Dropdown — instead of a bare text input for everything.
       const fields = rawFields.map(f => ({
         id:        f.id || f.fieldId || f.name,
         type:      f.fieldType || f.type,
         roleIndex: f.roleIndex != null ? Number(f.roleIndex) : (f.signerIndex != null ? Number(f.signerIndex) : null),
+        label:     f.label || f.placeholder || f.placeHolder || '',
+        required:  Boolean(f.isRequired),
+        value:     f.value != null ? String(f.value) : '',
+        ...(Array.isArray(f.dropdownOptions) && f.dropdownOptions.length ? { options: f.dropdownOptions } : {}),
       })).filter(f => f.id)
       return res.json({ roles, fields })
     }

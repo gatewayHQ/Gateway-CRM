@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload } from '../boldsign.js'
+import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -810,5 +810,89 @@ describe('buildPrintablePdf — the document, plus a summary that cannot be subt
     const out = await buildPrintablePdf({ pdfBytes: await sourcePdf(2), props: { status: 'Draft' }, documentName: 'Empty' })
     const { PDFDocument } = await import('pdf-lib')
     expect((await PDFDocument.load(out)).getPageCount()).toBe(3)
+  })
+
+  it('prints a filled draft with its values on the pages, not just in the summary', async () => {
+    // The bug this covers: BoldSign hands back the ORIGINAL file for an unsent
+    // document, so a draft an agent had filled out printed completely blank.
+    const filled = {
+      status: 'Draft',
+      signerDetails: [{ signerRole: 'Seller', order: 1, formFields: [
+        { type: 'CheckBox', pageNumber: 1, value: 'true',   bounds: { x: 60, y: 100, width: 12, height: 12 } },
+        { type: 'Textbox',  pageNumber: 1, value: 'Polk',   bounds: { x: 200, y: 140, width: 120, height: 18 } },
+      ] }],
+    }
+    const before = await buildPrintablePdf({ pdfBytes: await sourcePdf(1), props: { status: 'Draft' }, documentName: 'x' })
+    const after  = await buildPrintablePdf({ pdfBytes: await sourcePdf(1), props: filled, documentName: 'x' })
+    // Same source, same page count — the difference is drawn content on page 1.
+    const { PDFDocument } = await import('pdf-lib')
+    expect((await PDFDocument.load(after)).getPageCount()).toBe(2)
+    expect(after.length).toBeGreaterThan(before.length)
+  })
+})
+
+// ─── Printing a draft's own entries ───────────────────────────────────────────
+describe('collectFilledFields — only what the agent actually entered', () => {
+  const bounds = { x: 10, y: 20, width: 100, height: 16 }
+
+  it('takes valued fields from signers and from sender-filled common fields', () => {
+    const out = collectFilledFields({
+      signerDetails: [{ formFields: [{ type: 'Textbox', pageNumber: 2, value: 'Polk', bounds }] }],
+      commonFields:  [{ type: 'Label', pageNumber: 1, value: 'Gateway', bounds }],
+    })
+    expect(out.map(f => f.value)).toEqual(['Polk', 'Gateway'])
+    expect(out[0].page).toBe(2)
+  })
+
+  it('skips empty fields — an unfilled box must never be drawn onto the form', () => {
+    expect(collectFilledFields({ signerDetails: [{ formFields: [
+      { type: 'Textbox',   pageNumber: 1, value: '',   bounds },
+      { type: 'Textbox',   pageNumber: 1, value: '  ', bounds },
+      { type: 'Signature', pageNumber: 1, bounds },
+    ] }] })).toEqual([])
+  })
+
+  it('marks a ticked box with an X and ignores one that is merely present', () => {
+    const on = collectFilledFields({ signerDetails: [{ formFields: [{ type: 'CheckBox', pageNumber: 1, value: 'true', bounds }] }] })
+    expect(on[0]).toMatchObject({ value: 'X', ticked: true })
+    for (const v of ['false', '', 'off', 'no', null]) {
+      expect(collectFilledFields({ signerDetails: [{ formFields: [{ type: 'CheckBox', pageNumber: 1, value: v, bounds }] }] })).toEqual([])
+    }
+  })
+
+  it('drops a field with no usable geometry rather than stacking it at the corner', () => {
+    expect(collectFilledFields({ commonFields: [{ type: 'Textbox', pageNumber: 1, value: 'x' }] })).toEqual([])
+  })
+})
+
+describe('resolveBoundsScale — derived from evidence, never assumed', () => {
+  const pdfPages = [{ width: 612, height: 792 }]
+  const field = (o = {}) => ({ page: 1, x: 100, y: 100, width: 100, height: 20, ...o })
+
+  it('uses BoldSign\'s own page width when the payload carries it', () => {
+    const sizes = new Map([[1, { width: 816, height: 1056 }]])   // letter at 96 DPI
+    expect(resolveBoundsScale({ fields: [field()], pdfPages, boldsignSizes: sizes })).toBeCloseTo(0.75)
+  })
+
+  it('falls back to points (1:1) when every field fits at that scale', () => {
+    expect(resolveBoundsScale({ fields: [field()], pdfPages })).toBe(1)
+  })
+
+  it('picks the 96-DPI mapping when a field would otherwise run off the page', () => {
+    expect(resolveBoundsScale({ fields: [field({ x: 700, width: 80 })], pdfPages })).toBe(0.75)
+  })
+
+  it('gives up rather than guess when nothing fits — the summary then carries the values', () => {
+    expect(resolveBoundsScale({ fields: [field({ x: 5000 })], pdfPages })).toBeNull()
+    expect(resolveBoundsScale({ fields: [], pdfPages })).toBeNull()
+    expect(resolveBoundsScale({ fields: [field()], pdfPages: [] })).toBeNull()
+  })
+
+  it('reads page sizes under whichever key the properties payload used', () => {
+    for (const key of ['documentPageDetails', 'pageDetails', 'pages']) {
+      const sizes = boldsignPageSizes({ [key]: [{ pageNumber: 1, width: 816, height: 1056 }] })
+      expect(sizes.get(1)).toEqual({ width: 816, height: 1056 })
+    }
+    expect(boldsignPageSizes({}).size).toBe(0)
   })
 })
