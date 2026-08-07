@@ -14,6 +14,7 @@ import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
 import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
+import { propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty } from '../lib/dealPeople.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { documentEmbedUrl, documentEditUrl, captureLayout, documentPrintUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
@@ -2401,6 +2402,8 @@ function PortalTab({ deal }) {
 
 // Reconcile a deal's additional-contact link rows (deal_contacts) to match the
 // chosen id list — inserts new links, deletes removed ones. Best-effort.
+// Returns true when rows actually changed, so the caller only refreshes state
+// (which re-runs the drawer's seeding effect) when there is something new.
 async function syncDealContacts(dealId, contactIds) {
   try {
     const { data: existing } = await supabase.from('deal_contacts').select('contact_id').eq('deal_id', dealId)
@@ -2410,7 +2413,22 @@ async function syncDealContacts(dealId, contactIds) {
     const toRemove = [...have].filter(id => !want.has(id))
     if (toAdd.length)    await supabase.from('deal_contacts').insert(toAdd.map(contact_id => ({ deal_id: dealId, contact_id })))
     if (toRemove.length) await supabase.from('deal_contacts').delete().eq('deal_id', dealId).in('contact_id', toRemove)
-  } catch (e) { console.error('[syncDealContacts]', e) }
+    return toAdd.length + toRemove.length > 0
+  } catch (e) { console.error('[syncDealContacts]', e); return false }
+}
+
+// Pull a deal's link rows back into global state after writing them. The drawer
+// re-seeds its picker from `db.dealContacts` — with a stale (pre-save) copy it
+// would reopen empty, and the reconcile above would then delete the very links
+// that were just inserted. App's loader only refetches these on a full reload.
+export async function reloadDealContacts(setDb, dealId) {
+  if (!setDb || !dealId) return
+  const { data, error } = await supabase.from('deal_contacts').select('*').eq('deal_id', dealId)
+  if (error) return   // table missing (pre-0021) — leave state as it was
+  setDb(p => ({
+    ...p,
+    dealContacts: [...(p.dealContacts || []).filter(r => r?.deal_id !== dealId), ...(data || [])],
+  }))
 }
 
 // ── Commission entry (deal Details tab) ──────────────────────────────────────
@@ -2504,7 +2522,7 @@ export function dealContactIdsFor(dealContacts, dealId) {
     .sort()
 }
 
-export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], activeAgent, onSave, initialTab = 'details' }) {
+export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], propertyContacts = [], activeAgent, onSave, setDb, initialTab = 'details' }) {
   const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, commission_type:'percent', commission_pct:'', commission_flat:'' }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
@@ -2552,6 +2570,60 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
     // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately keyed on
     // the deal's IDENTITY and its contacts' CONTENT; see the comment above.
   }, [deal?.id, open, initialTab, dealContactKey])
+
+  // ── Carry the linked property's extra contacts into the picker ─────────────
+  // "Start Deal" copies the property's Additional Contacts onto the new deal, so
+  // a co-owner normally arrives here as a real deal_contacts row and seeds a
+  // signer row of their own. Deals that never got that copy — converted before
+  // the carry-over shipped, or built from scratch and linked to a property later
+  // — had nothing, and the co-owner silently missed the signature packet.
+  //
+  // So an EMPTY picker seeds from the property. A picker that already has
+  // someone in it is left alone: re-adding a person the agent deliberately
+  // removed from this deal would put them back on the next send, which is
+  // exactly the silent behavior worth avoiding. Those show up as a one-click
+  // "also on the property" suggestion under the field instead.
+  const propertyContactKey = propertyContactIds(propertyContacts, form.property_id).slice().sort().join(',')
+  const propertySeedRef = useRef('')
+
+  // People the agent has taken off this deal. Removing the LAST extra empties
+  // the picker, which reads exactly like "this deal never had one" — without
+  // this, the property would seed them back on the next open and the removal
+  // would never stick. Kept for the session; they remain one click away below.
+  const removedRef = useRef({ dealKey: '', ids: [] })
+  const changeAdditionalContacts = (next) => {
+    const dealKey = deal?.id || 'new'
+    const known = removedRef.current.dealKey === dealKey ? removedRef.current.ids : []
+    // Anyone previously removed or currently picked, who isn't in the new list.
+    // Re-adding someone drops them from the memory by the same rule.
+    removedRef.current = {
+      dealKey,
+      ids: [...new Set([...known, ...additionalContactIds])].filter(id => !next.includes(id)),
+    }
+    setAdditionalContactIds(next)
+  }
+  React.useEffect(() => {
+    if (!open) { propertySeedRef.current = ''; return }
+    // The key includes the property's link CONTENT, so rows that arrive after
+    // the drawer opened can still seed an empty picker. Nothing is ever
+    // overwritten — `prev.length` below is what protects a curated list.
+    const seedKey = `${deal?.id || 'new'}:${form.property_id || ''}:${propertyContactKey}`
+    if (propertySeedRef.current === seedKey) return
+    propertySeedRef.current = seedKey
+    setAdditionalContactIds(prev => seedPickerFromProperty({
+      selectedIds: prev, propertyId: form.property_id, propertyContacts, primaryContactId: form.contact_id,
+      excludeIds: removedRef.current.dealKey === (deal?.id || 'new') ? removedRef.current.ids : [],
+    }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the deal's
+    // IDENTITY and the property links' CONTENT, like the seeding effect above.
+  }, [open, deal?.id, form.property_id, form.contact_id, propertyContactKey])
+
+  // Anyone left on the property who isn't on the deal — offered, never forced.
+  const propertyOnlyIds = propertyExtrasNotOnDeal({
+    propertyId: form.property_id, propertyContacts,
+    selectedIds: additionalContactIds, primaryContactId: form.contact_id,
+  })
+  const propertyOnlyContacts = propertyOnlyIds.map(id => contacts.find(c => c.id === id)).filter(Boolean)
 
   // Resolved additional-contact objects — used for the "Send from Template"
   // signer prefill on the Signatures tab (co-signers get their own rows).
@@ -2646,8 +2718,12 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         pushToast(friendlyDbError(error) || error.message, 'error'); return
       }
 
-      // Sync additional contacts (best-effort — the deal itself is already saved).
-      if (savedId) await syncDealContacts(savedId, additionalContactIds)
+      // Sync additional contacts (best-effort — the deal itself is already saved),
+      // then mirror the result into global state so the picker and the deal page's
+      // People card read the rows that now exist.
+      if (savedId && await syncDealContacts(savedId, additionalContactIds)) {
+        await reloadDealContacts(setDb, savedId)
+      }
 
       const coAgentWarning = coAgentsDropped && seededCoAgents.length
         ? 'Deal saved, but its co-agents were not — ask an admin to apply database migration 0025.'
@@ -2746,8 +2822,19 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
             <div className="form-group"><label className="form-label">Contact</label><SearchDropdown items={contacts} value={form.contact_id} onSelect={v=>set('contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
             <div className="form-group">
               <label className="form-label">Additional Contacts</label>
-              <ContactMultiSelect contacts={contacts} selectedIds={additionalContactIds} onChange={setAdditionalContactIds} excludeId={form.contact_id} placeholder="Add co-buyer, spouse, co-owner…" />
+              <ContactMultiSelect contacts={contacts} selectedIds={additionalContactIds} onChange={changeAdditionalContacts} excludeId={form.contact_id} placeholder="Add co-buyer, spouse, co-owner…" />
               <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Husband &amp; wife, co-buyers, co-owners — these also pre-fill as signers when you Send from Template.</div>
+              {propertyOnlyContacts.length > 0 && (
+                <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 6, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span>Also on this property:</span>
+                  {propertyOnlyContacts.map(c => (
+                    <button key={c.id} type="button" className="btn btn--ghost btn--sm" style={{ fontSize: 11, padding: '1px 7px' }}
+                      onClick={() => changeAdditionalContacts([...additionalContactIds, c.id])}>
+                      + {c.first_name} {c.last_name}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
             <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
@@ -3645,7 +3732,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
       <DealDrawer open={drawer} onClose={() => setDrawer(false)}
         deal={editing ? editing : { stage: defaultStage }}
-        agents={agents} contacts={contacts} properties={properties} dealContacts={dealContacts} activeAgent={activeAgent} onSave={reload} />
+        agents={agents} contacts={contacts} properties={properties} dealContacts={dealContacts} propertyContacts={db.propertyContacts || []} activeAgent={activeAgent} onSave={reload} setDb={setDb} />
       {confirm && <ConfirmDialog message="This will permanently delete this deal." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {confirmProp && <ConfirmDialog message="Remove this listing from the pipeline? Any linked deals are kept but will be unlinked from the property." onConfirm={() => delProperty(confirmProp)} onCancel={() => setConfirmProp(null)} />}
     </div>
