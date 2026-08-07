@@ -79,11 +79,14 @@ export const documentEditUrl  = (p)          => call({ action: 'document-edit-ur
 // blank template's defaults. Resolves { saved, fieldCount, reason? } — `saved:
 // false` is a normal outcome (nothing placed yet), not an error.
 export const captureLayout    = (documentId) => call({ action: 'layout-capture', documentId })
-// A printable copy of the document as it stands right now — the pages BoldSign
-// holds plus an appended signing summary (who signs what, on which page). Resolves
-// { url, filename, fieldCount }: a short-lived signed storage URL, never base64,
-// because a serverless response caps at 4.5 MB and a scanned packet exceeds it.
-export const documentPrintUrl = (documentId) => call({ action: 'document-print', documentId })
+// A downloadable PDF of the document as it stands right now — the pages BoldSign
+// holds, with every filled field value drawn onto them and any interactive form
+// flattened, plus an appended signing summary (who signs what, on which page).
+// Resolves { url, filename, fieldCount }: a short-lived signed storage URL, never
+// base64, because a serverless response caps at 4.5 MB and a scanned packet exceeds
+// it. The wire action is still `document-print` — it fed a Print button before the
+// browser's print dialog turned out to render these blank (see src/lib/savePdf.js).
+export const documentPdfUrl   = (documentId) => call({ action: 'document-print', documentId })
 export const signLink         = (p)          => call({ action: 'sign-link', ...p })
 export const getDocStatus    = (documentId) => call({ action: 'status',   documentId })
 // download/audit-download return { url, filename } — a short-lived signed

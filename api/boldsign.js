@@ -442,11 +442,13 @@ export async function trackDocument(supabase, { dealId, agentId, documentId, sig
   return true
 }
 
-// ─── Printable copy (review on paper before sending) ─────────────────────────
-// Agents want to read a packet on paper before it goes to a client — and the
-// browser cannot do it for them: the document lives in a cross-origin iframe, so
-// window.print() prints OUR page chrome, not BoldSign's canvas. The printable copy
-// has to be built from BoldSign's own bytes.
+// ─── Saveable PDF copy (review before sending, or take it to the client) ─────
+// Agents want the packet as a finished file before it goes to a client — and the
+// browser cannot produce it for them: the document lives in a cross-origin iframe,
+// so window.print() prints OUR page chrome, not BoldSign's canvas. The copy has to
+// be built from BoldSign's own bytes. It is downloaded by the client (Save PDF),
+// not pushed at the browser's print dialog — that dialog rendered these blank,
+// which is what src/lib/savePdf.js replaced.
 //
 // WHAT THIS DOES NOT DO: draw EMPTY field boxes onto the page. BoldSign's `bounds`
 // origin and units could not be confirmed from their docs (WAF-blocked from here),
@@ -697,7 +699,22 @@ async function appendSigningSummary(pdfDoc, { summary, documentName, status, val
 export async function buildPrintablePdf({ pdfBytes, props, documentName }) {
   const { PDFDocument } = await import('pdf-lib')
   const doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true })
-  // Values first, onto the document's OWN pages — the summary is appended after,
+
+  // Flatten any interactive AcroForm the SOURCE pdf brought with it, before
+  // anything is drawn. A form whose widgets have no generated appearance streams
+  // (NeedAppearances, which plenty of county/board forms ship with) renders in the
+  // browser but comes out of a print driver — and out of some PDF viewers — blank.
+  // Flattening bakes each widget's current appearance into the page content, so
+  // what the file shows is what the paper shows. Best-effort: a document with no
+  // form, or one pdf-lib cannot flatten, is left exactly as it was.
+  try {
+    const form = doc.getForm()
+    if (form.getFields().length) form.flatten()
+  } catch (err) {
+    console.warn(`[boldsign] print: could not flatten the source form (${err.message}) — using the pages as-is`)
+  }
+
+  // Values next, onto the document's OWN pages — the summary is appended after,
   // so it never gets an overlay of its own.
   const valuesTotal = collectFilledFields(props).length
   const valuesDrawn = valuesTotal ? await drawFilledValues(doc, props) : 0
@@ -722,7 +739,8 @@ export async function buildPrintablePdf({ pdfBytes, props, documentName }) {
 //   • CAPTURE reads it back from BoldSign (`/document/properties`), so what gets
 //     stored is what the agent actually left behind rather than what the app
 //     believes it sent.
-//   • APPLY pushes it onto the next draft for that deal (`/document/edit`).
+//   • APPLY pushes it onto the next draft for that deal (`PUT /document/edit`),
+//     then re-reads the draft to confirm the fields are really on it.
 //
 // Deliberately NOT saved back to the shared BoldSign template: `form_packets`
 // entries are brokerage-wide and compliance-relevant, so one deal's arrangement
@@ -947,6 +965,43 @@ export async function captureFieldLayout(supabase, { documentId, record, agentId
   }
 }
 
+// Push a set of field edits onto an existing document.
+//
+// THE ENDPOINT IS `PUT /v1/document/edit?documentId=…`. This was sent as a POST,
+// and BoldSign answers a wrong verb with a bare 405 and no body — which surfaced to
+// agents as "This deal's saved field layout could not be applied (BoldSign API 405)"
+// on every single send, so a deal never got its arrangement back. The verb is
+// confirmed against BoldSign's own SDK (`DocumentApi.editDocument` → method 'PUT',
+// path '/v1/document/edit'); the JSON body shape (signers[].formFields[] each with
+// an `editAction` and the EditFormField property names used in
+// buildLayoutEditPayload) comes from the same model definitions.
+export async function editDocumentFields(documentId, json) {
+  return boldsign(`/document/edit?documentId=${encodeURIComponent(documentId)}`, { method: 'PUT', json })
+}
+
+// A BoldSign failure, in words an agent can act on. The raw message is kept for
+// anything unrecognized — it is usually BoldSign's own validation text, which is
+// more useful than a generic sentence — but the bare status codes that carry no
+// body get a description instead of a number nobody can interpret.
+export function describeLayoutFailure(err) {
+  const status = err?.status
+  const raw    = String(err?.message || '').trim()
+  const bare   = !raw || /^BoldSign API \d+$/.test(raw)
+  if (status === 401 || status === 403) return 'BoldSign rejected the request — the API key may not have permission to edit this document'
+  if (status === 404) return 'BoldSign no longer has this draft'
+  if (status === 405) return 'BoldSign rejected the request method for its document-edit endpoint'
+  if (status === 429) return 'BoldSign is rate-limiting this account right now'
+  if (status >= 500)  return 'BoldSign had a server error'
+  return bare ? `BoldSign API ${status || 'error'}` : raw
+}
+
+// How many fields a document actually carries, across all of its signers. Used to
+// confirm a restore landed rather than trusting that a 200 means the arrangement
+// is really on the draft.
+function countSignerFields(props) {
+  return (props?.signerDetails || []).reduce((t, s) => t + (s?.formFields || []).length, 0)
+}
+
 // Apply a deal's saved layout to a freshly created draft. Also never throws: if
 // this fails the draft simply opens with the template's default placement, which
 // is the behavior that existed before layouts — a degraded send beats no send.
@@ -969,14 +1024,33 @@ export async function applyFieldLayout(supabase, { documentId, dealId, templateI
     const payload = buildLayoutEditPayload({ layout: saved.layout, signerDetails: props?.signerDetails || [] })
     if (!payload) return { applied: false, reason: 'saved layout matched none of this document\'s signers' }
 
-    await boldsign(`/document/edit?documentId=${encodeURIComponent(documentId)}`, {
-      method: 'POST',
-      json: { ...payload, ...(onBehalfOf ? { onBehalfOf } : {}) },
-    })
-    return { applied: true, fieldCount: saved.field_count }
+    await editDocumentFields(documentId, { ...payload, ...(onBehalfOf ? { onBehalfOf } : {}) })
+
+    // Confirm it landed. A 200 from /document/edit means BoldSign accepted the
+    // request, not that the draft now holds the arrangement — and the number the
+    // agent is shown ("restored 14 fields") must be what is actually on the
+    // document, not what we hoped to put there. A failed re-read is not treated as
+    // a failed restore: the edit was accepted, so the saved count is reported and
+    // the discrepancy goes to the log.
+    let fieldCount = saved.field_count
+    try {
+      const after = await boldsign(`/document/properties?documentId=${encodeURIComponent(documentId)}`)
+      const live  = countSignerFields(after)
+      if (!live) {
+        console.error(`[boldsign] layout apply for ${documentId}: BoldSign accepted the edit but reports no fields on the draft`)
+        return { applied: false, reason: 'BoldSign accepted the change but the draft came back with no fields' }
+      }
+      fieldCount = live
+    } catch (verifyErr) {
+      console.warn(`[boldsign] layout apply for ${documentId}: could not verify the restore (${verifyErr.message})`)
+    }
+    return { applied: true, fieldCount }
   } catch (err) {
-    console.error(`[boldsign] layout apply failed for ${documentId}: ${err.message}`)
-    return { applied: false, reason: err.message }
+    // The full API response is already logged by boldsign() (status + body); this
+    // adds which deal/document it was for, so one grep explains a degraded send.
+    console.error(`[boldsign] layout apply failed for document ${documentId} (deal ${dealId}, template ${templateId || 'none'}): `
+      + `status=${err?.status || 'n/a'} message=${err?.message} data=${JSON.stringify(err?.data || {}).slice(0, 1000)}`)
+    return { applied: false, reason: describeLayoutFailure(err) }
   }
 }
 
@@ -1427,9 +1501,10 @@ export default async function handler(req, res) {
       })
     }
 
-    // A printable copy of the document AS IT STANDS — available at any point before
+    // A saveable PDF of the document AS IT STANDS — available at any point before
     // the send, which is the whole point: an agent reviewing a listing packet wants
-    // it on paper before a client ever sees it.
+    // the finished file before a client ever sees it. Action name kept as
+    // `document-print` for compatibility; the UI calls it Save PDF.
     //
     // Returns a short-lived signed storage URL, never base64: a serverless response
     // is capped at 4.5 MB and a scanned packet is bigger than that, so base64 would
@@ -1482,7 +1557,7 @@ export default async function handler(req, res) {
         .upload(path, printable, { contentType: 'application/pdf', upsert: true })
       if (upErr) return res.status(500).json({ error: `Could not prepare the print copy: ${upErr.message}` })
 
-      const filename = `${String(record.document_name || 'document').replace(/\.pdf$/i, '')} (review).pdf`
+      const filename = `${String(record.document_name || 'document').replace(/\.pdf$/i, '')} (filled).pdf`
       const { data: signed, error: signErr } = await svc.storage.from(DEAL_BUCKET)
         .createSignedUrl(path, 300, { download: filename })
       if (signErr || !signed?.signedUrl) {

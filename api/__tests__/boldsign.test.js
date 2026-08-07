@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
+import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -685,6 +685,102 @@ describe('buildLayoutEditPayload — restoring a layout onto a fresh draft', () 
   })
 })
 
+describe('applyFieldLayout — the request BoldSign actually accepts', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  // One saved layout, one matching signer on the new draft. Enough to produce a
+  // real /document/edit payload so the transport is what's under test.
+  const savedRows = {
+    'template_id=tpl1': {
+      field_count: 2,
+      layout: { signers: [{ signerRole: 'Seller', order: 1, formFields: [
+        { id: 'sig', fieldType: 'Signature', pageNumber: 1, bounds: { x: 10, y: 20, width: 180, height: 35 } },
+        { id: 'ini', fieldType: 'Initial',   pageNumber: 2, bounds: { x: 10, y: 20, width: 60,  height: 25 } },
+      ] }] },
+    },
+  }
+  const draftProps = (fieldCount = 2) => JSON.stringify({
+    signerDetails: [{ id: 'n1', signerRole: 'Seller', formFields: Array.from({ length: fieldCount }, (_, i) => ({ id: `f${i}` })) }],
+  })
+
+  it('sends the edit as PUT — a POST is what returned 405 and lost every layout', async () => {
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn((url, opts) => {
+      calls.push(`${opts.method || 'GET'} ${String(url).replace(/^https:\/\/api\.boldsign\.com/, '')}`)
+      return Promise.resolve(okResp(String(url).includes('/document/properties') ? draftProps() : '{}'))
+    }))
+
+    const res = await applyFieldLayout(fakeSupabase(savedRows), {
+      documentId: 'd1', dealId: 'deal1', templateId: 'tpl1',
+    })
+    expect(res.applied).toBe(true)
+    expect(calls).toContain('PUT /v1/document/edit?documentId=d1')
+    expect(calls.filter(c => c.startsWith('POST'))).toHaveLength(0)
+  })
+
+  it('reports the applied count BoldSign confirms, not the count we hoped for', async () => {
+    // The draft comes back with 3 fields; the saved row said 2. What the agent is
+    // told has to be what is really on the document.
+    let seenProps = 0
+    vi.stubGlobal('fetch', vi.fn((url) => Promise.resolve(
+      String(url).includes('/document/properties')
+        ? okResp(draftProps(++seenProps === 1 ? 2 : 3))
+        : okResp('{}'))))
+
+    const res = await applyFieldLayout(fakeSupabase(savedRows), {
+      documentId: 'd1', dealId: 'deal1', templateId: 'tpl1',
+    })
+    expect(res).toEqual({ applied: true, fieldCount: 3 })
+  })
+
+  it('does not claim success when the draft comes back with no fields at all', async () => {
+    let seenProps = 0
+    vi.stubGlobal('fetch', vi.fn((url) => Promise.resolve(
+      String(url).includes('/document/properties')
+        ? okResp(++seenProps === 1 ? draftProps(2) : JSON.stringify({ signerDetails: [{ id: 'n1', formFields: [] }] }))
+        : okResp('{}'))))
+
+    const res = await applyFieldLayout(fakeSupabase(savedRows), {
+      documentId: 'd1', dealId: 'deal1', templateId: 'tpl1',
+    })
+    expect(res.applied).toBe(false)
+    expect(res.reason).toMatch(/no fields/i)
+  })
+
+  it('degrades to the template defaults — never throws — when BoldSign refuses', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => Promise.resolve(
+      String(url).includes('/document/properties') ? okResp(draftProps()) : errResp(403))))
+
+    const res = await applyFieldLayout(fakeSupabase(savedRows), {
+      documentId: 'd1', dealId: 'deal1', templateId: 'tpl1',
+    })
+    expect(res.applied).toBe(false)
+    expect(res.reason).toMatch(/permission/i)
+  })
+
+  it('skips the API call entirely when the deal has nothing saved', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(okResp('{}')))
+    vi.stubGlobal('fetch', fetchMock)
+    const res = await applyFieldLayout(fakeSupabase({}), { documentId: 'd1', dealId: 'deal1', templateId: 'tpl1' })
+    expect(res).toEqual({ applied: false, reason: 'no saved layout' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('describeLayoutFailure — a reason an agent can act on', () => {
+  it('translates the bare statuses that carry no body', () => {
+    expect(describeLayoutFailure({ status: 405, message: 'BoldSign API 405' })).toMatch(/request method/)
+    expect(describeLayoutFailure({ status: 404, message: 'BoldSign API 404' })).toMatch(/no longer has this draft/)
+    expect(describeLayoutFailure({ status: 401, message: '' })).toMatch(/permission/)
+    expect(describeLayoutFailure({ status: 503, message: 'BoldSign API 503' })).toMatch(/server error/)
+  })
+
+  it("keeps BoldSign's own validation text — it says more than we could", () => {
+    expect(describeLayoutFailure({ status: 400, message: 'Bounds is invalid for field sig' }))
+      .toBe('Bounds is invalid for field sig')
+  })
+})
+
 describe('isMissingLayoutStorage — un-migrated database is a provisioning state', () => {
   it('recognizes the missing table by code and by message', () => {
     expect(isMissingLayoutStorage({ code: '42P01', message: 'relation "deal_field_layouts" does not exist' })).toBe(true)
@@ -810,6 +906,29 @@ describe('buildPrintablePdf — the document, plus a summary that cannot be subt
     const out = await buildPrintablePdf({ pdfBytes: await sourcePdf(2), props: { status: 'Draft' }, documentName: 'Empty' })
     const { PDFDocument } = await import('pdf-lib')
     expect((await PDFDocument.load(out)).getPageCount()).toBe(3)
+  })
+
+  it('flattens an interactive form in the source — an unflattened one prints blank', async () => {
+    // Plenty of county/board forms ship as AcroForms whose widgets have no
+    // appearance streams. They look filled on screen and come out of a print
+    // driver empty, which is the "Print produces a blank document" report this
+    // whole path exists to answer. Flattening bakes the value into the page.
+    const { PDFDocument } = await import('pdf-lib')
+    const src = await PDFDocument.create()
+    const page = src.addPage([612, 792])
+    const form = src.getForm()
+    const field = form.createTextField('county')
+    field.setText('Polk')
+    field.addToPage(page, { x: 60, y: 600, width: 160, height: 20 })
+    const bytes = Buffer.from(await src.save())
+    expect((await PDFDocument.load(bytes)).getForm().getFields()).toHaveLength(1)
+
+    const out = await buildPrintablePdf({ pdfBytes: bytes, props: { status: 'Draft' }, documentName: 'County form' })
+    const flat = await PDFDocument.load(out)
+    expect(flat.getForm().getFields()).toHaveLength(0)
+    // The value survives as page content (a form XObject drawn into the page)
+    // rather than as a widget a print driver may decline to render.
+    expect(out.toString('latin1')).toContain('/Subtype /Form')
   })
 
   it('prints a filled draft with its values on the pages, not just in the summary', async () => {
