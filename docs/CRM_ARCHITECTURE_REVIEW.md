@@ -119,6 +119,28 @@ This nullifies the careful scoping work done on `contacts`, `deals`, and `commis
 
 ---
 
+#### ⚠️ Correction — what the live database actually shows (2026-08-07)
+
+The section above was written from `src/lib/schema.sql`. A read-only `pg_policies` diagnostic against **production** was run afterwards, and the live picture differs materially. `schema.sql` is what a *fresh install* gets, so the findings above remain accurate for that — but they are not an accurate description of the running system, and the difference cuts both ways.
+
+**Narrower than stated.** `templates`, `teams`, `team_splits`, `mailing_recipients`, `mailing_scans` and `mailing_leads` are **not** anon-reachable in production. **The mailing-address exposure described above does not exist in the live database.** `properties` and `mailings` are anon-`SELECT` only — the 2026-06-10 Phase A bundle had already closed the writes.
+
+**Wider than stated.** Seven tables unknown to `schema.sql` are open to `PUBLIC` with `ALL` (read *and* write):
+
+| Table | Why it matters |
+|---|---|
+| `canva_connections` | Orphan, no code references. The name implies stored OAuth credentials, anonymously readable and writable. The most serious single row in the diagnostic. |
+| `deal_contacts` | The repo defines this deal-scoped; production had it wide open, leaking which contacts sit on which deals. |
+| `mail_sends`, `mail_campaigns`, `mail_suppressions` | The legacy v1 mailing tables migration `0001` was written to drop. `mail_sends` holds send history keyed to `cold_call_leads` — **this is the real mailing-PII exposure, and it is writable.** |
+| `campaign_scans` | Orphan, no code references. |
+| `option_values` | Low sensitivity, but anonymously writable means anyone can pollute every dropdown in the CRM. |
+
+Also confirmed live: `agents_public_read` is `SELECT` to `PUBLIC`, exposing every agent's `cap_amount`, `default_split_pct` and `no_brokerage_split`.
+
+**The methodological lesson is the point.** `migrations/production/README.md` records that the live database predates this codebase and never received the numbered migrations. Any finding in this document derived from `schema.sql` alone describes the repo's *intent*, not production's *state* — the two have been diverging since 2026-06-10. Migration `0027` was rewritten to discover anon-reachable policies from `pg_policies` **by role rather than by name** for exactly this reason: a name-based drop would have silently no-opped against the live policy names (`prop_select`, `properties_public_read`, `"Allow all"`) while reporting success.
+
+---
+
 ## Part 3 — What Must Be Better Than kvCORE, FUB, Chime, Sierra, BoomTown
 
 Gateway will never win on breadth. It wins on these six, or it has no reason to exist:
@@ -266,7 +288,12 @@ An agent opens Gateway on their phone in a driveway in Sioux Falls, hits Cmd-K o
 
 | # | File | Severity | Finding |
 |---|---|---|---|
-| 1 | `schema.sql:300,304,421,444,942,977,998,1024` | 🔴 Critical | 8 RLS policies default to `PUBLIC`; anon read+write incl. mailing PII |
+| 1 | `schema.sql:300,304,421,444,942,977,998,1024` | 🔴 Critical | 8 RLS policies default to `PUBLIC` — anon read+write. **Fresh installs only; see the §2.5 correction for live state** |
+| 1a | live DB (`pg_policies`, 2026-08-07) | 🔴 Critical | `canva_connections` open to anon `ALL` — orphan table, name implies stored OAuth credentials |
+| 1b | live DB (`pg_policies`, 2026-08-07) | 🔴 Critical | `mail_sends`/`mail_campaigns`/`mail_suppressions` open to anon `ALL` — legacy v1 PII, writable. Fix: run migration `0001` |
+| 1c | live DB (`pg_policies`, 2026-08-07) | 🟠 High | `deal_contacts` open to anon `ALL`; repo defines it deal-scoped |
+| 1d | live DB (`pg_policies`, 2026-08-07) | 🟠 High | `agents_public_read` exposes `cap_amount` / `default_split_pct` to anon |
+| 1e | live DB (`pg_policies`, 2026-08-07) | 🟡 Medium | `campaign_scans`, `option_values` open to anon `ALL` |
 | 2 | `api/cron.js:51` | 🔴 Critical | Reminders skip all commercial + seller stages |
 | 3 | `api/cron.js` (runReminders) | 🔴 Critical | Deadline SMS sent to client; TCPA/A2P exposure |
 | 4 | `App.jsx:618` | 🟠 High | Global search input has no handler; RPCs unused |
