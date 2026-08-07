@@ -41,6 +41,18 @@ describe('friendlyDbError', () => {
       .toMatch(/first name/i)
   })
 
+  it('explains a delete blocked by rows that still point at the record', () => {
+    // The pipeline case: deleting a deal a CO-AGENT had a task on. Their task is
+    // invisible under RLS, so the agent saw only a raw Postgres string.
+    const msg = friendlyDbError({
+      code: '23503',
+      message: 'update or delete on table "deals" violates foreign key constraint "tasks_deal_id_fkey" on table "tasks"',
+    })
+    expect(msg).toMatch(/tasks/)
+    expect(msg).toMatch(/another agent/i)
+    expect(msg).toMatch(/migration/i)
+  })
+
   it('returns null for unrecognized errors so callers can fall back', () => {
     expect(friendlyDbError({ code: '42P01', message: 'relation does not exist' })).toBeNull()
   })

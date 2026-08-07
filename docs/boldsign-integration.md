@@ -287,6 +287,16 @@ BoldSign's frame throws.
 - **`document-print`** builds the copy server-side: the document exactly as BoldSign
   holds it (`/document/download`), plus an appended **SIGNING SUMMARY** page listing
   every field by page, signer, type, label and prefilled value.
+- **A filled draft prints filled.** BoldSign hands back the *original* file for a
+  document that hasn't been signed — every ticked box and typed date lives in the
+  properties payload, not in the bytes — so a review copy of a draft the agent had
+  filled out used to come off the printer blank, which is the one thing they were
+  checking. `collectFilledFields()` + `drawFilledValues()` draw those values (and
+  only those: never an empty field box) onto the pages in blue. The bounds→points
+  scale is **derived, not assumed** — BoldSign's own page dimensions when the
+  payload carries them, otherwise the largest of points-1:1 / pixels-at-96-DPI
+  under which every field still lands inside its page. If neither validates,
+  nothing is drawn and the summary says so; the values are still listed there.
 - **Returns a signed storage URL, never base64** — a serverless response caps at
   4.5 MB, so base64 would work in testing and fail on the scanned packets worth
   printing. Written to `deal-<id>/print/` and overwritten per document; the Documents
@@ -295,8 +305,12 @@ BoldSign's frame throws.
 - **`printPdfFromUrl()`** (`src/lib/print.js`) fetches the bytes, wraps them in a
   blob URL (same-origin, so printable) and prints from a hidden iframe. The iframe
   is inserted before its `src` is set — an iframe outside the document isn't
-  guaranteed to fire `load`, and the whole helper hangs off that event. Blob URLs are
-  revoked on teardown. A blocked print dialog **rejects**, so the caller falls back
+  guaranteed to fire `load`, and the whole helper hangs off that event. That insert
+  also fires a `load` for the frame's initial **about:blank**, which used to put an
+  empty sheet in the print dialog first: the agent cancelled it, the blob then
+  loaded, and only the second dialog held the document. A load event now only counts
+  once `contentWindow.location.href` is the blob URL, and it prints exactly once.
+  Blob URLs are revoked on teardown. A blocked print dialog **rejects**, so the caller falls back
   to downloading the copy rather than silently losing it.
 - **No field boxes are drawn on the page, on purpose.** BoldSign's `bounds` origin
   and units could not be confirmed (docs WAF-blocked), and this file already retired
@@ -390,6 +404,7 @@ template with the template's defaults and the agent re-did the work from memory.
 ## Drafts cleanup (Signatures tab)
 - **Filter dropdown**: Active (default — hides completed, so drafts are visible) / Drafts only / Completed only / All.
 - **Delete** (trash icon, shown on any non-`completed` row): calls `document-delete`, which **revokes** the document in BoldSign first if it's still in progress (BoldSign requires `completed`/`revoked`/`declined` before `DELETE`), then deletes it there, writes an `audit_log` entry, and removes the local `boldsign_documents` row. Completed (signed) records are refused — they're the legal record and aren't deletable from this action.
+- **A draft is never revoked first.** Revoke means "recall a document that is out with signers"; BoldSign answers a bare **403 `Forbidden`** when asked to revoke one that was never sent. Only a 400 used to be tolerated, so that 403 surfaced to the agent as "Forbidden" on the one status that is always safe to remove — their own unsent draft. The live status is read from `/document/properties` (not trusted from our row, which a missed webhook can leave stale at `draft`), revocation is limited to documents actually in flight, and a 400/403 from either call on a genuine draft is logged and stepped over so the row still clears.
 
 ## Embedded signing/sending (iFrame)
 - `<BoldSignFrame>` (`src/components/BoldSignFrame.jsx`) renders the URL and relays completion to `onDone`/`onError`. Completion is detected three ways (see the header comment), because **the embedded template editor and the document flows emit different events**:
@@ -429,6 +444,31 @@ When an agent picks a template on a deal's Signatures tab, the signer name/email
 - Any other role (e.g. Witness) keeps the template's placeholder.
 
 The agent can edit every field before sending. **Prerequisite:** the deal must have a linked Contact (`deals.contact_id`) with an email — if a deal has no contact, client rows fall back to the template placeholder (usually blank). Link co-signers via the deal drawer's **Additional Contacts** picker so they seed with real emails.
+
+## Selections the agent makes (tick boxes, dates) — set them in the CRM, not in BoldSign
+A box the agent ticks inside BoldSign's **embedded editor** is a placement-time
+preview: the agent sees "Exclusive Agency" checked, sends the packet, and the
+client opens it unchecked. That editor is for *where fields go*, not *what they
+say*. Field values only reach signers when they travel with the send, as
+`roles[].existingFormFields`.
+
+So the send modal now offers every **prefillable** field, not just the text ones:
+
+- `isFillableField()` — text/label/dropdown/date-ish → a text input, or a
+  `<select>` of the template's own options when it has them.
+- `isTickableField()` — `CheckBox` / `RadioButton` → a three-way **Signer decides /
+  Checked / Unchecked** control. Three-way on purpose: "unticked" and "left to the
+  signer" are different instructions, and collapsing them would either lock every
+  box the agent didn't touch or lose a deliberate "no" on a form where an unticked
+  box is itself a term.
+- `prefillFieldEntry()` turns each one into its `existingFormFields` entry
+  (`"true"` / `"false"` for a box) and stamps **`isReadOnly: true`** — what the
+  agent decided is what every signer sees, and none of them can change it after the
+  send. All three are pure and unit-tested in `src/lib/services/__tests__/boldsign.test.js`.
+
+`template-details` returns `label`, `required`, `value` and `options` alongside each
+field's `id`/`type`/`roleIndex` so those controls can be rendered with the
+template's own wording rather than a prettified field id.
 
 ## CRM prefill tokens
 `property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `broker_name` · `agent_name` · `agent_email` · `list_price` · `commission_pct` · `commission_amount` · `listing_start_date` · `listing_end_date` · `close_date`

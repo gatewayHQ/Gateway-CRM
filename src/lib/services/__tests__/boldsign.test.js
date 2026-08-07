@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
+import { describeTransportFailure, buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
 
 describe('buildTextTag', () => {
   it('builds the {{fieldType|signerIndex|required|label|fieldId}} syntax', () => {
@@ -75,6 +75,44 @@ describe('isFillableField', () => {
   it('treats Signature/Initial as NOT fillable (signer actions)', () => {
     expect(isFillableField('Signature')).toBe(false)
     expect(isFillableField('Initial')).toBe(false)
+  })
+  it('keeps tick boxes out of the text inputs but inside the prefillable set', () => {
+    expect(isFillableField('CheckBox')).toBe(false)
+    expect(isTickableField('CheckBox')).toBe(true)
+    expect(isTickableField('RadioButton')).toBe(true)
+    expect(isPrefillableField('CheckBox')).toBe(true)
+    expect(isPrefillableField('Signature')).toBe(false)
+  })
+})
+
+describe('prefillFieldEntry — what the agent decided reaches the signers, locked', () => {
+  const tick = { id: 'exclusive_agency', type: 'CheckBox' }
+  const text = { id: 'county', type: 'Textbox' }
+
+  it('sends a ticked box as a real value the signer cannot change', () => {
+    // The reported bug: a box the agent ticked in BoldSign's editor showed
+    // unchecked when the client opened the document. Ticked in the CRM it goes
+    // out as an actual field value, read-only.
+    expect(prefillFieldEntry(tick, true)).toEqual({ id: 'exclusive_agency', value: 'true', isReadOnly: true })
+  })
+
+  it('sends a deliberately cleared box too — an unticked term is still a term', () => {
+    expect(prefillFieldEntry(tick, false)).toEqual({ id: 'exclusive_agency', value: 'false', isReadOnly: true })
+  })
+
+  it('leaves an untouched box for the signer rather than locking it', () => {
+    expect(prefillFieldEntry(tick, null)).toBeNull()
+    expect(prefillFieldEntry(tick, undefined)).toBeNull()
+    expect(prefillFieldEntry(tick, '')).toBeNull()
+  })
+
+  it('locks typed text and skips blanks', () => {
+    expect(prefillFieldEntry(text, ' Polk ')).toEqual({ id: 'county', value: 'Polk', isReadOnly: true })
+    expect(prefillFieldEntry(text, '   ')).toBeNull()
+  })
+
+  it('ignores a field with no id — there is nothing to address it by', () => {
+    expect(prefillFieldEntry({ type: 'Textbox' }, 'Polk')).toBeNull()
   })
 })
 

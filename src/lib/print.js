@@ -30,12 +30,31 @@ export async function printPdfFromUrl(url, { fetchImpl = fetch, doc = document }
     frame.setAttribute('title', 'Print document')
 
     let settled = false
+    let printed = false
     const cleanup = () => {
       URL.revokeObjectURL(blobUrl)
       frame.remove()
     }
 
+    // An iframe appended to the document fires `load` for its INITIAL about:blank
+    // before the blob has been attached. Printing on that event put an empty sheet
+    // in front of the agent — they cancelled it, the blob then loaded, fired load a
+    // second time, and only that dialog held the document. So a load event only
+    // counts once the frame is actually showing the blob.
+    //
+    // The frame is same-origin (blob: and about: both are), so location is readable.
+    // Where it isn't — a stubbed frame in tests — the event is trusted, since there
+    // is no about:blank stage to confuse it with.
+    const showingBlob = () => {
+      let href
+      try { href = frame.contentWindow?.location?.href } catch { return true }
+      if (href == null) return true
+      return href === blobUrl
+    }
+
     frame.onload = () => {
+      if (printed || !showingBlob()) return
+      printed = true
       try {
         const win = frame.contentWindow
         win.focus()

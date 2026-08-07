@@ -182,6 +182,42 @@ export function buildTextTag({ fieldType, signerIndex = 1, required = false, lab
 export const FILLABLE_FIELD_TYPES = new Set(['textbox', 'text', 'label', 'dropdown', 'editabledate', 'company', 'name', 'title', 'email'])
 export const isFillableField = (t) => FILLABLE_FIELD_TYPES.has(String(t || '').toLowerCase())
 
+// Boxes an agent ticks BEFORE the send — "Exclusive Agency", "Seller pays",
+// "Cash offer". These were not offered anywhere in the CRM, so the only way to
+// set one was inside BoldSign's own editor, where a sender's tick is a
+// placement-time preview and NOT a value the signer inherits: the agent saw the
+// box checked, sent it, and the client opened an unchecked form. Ticked here they
+// travel as real field values, and (like every other CRM-supplied value) they go
+// out read-only, so what the agent decided is what every signer sees and none of
+// them can change it after the send.
+export const TICKABLE_FIELD_TYPES = new Set(['checkbox', 'radiobutton', 'radio'])
+export const isTickableField = (t) => TICKABLE_FIELD_TYPES.has(String(t || '').toLowerCase())
+
+// Every field an agent can set a value for before sending.
+export const isPrefillableField = (t) => isFillableField(t) || isTickableField(t)
+
+// BoldSign wants a checkbox value as the string "true"/"false".
+export const tickValue = (on) => (on ? 'true' : 'false')
+
+// One field's contribution to a role's `existingFormFields`, or null when the
+// agent left it for the signer to fill.
+//
+// A tickable field is three-state on purpose: unticked and "signer decides" are
+// different instructions, and collapsing them would either lock every box the
+// agent didn't touch or lose the deliberate "no" on a form where an unticked box
+// is itself a term.
+export function prefillFieldEntry(field, value) {
+  const id = field?.id
+  if (!id) return null
+  if (isTickableField(field?.type)) {
+    if (value !== true && value !== false) return null      // left to the signer
+    return { id, value: tickValue(value), isReadOnly: true }
+  }
+  const v = String(value ?? '').trim()
+  if (!v) return null
+  return { id, value: v, isReadOnly: true }
+}
+
 // Normalize a state value to a 2-letter code. Accepts existing codes (IA) or
 // the full names of the states the brokerage operates in. Extend the map if you
 // add states.

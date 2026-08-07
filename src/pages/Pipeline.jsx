@@ -16,7 +16,7 @@ import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty } from '../lib/dealPeople.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPrintUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPrintUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { printPdfFromUrl } from '../lib/print.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2118,7 +2118,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
       .then(det => {
         if (cancelled) return
         const roles  = det.roles?.length ? det.roles : [{ index: 1, name: 'Signer' }]
-        const fields = (det.fields || []).filter(f => isFillableField(f.type))
+        const fields = (det.fields || []).filter(f => isPrefillableField(f.type))
         setDetails({ roles, fields })
 
         // Seed signer name/email from the deal's linked contact (+ spouse for a
@@ -2127,7 +2127,11 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent, dealAgents }))
 
         const seededValues = {}
-        for (const f of fields) seededValues[f.id] = tokenVals[f.id] || ''
+        for (const f of fields) {
+          // Tick boxes start as null — "leave it to the signer" — rather than
+          // false, so an untouched box isn't sent out locked as a deliberate no.
+          seededValues[f.id] = isTickableField(f.type) ? null : (tokenVals[f.id] || '')
+        }
         setValues(seededValues)
       })
       // A FAILED LOAD MUST NOT LOOK LIKE A LOADED TEMPLATE. This used to fall back to
@@ -2161,10 +2165,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     const firstIdx = filled[0].index
     const byRole = {}
     for (const f of (details.fields || [])) {
-      const v = (values[f.id] || '').trim()
-      if (!v) continue
+      // prefillFieldEntry decides what (if anything) this field contributes: text
+      // when the agent typed something, "true"/"false" for a box they ticked or
+      // deliberately cleared, nothing at all when it's left to the signer. Every
+      // entry it returns is read-only — see its comment.
+      const entry = prefillFieldEntry(f, values[f.id])
+      if (!entry) continue
       const idx = (f.roleIndex && filled.some(r => r.index === f.roleIndex)) ? f.roleIndex : firstIdx
-      ;(byRole[idx] ||= []).push({ id: f.id, value: v, isReadOnly: true })
+      ;(byRole[idx] ||= []).push(entry)
     }
     // Roles + removals, with BoldSign's post-removal index shift applied — see
     // buildTemplateRoles. Leaving a middle role blank (e.g. Co-seller, with a
@@ -2200,7 +2208,9 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     }
   }
 
-  const fields = details?.fields || []
+  const fields     = details?.fields || []
+  const tickFields = fields.filter(f => isTickableField(f.type))
+  const textFields = fields.filter(f => isFillableField(f.type))
 
   // Step 2 — BoldSign's embedded prepare/send UI (replaces our own send popup).
   if (embedUrl) {
@@ -2285,13 +2295,45 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
             </div>
 
             {/* Editable, CRM-prefilled detail fields the sellers see filled in. */}
-            {fields.length > 0 && (
+            {textFields.length > 0 && (
               <div className="form-group">
                 <label className="form-label">Document details <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— prefilled from the deal; edit as needed</span></label>
-                {fields.map(f => (
+                {textFields.map(f => (
                   <div key={f.id} style={{ marginBottom:8 }}>
-                    <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2 }}>{prettyLabel(f.id)}</div>
-                    <input className="form-control" value={values[f.id] || ''} onChange={e => setValue(f.id, e.target.value)}/>
+                    <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2 }}>{f.label || prettyLabel(f.id)}</div>
+                    {f.options?.length
+                      ? (
+                        <select className="form-control" value={values[f.id] || ''} onChange={e => setValue(f.id, e.target.value)}>
+                          <option value="">— signer chooses —</option>
+                          {f.options.map(o => <option key={o} value={o}>{o}</option>)}
+                        </select>
+                      )
+                      : <input className="form-control" value={values[f.id] || ''} onChange={e => setValue(f.id, e.target.value)}/>}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Boxes the AGENT decides — exclusive agency, who pays what. Ticked
+                here they go out as real, locked values every signer sees; left
+                alone they stay the signer's to fill. Setting one inside
+                BoldSign's editor instead does NOT carry to the signers. */}
+            {tickFields.length > 0 && (
+              <div className="form-group">
+                <label className="form-label">Selections <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— set these here and they reach every signer locked</span></label>
+                {tickFields.map(f => (
+                  <div key={f.id} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
+                    <div style={{ flex:1, fontSize:12 }}>{f.label || prettyLabel(f.id)}</div>
+                    <select
+                      className="form-control"
+                      style={{ width:150, flex:'none' }}
+                      value={values[f.id] === true ? 'yes' : values[f.id] === false ? 'no' : ''}
+                      onChange={e => setValue(f.id, e.target.value === 'yes' ? true : e.target.value === 'no' ? false : null)}
+                    >
+                      <option value="">Signer decides</option>
+                      <option value="yes">Checked</option>
+                      <option value="no">Unchecked</option>
+                    </select>
                   </div>
                 ))}
               </div>
@@ -2301,6 +2343,8 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
         <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px' }}>
           Next: BoldSign opens here in the app with these signers &amp; details filled in — review field placement and click Send.
+          Anything filled in above is sent locked: signers see it and cannot change it. Values typed or ticked inside BoldSign&rsquo;s
+          own editor are placement previews and do <strong>not</strong> reach the signers — set them here.
         </div>
       </div>
       <div className="modal__foot">
@@ -3322,10 +3366,16 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   }, [setDb, isAdmin, dealAgentIds, activeAgent?.id])
 
   const del = useCallback(async (id) => {
-    // Nullify deal_id on tasks before deletion to avoid FK constraint failures
+    // Best-effort: clear this deal off any tasks pointing at it. RLS makes tasks
+    // strictly personal, so this only ever reaches the CALLER'S OWN tasks — a
+    // co-agent's task on the same deal is invisible here and silently unaffected,
+    // which is exactly how a shared deal used to fail the delete below with a raw
+    // "violates foreign key constraint tasks_deal_id_fkey". The database now
+    // clears those itself (migration 0029); this stays because it costs nothing
+    // and keeps deletes working on a database that hasn't had 0029 applied yet.
     await supabase.from('tasks').update({ deal_id: null }).eq('deal_id', id)
     const { error } = await supabase.from('deals').delete().eq('id', id)
-    if (error) { pushToast(error.message, 'error'); setConfirm(null); return }
+    if (error) { pushToast(friendlyDbError(error) || error.message, 'error'); setConfirm(null); return }
     pushToast('Deal deleted', 'info')
     setConfirm(null); reload()
   }, [reload])
