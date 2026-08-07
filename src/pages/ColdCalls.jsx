@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { apiPost } from '../lib/apiClient.js'
 import { Icon, Modal, pushToast } from '../components/UI.jsx'
 import { CONTACT_TYPES, PROPERTY_TYPES, titleCase } from '../lib/enums.js'
 
@@ -431,14 +432,10 @@ function PowerDialer({ leads, startIndex, agents, activeAgent, onClose, onUpdate
     ].filter(Boolean).join('\n')
 
     try {
-      const res = await fetch('/api/claude', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          system: `You are a real estate cold calling coach specializing in investment properties. Write natural, conversational scripts that don't sound robotic. Keep it concise and practical.`,
-          messages: [{ role: 'user', content: `Generate a cold call script for this lead:\n\n${ctx}\n\nInclude: opening, reason for calling, 2-3 key questions, one common objection + response, and a closing to schedule follow-up. Use plain text with clear section labels.` }],
-          max_tokens: 800,
-        }),
+      const res = await apiPost('/api/claude', {
+        system: `You are a real estate cold calling coach specializing in investment properties. Write natural, conversational scripts that don't sound robotic. Keep it concise and practical.`,
+        messages: [{ role: 'user', content: `Generate a cold call script for this lead:\n\n${ctx}\n\nInclude: opening, reason for calling, 2-3 key questions, one common objection + response, and a closing to schedule follow-up. Use plain text with clear section labels.` }],
+        max_tokens: 800,
       })
       const data = await res.json()
       setScript(data.content?.[0]?.text || 'Could not generate script.')

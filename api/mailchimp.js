@@ -3,12 +3,19 @@
 // Never hardcode secrets here — the key travels in the POST body, authenticated
 // only by Supabase RLS on the integrations table.
 
+import { requireAgent } from './_lib/auth.js'
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+
+  // Require a verified agent — otherwise this is an open proxy to the
+  // Mailchimp API usable by anyone to relay/validate keys.
+  try { await requireAgent(req) }
+  catch (e) { return res.status(e.status || 401).json({ error: e.message || 'Sign in required' }) }
 
   const { action, apiKey, listId, members, tag } = req.body || {}
   if (!apiKey) return res.status(400).json({ error: 'Missing apiKey' })

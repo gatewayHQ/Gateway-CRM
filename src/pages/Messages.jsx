@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { apiPost } from '../lib/apiClient.js'
 import { Icon, Avatar, EmptyState, pushToast } from '../components/UI.jsx'
 
 function fmtTime(ts) {
@@ -324,16 +325,12 @@ export default function MessagesPage({ db, activeAgent }) {
     ))
 
     try {
-      const res  = await fetch('/api/twilio-send', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          to:             activeConv.contact_number,
-          from:           fromNumber,
-          body:           text,
-          conversationId: activeConv.id,
-          agentId:        activeAgent?.id,
-        }),
+      const res  = await apiPost('/api/twilio-send', {
+        to:             activeConv.contact_number,
+        from:           fromNumber,
+        body:           text,
+        conversationId: activeConv.id,
+        agentId:        activeAgent?.id,
       })
       const data = await res.json()
       if (data.error) {

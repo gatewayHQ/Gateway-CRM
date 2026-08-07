@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '../lib/supabase.js'
+import { apiPost } from '../lib/apiClient.js'
 import { Icon, Badge, Drawer, EmptyState, ConfirmDialog, Modal, pushToast } from '../components/UI.jsx'
 
 // Load from Supabase auth metadata first (cross-device), fall back to localStorage
@@ -261,11 +262,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
     ].filter(Boolean).join('\n')
 
     try {
-      const res = await fetch('/api/claude', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ system, messages: [{ role: 'user', content: userMsg }], max_tokens: 1024 }),
-      })
+      const res = await apiPost('/api/claude', { system, messages: [{ role: 'user', content: userMsg }], max_tokens: 1024 })
       const data = await res.json()
       if (!res.ok) { pushToast(data.error || 'AI failed', 'error'); setAiLoading(false); return }
       const text = data.content?.[0]?.text || ''
@@ -311,20 +308,13 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
         const fromAddr = resendFrom || (agent.email ? `${agent.name || 'Gateway'} <${agent.email}>` : 'onboarding@resend.dev')
         // Route through our server — keeps the API key off the wire and
         // gives us a server-side audit trail + retry handling.
-        const res = await fetch('/api/email-send', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-resend-key': resendKey,
-          },
-          body: JSON.stringify({
-            from: fromAddr,
-            to,
-            subject: subject || '(no subject)',
-            text: body,
-            html: body.split(/\n\n+/).map(p => `<p style="margin:0 0 16px 0">${p.replace(/\n/g, '<br>')}</p>`).join(''),
-          }),
-        })
+        const res = await apiPost('/api/email-send', {
+          from: fromAddr,
+          to,
+          subject: subject || '(no subject)',
+          text: body,
+          html: body.split(/\n\n+/).map(p => `<p style="margin:0 0 16px 0">${p.replace(/\n/g, '<br>')}</p>`).join(''),
+        }, { 'x-resend-key': resendKey })
         const result = await res.json()
         if (!res.ok) {
           setSending(false)

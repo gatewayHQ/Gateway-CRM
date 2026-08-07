@@ -1,11 +1,23 @@
 import { createClient } from '@supabase/supabase-js'
+import { requireAgent } from './_lib/auth.js'
 
 function basicAuth(sid, token) {
   return 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64')
 }
 
 export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+
+  // Require a verified agent — otherwise anyone can send SMS or buy phone
+  // numbers on the brokerage's Twilio account. 'buy' additionally requires
+  // admin (it provisions a number and spends money).
+  let actor
+  try { actor = await requireAgent(req) }
+  catch (e) { return res.status(e.status || 401).json({ error: e.message || 'Sign in required' }) }
 
   const SID   = process.env.TWILIO_ACCOUNT_SID
   const TOKEN = process.env.TWILIO_AUTH_TOKEN
@@ -16,6 +28,10 @@ export default async function handler(req, res) {
 
   // ── Provisioning actions (formerly twilio-provision.js) ──────────────────
   const { action } = req.body || {}
+
+  if (action === 'buy' && !actor.isAdmin) {
+    return res.status(403).json({ error: 'Only an admin can purchase phone numbers' })
+  }
 
   if (action === 'test') {
     try {

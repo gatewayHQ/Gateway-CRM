@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { apiPost } from '../lib/apiClient.js'
 import { Icon, pushToast } from '../components/UI.jsx'
 import { WEBHOOK_EVENTS } from '../lib/webhooks.js'
 
@@ -48,11 +49,7 @@ function MailchimpSection() {
     if (!apiKey.trim()) { pushToast('Enter your Mailchimp API key', 'error'); return }
     setStatus('testing'); setErrMsg('')
     try {
-      const res = await fetch('/api/mailchimp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'getLists', apiKey: apiKey.trim() }),
-      })
+      const res = await apiPost('/api/mailchimp', { action: 'getLists', apiKey: apiKey.trim() })
       const data = await res.json()
       if (!res.ok) { setStatus('error'); setErrMsg(data.error || 'Invalid API key'); return }
       setLists(data.lists || [])
@@ -486,20 +483,14 @@ function TwilioSection({ db }) {
 
   // Load numbers already in Twilio account
   const loadOwned = useCallback(async () => {
-    const r = await fetch('/api/twilio-send', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'list' }),
-    })
+    const r = await apiPost('/api/twilio-send', { action: 'list' })
     const d = await r.json()
     if (!d.error) setOwned(d.numbers || [])
   }, [])
 
   // Test connection on mount
   useEffect(() => {
-    fetch('/api/twilio-send', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'test' }),
-    })
+    apiPost('/api/twilio-send', { action: 'test' })
       .then(r => r.json())
       .then(d => {
         if (d.ok) { setStatus('ok'); loadOwned() }
@@ -517,10 +508,7 @@ function TwilioSection({ db }) {
 
   const search = async () => {
     setSearching(true); setAvailable([])
-    const r = await fetch('/api/twilio-send', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'search', areaCode }),
-    })
+    const r = await apiPost('/api/twilio-send', { action: 'search', areaCode })
     const d = await r.json()
     setSearching(false)
     if (d.error) { pushToast(d.error, 'error'); return }
@@ -529,10 +517,7 @@ function TwilioSection({ db }) {
 
   const buy = async (number) => {
     setBuying(number)
-    const r = await fetch('/api/twilio-send', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'buy', phoneNumber: number, friendlyName: 'Gateway CRM' }),
-    })
+    const r = await apiPost('/api/twilio-send', { action: 'buy', phoneNumber: number, friendlyName: 'Gateway CRM' })
     const d = await r.json()
     setBuying(null)
     if (d.error) { pushToast(d.error, 'error'); return }

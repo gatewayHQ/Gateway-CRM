@@ -25,10 +25,12 @@
  *  • Centralized rate limiting + retry logic
  */
 
+import { requireAgent } from './_lib/auth.js'
+
 const SHARED_HEADERS = {
   'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, x-resend-key, x-gateway-secret',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-resend-key, x-gateway-secret',
 }
 
 // In-memory rate limit (per cold-start). Resets when the function reloads.
@@ -57,6 +59,11 @@ export default async function handler(req, res) {
   applyCors(res)
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' })
+
+  // Require a verified agent — otherwise this is an open relay that can send
+  // mail from the brokerage's verified Resend domain to anyone.
+  try { await requireAgent(req) }
+  catch (e) { return res.status(e.status || 401).json({ error: e.message || 'Sign in required' }) }
 
   // ── Rate limit ────────────────────────────────────────────────────────────
   const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
