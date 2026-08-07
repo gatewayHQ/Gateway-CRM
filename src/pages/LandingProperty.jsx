@@ -64,11 +64,11 @@ export default function LandingProperty({ mailingId, preview = null }) {
         if (ids.length) {
           // Include bio; fall back to the pre-0004 column set if that migration
           // hasn't run yet (selecting a missing column would otherwise error).
-          let { data: rows, error: agErr } = await supabase.from('agents')
+          let { data: rows, error: agErr } = await supabase.from('agents_public')
             .select('id, name, phone, email, photo_url, color, role, bio')
             .in('id', ids)
           if (agErr) {
-            ;({ data: rows } = await supabase.from('agents')
+            ;({ data: rows } = await supabase.from('agents_public')
               .select('id, name, phone, email, photo_url, color, role')
               .in('id', ids))
           }
