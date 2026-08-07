@@ -3,6 +3,9 @@ import { supabase } from '../lib/supabase.js'
 import { fetchVisibleDeals } from '../lib/services/deals.js'
 import { formatCurrency, formatDate, STAGE_LABELS, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
+import { normalizeStageLabel, hasStageLabelOverrides, STAGE_LABEL_MAX } from '../lib/stageLabels.js'
+import { useStageLabels } from '../lib/stageLabelContext.js'
+import { saveStageLabels } from '../lib/services/agentProfile.js'
 import {
   weightedValue, daysInStage, isRotting, dealActivityState, nextKeyDate,
   focusItems, pipelineTotals,
@@ -2525,6 +2528,9 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
   const [tab, setTab]       = useState(initialTab)
+  // Stage picker reads the agent's own column names, so the drawer and the
+  // board they dragged the card from agree.
+  const stageLabels         = useStageLabels()
   // Additional contacts (husband & wife, co-buyers) — the primary stays contact_id.
   const [additionalContactIds, setAdditionalContactIds] = useState([])
 
@@ -2807,7 +2813,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
               </div>
             )}
 
-            <div className="form-group"><label className="form-label">Stage</label><select className="form-control" value={formStages.includes(form.stage) ? form.stage : boardStageFor(form, formTrack)} onChange={e=>set('stage',e.target.value)}>{formStages.map(s=><option key={s} value={s}>{STAGE_LABELS[s]}</option>)}</select></div>
+            <div className="form-group"><label className="form-label">Stage</label><select className="form-control" value={formStages.includes(form.stage) ? form.stage : boardStageFor(form, formTrack)} onChange={e=>set('stage',e.target.value)}>{formStages.map(s=><option key={s} value={s}>{stageLabels[s]}</option>)}</select></div>
             <div className="form-row">
               <div className="form-group"><label className="form-label">Sale / Deal Value</label><input className="form-control" type="number" value={form.value||''} onChange={e=>set('value',e.target.value)} placeholder="0" /></div>
               <div className="form-group"><label className="form-label">Probability %</label><input className="form-control" type="number" min="0" max="100" value={form.probability||0} onChange={e=>set('probability',e.target.value)} /></div>
@@ -3066,6 +3072,64 @@ function ListingCard({ property, agent, deals = [], onClick, onDelete, draggable
   )
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Editable board column header.
+//
+// Renaming a column is a personal display preference — "Qualified" becomes
+// "Vetted", "Offer" becomes "LOI Out". The deal's stored stage token never
+// changes, so reports, automations, the stage CHECK constraint, and the client
+// portal keep working off the canonical value; only what this agent reads
+// changes, and only for this agent.
+//
+// Enter or blur commits, Escape reverts, and an empty box restores the built-in
+// label — which is the whole undo story, so there's no way to get stuck with a
+// header you can't read.
+// ─────────────────────────────────────────────────────────────────────────────
+function StageHeader({ stage, label, canRename, onRename }) {
+  const [editing, setEditing] = useState(false)
+  const [draft,   setDraft]   = useState(label)
+
+  const begin = () => { if (!canRename) return; setDraft(label); setEditing(true) }
+  const commit = () => {
+    setEditing(false)
+    if (draft.trim() === label) return          // nothing typed, nothing to save
+    onRename(stage, draft)
+  }
+
+  if (editing) {
+    return (
+      <input
+        className="kanban-col__rename"
+        value={draft}
+        maxLength={STAGE_LABEL_MAX}
+        autoFocus
+        onFocus={e => e.target.select()}
+        onChange={e => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={e => {
+          if (e.key === 'Enter')  { e.preventDefault(); commit() }
+          if (e.key === 'Escape') { e.preventDefault(); setEditing(false) }
+        }}
+        aria-label={`Rename the ${label} column`}
+        placeholder={STAGE_LABELS[stage]}
+      />
+    )
+  }
+
+  return (
+    <div className="kanban-col__label" onDoubleClick={begin}
+         title={canRename ? `${label} — double-click to rename` : label}>
+      <span>{label}</span>
+      {canRename && (
+        <button type="button" className="kanban-col__rename-btn" onClick={begin}
+                aria-label={`Rename the ${label} column`}>
+          <Icon name="edit" size={11} />
+        </button>
+      )}
+    </div>
+  )
+}
+
 export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgentIds, go }) {
   const [drawer, setDrawer] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -3088,6 +3152,55 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const [dragListing, setDragListing] = useState(null)
   const [dragOverStatus, setDragOverStatus] = useState(null)
   const [agentFilter, setAgentFilter] = useState('all')
+
+  // ── Personal column headers ──────────────────────────────────────────────
+  // Provided by App (defaults + this agent's overrides). Renaming writes to the
+  // agent row through the authenticated profile API and mirrors the SAVED row
+  // back into db.agents, which is what re-renders the provider — so a rename
+  // the server rejected never sticks on screen.
+  const stageLabels   = useStageLabels()
+  const canRename     = !!activeAgent?.id
+  const [renaming, setRenaming] = useState(false)
+
+  // Renaming two columns in quick succession must not lose the first. Each save
+  // sends the WHOLE map, so the second request has to be built from the first
+  // one's intent — not from `activeAgent`, which won't have caught up yet. This
+  // ref carries that intent, tagged with the agent it belongs to so switching
+  // agents (admin "view as") can never inherit someone else's pending edit.
+  const pendingLabels = useRef({ agentId: null, labels: null })
+  const myStageLabels =
+    (pendingLabels.current.agentId === activeAgent?.id ? pendingLabels.current.labels : null)
+    || activeAgent?.stage_labels || {}
+
+  const persistStageLabels = async (next) => {
+    if (!activeAgent?.id) return
+    pendingLabels.current = { agentId: activeAgent.id, labels: next }
+    setRenaming(true)
+    try {
+      const saved = await saveStageLabels(activeAgent.id, next)
+      setDb(p => ({ ...p, agents: (p.agents || []).map(a => a.id === saved.id ? { ...a, ...saved } : a) }))
+    } catch (e) {
+      // Fall back to whatever the server actually holds, so a retry doesn't
+      // build on an edit that never landed.
+      pendingLabels.current = { agentId: null, labels: null }
+      pushToast(e.message || 'Could not save the column name', 'error')
+    } finally {
+      setRenaming(false)
+    }
+  }
+
+  const renameStage = (stage, value) => {
+    const label = normalizeStageLabel(stage, value)
+    const next  = { ...myStageLabels }
+    // A blank entry (or one that matches the built-in name) removes the
+    // override rather than storing it — that's how a column resets.
+    if (label) next[stage] = label
+    else       delete next[stage]
+    if (next[stage] === myStageLabels[stage]) return   // nothing actually changed
+    persistStageLabels(next)
+  }
+
+  const resetStageLabels = () => persistStageLabels({})
 
   const deals        = db.deals        || []
   const agents       = db.agents       || []
@@ -3263,7 +3376,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     const comp_data = { ...(deal?.comp_data || {}), stage_since: new Date().toISOString() }
     await supabase.from('deals').update({ stage: newStage, comp_data }).eq('id', dealId)
     setDb(p => ({ ...p, deals: p.deals.map(d => d.id === dealId ? { ...d, stage: newStage, comp_data } : d) }))
-    pushToast(`Moved to ${STAGE_LABELS[newStage]}`)
+    pushToast(`Moved to ${stageLabels[newStage]}`)
 
     const auto = AUTO_TASKS[newStage]
     if (!auto) return
@@ -3336,6 +3449,13 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
               ))}
             </div>
           )}
+          {pipelineTab === 'deals' && dealView === 'board' && canRename && hasStageLabelOverrides(myStageLabels) && (
+            <button className="btn btn--ghost btn--sm" style={{ fontSize:11 }}
+              onClick={resetStageLabels} disabled={renaming}
+              title="Put every column back to its standard name">
+              Reset headers
+            </button>
+          )}
           {isAdmin && (
             <select
               value={agentFilter}
@@ -3363,8 +3483,9 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
             {track.stages.map(stage => (
               <div key={stage} className="kanban-col">
                 <div className="kanban-col__head">
-                  <div>
-                    <div className="kanban-col__label">{STAGE_LABELS[stage]}</div>
+                  <div style={{ minWidth:0 }}>
+                    <StageHeader stage={stage} label={stageLabels[stage]}
+                      canRename={canRename} onRename={renameStage} />
                     {stageTotals[stage] > 0 && <div style={{ fontSize:10, color:'var(--gw-mist)', marginTop:1 }}>{formatCurrency(stageTotals[stage])}</div>}
                   </div>
                   <span className="kanban-col__count">{stageGroups[stage].length}</span>
@@ -3502,7 +3623,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                         <div style={{ fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{deal.title}</div>
                         {contact && <div style={{ fontSize:11, color:'var(--gw-mist)' }}>{contact.first_name} {contact.last_name}</div>}
                       </td>
-                      <td style={{ padding:'9px 12px', whiteSpace:'nowrap' }}><Badge variant={col === 'closed' ? 'closed' : col === 'lost' ? 'lost' : 'lead'}>{STAGE_LABELS[col]}</Badge></td>
+                      <td style={{ padding:'9px 12px', whiteSpace:'nowrap' }}><Badge variant={col === 'closed' ? 'closed' : col === 'lost' ? 'lost' : 'lead'}>{stageLabels[col]}</Badge></td>
                       <td style={{ padding:'9px 12px', whiteSpace:'nowrap', fontWeight:600 }}>{deal.value > 0 ? formatCurrency(deal.value) : '—'}</td>
                       <td style={{ padding:'9px 12px', whiteSpace:'nowrap', color:'var(--gw-mist)' }}>{deal.value > 0 ? formatCurrency(weighted) : '—'}</td>
                       <td style={{ padding:'9px 12px', whiteSpace:'nowrap' }}>{deal.expected_close_date ? formatDate(deal.expected_close_date) : '—'}</td>
@@ -3550,7 +3671,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
                     </div>
                   </div>
                   <Badge variant={item.deal.prop_category === 'commercial' ? 'commercial' : 'residential'}>
-                    {STAGE_LABELS[item.deal.stage] || item.deal.stage}
+                    {stageLabels[item.deal.stage] || item.deal.stage}
                   </Badge>
                 </div>
               )

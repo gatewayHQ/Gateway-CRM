@@ -10,12 +10,24 @@ import { supabase } from '../supabase.js'
 import { TABLES } from '../constants.js'
 import { audit } from '../audit.js'
 
+// `satisfied_by` arrives with migration 0028 (which envelope proves this
+// sign-step). Selected separately so a database that has not applied 0028 yet
+// falls back instead of erroring — the closing gate degrades to distinct-
+// envelope matching, which is still correct, just less precise.
+const STEP_COLS      = 'id, title, completed, sort_order, doc_action, doc_status, if_applicable'
+const STEP_COLS_0028 = `${STEP_COLS}, satisfied_by`
+
 export async function listDealSteps(dealId) {
-  const { data, error } = await supabase
+  const query = (cols) => supabase
     .from(TABLES.TRANSACTION_STEPS)
-    .select('id, title, completed, sort_order, doc_action, doc_status, if_applicable')
+    .select(cols)
     .eq('deal_id', dealId)
     .order('sort_order', { ascending: true })
+
+  let { data, error } = await query(STEP_COLS_0028)
+  if (error && /satisfied_by/.test(error.message || '')) {
+    ;({ data, error } = await query(STEP_COLS))
+  }
   return { steps: data || [], error: error?.message || null }
 }
 

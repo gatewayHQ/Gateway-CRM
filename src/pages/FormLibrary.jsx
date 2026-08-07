@@ -41,7 +41,7 @@ function UploadModal({ packet, onClose, onSaved }) {
   const isNew = !packet?.id
   const blank = {
     state: '', transaction_type: 'buyer', name: '', description: '',
-    boldsign_template_id: '', doc_type: '', field_tokens: [], active: true,
+    boldsign_template_id: '', doc_type: '', field_tokens: [], active: true, required: false,
   }
   const [form, setForm]   = useState(packet ? { ...blank, ...packet, field_tokens: packet.field_tokens || [] } : blank)
   const [tokensText, setTokensText] = useState((packet?.field_tokens || []).join(', '))
@@ -259,6 +259,7 @@ function UploadModal({ packet, onClose, onSaved }) {
         doc_type: (form.doc_type || '').trim() || null,
         field_tokens,
         active: form.active,
+        required: form.required,
       }
       // Target the existing row, or one this modal already created via an
       // intermediate editor save — never insert twice for the same packet.
@@ -267,8 +268,17 @@ function UploadModal({ packet, onClose, onSaved }) {
         ? supabase.from('form_packets').update(p).eq('id', rowId).select()
         : supabase.from('form_packets').insert([p]).select()
       let { data, error } = await upsert(payload)
-      // Graceful fallback if migration 0022 (storage_paths) hasn't been applied yet.
-      if (error && (error.code === '42703' || error.code === 'PGRST204' || /storage_paths/.test(error.message || ''))) {
+      // Graceful fallback for columns whose migration may not be applied yet:
+      // storage_paths (0022) and required (0028). Retry without whichever the
+      // database is complaining about rather than losing the whole save.
+      const missingCol = (err, col) =>
+        err && (err.code === '42703' || err.code === 'PGRST204' || new RegExp(col).test(err.message || ''))
+      if (missingCol(error, 'required')) {
+        const { required, ...legacy } = payload
+        ;({ data, error } = await upsert(legacy))
+        if (!error) pushToast('Saved, but "Required to close" needs migration 0028', 'info')
+      }
+      if (missingCol(error, 'storage_paths')) {
         const { storage_paths, ...legacy } = payload
         ;({ data, error } = await upsert(legacy))
       }
@@ -452,6 +462,23 @@ function UploadModal({ packet, onClose, onSaved }) {
             </div>
           </div>
           <div className="form-group">
+            <label className="form-label">Required to close</label>
+            <select
+              className="form-control"
+              value={form.required ? '1' : '0'}
+              onChange={e => set('required', e.target.value === '1')}
+              disabled={!form.boldsign_template_id}
+            >
+              <option value="0">No — optional</option>
+              <option value="1">Yes — block closing until executed</option>
+            </select>
+            <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>
+              {form.boldsign_template_id
+                ? `A deal in ${form.state ? form.state.toUpperCase() : 'this state'} cannot reach Closed until a completed signature request built from this packet exists on it.`
+                : 'Link a BoldSign template first — the closing gate proves this packet by matching the executed envelope back to its template.'}
+            </div>
+          </div>
+          <div className="form-group">
             <label className="form-label">Field Tokens <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}>(optional — reference only)</span></label>
             <input className="form-control" value={tokensText} onChange={e => setTokensText(e.target.value)} placeholder="property_address, list_price, seller_name" />
             <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>
@@ -554,8 +581,10 @@ export default function FormLibraryPage({ isAdmin }) {
   const states = [...new Set(packets.map(p => p.state))].sort()
 
   if (!tableReady) return (
-    <div style={{ padding: 32, maxWidth: 680 }}>
-      <div style={{ background: 'var(--gw-bone)', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', padding: 24 }}>
+    // .page-content is the app's scroll container (flex:1 + overflow-y:auto inside
+    // .main, which is overflow:hidden). Without it the page is simply clipped.
+    <div className="page-content">
+      <div style={{ maxWidth: 680, background: 'var(--gw-bone)', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', padding: 24 }}>
         <div style={{ fontWeight: 700, marginBottom: 8 }}>Setup required</div>
         <div style={{ fontSize: 13, color: 'var(--gw-mist)', marginBottom: 16 }}>Run this SQL in Supabase, then create a <code>form-packets</code> storage bucket (private).</div>
         <pre style={{ fontSize: 11, background: '#f1f3f5', padding: 14, borderRadius: 6, overflowX: 'auto' }}>{`create table if not exists form_packets (
@@ -584,7 +613,11 @@ create unique index if not exists uq_form_packets_boldsign_tid
   )
 
   return (
-    <div style={{ padding: 24, maxWidth: 900, margin: '0 auto' }}>
+    // .page-content owns the vertical scroll (flex:1 + overflow-y:auto inside .main,
+    // which is overflow:hidden). It has to sit on the outermost element — putting the
+    // centring wrapper outside it is what made long form lists unreachable.
+    <div className="page-content">
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
@@ -641,6 +674,11 @@ create unique index if not exists uq_form_packets_boldsign_tid
                         {packet.active ? 'Sendable' : 'Sendable (disabled)'}
                       </span>
                     )}
+                    {packet.required && packet.boldsign_template_id && (
+                      <span style={{ padding: '1px 7px', borderRadius: 8, fontSize: 10, fontWeight: 700, background: '#fde8e6', color: '#c0392b' }}>
+                        Required to close
+                      </span>
+                    )}
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 2 }}>
                     {typeLabel}
@@ -691,6 +729,7 @@ create unique index if not exists uq_form_packets_boldsign_tid
           onSaved={() => { setModal(null); load() }}
         />
       )}
+      </div>
     </div>
   )
 }

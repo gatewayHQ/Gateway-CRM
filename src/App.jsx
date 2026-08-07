@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase.js'
 import { primeCache, invalidate } from './lib/queryCache.js'
 import { fetchVisibleDeals, fetchVisibleCommissions } from './lib/services/deals.js'
+import { resolveStageLabels } from './lib/stageLabels.js'
+import { StageLabelContext } from './lib/stageLabelContext.js'
 import { Icon, Avatar, Modal, Badge, ToastHost, Loading, ErrorBoundary, pushToast } from './components/UI.jsx'
 // All pages are lazy-loaded — only the current route's bundle downloads
 const Dashboard        = React.lazy(() => import('./pages/Dashboard.jsx'))
@@ -26,6 +28,7 @@ const FormLibraryPage  = React.lazy(() => import('./pages/FormLibrary.jsx'))
 const AdminReviewPage  = React.lazy(() => import('./pages/AdminReview.jsx'))
 import LoginPage from './pages/Login.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
+import GlobalSearch from './components/GlobalSearch.jsx'
 import { Analytics } from '@vercel/analytics/react'
 // ComposeModal is a named export — wrap in a lazy default-export shim
 const ComposeModalLazy = React.lazy(() =>
@@ -223,6 +226,8 @@ export default function App() {
   const [needsOnboarding, setNeedsOnboarding] = useState(false)
   const [notifications,   setNotifications]   = useState([])
   const [notifOpen,       setNotifOpen]       = useState(false)
+  // Set by a global-search hit so the destination page opens that record.
+  const [focusRecord,     setFocusRecord]     = useState(null)
   const [websiteEnabled, setWebsiteEnabled] = useState(
     () => localStorage.getItem('gw_website_enabled') === 'true'
   )
@@ -492,6 +497,12 @@ export default function App() {
   // Office admin: honor the explicit is_admin flag (migration 0005) first, then
   // fall back to the free-text role for profiles created before the column.
   const isAdmin     = activeAgent?.is_admin === true || (activeAgent?.role?.toLowerCase().includes('admin') ?? false)
+  // Pipeline column headers this agent renamed, layered over the built-in
+  // labels. Resolved once here and provided to every screen so the board, the
+  // deal page, and the dashboard all speak the agent's own vocabulary. Cheap
+  // enough to recompute (one spread over ~16 keys) that memoizing it after the
+  // early returns above would only buy a rules-of-hooks violation.
+  const stageLabels = resolveStageLabels(activeAgent?.stage_labels)
   const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin, visibleAgentIds, dealAgentIds }
 
   if (loading) return (
@@ -502,6 +513,7 @@ export default function App() {
   )
 
   return (
+    <StageLabelContext.Provider value={stageLabels}>
     <div className="app" onClick={() => notifOpen && setNotifOpen(false)}>
       {needsOnboarding && (
         <AgentOnboardingModal
@@ -613,10 +625,16 @@ export default function App() {
             <div className="topbar__title">{TITLES[route]?.title}</div>
             <div className="topbar__breadcrumb">{TITLES[route]?.crumb}</div>
           </div>
-          <div className="topbar__search">
-            <Icon name="search" size={14} style={{ color: 'var(--gw-mist)' }} />
-            <input placeholder="Search contacts, properties, deals…" defaultValue="" />
-          </div>
+          <GlobalSearch
+            db={db}
+            visibleAgentIds={visibleAgentIds}
+            isAdmin={isAdmin}
+            onNavigate={(item) => {
+              if (item.kind === 'deal')     { setRoute(`deal/${item.id}`); return }
+              if (item.kind === 'contact')  { setFocusRecord({ type: 'contact',  id: item.id }); setRoute('contacts');   return }
+              if (item.kind === 'property') { setFocusRecord({ type: 'property', id: item.id }); setRoute('properties') }
+            }}
+          />
           {activeAgent && (
             <div className="topbar__agent-badge">
               <Avatar agent={activeAgent} size={30} />
@@ -705,8 +723,8 @@ export default function App() {
         <React.Suspense fallback={<div style={{ display:'flex', alignItems:'center', justifyContent:'center', flex:1 }}><Loading /></div>}>
         <ErrorBoundary>
           {route === 'dashboard'  && <Dashboard {...props} />}
-          {route === 'contacts'   && <ContactsPage {...props} />}
-          {route === 'properties' && <PropertiesPage {...props} />}
+          {route === 'contacts'   && <ContactsPage {...props} focusRecord={focusRecord} onFocusHandled={() => setFocusRecord(null)} />}
+          {route === 'properties' && <PropertiesPage {...props} focusRecord={focusRecord} onFocusHandled={() => setFocusRecord(null)} />}
           {route === 'pipeline'   && <PipelinePage {...props} isAdmin={isAdmin} />}
           {route.startsWith('deal/') && <DealPage {...props} dealId={route.slice(5)} />}
           {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
@@ -781,5 +799,6 @@ export default function App() {
       <ToastHost />
       <Analytics />
     </div>
+    </StageLabelContext.Provider>
   )
 }

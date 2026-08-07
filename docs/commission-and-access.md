@@ -97,6 +97,55 @@ documents are deal-scoped (`eq('deal_id', …)`), so an admin who can open every
 deal can see every document and signature without extra plumbing. Tasks stay personal — a
 to-do list is not oversight data.
 
+### 3a. Where per-agent split settings are written (and how they used to vanish)
+
+`agents.default_split_pct` / `no_brokerage_split` / `cap_amount` /
+`cap_anniversary` / `is_admin` are **guarded columns**: the
+`agents_guard_privileged` BEFORE trigger rewrites them back to their old values
+for any caller it doesn't recognize as trusted. It does not raise — the UPDATE
+reports success having changed nothing.
+
+That produced a bug worth remembering. Trusted-caller detection originally read
+only `auth.jwt() ->> 'role' = 'service_role'`. Under Supabase's legacy
+service_role key (a JWT) that holds; under the newer `sb_secret_…` keys there
+are no JWT claims to read, so the brokerage's own admin endpoint was treated as
+hostile and every commission-split edit silently reverted while the UI toasted
+"saved". Migration 0027 detects the service role via `current_user` (PostgREST
+issues `SET LOCAL ROLE service_role` regardless of key format).
+
+Three rules follow, and they are load-bearing:
+
+1. **Never write these columns straight from the browser.** Go through
+   `src/lib/services/agentProfile.js` → `POST /api/portal {action:'profile-save'}`.
+   The Team drawer, Back Office caps table, and pipeline header rename all do.
+2. **The server verifies the row it gets back.** `verifyPrivilegedWrite()`
+   compares the requested privileged fields against the saved row and returns a
+   500 naming the offenders if any didn't stick. A frozen write can no longer
+   masquerade as a successful one.
+3. **Render the saved row, not the request.** Callers merge the `agent` the API
+   returns into state. Optimistically merging the *payload* is what made the old
+   bug invisible for so long.
+
+`stage_labels` is deliberately outside the guard: renaming your own pipeline
+column headers is a display preference, not a permission, so every agent may set
+it on their own row.
+
+### 3b. Team splits (`team_splits`)
+
+Separate from an agent's brokerage split. `teams.type` decides whether the
+per-member `split_pct` means anything:
+
+- `collaboration` — shared visibility only (`share_contacts` / `share_properties`
+  / `share_deals` per member); each agent is paid on their own brokerage split
+  and `split_pct` is stored as 0.
+- `split` — the team commission is divided by `split_pct`, which the Team modal
+  requires to total exactly 100% before it will save.
+
+Membership saves as an **upsert on `(team_id, agent_id)` followed by a prune of
+the members actually removed**. The previous delete-then-insert wiped the roster
+first, so a failed insert left the team empty — and since no result was checked,
+it still reported "Team updated."
+
 ## 4. API design — mailing scope
 
 `GET /api/campaigns?action=list`:
@@ -124,3 +173,9 @@ needs no new column.
 `migrations/0005_commission_structured_admin.sql` — additive only, idempotent,
 safe to run anytime. Adds the jsonb columns, the per-agent split defaults, and
 `is_admin` (back-filled). Nothing about existing deals changes until edited.
+
+`migrations/0027_agent_stage_labels_and_split_guard.sql` — **required** for split
+edits to persist on projects using Supabase's newer secret keys (see 3a). Also
+adds `agents.stage_labels` for per-agent pipeline column headers and asserts the
+`(team_id, agent_id)` uniqueness the team-membership upsert relies on. No data is
+rewritten.
