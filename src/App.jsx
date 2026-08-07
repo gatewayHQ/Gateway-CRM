@@ -26,6 +26,7 @@ const FormLibraryPage  = React.lazy(() => import('./pages/FormLibrary.jsx'))
 const AdminReviewPage  = React.lazy(() => import('./pages/AdminReview.jsx'))
 import LoginPage from './pages/Login.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
+import GlobalSearch from './components/GlobalSearch.jsx'
 import { Analytics } from '@vercel/analytics/react'
 // ComposeModal is a named export — wrap in a lazy default-export shim
 const ComposeModalLazy = React.lazy(() =>
@@ -223,6 +224,8 @@ export default function App() {
   const [needsOnboarding, setNeedsOnboarding] = useState(false)
   const [notifications,   setNotifications]   = useState([])
   const [notifOpen,       setNotifOpen]       = useState(false)
+  // Set by a global-search hit so the destination page opens that record.
+  const [focusRecord,     setFocusRecord]     = useState(null)
   const [websiteEnabled, setWebsiteEnabled] = useState(
     () => localStorage.getItem('gw_website_enabled') === 'true'
   )
@@ -613,10 +616,16 @@ export default function App() {
             <div className="topbar__title">{TITLES[route]?.title}</div>
             <div className="topbar__breadcrumb">{TITLES[route]?.crumb}</div>
           </div>
-          <div className="topbar__search">
-            <Icon name="search" size={14} style={{ color: 'var(--gw-mist)' }} />
-            <input placeholder="Search contacts, properties, deals…" defaultValue="" />
-          </div>
+          <GlobalSearch
+            db={db}
+            visibleAgentIds={visibleAgentIds}
+            isAdmin={isAdmin}
+            onNavigate={(item) => {
+              if (item.kind === 'deal')     { setRoute(`deal/${item.id}`); return }
+              if (item.kind === 'contact')  { setFocusRecord({ type: 'contact',  id: item.id }); setRoute('contacts');   return }
+              if (item.kind === 'property') { setFocusRecord({ type: 'property', id: item.id }); setRoute('properties') }
+            }}
+          />
           {activeAgent && (
             <div className="topbar__agent-badge">
               <Avatar agent={activeAgent} size={30} />
@@ -705,8 +714,8 @@ export default function App() {
         <React.Suspense fallback={<div style={{ display:'flex', alignItems:'center', justifyContent:'center', flex:1 }}><Loading /></div>}>
         <ErrorBoundary>
           {route === 'dashboard'  && <Dashboard {...props} />}
-          {route === 'contacts'   && <ContactsPage {...props} />}
-          {route === 'properties' && <PropertiesPage {...props} />}
+          {route === 'contacts'   && <ContactsPage {...props} focusRecord={focusRecord} onFocusHandled={() => setFocusRecord(null)} />}
+          {route === 'properties' && <PropertiesPage {...props} focusRecord={focusRecord} onFocusHandled={() => setFocusRecord(null)} />}
           {route === 'pipeline'   && <PipelinePage {...props} isAdmin={isAdmin} />}
           {route.startsWith('deal/') && <DealPage {...props} dealId={route.slice(5)} />}
           {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}

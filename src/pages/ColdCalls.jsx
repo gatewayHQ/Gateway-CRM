@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
+import { upsertContact } from '../lib/services/contacts.js'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Modal, pushToast } from '../components/UI.jsx'
 import { CONTACT_TYPES, PROPERTY_TYPES, titleCase } from '../lib/enums.js'
@@ -286,7 +287,7 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
 }
 
 // ── Convert Lead → Contact ────────────────────────────────────────────────
-function ConvertModal({ lead, agents, activeAgent, setDb, onClose, onConverted }) {
+function ConvertModal({ lead, agents, activeAgent, setDb, contacts = [], onClose, onConverted }) {
   const parts = (lead?.contact_name || '').trim().split(/\s+/)
   const [form, setForm] = useState({
     first_name: parts[0] || '',
@@ -317,9 +318,16 @@ function ConvertModal({ lead, agents, activeAgent, setDb, onClose, onConverted }
       assigned_agent_id: form.assigned_agent_id || null,
       notes: form.notes, tags: form.tags,
     }
-    const { data, error } = await supabase.from('contacts').insert([contactPayload]).select().single()
-    if (error) { setSaving(false); pushToast(error.message, 'error'); return }
-    if (setDb) setDb(p => ({ ...p, contacts: [data, ...(p.contacts || [])] }))
+    // Converting the same owner twice (or an owner already reached through a
+    // website capture) updates their record instead of creating a duplicate.
+    const { contact: data, created, error } = await upsertContact(supabase, contactPayload, contacts)
+    if (error || !data) { setSaving(false); pushToast(error || 'Failed to save contact', 'error'); return }
+    if (setDb) setDb(p => ({
+      ...p,
+      contacts: created
+        ? [data, ...(p.contacts || [])]
+        : (p.contacts || []).map(c => (c.id === data.id ? data : c)),
+    }))
 
     // Create linked property and sync into in-memory db
     if (lead?.property_address) {
@@ -851,7 +859,7 @@ export default function ColdCallsPage({ db, setDb, activeAgent }) {
           onClose={()=>setDialer(false)} onUpdate={updateLead} />
       )}
       {convertLead && (
-        <ConvertModal lead={convertLead} agents={agents} activeAgent={activeAgent} setDb={setDb}
+        <ConvertModal lead={convertLead} agents={agents} activeAgent={activeAgent} setDb={setDb} contacts={db?.contacts || []}
           onClose={()=>setConvertLead(null)}
           onConverted={(c)=>{ updateLead(convertLead.id,{status:'converted',contact_id:c.id}); setConvertLead(null) }} />
       )}

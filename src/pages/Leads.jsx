@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { upsertContact } from '../lib/services/contacts.js'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Badge, Avatar, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatDate } from '../lib/helpers.js'
@@ -43,7 +44,9 @@ export default function LeadsPage({ db }) {
   const addToContacts = async (capture) => {
     if (capture.converted_contact_id) return
     setConverting(capture.id)
-    const { data, error } = await supabase.from('contacts').insert([{
+    // Route through upsertContact so converting a capture for someone already
+    // in the database updates them instead of creating a second row.
+    const { contact: data, created, error } = await upsertContact(supabase, {
       first_name: capture.first_name,
       last_name: capture.last_name,
       email: capture.email,
@@ -56,11 +59,11 @@ export default function LeadsPage({ db }) {
         capture.message ? `Message: ${capture.message}` : '',
       ].filter(Boolean).join('\n'),
       assigned_agent_id: capture.agent_id || null,
-    }]).select().single()
+    }, db?.contacts || [])
     if (!error && data) {
       await supabase.from('lead_captures').update({ converted_contact_id: data.id }).eq('id', capture.id)
       setCaptures(prev => prev.map(c => c.id === capture.id ? { ...c, converted_contact_id: data.id } : c))
-      pushToast(`${capture.first_name} added to Contacts`)
+      pushToast(created ? `${capture.first_name} added to Contacts` : `${capture.first_name} already existed — capture linked to their record`)
     } else {
       pushToast('Failed to add contact', 'error')
     }

@@ -151,8 +151,40 @@ body { font-family: var(--font-body); font-size: 14px; color: var(--gw-ink); bac
 .topbar__search {
   flex: 1; max-width: 360px; display: flex; align-items: center; gap: 8px;
   background: var(--gw-bone); border: 1px solid var(--gw-border); border-radius: var(--radius);
-  padding: 0 12px; height: 34px;
+  padding: 0 12px; height: 34px; position: relative;
 }
+
+/* ── Global search results (components/GlobalSearch.jsx) ── */
+.gsearch__kbd {
+  font-family: var(--font-body); font-size: 10px; color: var(--gw-mist);
+  border: 1px solid var(--gw-border); border-radius: 4px; padding: 1px 5px;
+  background: #fff; flex-shrink: 0; line-height: 1.5;
+}
+.gsearch__panel {
+  position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 300;
+  background: #fff; border: 1px solid var(--gw-border); border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12); max-height: 420px; overflow-y: auto;
+  padding: 4px 0;
+}
+.gsearch__section {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--gw-mist); padding: 8px 12px 4px;
+}
+.gsearch__item {
+  display: flex; align-items: center; gap: 10px; padding: 7px 12px; cursor: pointer;
+}
+.gsearch__item.is-active { background: var(--gw-bone); }
+.gsearch__icon { color: var(--gw-mist); flex-shrink: 0; }
+.gsearch__text { min-width: 0; flex: 1; }
+.gsearch__label {
+  font-size: 13px; font-weight: 600; color: var(--gw-ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.gsearch__sub {
+  font-size: 11px; color: var(--gw-mist);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.gsearch__empty { padding: 16px 12px; font-size: 12px; color: var(--gw-mist); text-align: center; }
 .topbar__search input { border: none; background: none; outline: none; font-size: 13px; flex: 1; font-family: var(--font-body); color: var(--gw-ink); }
 .topbar__search input::placeholder { color: var(--gw-mist); }
 .topbar__agent-badge { display: flex; align-items: center; gap: 8px; cursor: pointer; margin-left: auto; padding: 6px 10px; border-radius: var(--radius); transition: background 200ms ease; }
@@ -487,7 +519,10 @@ select.form-control { cursor: pointer; }
 
   /* ── Topbar ── */
   .topbar { padding: 0 14px; gap: 10px; }
-  .topbar__search { display: none; }
+  /* Search stays on mobile — hiding it left the phone with no way to find a
+     record at all. The agent badge is what gives up the space. */
+  .topbar__search { max-width: none; flex: 1; }
+  .gsearch__kbd { display: none; }
   .topbar__agent-badge { display: none; }
 
   /* ── Page content ── */
