@@ -804,10 +804,17 @@ function CompsTab({ property, onUpdateComps }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Seed a freshly-created deal's additional contacts from a property's list.
+// Returns the inserted link rows so the caller can put them in global state —
+// the deal page and the deal drawer both read `db.dealContacts`, and without
+// this the co-owner reads as property-only until the next full reload.
 async function syncDealContactsFromProperty(dealId, contactIds) {
   try {
-    await supabase.from('deal_contacts').insert(contactIds.map(contact_id => ({ deal_id: dealId, contact_id })))
-  } catch (e) { console.error('[syncDealContactsFromProperty]', e) }
+    const { data } = await supabase
+      .from('deal_contacts')
+      .insert(contactIds.map(contact_id => ({ deal_id: dealId, contact_id })))
+      .select()
+    return data || []
+  } catch (e) { console.error('[syncDealContactsFromProperty]', e); return [] }
 }
 
 // Reconcile a property's additional-contact link rows (property_contacts) to
@@ -821,7 +828,22 @@ async function syncPropertyContacts(propertyId, contactIds) {
     const toRemove = [...have].filter(id => !want.has(id))
     if (toAdd.length)    await supabase.from('property_contacts').insert(toAdd.map(contact_id => ({ property_id: propertyId, contact_id })))
     if (toRemove.length) await supabase.from('property_contacts').delete().eq('property_id', propertyId).in('contact_id', toRemove)
-  } catch (e) { console.error('[syncPropertyContacts]', e) }
+    return toAdd.length + toRemove.length > 0
+  } catch (e) { console.error('[syncPropertyContacts]', e); return false }
+}
+
+// Mirror a property's link rows into global state after writing them. The deal
+// page shows the property's extra contacts, and the deal drawer seeds its
+// picker from them, so both need the rows that now exist — App's loader only
+// refetches `property_contacts` on a full reload.
+async function reloadPropertyContacts(setDb, propertyId) {
+  if (!setDb || !propertyId) return
+  const { data, error } = await supabase.from('property_contacts').select('*').eq('property_id', propertyId)
+  if (error) return   // table missing (pre-0021) — leave state as it was
+  setDb(p => ({
+    ...p,
+    propertyContacts: [...(p.propertyContacts || []).filter(r => r?.property_id !== propertyId), ...(data || [])],
+  }))
 }
 
 function PropertyDrawer({ open, onClose, property, agents, contacts, propertyContacts = [], activeAgent, onSave, go, setDb }) {
@@ -889,8 +911,13 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     if (error) { pushToast(error.message, 'error'); return }
     if (coAgentsDropped) pushToast('Co-agents not carried over — run migration 0025', 'error')
     // Carry the property's additional contacts onto the new deal.
-    if (data?.id && additionalContactIds.length) await syncDealContactsFromProperty(data.id, additionalContactIds)
-    if (setDb) setDb(p => ({ ...p, deals: [data, ...(p.deals || [])] }))
+    let newDealContacts = []
+    if (data?.id && additionalContactIds.length) newDealContacts = await syncDealContactsFromProperty(data.id, additionalContactIds)
+    if (setDb) setDb(p => ({
+      ...p,
+      deals: [data, ...(p.deals || [])],
+      dealContacts: [...(p.dealContacts || []), ...newDealContacts],
+    }))
     pushToast('Deal created — opening Pipeline')
     onClose()
     if (go) go('pipeline')
@@ -942,8 +969,11 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     // Geocode on save if address changed or not yet geocoded
     const savedId = data?.id || resolvedId
 
-    // Sync additional contacts (best-effort — property is already saved).
-    if (savedId) await syncPropertyContacts(savedId, additionalContactIds)
+    // Sync additional contacts (best-effort — property is already saved), then
+    // mirror them into state so a deal on this property sees them right away.
+    if (savedId && await syncPropertyContacts(savedId, additionalContactIds)) {
+      await reloadPropertyContacts(setDb, savedId)
+    }
     const addressChanged = !property?.id || form.address !== property?.address || form.city !== property?.city
     if (savedId && addressChanged && (!form.lat || !form.lng)) {
       const fullAddr = [form.address, form.city, form.state, form.zip].filter(Boolean).join(', ')
