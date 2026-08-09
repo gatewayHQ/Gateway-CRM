@@ -1207,6 +1207,9 @@ describe('normalizeKnownStatus — only statuses the app will store', () => {
     expect(normalizeKnownStatus('WaitingForOthers')).toBe('sent')
     expect(normalizeKnownStatus('Viewed')).toBe('delivered')
     expect(normalizeKnownStatus('Revoked')).toBe('voided')
+    // Its own status, not folded into 'voided' — folding it made the webhook's
+    // expiry-notification branch unreachable, so nobody was told.
+    expect(normalizeKnownStatus('Expired')).toBe('expired')
     expect(normalizeKnownStatus('Draft')).toBe('draft')
     expect(normalizeKnownStatus('None')).toBe('draft')
   })

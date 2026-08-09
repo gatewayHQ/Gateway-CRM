@@ -539,6 +539,36 @@ export async function trackDocument(supabase, { dealId, agentId, documentId, sig
   return true
 }
 
+// Who sent what, to whom, and when — written for every signature request that
+// leaves this CRM. Deletes were already audited; the SEND was not, which is the
+// event that actually matters: on Live these are binding documents, and "which
+// agent sent this contract to this client on this date" is the first question
+// asked in a commission dispute, a licence complaint, or a discovery request.
+// Best-effort — an audit write must never fail a send that already happened.
+export async function logSignatureAudit(supabase, { dealId, actorId, documentId, action, documentName, signers, templateId, recordId }) {
+  try {
+    const list = Array.isArray(signers) ? signers : []
+    const to   = list.map(x => x?.email || x?.signerEmail).filter(Boolean)
+    await supabase.from('audit_log').insert([{
+      table_name: 'boldsign_documents',
+      record_id:  recordId || null,
+      deal_id:    dealId || null,
+      actor_id:   actorId || null,
+      action,
+      new_values: {
+        document_id: documentId,
+        document_name: documentName || null,
+        signer_emails: to,
+        boldsign_template_id: templateId || null,
+      },
+      summary: `${action === 'send' ? 'Sent' : 'Prepared'} "${documentName || 'Document'}" for signature`
+        + (to.length ? ` to ${to.join(', ')}` : ''),
+    }])
+  } catch (e) {
+    console.error(`[boldsign] audit write failed for ${documentId} (${action}): ${e.message}`)
+  }
+}
+
 // ─── Saveable PDF copy (review before sending, or take it to the client) ─────
 // Agents want the packet as a finished file before it goes to a client — and the
 // browser cannot produce it for them: the document lives in a cross-origin iframe,
@@ -1397,7 +1427,12 @@ function normalizeStatus(s) {
   if (v === 'completed' || v === 'signed')                 return 'completed'
   if (v === 'declined')                                    return 'declined'
   if (v === 'revoked' || v === 'voided' || v === 'canceled' || v === 'cancelled') return 'voided'
-  if (v === 'expired')                                     return 'voided'
+  // 'expired' is its own status, NOT folded into 'voided'. Folding it made the
+  // webhook's `status === 'expired'` branch unreachable, so an expired signature
+  // request updated the row and notified nobody — indistinguishable from one the
+  // agent had cancelled themselves, which is the exact confusion that branch was
+  // written to remove. `expired` is already a documented value of this column.
+  if (v === 'expired')                                     return 'expired'
   if (v === 'viewed' || v === 'delivered')                 return 'delivered'
   if (v === 'sent' || v === 'inprogress' || v === 'waitingforothers' || v === 'needtosign') return 'sent'
   if (v === 'draft' || v === 'none')                       return 'draft'
@@ -1562,10 +1597,15 @@ export default async function handler(req, res) {
       // Signatures tab all work — this path previously created a document
       // BoldSign knew about and the CRM did not.
       if (deal_id && data.documentId) {
-        await trackDocument(getServiceClient(), {
+        const svc = getServiceClient()
+        await trackDocument(svc, {
           dealId: deal_id, agentId: actor.agent.id, documentId: data.documentId,
           signers: orderedSigners, documentName: documentName || 'Document',
           subject: emailSubject || null, status: 'sent',
+        })
+        await logSignatureAudit(svc, {
+          dealId: deal_id, actorId: actor.agent.id, documentId: data.documentId,
+          action: 'send', documentName: documentName || 'Document', signers: orderedSigners,
         })
       }
 
@@ -2238,6 +2278,11 @@ export default async function handler(req, res) {
           signers: roles, documentName: documentName || emailSubject || 'Document',
           subject: emailSubject || null, status: 'sent', templateId,
         })
+        await logSignatureAudit(svc, {
+          dealId: deal_id, actorId: actor.agent.id, documentId: data.documentId,
+          action: 'send', documentName: documentName || emailSubject || 'Document',
+          signers: roles, templateId,
+        })
       }
       return res.json({
         documentId: data.documentId, envelopeId: data.documentId, status: 'sent', tracked,
@@ -2463,6 +2508,16 @@ async function handleWebhook(req, res) {
         documentId, record, agentId: record.agent_id,
       })
       if (captured.saved) console.log(`[boldsign] captured ${captured.fieldCount} field placement(s) for deal ${record.deal_id}`)
+
+      // The embedded flows create a DRAFT and the agent clicks Send inside
+      // BoldSign, so this webhook — not the API call — is the moment the
+      // document actually went to the client. That is the moment worth auditing.
+      await logSignatureAudit(supabase, {
+        dealId: record.deal_id, actorId: record.agent_id, documentId,
+        action: 'send', documentName: record.document_name,
+        signers: Array.isArray(record.signers) ? record.signers : [],
+        templateId: record.boldsign_template_id, recordId: record.id,
+      })
     }
 
     // A decline or expiry needs the agent's attention as much as a completion
