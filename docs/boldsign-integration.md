@@ -593,10 +593,34 @@ Order matters. Each step is safe to stop at.
 8. **Re-register sender identities** on the Live account (Settings → BoldSign →
    sync/resend). Each agent must click the approval email again; until they do,
    sends fall back to the org default identity, and then to the raw API account.
-9. **Rebuild templates** against Live and update each Form Library packet's
-   template id. The nightly `boldsign-sync` will otherwise deactivate every
-   packet whose Sandbox template id does not exist on the Live account — which is
-   the correct behavior, but it happens at 03:00 and silently.
+9. **Verify every template id against the Live key — do not assume they carried
+   over.** BoldSign's own docs are explicit that Sandbox and Live keep separate
+   templates *within the same account*, so a template id that resolves under the
+   Sandbox key is not guaranteed to resolve under the Live one. This is a
+   two-minute check and it is the difference between a working send picker and an
+   empty one:
+
+   ```
+   # With BOLDSIGN_API_KEY already switched to the Live key:
+   curl -s -H "X-API-KEY: $BOLDSIGN_API_KEY" \
+     "https://api.boldsign.com/v1/template/list?page=1&pageSize=100" \
+     | jq -r '.result[] | "\(.templateId)  \(.title)"'
+   ```
+   ```sql
+   -- Compare against what the CRM points at:
+   select name, boldsign_template_id, active from form_packets
+    where boldsign_template_id is not null order by name;
+   ```
+
+   Every id in the second list must appear in the first. For any that do not:
+   export the template from Sandbox and import it into Live (BoldSign →
+   Templates → ⋯ → Export / Import, JSON), then paste the **new** id into that
+   Form Library packet — an import mints a new id, it does not preserve the old
+   one.
+
+   Do this BEFORE 03:00. The nightly `boldsign-sync` deactivates every packet
+   whose template id is absent from the live list — correct behavior, but it
+   happens unattended and the packets simply disappear from the send picker.
 10. **Smoke test on a throwaway deal**, in this order: send from template →
     confirm the row appears in the Signatures tab → sign as the client in the
     portal → confirm the webhook flipped it to `completed`, the signed PDF *and*
