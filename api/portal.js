@@ -14,8 +14,13 @@
 //     — never as the agent or the other side. See portalSignableEmails().
 // ─────────────────────────────────────────────────────────────────────────────
 import { createClient } from '@supabase/supabase-js'
+import { boldsign } from './boldsign.js'
 
 const DOC_BUCKET = 'deal-documents'
+
+// No hardcoded project fallback — a missing env var must fail, not silently
+// resolve to the production project. See api/_lib/auth.js for the same rule.
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || ''
 
 // ─── Portal signer authorization ──────────────────────────────────────────────
 // A document's signer list routinely contains people who are NOT the portal's
@@ -107,10 +112,9 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid portal link' })
   }
 
-  const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
-  const serviceKey   = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!serviceKey) {
-    return res.status(500).json({ error: 'Server misconfigured: set SUPABASE_SERVICE_KEY' })
+  const serviceKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!SUPABASE_URL || !serviceKey) {
+    return res.status(500).json({ error: 'Server misconfigured: set SUPABASE_URL and SUPABASE_SERVICE_KEY' })
   }
 
   const supabase = createClient(SUPABASE_URL, serviceKey, {
@@ -237,11 +241,9 @@ async function handlePortalSignLink(req, res) {
   if (!/^[0-9a-f-]{36}$/i.test(token)) return res.status(400).json({ error: 'Invalid portal link' })
   if (!documentId || !signerEmail)     return res.status(400).json({ error: 'documentId and signerEmail required' })
 
-  const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
-  const serviceKey   = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
-  const API_KEY      = process.env.BOLDSIGN_API_KEY
-  if (!serviceKey) return res.status(500).json({ error: 'Server misconfigured: set SUPABASE_SERVICE_KEY' })
-  if (!API_KEY)    return res.status(500).json({ error: 'BoldSign not configured' })
+  const serviceKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!SUPABASE_URL || !serviceKey) return res.status(500).json({ error: 'Server misconfigured: set SUPABASE_URL and SUPABASE_SERVICE_KEY' })
+  if (!process.env.BOLDSIGN_API_KEY) return res.status(500).json({ error: 'BoldSign not configured' })
 
   const supabase = createClient(SUPABASE_URL, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } })
   try {
@@ -268,15 +270,20 @@ async function handlePortalSignLink(req, res) {
       return res.status(403).json({ error: 'That email is not able to sign this document here. Please use the link BoldSign emailed you.' })
     }
 
+    // Through the shared client, not a bare fetch: this is a client-facing path
+    // where a transient 5xx or a 429 used to surface as "Could not start signing"
+    // with no retry at all, and it was the one BoldSign call in the codebase with
+    // no backoff, no rate-limit accounting and no structured error logging.
     const qs = new URLSearchParams({ documentId, signerEmail })
-    const r  = await fetch(`https://api.boldsign.com/v1/document/getEmbeddedSignLink?${qs.toString()}`, {
-      headers: { 'X-API-KEY': API_KEY, Accept: 'application/json' },
-    })
-    const data = await r.json().catch(() => ({}))
-    if (!r.ok) return res.status(r.status).json({ error: data?.error || data?.message || 'Could not create sign link' })
-    return res.status(200).json({ url: data.signLink || data.embeddedSigningLink || data.url || null })
+    const data = await boldsign(`/document/getEmbeddedSignLink?${qs.toString()}`)
+    const url  = data.signLink || data.embeddedSigningLink || data.url || null
+    if (!url) return res.status(502).json({ error: 'BoldSign did not return a signing link. Please use the link BoldSign emailed you.' })
+    return res.status(200).json({ url })
   } catch (err) {
-    return res.status(500).json({ error: 'Could not start signing.' })
+    console.error(`[portal] sign-link failed for document ${documentId}: ${err.status || ''} ${err.message}`)
+    return res.status(err.status && err.status < 500 ? err.status : 500).json({
+      error: 'Could not start signing. Please use the link BoldSign emailed you, or try again shortly.',
+    })
   }
 }
 

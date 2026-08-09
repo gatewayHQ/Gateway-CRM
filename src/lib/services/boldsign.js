@@ -68,7 +68,6 @@ async function call(payload) {
 // so inline bytes silently capped every send at ~3.3 MB of PDF — well under a
 // normal scanned disclosure packet. Upload to storage first (see
 // uploadSendablePdf) and pass the path; the API streams it to BoldSign.
-export const sendDocument     = (p)          => call({ action: 'send', ...p })
 export const documentEmbedUrl = (p)          => call({ action: 'document-embed-url', ...p })
 // Reopen an unsent draft in BoldSign's embedded editor — the way back into a send
 // that was started and abandoned (tab closed, agent switched screens). Returns
@@ -87,7 +86,6 @@ export const captureLayout    = (documentId) => call({ action: 'layout-capture',
 // it. The wire action is still `document-print` — it fed a Print button before the
 // browser's print dialog turned out to render these blank (see src/lib/savePdf.js).
 export const documentPdfUrl   = (documentId) => call({ action: 'document-print', documentId })
-export const signLink         = (p)          => call({ action: 'sign-link', ...p })
 export const getDocStatus    = (documentId) => call({ action: 'status',   documentId })
 // download/audit-download return { url, filename } — a short-lived signed
 // storage URL, not base64, so size is not a factor and each document resolves
@@ -96,7 +94,6 @@ export const downloadSigned  = (documentId) => call({ action: 'download', docume
 export const downloadAudit   = (documentId) => call({ action: 'audit-download', documentId })
 export const remindDocument  = (documentId) => call({ action: 'remind',   documentId })
 export const deleteDocument  = (documentId) => call({ action: 'document-delete', documentId })
-export const debugBoldsign   = ()           => call({ action: 'debug' })
 
 // ── Sendable-PDF upload ───────────────────────────────────────────────────────
 // BoldSign accepts files well above what a serverless request body can carry, so
@@ -153,7 +150,6 @@ export async function signSendableUrl(supabase, path) {
 
 // ── Sender identities (admin) ────────────────────────────────────────────────
 export const createIdentity      = (agentId, name, email) => call({ action: 'identity-create', agentId, name, email })
-export const identityDetails     = (email)      => call({ action: 'identity-details', email })
 export const updateIdentity      = (email, name) => call({ action: 'identity-update', email, name })
 export const deleteIdentity      = (email)      => call({ action: 'identity-delete', email })
 export const setDefaultIdentity  = (email)      => call({ action: 'identity-set-default', email })
@@ -161,24 +157,10 @@ export const syncIdentities      = ()      => call({ action: 'identity-sync' })
 export const resendIdentity      = (email) => call({ action: 'identity-resend', email })
 
 // ── Templates ────────────────────────────────────────────────────────────────
-export const listBoldsignTemplates = ()  => call({ action: 'template-list' })
 export const templateEditorUrl     = (p) => call({ action: 'template-editor-url', ...p })
 export const templateDetails       = (templateId) => call({ action: 'template-details', templateId })
 export const sendFromTemplate      = (p) => call({ action: 'template-send', ...p })
 export const templateEmbedUrl      = (p) => call({ action: 'template-embed-url', ...p })
-
-// ── Text tags ─────────────────────────────────────────────────────────────────
-// BoldSign auto-places a field when it finds `{{fieldType|signerIndex|required|
-// label|fieldId}}` in the document text. Setting fieldId to a CRM token (see
-// crmTokenValues below) unifies template prep with prefill — the same string
-// both places the field and tells the CRM what to fill. See
-// docs/boldsign-integration.md and developers.boldsign.com/text-tags.
-export const TEXT_TAG_FIELD_TYPES = Object.freeze([
-  'Signature', 'Initial', 'DateSigned', 'Textbox', 'CheckBox', 'RadioButton', 'Dropdown', 'Label',
-])
-export function buildTextTag({ fieldType, signerIndex = 1, required = false, label = '', fieldId = '' }) {
-  return `{{${fieldType}|${signerIndex}|${required ? 'true' : 'false'}|${label}|${fieldId}}}`
-}
 
 // Field types whose value an agent can pre-fill from the CRM (vs signer actions
 // like Signature/Initial). Used to decide which template fields become inputs.
@@ -313,14 +295,6 @@ export function crmTokenValues({ deal, property, contact, agent } = {}) {
     agent_email:        agent?.email || '',
     broker_name:        agent?.brokerage || agent?.broker_name || '',
   }
-}
-
-export function buildPrefill(fieldTokens = [], ctx = {}) {
-  const source = crmTokenValues(ctx)
-  return (fieldTokens || [])
-    .map(id => ({ id, value: source[id] }))
-    .filter(f => f.value)                          // skip unknown/empty tokens
-    .map(f => ({ ...f, isReadOnly: true }))        // CRM-owned values are locked
 }
 
 // Role names that should be filled with the deal's client(s) rather than an

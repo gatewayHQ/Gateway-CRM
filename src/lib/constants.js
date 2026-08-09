@@ -13,7 +13,7 @@ export const BUCKETS = Object.freeze({
 })
 
 // States the brokerage operates in. 2-letter code is the stored/canonical value
-// (matches deals.comp_data.state and boldsign_templates.state). Add a row here
+// (matches deals.comp_data.state and form_packets.state). Add a row here
 // to expand into a new state — the property form and pipeline pick it up.
 export const OPERATING_STATES = Object.freeze([
   { code: 'IA', name: 'Iowa' },
@@ -37,7 +37,6 @@ export const TABLES = Object.freeze({
   PROPERTIES:          'properties',
   BOLDSIGN_DOCUMENTS:  'boldsign_documents',
   BOLDSIGN_SENDER_IDENTITIES: 'boldsign_sender_identities',
-  BOLDSIGN_TEMPLATES:  'boldsign_templates',
   TASKS:               'tasks',
   TEAMS:               'teams',
   TEAM_SPLITS:         'team_splits',

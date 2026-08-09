@@ -21,10 +21,12 @@ Agent (CRM)                    /api/boldsign                 BoldSign (US)
 Client (Portal)                /api/portal?action=sign-link
   Documents to Sign   ─────▶   token-validated → getEmbeddedSignLink ─▶ iframe
 
-BoldSign  ──webhook──▶  /api/boldsign (HMAC-verified)
-                          → update boldsign_documents
+BoldSign  ──webhook──▶  /api/boldsign (HMAC-verified, required)
+                          → compare-and-set boldsign_documents.status
+                            (forward-only; terminal states are final)
                           → on Completed: archive signed PDF + audit trail
-                          → notify agent
+                          → notify agent (once — only the delivery that won
+                            the transition)
 
 Nightly:  /api/cron?task=boldsign-sync
             → template-list → reconcile Form Library (form_packets) with what
@@ -46,7 +48,9 @@ Nightly:  /api/cron?task=boldsign-sync
   3. **Interactive placement** — for the embedded (PreparePage) send flow, the agent places fields visually in BoldSign; nothing is pre-placed. The non-interactive `send` action has no such step, so it rejects a request with neither text tags nor explicit tabs (`requiresExplicitFieldPlacement`) rather than silently guessing.
 - **Prefill by field ID:** a template field whose ID matches a CRM token (`property_address`, `seller_name`, `agent_name`, `broker_name`, …) is auto-filled and sent **read-only**. See `crmTokenValues()`.
 - **Embedded everywhere:** agents send via BoldSign's embedded prepare UI in-frame; clients sign via embedded signing in the portal. Requires **approved domains** in BoldSign + a paid tier.
-- **Reliability:** the central `boldsign()` client does exponential backoff + jitter on network / 429 / 5xx, and attaches an `Idempotency-Key` to writes.
+- **Reliability:** the central `boldsign()` client does exponential backoff + jitter. **A GET is always retried; a write is not.** BoldSign does not document an `Idempotency-Key` header, so a retried `POST /document/send` after a lost response is a second legally binding document in the client's inbox and a second credit off the plan. A write retries only on **429/408** (both mean BoldSign never processed it) or when the caller passes `idempotent: true` (revoke, delete, cancelEditing, URL minting). A connection that dies mid-send throws an error that *says the outcome is unknown* rather than one that reads like nothing happened. The `Idempotency-Key` header is still sent — harmless if ignored, correct the day it isn't.
+- **Rate limits are per ACCOUNT and shared:** Live 2,000 requests/hour, Sandbox 50/hour — the nightly sweep, every agent sending, and any AI agent polling all draw on the same budget. `getRateLimitState()` records what BoldSign reports on each response; the nightly cron logs and returns it.
+- **Webhook events are forward-only.** Deliveries are unordered and BoldSign stops redelivering once we answer 200, so the status write is a compare-and-set: terminal states (completed/declined/expired/voided) are final and the lifecycle never rewinds. Without it a redelivered "Sent" landing after "Completed" put a signed agreement back in the client portal as unsigned, restarted reminder emails to someone who had already signed, and dropped it out of the closing compliance gate.
 - **Document bytes never travel as base64.** A Vercel function caps request *and* response payloads at 4.5 MB and base64 inflates by ~33%, which silently limited every send to ~3.3 MB of PDF — under the size of a normal scanned disclosure packet. The browser puts the PDF in the deal's storage folder and passes a short-lived **signed URL**; the API streams it to BoldSign. Downloads work the same way in reverse (signed storage URL out). Nothing is size-limited except BoldSign's own 25 MB per-file ceiling, which is checked client-side with a real message.
 - **Every send is tracked server-side before the agent gets a send URL.** An untracked document is worse than a failed one: it reaches the client and then never updates, archives, or appears in the CRM. If the row can't be written the draft is deleted and the send is refused.
 - **Archive paths are deterministic and recorded on the row** (`signed_storage_path` / `audit_storage_path`), so a webhook redelivery overwrites instead of duplicating, and each document resolves to *its own* PDF rather than the first `signed-` file in the deal folder.
@@ -75,7 +79,6 @@ Signed PDFs + audit-trail PDFs are archived to the `deal-documents` bucket.
 | `template-send` / `template-embed-url` | agent | Send from template (JSON) / embedded prepare from template |
 | `template-editor-url` | admin | Embedded template create/edit URL. Requires `roles` (defaults to Seller/Listing Agent) and a document title on create — see "Fixing 'Roles cannot be null or empty'" below. `useTextTags` + `textTagDefinitions` supported. |
 | `identity-create` / `identity-details` / `identity-update` / `identity-delete` / `identity-set-default` / `identity-sync` / `identity-resend` | admin | Full sender-identity lifecycle — see "Sender Identity Management" below |
-| `debug` | agent | Config sanity check |
 | _(no `action`)_ | webhook | BoldSign lifecycle events (HMAC-verified) |
 
 `getEmbeddedSignLink` for clients is minted via `GET /api/portal?action=sign-link`.
@@ -527,7 +530,11 @@ go enter one rather than a silent `0%` on a signed agreement.
 | Var | Purpose |
 |---|---|
 | `BOLDSIGN_API_KEY` | API key (Sandbox in preview/staging, Live in prod) |
-| `BOLDSIGN_WEBHOOK_SECRET` | Webhook HMAC signing secret |
+| `BOLDSIGN_WEBHOOK_SECRET` | Webhook HMAC signing secret. **Required** — without it `/api/boldsign` answers 503 and processes nothing (an unverified endpoint lets anyone who knows the URL mark a real document completed or declined) |
+| `BOLDSIGN_WEBHOOK_AUDIT_ONLY` | Go-live safety valve: verify, log the verdict, process anyway. On for the first hours on Live, then off |
+| `BOLDSIGN_WEBHOOK_INSECURE` | Local dev only — process events with no secret configured |
+| `BOLDSIGN_API_BASE` | Region override (EU accounts: `https://api-eu.boldsign.com/v1`) |
+| `ALLOWED_ORIGIN` | Comma-separated origins allowed to call the API from a browser. Unset = `*` |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | Server-side DB + storage (webhook, portal, cron) |
 
 ## Migrations (Supabase SQL Editor — manual apply)
@@ -550,6 +557,56 @@ go enter one rather than a silent `0%` on a signed agreement.
 **Deploy order is flexible** — every read of a new column falls back when it's
 absent (with a `console.warn` naming the bundle), so shipping the app before the
 SQL degrades rather than breaks. Apply the SQL first anyway.
+
+## Sandbox → Live go-live procedure
+
+Sandbox and Live are **separate BoldSign accounts**. Nothing carries over: not
+template ids, not sender identities, not the webhook endpoint or its signing
+secret. Plan for the Form Library's `boldsign_template_id` values to be *wrong*
+the moment the key changes — every packet must be rebuilt or re-registered
+against the Live account.
+
+Order matters. Each step is safe to stop at.
+
+1. **Apply `migrations/production/2026-08-09_boldsign_go_live.sql`** in the
+   Supabase SQL editor (unique `document_id`, admin-only form catalog). If it
+   warns about duplicate `document_id` rows, resolve those by hand and re-run —
+   it will not pick a survivor for a legal record.
+2. **Let Sandbox drain.** Any document still `sent`/`delivered` on the Sandbox
+   account will never complete once the key changes: its webhooks stop matching
+   and its documents are deleted by BoldSign after the sandbox retention window.
+   Finish or revoke them first:
+   `select document_id, document_name, status from boldsign_documents where status in ('sent','delivered');`
+3. **Create the Live API key** (app.boldsign.com → Settings → API → API Keys)
+   and set `BOLDSIGN_API_KEY` in Vercel → Production only. Leave Preview on the
+   Sandbox key so preview deploys can never email a real client.
+4. **Register the Live webhook** → `https://<your-domain>/api/boldsign`,
+   subscribed to Sent, Viewed/Delivered, Completed, Declined, Revoked, Expired.
+   Reveal its signing secret and set `BOLDSIGN_WEBHOOK_SECRET`.
+5. **Set `BOLDSIGN_WEBHOOK_AUDIT_ONLY=true`** for the first hours. Verification
+   runs and logs its verdict but events are still processed, so a wrong or rolled
+   secret shows up as a log line instead of silently 401-ing every status update.
+   Remove it once the logs show clean verifications.
+6. **Set `ALLOWED_ORIGIN`** to the production origin(s).
+7. **Approved domains** — add the production domain in BoldSign → Settings →
+   Embedded, or every embedded prepare/sign iframe refuses to load.
+8. **Re-register sender identities** on the Live account (Settings → BoldSign →
+   sync/resend). Each agent must click the approval email again; until they do,
+   sends fall back to the org default identity, and then to the raw API account.
+9. **Rebuild templates** against Live and update each Form Library packet's
+   template id. The nightly `boldsign-sync` will otherwise deactivate every
+   packet whose Sandbox template id does not exist on the Live account — which is
+   the correct behavior, but it happens at 03:00 and silently.
+10. **Smoke test on a throwaway deal**, in this order: send from template →
+    confirm the row appears in the Signatures tab → sign as the client in the
+    portal → confirm the webhook flipped it to `completed`, the signed PDF *and*
+    the audit trail landed in Documents, and the agent got a notification. Then
+    check the function log for `[boldsign] rate limit` and signature-verification
+    lines.
+11. **Revoke the Sandbox key** so nothing can accidentally send from it again.
+
+Rollback: put the Sandbox key back and re-point the webhook. Documents created
+on Live stay on Live — they are real signed records and are not portable.
 
 ## Testing
 - `api/__tests__/boldsign.test.js` — retry/idempotency, `buildSignerPayload`/`requiresExplicitFieldPlacement` (retired-placement contract), `normalizeTemplateRoles` (the Roles-empty fix), `resolveOnBehalfOf` (agent identity → org-default fallback → null).

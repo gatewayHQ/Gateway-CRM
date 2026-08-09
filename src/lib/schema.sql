@@ -847,6 +847,11 @@ create index if not exists idx_boldsign_docs_deal   on boldsign_documents(deal_i
 create index if not exists idx_boldsign_docs_agent  on boldsign_documents(agent_id);
 create index if not exists idx_boldsign_docs_status on boldsign_documents(status) where status not in ('completed','voided');
 create index if not exists idx_boldsign_docs_docid  on boldsign_documents(document_id);
+-- One CRM row per BoldSign document. A duplicate made every server-side
+-- `.maybeSingle()` lookup throw — and in the webhook that throw was answered 200,
+-- so BoldSign never redelivered and the document stopped updating permanently.
+create unique index if not exists uq_boldsign_documents_document_id
+  on boldsign_documents(document_id);
 -- Nightly reminder sweep + "what's still outstanding" queries: in-flight only,
 -- ordered by age.
 create index if not exists idx_boldsign_docs_awaiting on boldsign_documents(sent_at)
@@ -1461,9 +1466,18 @@ create index if not exists idx_form_packets_required
   on form_packets(state, transaction_type)
   where required and active and boldsign_template_id is not null;
 alter table form_packets enable row level security;
+-- The catalog of state-required forms is brokerage-wide and compliance-relevant:
+-- every agent must READ it to send from it, but only an admin may add, change or
+-- remove an entry — or repoint one at a different BoldSign template. It used to
+-- be `for all to authenticated using (true) with check (true)`, i.e. any signed-in
+-- agent could delete a required form; the UI hid the buttons, the database did not.
 drop policy if exists "form_packets_all" on form_packets;
-create policy "form_packets_all" on form_packets
-  for all to authenticated using (true) with check (true);
+drop policy if exists form_packets_read  on form_packets;
+drop policy if exists form_packets_write on form_packets;
+create policy form_packets_read on form_packets
+  for select to authenticated using (true);
+create policy form_packets_write on form_packets
+  for all to authenticated using (app_is_admin()) with check (app_is_admin());
 create unique index if not exists uq_form_packets_boldsign_tid
   on form_packets(boldsign_template_id) where boldsign_template_id is not null;
 -- The send picker reads only active, template-linked rows.

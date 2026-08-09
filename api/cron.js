@@ -24,7 +24,7 @@
  */
 
 import { createClient } from '@supabase/supabase-js'
-import { boldsign, listAllTemplates } from './boldsign.js'
+import { boldsign, listAllTemplates, getRateLimitState } from './boldsign.js'
 import { OPERATING_STATES } from '../src/lib/constants.js'
 import { ALL_DEAL_STAGES, isOpenStage } from '../src/lib/stages.js'
 
@@ -669,6 +669,14 @@ async function runBoldsignTemplateSync(supabase) {
   // Chase outstanding signatures in the same nightly run (no extra cron slot).
   const reminders = await runSignatureReminders(supabase)
 
+  // What this run cost against the account's hourly budget (Live 2,000/hr,
+  // Sandbox 50/hr — both per ACCOUNT, shared with every agent sending right now).
+  // Reported so a run that is quietly eating the quota is visible in the cron log
+  // rather than discovered as 429s during business hours.
+  const rateLimit = getRateLimitState()
+  console.log(`[cron] boldsign-sync: ${liveTemplates.length} templates, ${reminders.sent || 0} reminders`
+    + (rateLimit.remaining != null ? ` — ${rateLimit.remaining}/${rateLimit.limit ?? '?'} API calls left this window` : ''))
+
   return {
     status: 200,
     body: {
@@ -676,6 +684,7 @@ async function runBoldsignTemplateSync(supabase) {
       deactivated, deactivatedNames, drafted, unmatched,
       deactivationSkipped: !canDeactivate || undefined,
       reminders,
+      rateLimit,
     },
   }
 }
