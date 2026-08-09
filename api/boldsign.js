@@ -1,5 +1,6 @@
 import { applyJsonCors, requireAgent, errorResponse, getServiceClient, getUserClient, SUPABASE_URL } from './_lib/auth.js'
 import closingPacketHandler from './_handlers/closing-packet.js'
+import { wrap } from './_lib/observability.js'
 import crypto from 'node:crypto'
 
 // We verify webhook signatures against the RAW request body, so the automatic
@@ -1517,7 +1518,12 @@ export async function resolveOnBehalfOf(supabase, agentId) {
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
-export default async function handler(req, res) {
+// Exported through observability.wrap() at the bottom of this file: every
+// request gets a structured log line with the action, status, duration and a
+// request id — the same shape the other routes emit, and the thing that makes a
+// slow or failing send greppable instead of anecdotal. This is the busiest and
+// most consequential route in the app; it was the only one not wrapped.
+async function handler(req, res) {
   applyJsonCors(res, req)
   if (req.method === 'OPTIONS') return res.status(200).end()
   // A GET returns 200 so webhook-endpoint reachability checks pass.
@@ -2631,5 +2637,9 @@ async function handleWebhook(req, res) {
     return res.status(500).json({ error: 'Webhook processing failed', message: err.message })
   }
 }
+
+// Wrapped last, so `handler` above is the plain function every reader expects
+// and the logging is a decoration rather than something to read around.
+export default wrap('boldsign', handler)
 
 // (Closing packet generator moved to api/_handlers/closing-packet.js)
