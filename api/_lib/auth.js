@@ -13,10 +13,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { createClient } from '@supabase/supabase-js'
 
+// No hardcoded project fallback. A literal here meant a deployment with the env
+// var missing — a preview, a fork, a misconfigured environment — silently pointed
+// its service-key reads and storage writes at the PRODUCTION project instead of
+// failing. Absent config must fail loudly, not quietly succeed against live data.
 export const SUPABASE_URL =
   process.env.SUPABASE_URL ||
   process.env.VITE_SUPABASE_URL ||
-  'https://twgwemkihpwlgliftagg.supabase.co'
+  ''
 
 export const SERVICE_KEY =
   process.env.SUPABASE_SERVICE_KEY ||
@@ -27,6 +31,11 @@ const ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON
 // Memoize the service-key client so we don't reconnect on every request.
 let _svc = null
 export function getServiceClient() {
+  if (!SUPABASE_URL) {
+    const e = new Error('Server misconfigured: SUPABASE_URL missing')
+    e.status = 500
+    throw e
+  }
   if (!SERVICE_KEY) {
     const e = new Error('Server misconfigured: SUPABASE_SERVICE_KEY missing')
     e.status = 500
@@ -118,10 +127,24 @@ export function errorResponse(res, err) {
   return res.status(status).json({ error: err?.message || 'Server error' })
 }
 
-// CORS preset for browser-called JSON APIs. Wildcard for now (no cookies are
-// ever sent); tighten to specific origins if/when we add credentialed routes.
-export function applyJsonCors(res) {
-  res.setHeader('Access-Control-Allow-Origin',  '*')
+// CORS preset for browser-called JSON APIs.
+//
+// ALLOWED_ORIGIN has been documented in .env.example the whole time but nothing
+// read it — every deployment answered `*`, so any page on the internet could put
+// a signed-in agent's own token to work against the signing API from a tab they
+// didn't open. Set it (comma-separated for several) and only those origins are
+// echoed; leave it unset and behavior is unchanged.
+export function applyJsonCors(res, req) {
+  const allowed = String(process.env.ALLOWED_ORIGIN || '')
+    .split(',').map(s => s.trim().replace(/\/$/, '')).filter(Boolean)
+  const origin = String(req?.headers?.origin || '').replace(/\/$/, '')
+  if (allowed.length) {
+    res.setHeader('Vary', 'Origin')
+    // No match → no CORS header at all, which is the browser's own refusal.
+    if (origin && allowed.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin)
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*')
+  }
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key')
 }

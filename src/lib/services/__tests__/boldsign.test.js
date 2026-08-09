@@ -1,16 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, buildTextTag, normalizeState, crmTokenValues, buildPrefill, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
-
-describe('buildTextTag', () => {
-  it('builds the {{fieldType|signerIndex|required|label|fieldId}} syntax', () => {
-    expect(buildTextTag({ fieldType: 'Signature', signerIndex: 1, required: true, label: 'Sign', fieldId: 'seller_signature' }))
-      .toBe('{{Signature|1|true|Sign|seller_signature}}')
-  })
-  it('defaults signerIndex to 1 and required to false', () => {
-    expect(buildTextTag({ fieldType: 'Textbox', label: 'Address', fieldId: 'property_address' }))
-      .toBe('{{Textbox|1|false|Address|property_address}}')
-  })
-})
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -22,7 +11,7 @@ describe('normalizeState', () => {
   it('returns empty string for empty input', () => { expect(normalizeState('')).toBe('') })
 })
 
-describe('crmTokenValues + buildPrefill', () => {
+describe('crmTokenValues', () => {
   const ctx = {
     deal: { value: 450000, commission_pct: 3, expected_close_date: '2026-08-15' },
     property: { address: '123 Main St', city: 'Ames', state: 'IA', zip: '50010' },
@@ -56,14 +45,6 @@ describe('crmTokenValues + buildPrefill', () => {
     const vals = crmTokenValues({ ...ctx, deal: { value: 450000 } })
     expect(vals.commission_pct).toBe('')
     expect(vals.commission_amount).toBe('')
-  })
-
-  it('buildPrefill only includes known, non-empty tokens and locks them read-only', () => {
-    const fields = buildPrefill(['property_address', 'agent_name', 'unknown_token'], ctx)
-    expect(fields).toEqual([
-      { id: 'property_address', value: '123 Main St', isReadOnly: true },
-      { id: 'agent_name', value: 'Alex Agent', isReadOnly: true },
-    ])
   })
 })
 

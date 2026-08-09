@@ -1586,10 +1586,20 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
     // Realtime subscription — auto-update status when webhook fires
     const channel = supabase.channel(`sig-documents-${deal.id}`)
       .on('postgres_changes', {
-        event: 'UPDATE', schema: 'public', table: 'boldsign_documents',
+        event: '*', schema: 'public', table: 'boldsign_documents',
         filter: `deal_id=eq.${deal.id}`,
       }, payload => {
-        setEnvelopes(prev => prev.map(e => e.id === payload.new.id ? { ...e, ...payload.new } : e))
+        if (payload.eventType === 'DELETE') {
+          setEnvelopes(prev => prev.filter(e => e.id !== payload.old?.id))
+          return
+        }
+        // INSERT as well as UPDATE: every send path writes its row server-side
+        // before handing back a send URL, so a document that went out from
+        // another tab (or from BoldSign itself) used to be invisible here until
+        // the agent reloaded the deal.
+        setEnvelopes(prev => (prev.some(e => e.id === payload.new.id)
+          ? prev.map(e => e.id === payload.new.id ? { ...e, ...payload.new } : e)
+          : [payload.new, ...prev]))
         if (payload.new.status === 'completed' && payload.old?.status !== 'completed') {
           loadDealFiles() // signed copy should now be in storage
           pushToast('Document fully signed — signed copy saved to Documents tab', 'success')
@@ -1682,6 +1692,14 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
     let data
     try { data = await getDocStatus(env.document_id) }
     catch (err) { pushToast(err.message, 'error'); return }
+    // A status BoldSign reports but this app does not store comes back as null.
+    // Show it, never write it: an unknown string in this column takes the
+    // document out of the portal, the reminder sweep and the closing gate, all
+    // of which filter on the known set.
+    if (!data.status) {
+      pushToast(`BoldSign reports "${data.rawStatus || 'an unrecognized status'}" — left unchanged here.`, 'info')
+      return
+    }
     // Only write completed_at when there IS one — assigning `|| null`
     // unconditionally wiped a known signing date whenever a status read came
     // back without it, losing the "Signed on …" record permanently.

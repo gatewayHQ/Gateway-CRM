@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
+import crypto from 'node:crypto'
+import { boldsign, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -41,7 +42,10 @@ describe('boldsign() retry + idempotency', () => {
       .mockResolvedValueOnce(errResp(503))
       .mockResolvedValueOnce(okResp('{"documentId":"d1"}'))
     vi.stubGlobal('fetch', fetchMock)
-    const data = await boldsign('/x', { method: 'POST', json: { a: 1 }, maxRetries: 3 })
+    // A GET, or a write the caller has declared repeatable. A plain write is
+    // NOT retried on a 5xx — see "a non-idempotent write is never blindly
+    // retried" below for why.
+    const data = await boldsign('/x', { method: 'GET', maxRetries: 3 })
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(data.documentId).toBe('d1')
   })
@@ -53,7 +57,7 @@ describe('boldsign() retry + idempotency', () => {
       return Promise.resolve(keys.length < 2 ? errResp(500) : okResp())
     })
     vi.stubGlobal('fetch', fetchMock)
-    await boldsign('/x', { method: 'POST', json: {}, maxRetries: 2 })
+    await boldsign('/x', { method: 'POST', json: {}, maxRetries: 2, idempotent: true })
     expect(keys).toHaveLength(2)
     expect(keys[0]).toBeTruthy()
     expect(keys[0]).toBe(keys[1])   // same key across the retry
@@ -1102,5 +1106,150 @@ describe('resolveBoundsScale — derived from evidence, never assumed', () => {
       expect(sizes.get(1)).toEqual({ width: 816, height: 1056 })
     }
     expect(boldsignPageSizes({}).size).toBe(0)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Go-live hardening (Sandbox → Live)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('verifyWebhookSignature', () => {
+  const secret = 'whsec_test_key'
+  const body   = '{"event":{"eventType":"Completed"},"data":{"documentId":"doc-1"}}'
+  const t      = 1700000000
+  const hmac   = (payload) => crypto.createHmac('sha256', secret).update(payload).digest('hex')
+
+  it('reports "unconfigured" when no secret is set — never "ok"', () => {
+    // The old behavior returned 'ok' here, which is how an unverified endpoint
+    // could accept status changes on real, legally binding documents.
+    expect(verifyWebhookSignature(body, `t=${t}, s0=${hmac(`${t}.${body}`)}`, { secret: '', nowSec: t }))
+      .toBe('unconfigured')
+  })
+
+  it('accepts the documented t.body payload', () => {
+    expect(verifyWebhookSignature(body, `t=${t}, s0=${hmac(`${t}.${body}`)}`, { secret, nowSec: t })).toBe('ok')
+  })
+
+  it('accepts a signature under ANY s<N> — a rolled secret sends s0 and s1', () => {
+    const header = `t=${t}, s0=${'0'.repeat(64)}, s1=${hmac(`${t}.${body}`)}`
+    expect(verifyWebhookSignature(body, header, { secret, nowSec: t })).toBe('ok')
+  })
+
+  it('rejects a wrong signature, a missing header, and a missing timestamp', () => {
+    expect(verifyWebhookSignature(body, `t=${t}, s0=${'a'.repeat(64)}`, { secret, nowSec: t })).toBe('invalid')
+    expect(verifyWebhookSignature(body, '', { secret, nowSec: t })).toBe('invalid')
+    expect(verifyWebhookSignature(body, `s0=${hmac(`${t}.${body}`)}`, { secret, nowSec: t })).toBe('invalid')
+  })
+
+  it('rejects a replay outside the 5-minute window', () => {
+    const header = `t=${t}, s0=${hmac(`${t}.${body}`)}`
+    expect(verifyWebhookSignature(body, header, { secret, nowSec: t + 301 })).toBe('invalid')
+    expect(verifyWebhookSignature(body, header, { secret, nowSec: t + 299 })).toBe('ok')
+  })
+
+  it('rejects a body that was altered after signing', () => {
+    const header = `t=${t}, s0=${hmac(`${t}.${body}`)}`
+    expect(verifyWebhookSignature(body.replace('doc-1', 'doc-2'), header, { secret, nowSec: t })).toBe('invalid')
+  })
+})
+
+describe('boldsign() — a non-idempotent write is never blindly retried', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  it('does NOT retry a send on a 5xx — a retry can be a second signed document', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(errResp(500)))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(boldsign('/document/send', { method: 'POST', json: {} })).rejects.toMatchObject({ status: 500 })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('DOES retry a write on 429 — rate limited means it was never processed', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(errResp(429))
+      .mockResolvedValueOnce(okResp('{"documentId":"d1"}'))
+    vi.stubGlobal('fetch', fetchMock)
+    const data = await boldsign('/document/send', { method: 'POST', json: {} })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(data.documentId).toBe('d1')
+  })
+
+  it('retries a write the caller marked idempotent (revoke, delete, url minting)', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(errResp(503))
+      .mockResolvedValueOnce(okResp())
+    vi.stubGlobal('fetch', fetchMock)
+    await boldsign('/document/revoke', { method: 'POST', json: {}, idempotent: true })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports an UNKNOWN outcome when the connection dies mid-send', async () => {
+    const fetchMock = vi.fn(() => Promise.reject(new Error('socket hang up')))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(boldsign('/document/send', { method: 'POST', json: {} }))
+      .rejects.toMatchObject({ indeterminate: true, message: expect.stringContaining('may or may not') })
+    expect(fetchMock).toHaveBeenCalledTimes(1)   // not retried
+  })
+
+  it('still retries a GET on a 5xx', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(errResp(502))
+      .mockResolvedValueOnce(okResp())
+    vi.stubGlobal('fetch', fetchMock)
+    await boldsign('/document/properties?documentId=x')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('normalizeKnownStatus — only statuses the app will store', () => {
+  it('maps BoldSign\'s vocabulary onto the stored set', () => {
+    expect(normalizeKnownStatus('Completed')).toBe('completed')
+    expect(normalizeKnownStatus('InProgress')).toBe('sent')
+    expect(normalizeKnownStatus('WaitingForOthers')).toBe('sent')
+    expect(normalizeKnownStatus('Viewed')).toBe('delivered')
+    expect(normalizeKnownStatus('Revoked')).toBe('voided')
+    // Its own status, not folded into 'voided' — folding it made the webhook's
+    // expiry-notification branch unreachable, so nobody was told.
+    expect(normalizeKnownStatus('Expired')).toBe('expired')
+    expect(normalizeKnownStatus('Draft')).toBe('draft')
+    expect(normalizeKnownStatus('None')).toBe('draft')
+  })
+
+  it('returns null for anything else, rather than storing it', () => {
+    // An event name that is not a status, or a future BoldSign value. Writing it
+    // would drop the document out of the portal, the reminder sweep and the
+    // closing gate, all of which filter on the known strings.
+    expect(normalizeKnownStatus('ReminderSent')).toBeNull()
+    expect(normalizeKnownStatus('SomethingNew')).toBeNull()
+    expect(normalizeKnownStatus('')).toBeNull()
+  })
+})
+
+describe('shouldApplyStatus — out-of-order webhooks cannot rewind a document', () => {
+  it('lets the lifecycle move forward', () => {
+    expect(shouldApplyStatus('draft', 'sent')).toBe(true)
+    expect(shouldApplyStatus('sent', 'delivered')).toBe(true)
+    expect(shouldApplyStatus('delivered', 'completed')).toBe(true)
+  })
+
+  it('refuses to move a signed document back to awaiting-signature', () => {
+    // The failure this prevents: a redelivered "Sent" landing after "Completed"
+    // put a fully-signed agreement back in the portal as unsigned, restarted the
+    // reminder emails to a client who had already signed, and removed it from
+    // the closing compliance gate.
+    expect(shouldApplyStatus('completed', 'sent')).toBe(false)
+    expect(shouldApplyStatus('completed', 'delivered')).toBe(false)
+    expect(shouldApplyStatus('declined', 'sent')).toBe(false)
+    expect(shouldApplyStatus('voided', 'delivered')).toBe(false)
+  })
+
+  it('treats a repeat of the same status as nothing to do', () => {
+    expect(shouldApplyStatus('completed', 'completed')).toBe(false)
+    expect(shouldApplyStatus('sent', 'sent')).toBe(false)
+  })
+
+  it('never writes an unknown status, and accepts anything onto an unknown one', () => {
+    expect(shouldApplyStatus('sent', 'remindersent')).toBe(false)
+    expect(shouldApplyStatus('sent', null)).toBe(false)
+    expect(shouldApplyStatus('somethingold', 'completed')).toBe(true)
   })
 })

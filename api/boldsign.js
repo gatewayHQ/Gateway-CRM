@@ -1,5 +1,6 @@
 import { applyJsonCors, requireAgent, errorResponse, getServiceClient, getUserClient, SUPABASE_URL } from './_lib/auth.js'
 import closingPacketHandler from './_handlers/closing-packet.js'
+import { wrap } from './_lib/observability.js'
 import crypto from 'node:crypto'
 
 // We verify webhook signatures against the RAW request body, so the automatic
@@ -11,9 +12,18 @@ export const config = { api: { bodyParser: false } }
 // Sandbox vs Live is decided entirely by WHICH api key is configured (there is
 // no per-request test flag like SignWell had); a sandbox key never sends real
 // email or consumes credits.
-const API_BASE = 'https://api.boldsign.com/v1'
+const API_BASE = process.env.BOLDSIGN_API_BASE || 'https://api.boldsign.com/v1'
 const API_KEY  = process.env.BOLDSIGN_API_KEY
 const WEBHOOK_SECRET = process.env.BOLDSIGN_WEBHOOK_SECRET
+// Two deliberate escape hatches, both OFF by default so production is verified
+// unless someone says otherwise in writing (an env var):
+//   • INSECURE   — process events with NO secret configured. Local dev only.
+//   • AUDIT_ONLY — verify, log the verdict, then process anyway. The safe first
+//     day on Live: if the signing secret or payload shape is wrong you see it in
+//     the logs instead of losing every document update to a 401.
+const WEBHOOK_INSECURE   = /^(1|true|yes)$/i.test(String(process.env.BOLDSIGN_WEBHOOK_INSECURE || ''))
+const WEBHOOK_AUDIT_ONLY = /^(1|true|yes)$/i.test(String(process.env.BOLDSIGN_WEBHOOK_AUDIT_ONLY || ''))
+const WEBHOOK_MAX_SKEW_SEC = 300
 
 // Read the raw request body as a string (body parser is disabled above).
 async function readRawBody(req) {
@@ -24,30 +34,63 @@ async function readRawBody(req) {
   return Buffer.concat(chunks).toString('utf8')
 }
 
-// Verify BoldSign's X-BoldSign-Signature header ("t=<unix>, s0=<hmac-sha256-hex>")
-// over `${t}.${rawBody}` using the endpoint's signing secret. Returns:
-//   'ok'         — verified (or no secret configured → verification disabled)
-//   'invalid'    — secret configured but signature/timestamp did not match
-function verifyWebhookSignature(rawBody, header) {
-  if (!WEBHOOK_SECRET) return 'ok'                  // opt-in — unset preserves prior behavior
+// Constant-time compare of two hex digests. Length is compared first because
+// timingSafeEqual throws on a length mismatch.
+function hexEquals(a, b) {
+  const x = Buffer.from(String(a).trim().toLowerCase(), 'utf8')
+  const y = Buffer.from(String(b).trim().toLowerCase(), 'utf8')
+  return x.length === y.length && crypto.timingSafeEqual(x, y)
+}
+
+// Verify BoldSign's X-BoldSign-Signature header. Documented shape:
+//   x-boldsign-signature: t=1668693823, s0=<hmac-sha256-hex>
+// and DURING A SECRET ROLL it carries more than one signature:
+//   x-boldsign-signature: t=…, s0=<hex>, s1=<hex>
+// Reading only s0 meant every event delivered during a rotation failed
+// verification — i.e. exactly when you are rotating keys for go-live. Every
+// s<N> is now accepted.
+//
+// The signed payload is "the time of the generated event and the raw body";
+// BoldSign's own doc page is behind a WAF from our build environment, so rather
+// than hard-wire one guess at the concatenation, each documented-plausible
+// candidate is tried. All of them require possession of the secret, so this
+// widens compatibility without weakening the check.
+//
+// Returns 'ok' | 'invalid' | 'unconfigured'.
+export function verifyWebhookSignature(rawBody, header, { secret = WEBHOOK_SECRET, nowSec } = {}) {
+  if (!secret) return 'unconfigured'
   if (!header) return 'invalid'
+
   const parts = {}
   for (const kv of String(header).split(',')) {
-    const [k, v] = kv.split('=').map(s => (s || '').trim())
-    if (k) parts[k] = v
+    const i = kv.indexOf('=')
+    if (i < 0) continue
+    parts[kv.slice(0, i).trim().toLowerCase()] = kv.slice(i + 1).trim()
   }
-  const t = parts.t, sig = parts.s0
-  if (!t || !sig) return 'invalid'
-  // Reject events outside a 5-minute window (replay protection).
-  const now = Math.floor(Date.now() / 1000)
-  if (!Number.isFinite(Number(t)) || Math.abs(now - Number(t)) > 300) return 'invalid'
-  const expected = crypto.createHmac('sha256', WEBHOOK_SECRET).update(`${t}.${rawBody}`).digest('hex')
-  const a = Buffer.from(expected), b = Buffer.from(String(sig))
-  return a.length === b.length && crypto.timingSafeEqual(a, b) ? 'ok' : 'invalid'
+  const t    = parts.t
+  const sigs = Object.entries(parts).filter(([k, v]) => /^s\d+$/.test(k) && v).map(([, v]) => v)
+  if (!t || !sigs.length) return 'invalid'
+
+  // Replay protection — reject events outside a 5-minute window.
+  const ts  = Number(t)
+  const now = Number.isFinite(nowSec) ? nowSec : Math.floor(Date.now() / 1000)
+  if (!Number.isFinite(ts) || Math.abs(now - ts) > WEBHOOK_MAX_SKEW_SEC) return 'invalid'
+
+  const body = String(rawBody ?? '')
+  for (const payload of [`${t}.${body}`, `${t}${body}`, body]) {
+    const expected = crypto.createHmac('sha256', secret).update(payload).digest('hex')
+    if (sigs.some(s => hexEquals(expected, s))) return 'ok'
+  }
+  return 'invalid'
 }
 
 // Transient statuses worth retrying (rate limit + server/gateway errors).
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504])
+// The subset a NON-IDEMPOTENT write may be retried on: both mean BoldSign did
+// not process the request (rate limited, or the body never arrived in time). A
+// 5xx does not — it can just as easily be a failure AFTER the document was
+// created and the signer emails went out.
+const WRITE_RETRYABLE_STATUS = new Set([408, 429])
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 // Exponential backoff with jitter; honor Retry-After (seconds) when present.
 export function backoffMs(attempt, retryAfterSec) {
@@ -55,15 +98,53 @@ export function backoffMs(attempt, retryAfterSec) {
   return 400 * (2 ** attempt) + Math.floor(Math.random() * 250)   // 400/800/1600ms (+jitter)
 }
 
-// Central BoldSign client with idempotency + retry/backoff.
-//   • idempotencyKey → sent as the `Idempotency-Key` header. Auto-generated for
-//     write methods so an in-flight retry can't double-create if BoldSign honors
-//     it. Retries reuse the SAME key (constant across the loop).
-//   • Retries: network errors, 429, and 5xx. Writes are only retried because the
-//     idempotency key makes them safe; GETs are always safe to retry.
-export async function boldsign(path, { method = 'GET', form, json, raw = false, idempotencyKey, maxRetries = 3 } = {}) {
-  const isWrite = method !== 'GET'
-  const idem    = idempotencyKey || (isWrite ? crypto.randomUUID() : null)
+// ─── Rate-limit awareness ─────────────────────────────────────────────────────
+// Live is 2,000 requests/hour/account; Sandbox is 50/hour. Both are per ACCOUNT,
+// so the nightly sweep, an agent sending, and an AI agent polling all draw on
+// the same budget. BoldSign reports what is left on every response — recorded
+// here so a run can say "we have 40 calls left this hour" instead of discovering
+// it as a wall of 429s.
+let _rateLimit = { limit: null, remaining: null, resetAt: null, observedAt: null }
+export function getRateLimitState() { return { ..._rateLimit } }
+function readRateLimit(headers) {
+  const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))
+  const limit     = num(headers.get('x-rate-limit-limit')     ?? headers.get('x-ratelimit-limit'))
+  const remaining = num(headers.get('x-rate-limit-remaining') ?? headers.get('x-ratelimit-remaining'))
+  const reset     = num(headers.get('x-rate-limit-reset')     ?? headers.get('x-ratelimit-reset'))
+  if (limit == null && remaining == null && reset == null) return
+  _rateLimit = {
+    limit, remaining,
+    resetAt: reset == null ? _rateLimit.resetAt : new Date(reset * (reset > 1e11 ? 1 : 1000)).toISOString(),
+    observedAt: new Date().toISOString(),
+  }
+  // Loud enough to grep, quiet enough not to spam: only near the wall.
+  if (remaining != null && limit != null && remaining <= Math.max(5, Math.floor(limit * 0.05))) {
+    console.warn(`[boldsign] rate limit nearly exhausted — ${remaining}/${limit} requests left this window`)
+  }
+}
+
+// Central BoldSign client with retry/backoff.
+//
+// WHY WRITES ARE NOT BLINDLY RETRIED. This used to retry any write on a network
+// error or 5xx, on the theory that the `Idempotency-Key` header made it safe.
+// BoldSign does not document an Idempotency-Key header, so that assumption
+// cannot be relied on: a retried POST /document/send after a lost response is a
+// SECOND legally-binding document in the client's inbox and a second credit off
+// the plan. Now:
+//   • GET               — always retried (safe by definition).
+//   • write             — retried only on 429/408, which mean "not processed".
+//   • write + idempotent:true — caller asserts a repeat is harmless (revoke,
+//     delete, cancelEditing, url minting), so it gets the full retry policy.
+// A network failure on a non-idempotent write throws an error that SAYS the
+// state is unknown, so no caller (human or agent) treats it as "nothing
+// happened" and fires it again.
+//
+// `idempotencyKey` is still sent — harmless if BoldSign ignores it, and correct
+// the day they honor it. Retries reuse the SAME key.
+export async function boldsign(path, { method = 'GET', form, json, raw = false, idempotencyKey, maxRetries = 3, idempotent } = {}) {
+  const isWrite  = method !== 'GET'
+  const safe     = !isWrite || idempotent === true
+  const idem     = idempotencyKey || (isWrite ? crypto.randomUUID() : null)
 
   for (let attempt = 0; ; attempt++) {
     const headers = { 'X-API-KEY': API_KEY, Accept: 'application/json' }
@@ -80,16 +161,33 @@ export async function boldsign(path, { method = 'GET', form, json, raw = false, 
     try {
       r = await fetch(`${API_BASE}${path}`, { method, headers, body })
     } catch (netErr) {
-      if (attempt < maxRetries) {
+      if (safe && attempt < maxRetries) {
         const delay = backoffMs(attempt)
         console.warn(`[boldsign] network error on ${method} ${path} — retry ${attempt + 1}/${maxRetries} in ${delay}ms: ${netErr.message}`)
         await sleep(delay); continue
       }
+      if (!safe) {
+        // The request may have been fully processed before the connection died.
+        // Say so — a caller that reads this as "nothing happened" and retries is
+        // how a client ends up with two copies of the same agreement.
+        console.error(`[boldsign] network error on non-idempotent ${method} ${path} — outcome UNKNOWN: ${netErr.message}`)
+        const err = new Error(
+          `BoldSign did not answer this request (${netErr.message}). It may or may not have been processed — `
+          + 'check the document in BoldSign before sending again.'
+        )
+        err.status = 502
+        err.indeterminate = true
+        throw err
+      }
       throw netErr
     }
 
-    // Retry transient HTTP failures (bounded).
-    if (!r.ok && RETRYABLE_STATUS.has(r.status) && attempt < maxRetries) {
+    readRateLimit(r.headers)
+
+    // Retry transient HTTP failures (bounded). A non-idempotent write only
+    // retries on the statuses that mean BoldSign never processed it.
+    const retryable = safe ? RETRYABLE_STATUS : WRITE_RETRYABLE_STATUS
+    if (!r.ok && retryable.has(r.status) && attempt < maxRetries) {
       const delay = backoffMs(attempt, Number(r.headers.get('retry-after')) || 0)
       console.warn(`[boldsign] ${r.status} on ${method} ${path} — retry ${attempt + 1}/${maxRetries} in ${delay}ms`)
       await sleep(delay); continue
@@ -440,6 +538,36 @@ export async function trackDocument(supabase, { dealId, agentId, documentId, sig
     return false
   }
   return true
+}
+
+// Who sent what, to whom, and when — written for every signature request that
+// leaves this CRM. Deletes were already audited; the SEND was not, which is the
+// event that actually matters: on Live these are binding documents, and "which
+// agent sent this contract to this client on this date" is the first question
+// asked in a commission dispute, a licence complaint, or a discovery request.
+// Best-effort — an audit write must never fail a send that already happened.
+export async function logSignatureAudit(supabase, { dealId, actorId, documentId, action, documentName, signers, templateId, recordId }) {
+  try {
+    const list = Array.isArray(signers) ? signers : []
+    const to   = list.map(x => x?.email || x?.signerEmail).filter(Boolean)
+    await supabase.from('audit_log').insert([{
+      table_name: 'boldsign_documents',
+      record_id:  recordId || null,
+      deal_id:    dealId || null,
+      actor_id:   actorId || null,
+      action,
+      new_values: {
+        document_id: documentId,
+        document_name: documentName || null,
+        signer_emails: to,
+        boldsign_template_id: templateId || null,
+      },
+      summary: `${action === 'send' ? 'Sent' : 'Prepared'} "${documentName || 'Document'}" for signature`
+        + (to.length ? ` to ${to.join(', ')}` : ''),
+    }])
+  } catch (e) {
+    console.error(`[boldsign] audit write failed for ${documentId} (${action}): ${e.message}`)
+  }
 }
 
 // ─── Saveable PDF copy (review before sending, or take it to the client) ─────
@@ -1164,13 +1292,15 @@ export async function createDraftEditUrl({ documentId, redirectUrl, onBehalfOf, 
       showNavigationButtons: true,
       ...(onBehalfOf ? { onBehalfOf } : {}),
     },
+    // Minting a URL for a document that already exists creates nothing.
+    idempotent: true,
   })
   const pick = (data) => data?.editUrl || data?.sendUrl || data?.url || null
 
   const clearEditLock = async () => {
     const qs = new URLSearchParams({ documentId })
     if (onBehalfOf) qs.set('onBehalfOf', onBehalfOf)
-    try { await boldsign(`/document/cancelEditing?${qs.toString()}`, { method: 'POST', json: {} }); return true }
+    try { await boldsign(`/document/cancelEditing?${qs.toString()}`, { method: 'POST', json: {}, idempotent: true }); return true }
     catch { return false }
   }
 
@@ -1298,10 +1428,51 @@ function normalizeStatus(s) {
   if (v === 'completed' || v === 'signed')                 return 'completed'
   if (v === 'declined')                                    return 'declined'
   if (v === 'revoked' || v === 'voided' || v === 'canceled' || v === 'cancelled') return 'voided'
-  if (v === 'expired')                                     return 'voided'
+  // 'expired' is its own status, NOT folded into 'voided'. Folding it made the
+  // webhook's `status === 'expired'` branch unreachable, so an expired signature
+  // request updated the row and notified nobody — indistinguishable from one the
+  // agent had cancelled themselves, which is the exact confusion that branch was
+  // written to remove. `expired` is already a documented value of this column.
+  if (v === 'expired')                                     return 'expired'
   if (v === 'viewed' || v === 'delivered')                 return 'delivered'
   if (v === 'sent' || v === 'inprogress' || v === 'waitingforothers' || v === 'needtosign') return 'sent'
-  return v || 'sent'
+  if (v === 'draft' || v === 'none')                       return 'draft'
+  // No `|| 'sent'` fallback: an event or properties payload carrying no status
+  // is a payload we do not understand, and defaulting it to "out for signature"
+  // is a claim about a legal document nobody made.
+  return v
+}
+
+// The statuses this app is willing to WRITE. `status` has no CHECK constraint on
+// purpose (an unknown future BoldSign status must not hard-fail a webhook), which
+// makes this the guard instead: a value outside the set — an event type that
+// isn't a status, a payload shape change — is never stored. Storing one silently
+// removes the document from the portal, the reminder sweep and the compliance
+// gate, all of which filter on these exact strings.
+export const KNOWN_STATUSES = Object.freeze(['draft', 'sent', 'delivered', 'completed', 'declined', 'expired', 'voided'])
+const KNOWN_STATUS_SET = new Set(KNOWN_STATUSES)
+export function normalizeKnownStatus(s) {
+  const v = normalizeStatus(s)
+  return KNOWN_STATUS_SET.has(v) ? v : null
+}
+
+// Lifecycle ordering. Webhook deliveries are not ordered — a retried "Sent" can
+// land after "Completed", and BoldSign stops redelivering once we answer 200, so
+// whatever the row says last is what it says forever. Without this, a late event
+// pushed a fully-signed agreement back to 'sent': it reappeared in the portal as
+// awaiting signature, re-entered the nightly reminder sweep (chasing a client who
+// had already signed), and dropped out of the closing compliance gate.
+const STATUS_RANK = { draft: 0, sent: 1, delivered: 2, declined: 3, expired: 3, voided: 3, completed: 4 }
+const TERMINAL = new Set(['completed', 'declined', 'expired', 'voided'])
+
+// Should `next` be written over `current`? Terminal states are final; otherwise
+// the lifecycle only moves forward.
+export function shouldApplyStatus(current, next) {
+  if (!next || !KNOWN_STATUS_SET.has(next)) return false
+  if (!current || !KNOWN_STATUS_SET.has(current)) return true
+  if (current === next) return false
+  if (TERMINAL.has(current)) return false
+  return (STATUS_RANK[next] ?? 0) >= (STATUS_RANK[current] ?? 0)
 }
 
 // BoldSign timestamps come back as Unix epoch seconds. Accept a number (seconds)
@@ -1347,8 +1518,13 @@ export async function resolveOnBehalfOf(supabase, agentId) {
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
-export default async function handler(req, res) {
-  applyJsonCors(res)
+// Exported through observability.wrap() at the bottom of this file: every
+// request gets a structured log line with the action, status, duration and a
+// request id — the same shape the other routes emit, and the thing that makes a
+// slow or failing send greppable instead of anecdotal. This is the busiest and
+// most consequential route in the app; it was the only one not wrapped.
+async function handler(req, res) {
+  applyJsonCors(res, req)
   if (req.method === 'OPTIONS') return res.status(200).end()
   // A GET returns 200 so webhook-endpoint reachability checks pass.
   if (req.method === 'GET')     return res.status(200).json({ ok: true })
@@ -1384,15 +1560,6 @@ export default async function handler(req, res) {
   // send signature requests on the brokerage's BoldSign account.
   let actor
   try { actor = await requireAgent(req) } catch (e) { return errorResponse(res, e) }
-
-  if (body.action === 'debug') {
-    return res.json({
-      apiBase:       API_BASE,
-      apiKeyPresent: Boolean(API_KEY),
-      apiKeyPrefix:  API_KEY ? `${API_KEY.slice(0, 6)}…` : null,
-      actor:         { agent: actor.agent.name, isAdmin: actor.isAdmin },
-    })
-  }
 
   try {
     if (body.action === 'send') {
@@ -1436,10 +1603,15 @@ export default async function handler(req, res) {
       // Signatures tab all work — this path previously created a document
       // BoldSign knew about and the CRM did not.
       if (deal_id && data.documentId) {
-        await trackDocument(getServiceClient(), {
+        const svc = getServiceClient()
+        await trackDocument(svc, {
           dealId: deal_id, agentId: actor.agent.id, documentId: data.documentId,
           signers: orderedSigners, documentName: documentName || 'Document',
           subject: emailSubject || null, status: 'sent',
+        })
+        await logSignatureAudit(svc, {
+          dealId: deal_id, actorId: actor.agent.id, documentId: data.documentId,
+          action: 'send', documentName: documentName || 'Document', signers: orderedSigners,
         })
       }
 
@@ -1502,7 +1674,7 @@ export default async function handler(req, res) {
         if (!tracked) {
           // Don't leave an untrackable draft behind for the agent to trip over.
           // It has not been sent to anyone at this point.
-          try { await boldsign(`/document/delete?documentId=${encodeURIComponent(data.documentId)}&deletePermanently=true`, { method: 'DELETE' }) }
+          try { await boldsign(`/document/delete?documentId=${encodeURIComponent(data.documentId)}&deletePermanently=true`, { method: 'DELETE', idempotent: true }) }
           catch { /* best-effort cleanup */ }
           return res.status(500).json({
             error: 'Could not record this document against the deal, so it was not opened for sending. Nothing was sent — please try again.',
@@ -1521,7 +1693,8 @@ export default async function handler(req, res) {
       const base = 'id, deal_id, agent_id, status, document_name'
       let { data: record, error } = await svc.from('boldsign_documents')
         .select(`${base}, boldsign_template_id, signed_storage_path`)
-        .eq('document_id', documentId).maybeSingle()
+        .eq('document_id', documentId).order('created_at', { ascending: false }).limit(1)
+        .maybeSingle()
       // A database missing one of the newer columns must not turn every draft
       // action into a 404 — fall back to the columns that have always existed.
       if (error) {
@@ -1650,7 +1823,7 @@ export default async function handler(req, res) {
       const record = await resolveDocumentRecord(svc, id, { verb: 'edit' })
 
       const props  = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
-      const live   = normalizeStatus(props.status)
+      const live   = normalizeStatus(props.status) || 'in an unknown state'
       if (live !== 'draft') {
         // Correct the row so the tab stops advertising a draft that isn't one.
         const patch = { status: live }
@@ -1695,8 +1868,12 @@ export default async function handler(req, res) {
       const id = body.envelopeId || body.documentId
       if (!id) return res.status(400).json({ error: 'documentId required' })
       const data = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+      // `status` is null when BoldSign reports something outside the set this app
+      // stores; `rawStatus` still carries it so the UI can show the truth without
+      // writing an unknown value into a column every other query filters on.
       return res.json({
-        status:            normalizeStatus(data.status),
+        status:            normalizeKnownStatus(data.status),
+        rawStatus:         data.status ?? null,
         sentDateTime:      toIso(data.createdDate || data.sentDate || null),
         completedDateTime: toIso(data.completedDate || data.signedDate || null),
       })
@@ -1826,14 +2003,14 @@ export default async function handler(req, res) {
 
       const settled = ['draft', 'revoked', 'voided', 'declined', 'expired'].includes(live)
       if (!settled) {
-        try { await boldsign(`/document/revoke?documentId=${encodeURIComponent(id)}`, { method: 'POST', json: { message: 'Removed from Gateway CRM' } }) }
+        try { await boldsign(`/document/revoke?documentId=${encodeURIComponent(id)}`, { method: 'POST', json: { message: 'Removed from Gateway CRM' }, idempotent: true }) }
         catch (e) {
           // 400/403 here means BoldSign considers it not-in-progress after all.
           if (![400, 403].includes(e.status)) throw e
           console.warn(`[boldsign] delete: revoke of ${id} refused (${e.status}) — deleting anyway`)
         }
       }
-      try { await boldsign(`/document/delete?documentId=${encodeURIComponent(id)}&deletePermanently=false`, { method: 'DELETE' }) }
+      try { await boldsign(`/document/delete?documentId=${encodeURIComponent(id)}&deletePermanently=false`, { method: 'DELETE', idempotent: true }) }
       catch (e) {
         // Already gone there, or BoldSign will not let this account remove it. For
         // a document no signer ever received, the CRM row is the only thing the
@@ -1906,7 +2083,7 @@ export default async function handler(req, res) {
       if (!email) return res.status(400).json({ error: 'email required' })
       if (!name || !name.trim()) return res.status(400).json({ error: 'name required' })
       await boldsign(`/senderIdentities/update?email=${encodeURIComponent(email)}`, {
-        method: 'POST', json: { Name: name.trim() },
+        method: 'POST', json: { Name: name.trim() }, idempotent: true,
       })
       await getServiceClient().from('boldsign_sender_identities')
         .update({ name: name.trim(), updated_at: new Date().toISOString() })
@@ -1919,7 +2096,7 @@ export default async function handler(req, res) {
       if (!body.email) return res.status(400).json({ error: 'email required' })
       // Best-effort against BoldSign — proceed with the local delete even if it's
       // already gone there (e.g. removed directly in the BoldSign dashboard).
-      try { await boldsign(`/senderIdentities/delete?email=${encodeURIComponent(body.email)}`, { method: 'DELETE' }) }
+      try { await boldsign(`/senderIdentities/delete?email=${encodeURIComponent(body.email)}`, { method: 'DELETE', idempotent: true }) }
       catch (e) { if (e.status !== 404) throw e }
       await getServiceClient().from('boldsign_sender_identities').delete().eq('email', body.email)
       return res.json({ ok: true })
@@ -2003,7 +2180,7 @@ export default async function handler(req, res) {
       const { templateId, title, documentTitle, documentBase64, documentName, documents, redirectUrl, useTextTags, textTagDefinitions, roles } = body
       if (templateId) {
         const data = await boldsign(`/template/getEmbeddedTemplateEditUrl?templateId=${encodeURIComponent(templateId)}`, {
-          method: 'POST', json: { RedirectUrl: redirectUrl || '', ShowToolbar: true, ViewOption: 'PreparePage' },
+          method: 'POST', json: { RedirectUrl: redirectUrl || '', ShowToolbar: true, ViewOption: 'PreparePage' }, idempotent: true,
         })
         return res.json({ url: data.editUrl || data.createUrl || data.url, templateId })
       }
@@ -2107,6 +2284,11 @@ export default async function handler(req, res) {
           signers: roles, documentName: documentName || emailSubject || 'Document',
           subject: emailSubject || null, status: 'sent', templateId,
         })
+        await logSignatureAudit(svc, {
+          dealId: deal_id, actorId: actor.agent.id, documentId: data.documentId,
+          action: 'send', documentName: documentName || emailSubject || 'Document',
+          signers: roles, templateId,
+        })
       }
       return res.json({
         documentId: data.documentId, envelopeId: data.documentId, status: 'sent', tracked,
@@ -2148,7 +2330,7 @@ export default async function handler(req, res) {
           subject: emailSubject || null, status: 'draft', templateId,
         })
         if (!tracked) {
-          try { await boldsign(`/document/delete?documentId=${encodeURIComponent(data.documentId)}&deletePermanently=true`, { method: 'DELETE' }) }
+          try { await boldsign(`/document/delete?documentId=${encodeURIComponent(data.documentId)}&deletePermanently=true`, { method: 'DELETE', idempotent: true }) }
           catch { /* best-effort cleanup of the untrackable draft */ }
           return res.status(500).json({
             error: 'Could not record this document against the deal, so it was not opened for sending. Nothing was sent — please try again.',
@@ -2196,12 +2378,26 @@ export default async function handler(req, res) {
 // are HMAC-verified (X-BoldSign-Signature) — unverified events are ignored.
 //
 async function handleWebhook(req, res) {
-  // Reject forged/replayed events when a signing secret is configured. We still
-  // answer 200 so BoldSign doesn't retry-storm a request we're deliberately
-  // ignoring; we simply don't process it.
   const verdict = verifyWebhookSignature(req.rawBody || '', req.headers['x-boldsign-signature'])
+
+  // NO SECRET = NO PROCESSING. This used to treat "unconfigured" as verified, so
+  // a deployment that simply forgot the env var accepted document-status updates
+  // from anyone who could POST to the URL — on Live that means anyone can mark a
+  // real listing agreement completed, or declined, on a real deal. 503 (not 200)
+  // so BoldSign keeps the event queued and nothing is lost once the secret is
+  // set. BOLDSIGN_WEBHOOK_INSECURE=true is the deliberate local-dev opt-out.
+  if (verdict === 'unconfigured' && !WEBHOOK_INSECURE) {
+    console.error('[boldsign] webhook REJECTED — BOLDSIGN_WEBHOOK_SECRET is not set on this deployment. '
+      + 'Set it from BoldSign → Settings → API → Webhooks → Reveal. Events are being refused, not processed.')
+    return res.status(503).json({ error: 'Webhook signature verification is not configured on this deployment' })
+  }
   if (verdict === 'invalid') {
-    return res.status(200).json({ received: true, ignored: 'signature verification failed' })
+    // 401, not 200: a genuine BoldSign event that fails verification is a
+    // configuration fault (wrong secret, rolled secret), and answering 200 threw
+    // it away permanently. A forged event isn't going to retry.
+    console.error('[boldsign] webhook signature verification FAILED — check BOLDSIGN_WEBHOOK_SECRET matches this endpoint in BoldSign')
+    if (!WEBHOOK_AUDIT_ONLY) return res.status(401).json({ error: 'Invalid signature' })
+    console.warn('[boldsign] BOLDSIGN_WEBHOOK_AUDIT_ONLY is on — processing an event that failed verification')
   }
 
   let supabase
@@ -2232,14 +2428,29 @@ async function handleWebhook(req, res) {
       return res.status(200).json({ received: true, note: 'No document id' })
     }
 
-    const status      = normalizeStatus(rawStatus)
+    const status      = normalizeKnownStatus(rawStatus)
     const completedAt = toIso(doc?.completedDate || doc?.signedDate || null)
 
-    const { data: record } = await supabase
+    // An event whose status isn't one this app understands (a payload shape
+    // change, or an event type that isn't a status at all) is acknowledged and
+    // dropped rather than written. Writing it would take the document out of
+    // every query that filters on the known set — the portal, the reminder
+    // sweep, the closing gate — with nothing anywhere saying why.
+    if (!status) {
+      console.error(`[boldsign] webhook for ${documentId}: unrecognized status "${rawStatus}" (event "${eventName}") — not written`)
+      return res.status(200).json({ received: true, documentId, note: 'Unrecognized status' })
+    }
+
+    // limit(1) rather than maybeSingle(): a duplicate document_id (possible until
+    // the unique index in 2026-08-09_boldsign_go_live.sql is applied) made
+    // maybeSingle() throw, which dropped the event permanently.
+    const { data: rows } = await supabase
       .from('boldsign_documents')
       .select('*, deals(id, agent_id, title)')
       .eq('document_id', documentId)
-      .maybeSingle()
+      .order('created_at', { ascending: false })
+      .limit(1)
+    const record = rows?.[0] || null
 
     if (!record) {
       // Every CRM send path now writes its row server-side BEFORE handing out a
@@ -2250,18 +2461,47 @@ async function handleWebhook(req, res) {
       return res.status(200).json({ received: true, note: 'Document not tracked' })
     }
 
-    // IDEMPOTENCE GATE. BoldSign redelivers on any non-2xx, and this handler
-    // does enough work (two PDF downloads + two uploads) to exceed the function
-    // timeout on a large packet — which guaranteed a retry, which previously
-    // duplicated every archive, version row and notification. Completed is
-    // terminal: once recorded, later deliveries are acknowledged and dropped.
-    if (record.status === 'completed' && status === 'completed') {
-      return res.status(200).json({ received: true, documentId, status, note: 'Already processed' })
+    // IDEMPOTENCE + ORDERING GATE, in one compare-and-set.
+    //
+    // BoldSign redelivers on any non-2xx, and this handler does enough work (two
+    // PDF downloads + two uploads) to exceed the function timeout on a large
+    // packet — which guarantees a retry. Deliveries also arrive out of order, so
+    // a retried "Sent" can land after "Completed".
+    //
+    // The update is conditional on the row still holding the status we read
+    // (`.eq('status', record.status)`), so of two concurrent deliveries exactly
+    // one wins the transition and only that one notifies. `advanced` is that
+    // verdict, and everything with a side effect below hangs off it.
+    const advance = shouldApplyStatus(record.status, status)
+    let advanced  = false
+    if (advance) {
+      const patch = { status }
+      if (completedAt) patch.completed_at = completedAt
+      // sent_at defaults to row-creation time, which for the embedded flow is
+      // when the agent opened the PREPARE screen — possibly days before they
+      // actually sent. The reminder sweep counts "days outstanding" from it, so
+      // an old draft that finally went out was instantly eligible to chase the
+      // client. Stamp it at the real send.
+      if (status === 'sent' && record.status === 'draft') patch.sent_at = new Date().toISOString()
+      const { data: updated } = await supabase
+        .from('boldsign_documents')
+        .update(patch)
+        .eq('id', record.id)
+        .eq('status', record.status)
+        .select('id')
+      advanced = Boolean(updated?.length)
+    } else if (record.status !== status) {
+      console.warn(`[boldsign] webhook for ${documentId}: ignoring out-of-order "${status}" — row is already "${record.status}"`)
     }
 
-    const patch = { status }
-    if (completedAt) patch.completed_at = completedAt
-    await supabase.from('boldsign_documents').update(patch).eq('document_id', documentId)
+    // Nothing left to do for a duplicate or superseded delivery, EXCEPT for a
+    // completion whose archive never finished (see below): that one still needs
+    // its second chance.
+    const needsArchive = status === 'completed' && record.status === 'completed'
+      && record.deal_id && !record.signed_storage_path
+    if (!advanced && !needsArchive) {
+      return res.status(200).json({ received: true, documentId, status, note: 'Already processed' })
+    }
 
     // A SEND is the moment the arrangement is final: whatever the agent placed is
     // what the signers are looking at. Capture it against the deal here, not only
@@ -2269,18 +2509,28 @@ async function handleWebhook(req, res) {
     // BoldSign's own UI) still teaches the next packet where the fields go.
     // Best-effort by contract — captureFieldLayout never throws, and this must not
     // put a webhook at risk of a retry storm.
-    if (status === 'sent' && record.deal_id) {
+    if (advanced && status === 'sent' && record.deal_id) {
       const captured = await captureFieldLayout(supabase, {
         documentId, record, agentId: record.agent_id,
       })
       if (captured.saved) console.log(`[boldsign] captured ${captured.fieldCount} field placement(s) for deal ${record.deal_id}`)
+
+      // The embedded flows create a DRAFT and the agent clicks Send inside
+      // BoldSign, so this webhook — not the API call — is the moment the
+      // document actually went to the client. That is the moment worth auditing.
+      await logSignatureAudit(supabase, {
+        dealId: record.deal_id, actorId: record.agent_id, documentId,
+        action: 'send', documentName: record.document_name,
+        signers: Array.isArray(record.signers) ? record.signers : [],
+        templateId: record.boldsign_template_id, recordId: record.id,
+      })
     }
 
     // A decline or expiry needs the agent's attention as much as a completion
     // does — previously both updated the row and told nobody, so a declined
     // listing agreement sat silently and an expired one was indistinguishable
     // from one the agent had cancelled themselves.
-    if (status === 'declined' || status === 'expired') {
+    if (advanced && (status === 'declined' || status === 'expired')) {
       const deal = record.deals
       if (deal?.agent_id) {
         const declined = status === 'declined'
@@ -2349,7 +2599,7 @@ async function handleWebhook(req, res) {
           ...(signed ? { signed_storage_path: signed.storagePath } : {}),
           ...(audit  ? { audit_storage_path:  audit.storagePath }  : {}),
         })
-        .eq('document_id', documentId)
+        .eq('id', record.id)
       if (pathErr) {
         // Non-fatal: the PDFs are archived and the download path re-resolves
         // them on demand. Almost always "column does not exist" on a database
@@ -2357,11 +2607,14 @@ async function handleWebhook(req, res) {
         console.warn(`[boldsign] could not record archive paths for ${documentId}: ${pathErr.message}`)
         await supabase.from('boldsign_documents')
           .update({ audit_trail_saved: Boolean(audit) })
-          .eq('document_id', documentId)
+          .eq('id', record.id)
       }
 
+      // Only the delivery that actually made the transition notifies — a
+      // redelivery that came back to finish an archive must not tell the agent
+      // their document was signed a second time.
       const deal = record.deals
-      if (deal?.agent_id) {
+      if (advanced && deal?.agent_id) {
         await supabase.from('agent_notifications').insert([{
           agent_id:    deal.agent_id,
           deal_id:     record.deal_id,
@@ -2373,10 +2626,20 @@ async function handleWebhook(req, res) {
       }
     }
 
-    return res.status(200).json({ received: true, documentId, status })
+    return res.status(200).json({ received: true, documentId, status, advanced })
   } catch (err) {
-    return res.status(200).json({ received: true, error: err.message })
+    // 500, not 200. Answering 200 told BoldSign the event was handled and it is
+    // never redelivered — so a transient database or storage blip permanently
+    // lost a completion, and the deal simply never showed its signed copy. Every
+    // step above is now either compare-and-set or keyed on a deterministic path,
+    // so a redelivery re-runs safely and heals whatever failed.
+    console.error(`[boldsign] webhook processing failed — asking BoldSign to redeliver: ${err.message}`, err?.stack?.split('\n').slice(0, 3).join(' | '))
+    return res.status(500).json({ error: 'Webhook processing failed', message: err.message })
   }
 }
+
+// Wrapped last, so `handler` above is the plain function every reader expects
+// and the logging is a decoration rather than something to read around.
+export default wrap('boldsign', handler)
 
 // (Closing packet generator moved to api/_handlers/closing-packet.js)

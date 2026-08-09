@@ -103,13 +103,17 @@ export const log = {
 export function wrap(name, handler) {
   return async function wrapped(req, res) {
     const start  = Date.now()
-    const action = req.body?.action || req.query?.action || null
+    // Read AFTER the handler has run, not before: a route with the body parser
+    // disabled (api/boldsign.js parses the raw body itself, so webhook
+    // signatures can be verified against it) has no req.body yet at this point,
+    // so every log line from the busiest route recorded action: null.
+    const readAction = () => req.body?.action || req.query?.action || null
     const reqId  = req.headers['x-vercel-id'] || crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     try {
       await handler(req, res)
       log.info(`${name} ok`, {
         handler:     name,
-        action,
+        action:      readAction(),
         method:      req.method,
         status:      res.statusCode,
         duration_ms: Date.now() - start,
@@ -118,7 +122,7 @@ export function wrap(name, handler) {
     } catch (err) {
       log.error(`${name} error`, {
         handler:     name,
-        action,
+        action:      readAction(),
         method:      req.method,
         duration_ms: Date.now() - start,
         req_id:      reqId,
