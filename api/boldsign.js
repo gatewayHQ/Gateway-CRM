@@ -805,6 +805,10 @@ export function normalizeCapturedField(f) {
     isReadOnly: Boolean(f?.isReadOnly),
   }
   if (f?.value != null && f.value !== '')       out.value = String(f.value)
+  // BoldSign's own name for the field. Kept because it is what re-creating a field
+  // on a later draft is allowed to set — `id` refers to a field that already exists
+  // (see buildLayoutEditPayload), so without a name an added field loses its identity.
+  if (f?.name)                                   out.name = String(f.name)
   if (f?.label)                                  out.label = String(f.label)
   if (f?.placeholder || f?.placeHolder)          out.placeHolder = String(f.placeholder || f.placeHolder)
   if (num(f?.fontSize))                          out.fontSize = num(f.fontSize)
@@ -884,8 +888,25 @@ export function matchLayoutSigner(saved, signerDetails = []) {
 // is only used to fill a field the new draft left EMPTY — which is exactly the
 // hand-typed label case the layout exists to preserve.
 //
+// AN `Add` MUST NOT CARRY THE SAVED `id`. To BoldSign, `id` on an edited field is a
+// REFERENCE to a field that already exists on that signer — not a name to give a new
+// one. Sending the previous document's id on a field the new draft doesn't have gets
+// the whole request rejected:
+//   "The document does not have a form field with the ID: 'CheckBox2'. If you are
+//    updating or removing an existing form field, please ensure the ID already exists
+//    and it belong to the signer with ID: '…'"
+// which is precisely the agent-added field a saved layout exists to bring back
+// ('CheckBox2' is BoldSign's own auto-name for a checkbox dropped in by hand). The
+// identifier is passed as `name` instead and BoldSign mints the id; the next capture
+// records that id, so the field settles into the Update path from then on.
+//
+// `confirmedOnly` builds the same payload with the Adds left out — every field whose
+// id BoldSign is known to hold. It is the fallback for a rejection that names one
+// field: /document/edit is atomic, so one bad entry otherwise costs the agent the
+// entire arrangement (see applyFieldLayout).
+//
 // Returns null when there is nothing to do, so callers can skip the API call.
-export function buildLayoutEditPayload({ layout, signerDetails = [] } = {}) {
+export function buildLayoutEditPayload({ layout, signerDetails = [], confirmedOnly = false } = {}) {
   const savedSigners = layout?.signers || []
   if (!savedSigners.length && !(layout?.commonFields || []).length) return null
 
@@ -901,8 +922,12 @@ export function buildLayoutEditPayload({ layout, signerDetails = [] } = {}) {
 
     for (const f of (saved.formFields || [])) {
       const live = f.id ? byId.get(String(f.id)) : null
-      const { id, ...rest } = f
-      const field = { editAction: live ? 'Update' : 'Add', ...(id ? { id } : {}), ...rest }
+      if (!live && confirmedOnly) continue
+      const { id, name, ...rest } = f
+      const field = live
+        ? { editAction: 'Update', id, ...rest, ...(name ? { name } : {}) }
+        // New to this draft: named, never id'd — see the note above.
+        : { editAction: 'Add', ...(name || id ? { name: String(name || id) } : {}), ...rest }
       // Live value wins — see VALUES ARE NOT CLOBBERED above.
       if (live?.value != null && live.value !== '') field.value = String(live.value)
       formFields.push(field)
@@ -1002,6 +1027,22 @@ function countSignerFields(props) {
   return (props?.signerDetails || []).reduce((t, s) => t + (s?.formFields || []).length, 0)
 }
 
+// How many field edits a payload asks for. Used to say how much of the arrangement
+// a partial retry gave up.
+export function countPayloadFields(payload) {
+  return (payload?.signers || []).reduce((t, s) => t + (s?.formFields || []).length, 0)
+}
+
+// Does this failure name ONE field, rather than condemning the request as a whole?
+// Those are worth retrying without the fields BoldSign cannot place: a field id it
+// does not hold, a type it will not create here. Anything else (auth, the document
+// state, a malformed body) would fail identically the second time.
+export function isFieldLevelRejection(err) {
+  if (err?.status !== 400) return false
+  const msg = `${err?.message || ''} ${JSON.stringify(err?.data || {})}`
+  return /form field/i.test(msg) || /field with the id/i.test(msg)
+}
+
 // Apply a deal's saved layout to a freshly created draft. Also never throws: if
 // this fails the draft simply opens with the template's default placement, which
 // is the behavior that existed before layouts — a degraded send beats no send.
@@ -1021,10 +1062,26 @@ export async function applyFieldLayout(supabase, { documentId, dealId, templateI
 
     // The new draft's signer ids are only knowable after it exists.
     const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(documentId)}`)
-    const payload = buildLayoutEditPayload({ layout: saved.layout, signerDetails: props?.signerDetails || [] })
+    const signerDetails = props?.signerDetails || []
+    const payload = buildLayoutEditPayload({ layout: saved.layout, signerDetails })
     if (!payload) return { applied: false, reason: 'saved layout matched none of this document\'s signers' }
 
-    await editDocumentFields(documentId, { ...payload, ...(onBehalfOf ? { onBehalfOf } : {}) })
+    // /document/edit is ATOMIC: one field BoldSign will not place fails the request
+    // and the agent loses the whole arrangement — every signature, every initial,
+    // every repositioned template field — over one entry. So a rejection that names
+    // a single field is retried with only the fields BoldSign is known to hold, and
+    // what was dropped is reported rather than swallowed.
+    let skipped = 0
+    try {
+      await editDocumentFields(documentId, { ...payload, ...(onBehalfOf ? { onBehalfOf } : {}) })
+    } catch (editErr) {
+      if (!isFieldLevelRejection(editErr)) throw editErr
+      const confirmed = buildLayoutEditPayload({ layout: saved.layout, signerDetails, confirmedOnly: true })
+      skipped = countPayloadFields(payload) - countPayloadFields(confirmed)
+      if (!confirmed || !skipped) throw editErr      // nothing left to drop — the retry would be identical
+      console.warn(`[boldsign] layout apply for ${documentId}: retrying without ${skipped} unplaceable field(s) — ${editErr.message}`)
+      await editDocumentFields(documentId, { ...confirmed, ...(onBehalfOf ? { onBehalfOf } : {}) })
+    }
 
     // Confirm it landed. A 200 from /document/edit means BoldSign accepted the
     // request, not that the draft now holds the arrangement — and the number the
@@ -1044,7 +1101,12 @@ export async function applyFieldLayout(supabase, { documentId, dealId, templateI
     } catch (verifyErr) {
       console.warn(`[boldsign] layout apply for ${documentId}: could not verify the restore (${verifyErr.message})`)
     }
-    return { applied: true, fieldCount }
+    // A partial restore is still a restore — but the agent is told, because the form
+    // they are about to see is missing something they placed last time.
+    return skipped
+      ? { applied: true, fieldCount, partial: true, skipped,
+          reason: `${skipped} field${skipped === 1 ? '' : 's'} could not be re-created on this draft` }
+      : { applied: true, fieldCount }
   } catch (err) {
     // The full API response is already logged by boldsign() (status + body); this
     // adds which deal/document it was for, so one grep explains a degraded send.
@@ -2106,9 +2168,14 @@ export default async function handler(req, res) {
         documentId: data.documentId || null,
         layoutApplied:    Boolean(layout?.applied),
         layoutFieldCount: layout?.applied ? layout.fieldCount : 0,
-        ...(layout && !layout.applied && layout.reason && layout.reason !== 'no saved layout'
-          ? { layoutWarning: `This deal's saved field layout could not be applied (${layout.reason}). The form opened with its default fields.` }
-          : {}),
+        // Three outcomes, three sentences: restored, restored-but-short, or not at
+        // all. The middle one used to be invisible, which made a silently incomplete
+        // form look like a faithful one.
+        ...(layout?.partial
+          ? { layoutWarning: `Most of this deal's saved field layout was restored, but ${layout.reason} — check the form before sending.` }
+          : layout && !layout.applied && layout.reason && layout.reason !== 'no saved layout'
+            ? { layoutWarning: `This deal's saved field layout could not be applied (${layout.reason}). The form opened with its default fields.` }
+            : {}),
       })
     }
 

@@ -2198,9 +2198,11 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
       // match the blank template and that should read as intentional.
       if (data.layoutApplied) {
         pushToast(`Restored this deal's saved field layout — ${data.layoutFieldCount} field${data.layoutFieldCount === 1 ? '' : 's'}.`, 'success')
-      } else if (data.layoutWarning) {
-        pushToast(data.layoutWarning, 'error')
       }
+      // A partial restore reports BOTH: what came back, and what didn't. Only a
+      // total failure is an error — a form that is mostly right is worth saying
+      // out loud, but it is not a broken send.
+      if (data.layoutWarning) pushToast(data.layoutWarning, data.layoutApplied ? 'info' : 'error')
       setEmbedDocId(data.documentId || null)
       setEmbedUrl(data.url)
     } catch (err) {
