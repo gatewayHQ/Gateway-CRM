@@ -404,6 +404,21 @@ template with the template's defaults and the agent re-did the work from memory.
   BoldSign's own validation text when it sends one. The full response (status, body,
   deal, document, template) goes to the function log either way, and the send still
   proceeds with the template's default placement.
+- **An `Add` carries a `name`, never the saved `id`.** To BoldSign, `id` on an edited
+  field is a *reference to a field that already exists on that signer* — not a name for
+  a new one. Sending the previous document's id on a field the fresh draft doesn't have
+  gets the request rejected outright: *"The document does not have a form field with the
+  ID: 'CheckBox2'…"* — and `CheckBox2` is exactly the kind of field a layout exists to
+  restore (BoldSign's auto-name for a checkbox an agent dropped in by hand). Added fields
+  are therefore named, not id'd; BoldSign mints the id and the next capture records it,
+  so the field moves onto the `Update` path from then on. `normalizeCapturedField()`
+  stores `name` for the same reason.
+- **`/document/edit` is atomic, so a field-level rejection is retried.** One unplaceable
+  field otherwise costs the agent the entire arrangement. A 400 that names a form field
+  triggers a second attempt built with `confirmedOnly: true` — only fields whose ids
+  BoldSign is known to hold — and the response carries `layoutWarning` saying how many
+  were skipped. Any other failure (auth, document state, malformed body) is not retried:
+  it would fail identically.
 - **The saved layout is authoritative for that deal**: a field it names is
   repositioned (`Update`) or created (`Add`), and a field the new draft has that the
   layout does *not* name is `Remove`d — otherwise a field the agent deliberately

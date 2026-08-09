@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
+import { boldsign, backoffMs, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -626,10 +626,14 @@ describe('buildLayoutEditPayload — restoring a layout onto a fresh draft', () 
     })
     expect(payload.signers).toHaveLength(1)
     expect(payload.signers[0]).toMatchObject({ editAction: 'Update', id: 'n1' })
-    const byId = Object.fromEntries(payload.signers[0].formFields.map(f => [f.id, f]))
-    expect(byId.tplSig.editAction).toBe('Update')       // reposition the template's own field
-    expect(byId.agentAdded.editAction).toBe('Add')       // the initials the agent added last time
-    expect(byId.agentAdded.bounds).toEqual({ x: 20, y: 30, width: 60, height: 25 })
+    const fields = payload.signers[0].formFields
+    // The template's own field is addressed by id; the one the agent added last time
+    // is re-created by NAME, because to BoldSign an id means "this already exists".
+    expect(fields.find(f => f.id === 'tplSig').editAction).toBe('Update')
+    const added = fields.find(f => f.editAction === 'Add')
+    expect(added.name).toBe('agentAdded')
+    expect(added.id).toBeUndefined()
+    expect(added.bounds).toEqual({ x: 20, y: 30, width: 60, height: 25 })
   })
 
   it('REMOVES a template field the agent had deleted — it must not creep back', () => {
@@ -676,6 +680,41 @@ describe('buildLayoutEditPayload — restoring a layout onto a fresh draft', () 
     })
     expect(payload.signers).toHaveLength(1)
     expect(payload.signers[0].id).toBe('n1')
+  })
+
+  it('ADDS a field under a NAME, never the saved id — an id means "this already exists"', () => {
+    // The bug: a checkbox the agent added by hand last time ('CheckBox2') does not
+    // exist on a draft built fresh from the template, and sending its old id made
+    // BoldSign reject the entire request:
+    //   "The document does not have a form field with the ID: 'CheckBox2' …"
+    const payload = buildLayoutEditPayload({
+      layout: savedLayout,
+      signerDetails: [{ id: 'n1', signerRole: 'Seller', formFields: [{ id: 'tplSig' }] }],
+    })
+    const added = payload.signers[0].formFields.find(f => f.editAction === 'Add')
+    expect(added.id).toBeUndefined()
+    expect(added.name).toBe('agentAdded')
+    // The field that DOES exist is still addressed by its id.
+    const updated = payload.signers[0].formFields.find(f => f.editAction === 'Update')
+    expect(updated.id).toBe('tplSig')
+  })
+
+  it('keeps a captured name over the id when both are present', () => {
+    const layout = { signers: [{ signerRole: 'Seller', formFields: [
+      { id: 'oldId', name: 'Buyer initials', fieldType: 'Initial', pageNumber: 1, bounds: { x: 1, y: 2, width: 30, height: 20 } },
+    ] }] }
+    const payload = buildLayoutEditPayload({ layout, signerDetails: [{ id: 'n1', signerRole: 'Seller', formFields: [] }] })
+    expect(payload.signers[0].formFields[0]).toMatchObject({ editAction: 'Add', name: 'Buyer initials' })
+  })
+
+  it('confirmedOnly drops the Adds and keeps what BoldSign already holds', () => {
+    // The fallback for an atomic rejection: better most of the arrangement than none.
+    const signerDetails = [{ id: 'n1', signerRole: 'Seller', formFields: [{ id: 'tplSig' }, { id: 'stray' }] }]
+    const full      = buildLayoutEditPayload({ layout: savedLayout, signerDetails })
+    const confirmed = buildLayoutEditPayload({ layout: savedLayout, signerDetails, confirmedOnly: true })
+    expect(countPayloadFields(full)).toBe(3)        // Update + Add + Remove
+    expect(countPayloadFields(confirmed)).toBe(2)   // Update + Remove — the Add is gone
+    expect(confirmed.signers[0].formFields.some(f => f.editAction === 'Add')).toBe(false)
   })
 
   it('returns null when there is nothing to apply, so no API call is made', () => {
@@ -758,6 +797,50 @@ describe('applyFieldLayout — the request BoldSign actually accepts', () => {
     expect(res.reason).toMatch(/permission/i)
   })
 
+  it('retries without the unplaceable field instead of losing the whole arrangement', async () => {
+    // BoldSign rejects the request as a WHOLE over one field it cannot place. The
+    // second attempt keeps every field it does hold.
+    const bodies = []
+    const rejectOnce = { ok: false, status: 400, headers: { get: () => null },
+      text: () => Promise.resolve(JSON.stringify({ message: "The document does not have a form field with the ID: 'CheckBox2'." })) }
+    vi.stubGlobal('fetch', vi.fn((url, opts) => {
+      if (String(url).includes('/document/properties')) return Promise.resolve(okResp(draftProps()))
+      bodies.push(JSON.parse(opts.body))
+      return Promise.resolve(bodies.length === 1 ? rejectOnce : okResp('{}'))
+    }))
+
+    const layout = { signers: [{ signerRole: 'Seller', order: 1, formFields: [
+      { id: 'f0',        fieldType: 'Signature', pageNumber: 1, bounds: { x: 1, y: 2, width: 80, height: 20 } },
+      { id: 'CheckBox2', fieldType: 'CheckBox',  pageNumber: 1, bounds: { x: 9, y: 9, width: 12, height: 12 } },
+    ] }] }
+    const res = await applyFieldLayout(fakeSupabase({ 'template_id=tpl1': { field_count: 2, layout } }), {
+      documentId: 'd1', dealId: 'deal1', templateId: 'tpl1',
+    })
+
+    expect(res.applied).toBe(true)
+    expect(res.partial).toBe(true)
+    expect(res.skipped).toBe(1)
+    expect(res.reason).toMatch(/could not be re-created/)
+    // The retry dropped the Add and kept the field BoldSign holds.
+    expect(bodies).toHaveLength(2)
+    expect(countPayloadFields(bodies[0])).toBe(3)   // Update f0 + Add CheckBox2 + Remove f1
+    expect(countPayloadFields(bodies[1])).toBe(2)   // the Add is dropped, the rest survives
+    expect(bodies[1].signers[0].formFields.some(f => f.editAction === 'Add')).toBe(false)
+    expect(bodies[1].signers[0].formFields[0]).toMatchObject({ editAction: 'Update', id: 'f0' })
+  })
+
+  it('does not retry a failure that is not about a single field', async () => {
+    let edits = 0
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      if (String(url).includes('/document/properties')) return Promise.resolve(okResp(draftProps()))
+      edits++
+      return Promise.resolve(errResp(403))
+    }))
+    const res = await applyFieldLayout(fakeSupabase(savedRows), { documentId: 'd1', dealId: 'deal1', templateId: 'tpl1' })
+    expect(res.applied).toBe(false)
+    expect(edits).toBe(1)
+  })
+
   it('skips the API call entirely when the deal has nothing saved', async () => {
     const fetchMock = vi.fn(() => Promise.resolve(okResp('{}')))
     vi.stubGlobal('fetch', fetchMock)
@@ -773,6 +856,12 @@ describe('describeLayoutFailure — a reason an agent can act on', () => {
     expect(describeLayoutFailure({ status: 404, message: 'BoldSign API 404' })).toMatch(/no longer has this draft/)
     expect(describeLayoutFailure({ status: 401, message: '' })).toMatch(/permission/)
     expect(describeLayoutFailure({ status: 503, message: 'BoldSign API 503' })).toMatch(/server error/)
+  })
+
+  it('recognizes a single-field rejection as retryable, and a blanket one as not', () => {
+    expect(isFieldLevelRejection({ status: 400, message: "The document does not have a form field with the ID: 'CheckBox2'." })).toBe(true)
+    expect(isFieldLevelRejection({ status: 400, message: 'Document is already sent' })).toBe(false)
+    expect(isFieldLevelRejection({ status: 403, message: 'form field denied' })).toBe(false)
   })
 
   it("keeps BoldSign's own validation text — it says more than we could", () => {
