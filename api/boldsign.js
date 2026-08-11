@@ -14,6 +14,22 @@ export const config = { api: { bodyParser: false } }
 // email or consumes credits.
 const API_BASE = process.env.BOLDSIGN_API_BASE || 'https://api.boldsign.com/v1'
 const API_KEY  = process.env.BOLDSIGN_API_KEY
+
+// Not every BoldSign endpoint has been promoted to /v1. `document/draftSend` —
+// the one that takes a document sitting in draft and actually sends it — is
+// still served from `/v1-beta`, and calling it on /v1 returns a bare 404.
+//
+// Derived from the CONFIGURED base rather than hard-coded, because the base is
+// also the region switch: an EU account sets
+// BOLDSIGN_API_BASE=https://api-eu.boldsign.com/v1, and a hard-coded
+// api.boldsign.com here would quietly send that account's documents through the
+// US host — a data-residency break, not just a wrong URL.
+export function betaBase(base = API_BASE) {
+  const trimmed = String(base || '').replace(/\/+$/, '')
+  if (/\/v1-beta$/.test(trimmed)) return trimmed
+  if (/\/v1$/.test(trimmed))      return trimmed.replace(/\/v1$/, '/v1-beta')
+  return `${trimmed}/v1-beta`          // a base configured without a version segment
+}
 const WEBHOOK_SECRET = process.env.BOLDSIGN_WEBHOOK_SECRET
 // Two deliberate escape hatches, both OFF by default so production is verified
 // unless someone says otherwise in writing (an env var):
@@ -141,10 +157,11 @@ function readRateLimit(headers) {
 //
 // `idempotencyKey` is still sent — harmless if BoldSign ignores it, and correct
 // the day they honor it. Retries reuse the SAME key.
-export async function boldsign(path, { method = 'GET', form, json, raw = false, idempotencyKey, maxRetries = 3, idempotent } = {}) {
+export async function boldsign(path, { method = 'GET', form, json, raw = false, idempotencyKey, maxRetries = 3, idempotent, beta = false } = {}) {
   const isWrite  = method !== 'GET'
   const safe     = !isWrite || idempotent === true
   const idem     = idempotencyKey || (isWrite ? crypto.randomUUID() : null)
+  const base     = beta ? betaBase() : API_BASE
 
   for (let attempt = 0; ; attempt++) {
     const headers = { 'X-API-KEY': API_KEY, Accept: 'application/json' }
@@ -159,7 +176,7 @@ export async function boldsign(path, { method = 'GET', form, json, raw = false, 
 
     let r
     try {
-      r = await fetch(`${API_BASE}${path}`, { method, headers, body })
+      r = await fetch(`${base}${path}`, { method, headers, body })
     } catch (netErr) {
       if (safe && attempt < maxRetries) {
         const delay = backoffMs(attempt)
@@ -1326,6 +1343,67 @@ export async function createDraftEditUrl({ documentId, redirectUrl, onBehalfOf, 
   throw lastErr
 }
 
+// ─── Sending a draft ─────────────────────────────────────────────────────────
+// The explicit, deliberate end of the prepare-and-print workflow: the agent has
+// filled the packet, saved it as a draft, printed a filled copy for the client
+// to read on paper — and only now chooses to put it in front of them to sign.
+//
+// `POST /v1-beta/document/draftSend?documentId=` converts a draft to in-progress
+// and notifies the signers. It runs the SAME validation as /document/send, so a
+// draft with no fields placed or a role missing an email is refused here rather
+// than reaching the client half-built.
+//
+// NOT idempotent, deliberately. A retried draftSend after a lost response is a
+// second copy of a binding agreement in the client's inbox, so this rides the
+// default write policy (retry only on 429/408, which mean BoldSign never
+// processed it) and a mid-flight connection failure surfaces as "outcome
+// unknown" — see the boldsign() header.
+export async function sendDraftDocument({ documentId, onBehalfOf } = {}) {
+  const qs = new URLSearchParams({ documentId })
+  // Sent as the identity the DRAFT was created under. BoldSign scopes a document
+  // to its sender, and switching identities at the send would change who the
+  // client hears from between the printed copy and the email.
+  if (onBehalfOf) qs.set('onBehalfOf', onBehalfOf)
+  return boldsign(`/document/draftSend?${qs.toString()}`, { method: 'POST', json: {}, beta: true })
+}
+
+// Turn a draftSend refusal into a sentence an agent can act on. BoldSign's own
+// text is kept whenever it names the problem — losing it would turn a one-look
+// fix ("the co-seller has no email") into guesswork — but a bare status code is
+// translated, because "BoldSign API 429" tells an agent nothing about what to do
+// next.
+export function describeDraftSendFailure(err) {
+  const status = err?.status
+  const raw    = String(err?.message || '').trim()
+
+  if (status === 429) {
+    return 'BoldSign is rate-limiting this account right now, so the send was refused. '
+      + 'Nothing was sent and the draft is untouched — wait a minute and try again.'
+  }
+  if (status === 401 || status === 403) {
+    return 'BoldSign refused this send as unauthorized. The sender identity for this draft may no longer be '
+      + 'approved — check Settings → BoldSign, then try again.'
+  }
+  if (status === 404) {
+    return 'BoldSign no longer has this draft, so it cannot be sent. It was most likely deleted in the '
+      + 'BoldSign dashboard — rebuild it from the template.'
+  }
+  if (status >= 500) {
+    return `BoldSign had a server error (${status}) and did not send this draft. Nothing went out — try again shortly.`
+  }
+  // 400s are BoldSign validating the draft itself. Name the two that agents
+  // actually hit, since both have an obvious fix inside Edit Fields.
+  if (/SignerName or SignerEmail is missing|missing in roles/i.test(raw)) {
+    return 'A signer role on this draft has no name or email, so BoldSign refused the send. '
+      + `Open Edit Fields, complete every signer, and send again. (BoldSign said: ${raw})`
+  }
+  if (/form ?field/i.test(raw)) {
+    return 'BoldSign refused the send because of a problem with this draft\'s fields — most often that no '
+      + `signature field has been placed for a signer. Open Edit Fields to place them. (BoldSign said: ${raw})`
+  }
+  return raw || `BoldSign refused the send (HTTP ${status || 'unknown'}).`
+}
+
 // ─── Field placement ─────────────────────────────────────────────────────────
 // RETIRED: pixel/point coordinate auto-placement. It guessed field position from
 // page dimensions read via pdf-lib, but BoldSign's `bounds` unit/origin couldn't
@@ -1760,13 +1838,16 @@ async function handler(req, res) {
       // signed copy. Only when neither exists does this fail, and then it says which
       // door was locked rather than "could not print".
       let pdfBytes = null
+      let downloadStatus = null
       try {
         const r = await boldsign(`/document/download?documentId=${encodeURIComponent(id)}`, { raw: true })
+        downloadStatus = r.status
         if (r.ok) {
           const buf = await r.arrayBuffer()
           if (buf.byteLength) pdfBytes = Buffer.from(buf)
         }
       } catch (err) {
+        downloadStatus = err.status || null
         console.warn(`[boldsign] print: /document/download refused ${id} (${err.message}) — trying the deal's own copy`)
       }
       if (!pdfBytes) {
@@ -1777,9 +1858,15 @@ async function handler(req, res) {
         }
       }
       if (!pdfBytes) {
-        return res.status(400).json({
-          error: 'BoldSign will not release this document\'s pages yet, and no copy is stored on the deal. '
-            + 'Use Preview inside BoldSign to review it, or print it after sending.',
+        // Name the door that was locked. "Could not print" sent agents to their
+        // admin; a status code tells them whether to wait, retry, or fix the draft.
+        return res.status(downloadStatus === 429 ? 429 : 400).json({
+          error: downloadStatus === 429
+            ? 'BoldSign is rate-limiting this account, so the PDF could not be built right now. Wait a minute and try again — the draft is untouched.'
+            : 'BoldSign will not release this document\'s pages yet, and no copy is stored on the deal. '
+              + 'This usually means the document is still being created — wait a moment and try again. '
+              + 'If it persists, open Edit Fields and use Preview inside BoldSign to check the document is intact.',
+          documentStatus: normalizeStatus(props?.status) || null,
         })
       }
 
@@ -1849,6 +1936,93 @@ async function handler(req, res) {
       const url = await createDraftEditUrl({ documentId: id, redirectUrl: body.redirectUrl, onBehalfOf })
       if (!url) return res.status(502).json({ error: 'BoldSign did not return an edit URL for this draft' })
       return res.json({ url, documentId: id, status: 'draft' })
+    }
+
+    // SEND a draft — the one action in this file that puts a document in front of
+    // a client, and the only one the prepare-and-print workflow ever calls to do
+    // it. Everything before this point is deliberately non-sending: an agent can
+    // create, fill, print and re-edit a draft all day and nothing leaves the
+    // building until this action runs.
+    //
+    // Guarded the same way `document-edit-url` is, and for the same reason: the
+    // CRM's own status can be stale (a missed Sent webhook leaves a row reading
+    // 'draft' for a document the client already has), and sending that again
+    // would put a second copy of a binding agreement in their inbox. BoldSign is
+    // asked what the document actually is, the row is corrected from the answer,
+    // and only a real draft is sent.
+    if (body.action === 'draft-send') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+
+      const svc    = getServiceClient()
+      const record = await resolveDocumentRecord(svc, id, { verb: 'send' })
+
+      const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+      const live  = normalizeStatus(props.status) || 'in an unknown state'
+      if (live !== 'draft') {
+        // Correct the row, but only forward — a stale read must not rewind a
+        // document that has already completed (see shouldApplyStatus).
+        if (shouldApplyStatus(record.status, live)) {
+          const patch = { status: live }
+          const done  = toIso(props.completedDate || props.signedDate || null)
+          if (done) patch.completed_at = done
+          await svc.from('boldsign_documents').update(patch).eq('id', record.id)
+        }
+        return res.status(409).json({
+          error: live === 'completed'
+            ? 'This document is already fully signed — there is nothing left to send.'
+            : `This document has already been sent (it is ${live}), so it was not sent again. Its status here has been updated.`,
+          status: live,
+        })
+      }
+
+      // Send as the identity the DRAFT was created under, not whoever is clicking.
+      // An admin releasing an agent's prepared packet must not change who the
+      // client hears from between the printed copy and the email.
+      let onBehalfOf = null
+      try { onBehalfOf = await resolveOnBehalfOf(svc, record.agent_id || actor.agent.id) } catch { /* account default */ }
+
+      try {
+        await sendDraftDocument({ documentId: id, onBehalfOf })
+      } catch (err) {
+        // A connection that died mid-send means the outcome is UNKNOWN — BoldSign
+        // may have processed it. Saying "nothing was sent" here is how a client
+        // ends up with two copies, so this one answer refuses to guess.
+        if (err.indeterminate) {
+          return res.status(502).json({
+            error: `${err.message} Use Refresh status on this row before sending again.`,
+            indeterminate: true,
+          })
+        }
+        console.error(`[boldsign] draftSend refused ${id}: ${err.message}`)
+        return res.status(err.status && err.status >= 400 && err.status < 500 ? err.status : 502)
+          .json({ error: describeDraftSendFailure(err), status: 'draft' })
+      }
+
+      // Optimistic advance so the row stops offering Send the moment it succeeds.
+      // Conditional on the status we read (`.eq('status', record.status)`) — the
+      // same compare-and-set the webhook uses, so a Sent event that beat us here
+      // is not rewritten and a completed document is never pushed back to 'sent'.
+      let advanced = false
+      if (shouldApplyStatus(record.status, 'sent')) {
+        const { data: updated } = await svc.from('boldsign_documents')
+          .update({ status: 'sent', sent_at: new Date().toISOString() })
+          .eq('id', record.id).eq('status', record.status).select('id')
+        advanced = Boolean(updated?.length)
+      }
+
+      // The arrangement that just went out is the one worth remembering for this
+      // deal's next packet — the same trigger every other end-of-session path uses.
+      try { await captureFieldLayout(svc, { documentId: id, record, agentId: actor.agent.id }) }
+      catch { /* convenience only — never fail a send that already happened */ }
+
+      await logSignatureAudit(svc, {
+        dealId: record.deal_id, actorId: actor.agent.id, documentId: id, action: 'send',
+        documentName: record.document_name, signers: props?.signerDetails || [],
+        templateId: record.boldsign_template_id, recordId: record.id,
+      })
+
+      return res.json({ documentId: id, status: 'sent', advanced })
     }
 
     // Embedded SIGNING: a URL to load in an iframe so a signer completes the
@@ -2296,15 +2470,23 @@ async function handler(req, res) {
       })
     }
 
-    // Like template-send, but returns an embedded BoldSign "prepare" URL where
-    // the agent can move/add/remove field placements before clicking Send. The
-    // document stays a draft until they send; the Sent webhook flips it to 'sent'.
-    if (body.action === 'template-embed-url') {
-      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices } = body
-      if (!templateId)     return res.status(400).json({ error: 'templateId required' })
-      if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
-
-      const svc        = getServiceClient()
+    // Create a document from a template and leave it in DRAFT. Shared by both
+    // template paths below, because they differ only in where the agent goes next.
+    //
+    // `/template/createEmbeddedRequestUrl` is the API's draft-from-template door:
+    // it mints the document with the roles and their `existingFormFields` values
+    // already written onto it, and hands back BOTH a documentId and an embedded
+    // prepare URL. THE DOCUMENT EXISTS, AND IS A DRAFT, WHETHER OR NOT ANYONE
+    // EVER OPENS THAT URL. That is the fact the whole prepare-and-print workflow
+    // rests on: "Save as Draft" can skip the editor entirely and still have a
+    // real, filled, downloadable document, while "Place Fields in BoldSign"
+    // opens the very same draft inside it.
+    //
+    // Neither path sends. BoldSign sends only when the agent clicks Send inside
+    // the editor, or when `draft-send` is called explicitly.
+    const createTemplateDraft = async (svc, {
+      templateId, dealId, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices,
+    }) => {
       const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
       const payload = {
         title:          documentName || emailSubject || 'Please sign this document',
@@ -2320,45 +2502,101 @@ async function handler(req, res) {
       }
       const data = await boldsign(`/template/createEmbeddedRequestUrl?templateId=${encodeURIComponent(templateId)}`, { method: 'POST', json: payload })
 
-      // A draft document may be created immediately; track it so status updates
-      // land when the agent finishes and BoldSign fires the Sent webhook.
+      // Track it so the agent can find the draft again, and so status updates
+      // land when it is eventually sent and BoldSign fires the Sent webhook.
       let layout = null
-      if (deal_id && data.documentId) {
+      if (dealId && data.documentId) {
         const tracked = await trackDocument(svc, {
-          dealId: deal_id, agentId: actor.agent.id, documentId: data.documentId,
+          dealId, agentId: actor.agent.id, documentId: data.documentId,
           signers: roles, documentName: documentName || emailSubject || 'Document',
           subject: emailSubject || null, status: 'draft', templateId,
         })
         if (!tracked) {
           try { await boldsign(`/document/delete?documentId=${encodeURIComponent(data.documentId)}&deletePermanently=true`, { method: 'DELETE', idempotent: true }) }
           catch { /* best-effort cleanup of the untrackable draft */ }
-          return res.status(500).json({
-            error: 'Could not record this document against the deal, so it was not opened for sending. Nothing was sent — please try again.',
-          })
+          const e = new Error(
+            'Could not record this document against the deal, so it was discarded rather than left where nobody could find it. '
+            + 'Nothing was sent — please try again.'
+          )
+          e.status = 500
+          throw e
         }
+        await logSignatureAudit(svc, {
+          dealId, actorId: actor.agent.id, documentId: data.documentId, action: 'prepare',
+          documentName: documentName || emailSubject || 'Document', signers: roles, templateId,
+        })
         // Restore this deal's own field arrangement over the template's defaults,
-        // BEFORE the editor URL is handed back, so the packet opens already
-        // arranged instead of asking the agent to redo last time's work. Failure
-        // is reported, never fatal — the draft is still perfectly sendable with
-        // the template's placement.
+        // BEFORE anything is handed back, so the packet is already arranged —
+        // both for the editor and for the printed copy, which is drawn from
+        // whatever BoldSign holds. Failure is reported, never fatal: the draft is
+        // still perfectly sendable with the template's own placement.
         layout = await applyFieldLayout(svc, {
-          documentId: data.documentId, dealId: deal_id, templateId, onBehalfOf,
+          documentId: data.documentId, dealId, templateId, onBehalfOf,
         })
       }
-      return res.json({
-        url: data.sendUrl || data.embeddedSendUrl || data.url || null,
+      return {
+        url:        data.sendUrl || data.embeddedSendUrl || data.url || null,
         documentId: data.documentId || null,
-        layoutApplied:    Boolean(layout?.applied),
-        layoutFieldCount: layout?.applied ? layout.fieldCount : 0,
-        // Three outcomes, three sentences: restored, restored-but-short, or not at
-        // all. The middle one used to be invisible, which made a silently incomplete
-        // form look like a faithful one.
-        ...(layout?.partial
-          ? { layoutWarning: `Most of this deal's saved field layout was restored, but ${layout.reason} — check the form before sending.` }
-          : layout && !layout.applied && layout.reason && layout.reason !== 'no saved layout'
-            ? { layoutWarning: `This deal's saved field layout could not be applied (${layout.reason}). The form opened with its default fields.` }
-            : {}),
+        layout,
+      }
+    }
+
+    // Three outcomes, three sentences: restored, restored-but-short, or not at
+    // all. The middle one used to be invisible, which made a silently incomplete
+    // form look like a faithful one.
+    const layoutReport = (layout) => ({
+      layoutApplied:    Boolean(layout?.applied),
+      layoutFieldCount: layout?.applied ? layout.fieldCount : 0,
+      ...(layout?.partial
+        ? { layoutWarning: `Most of this deal's saved field layout was restored, but ${layout.reason} — check the form before sending.` }
+        : layout && !layout.applied && layout.reason && layout.reason !== 'no saved layout'
+          ? { layoutWarning: `This deal's saved field layout could not be applied (${layout.reason}). The form opened with its default fields.` }
+          : {}),
+    })
+
+    // Save-as-Draft: create the filled document and STOP. No editor, no send.
+    //
+    // This is the entry point of the "prepare & print" workflow — the agent fills
+    // the packet from CRM data in our own form layer, saves it, downloads a filled
+    // PDF to take to the client on paper, and only sends later (draft-send) if the
+    // client is happy. `deal_id` is required, unlike the embedded path: a draft
+    // nobody can find again is not a draft, it is a leak.
+    if (body.action === 'template-draft') {
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, roleRemovalIndices } = body
+      if (!templateId)     return res.status(400).json({ error: 'templateId required' })
+      if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
+      if (!deal_id)        return res.status(400).json({ error: 'deal_id required — a draft has to be saved against a deal to be reopened later' })
+
+      const svc = getServiceClient()
+      const { url, documentId, layout } = await createTemplateDraft(svc, {
+        templateId, dealId: deal_id, roles, emailSubject, message, cc, documentName, labels,
+        redirectUrl: body.redirectUrl, roleRemovalIndices,
       })
+      if (!documentId) {
+        return res.status(502).json({ error: 'BoldSign created the document but did not return its id, so it could not be saved to this deal.' })
+      }
+      // The prepare URL rides along so a caller can offer "…and place fields"
+      // without creating a second draft — it addresses this same document. Named
+      // `prepareUrl`, not `editUrl`, because it is BoldSign's create-time send
+      // URL; reopening the draft LATER goes through `document-edit-url`, which
+      // mints a fresh URL and handles the draft's view-option and edit-lock rules.
+      return res.json({ documentId, status: 'draft', prepareUrl: url, ...layoutReport(layout) })
+    }
+
+    // Like template-send, but returns an embedded BoldSign "prepare" URL where
+    // the agent can move/add/remove field placements before clicking Send. The
+    // document stays a draft until they send; the Sent webhook flips it to 'sent'.
+    if (body.action === 'template-embed-url') {
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices } = body
+      if (!templateId)     return res.status(400).json({ error: 'templateId required' })
+      if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
+
+      const svc = getServiceClient()
+      const { url, documentId, layout } = await createTemplateDraft(svc, {
+        templateId, dealId: deal_id, roles, emailSubject, message, cc, documentName, labels,
+        redirectUrl, roleRemovalIndices,
+      })
+      return res.json({ url, documentId, ...layoutReport(layout) })
     }
 
     return res.status(400).json({ error: 'Unknown action' })

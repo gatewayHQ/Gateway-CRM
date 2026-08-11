@@ -86,6 +86,14 @@ export const captureLayout    = (documentId) => call({ action: 'layout-capture',
 // it. The wire action is still `document-print` — it fed a Print button before the
 // browser's print dialog turned out to render these blank (see src/lib/savePdf.js).
 export const documentPdfUrl   = (documentId) => call({ action: 'document-print', documentId })
+// Put a prepared DRAFT in front of its signers — BoldSign's `draftSend`. This is
+// the ONLY call in this file that sends anything: creating a draft, filling it,
+// downloading it and reopening it are all deliberately non-sending, so an agent
+// can prepare and print a packet without any risk of it reaching the client.
+// Resolves { documentId, status: 'sent' }; rejects with a message worth showing
+// (a signer with no email, no fields placed, a rate limit) and the draft is left
+// exactly as it was.
+export const sendDraft       = (documentId) => call({ action: 'draft-send', documentId })
 export const getDocStatus    = (documentId) => call({ action: 'status',   documentId })
 // download/audit-download return { url, filename } — a short-lived signed
 // storage URL, not base64, so size is not a factor and each document resolves
@@ -161,6 +169,14 @@ export const templateEditorUrl     = (p) => call({ action: 'template-editor-url'
 export const templateDetails       = (templateId) => call({ action: 'template-details', templateId })
 export const sendFromTemplate      = (p) => call({ action: 'template-send', ...p })
 export const templateEmbedUrl      = (p) => call({ action: 'template-embed-url', ...p })
+// Save-as-Draft: build the document from a template with every CRM value already
+// filled in, and STOP there — no editor, nothing sent. Resolves
+// { documentId, status: 'draft', editUrl } and the draft is immediately
+// downloadable as a filled PDF (documentPdfUrl), reopenable (documentEditUrl) and
+// sendable when the agent chooses (sendDraft). Takes the same payload as
+// templateEmbedUrl, but `deal_id` is required — a draft has to hang off a deal to
+// be found again.
+export const saveTemplateDraft     = (p) => call({ action: 'template-draft', ...p })
 
 // Field types whose value an agent can pre-fill from the CRM (vs signer actions
 // like Signature/Initial). Used to decide which template fields become inputs.

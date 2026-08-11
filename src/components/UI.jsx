@@ -163,7 +163,10 @@ export function EmptyState({ icon = 'alert', title, message, action }) {
 export function ConfirmDialog({
   message, onConfirm, onCancel,
   title = 'Are you sure?', confirmLabel = 'Delete', eyebrow = 'Confirm Action',
-  confirmVariant = 'btn--danger', cancelLabel = 'Cancel', busy = false,
+  // `busyLabel` because the default reads "Saving…" — right for the edit dialogs
+  // this started as, wrong (and briefly alarming) on a dialog whose button sends
+  // a binding agreement to a client.
+  confirmVariant = 'btn--danger', cancelLabel = 'Cancel', busy = false, busyLabel = 'Saving…',
 }) {
   return (
     <Modal open={true} onClose={onCancel} width={420}>
@@ -180,7 +183,7 @@ export function ConfirmDialog({
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onCancel} disabled={busy}>{cancelLabel}</button>
         <button className={`btn ${confirmVariant}`} onClick={onConfirm} disabled={busy}>
-          {busy ? 'Saving…' : confirmLabel}
+          {busy ? busyLabel : confirmLabel}
         </button>
       </div>
     </Modal>

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -353,6 +353,97 @@ describe('resolveOnBehalfOf — agent identity with org-default fallback', () =>
   it('returns null with no agentId and no default set', async () => {
     const svc = fakeSupabase({})
     expect(await resolveOnBehalfOf(svc, null)).toBeNull()
+  })
+})
+
+describe('betaBase — draftSend lives on /v1-beta, and must stay in its region', () => {
+  it('swaps the version segment on the default US base', () => {
+    expect(betaBase('https://api.boldsign.com/v1')).toBe('https://api.boldsign.com/v1-beta')
+  })
+  it('keeps an EU account on its own host', () => {
+    // The whole reason this is derived rather than hard-coded: an EU account's
+    // documents must not be routed through the US host by a beta endpoint.
+    expect(betaBase('https://api-eu.boldsign.com/v1')).toBe('https://api-eu.boldsign.com/v1-beta')
+  })
+  it('tolerates a trailing slash and an already-beta base', () => {
+    expect(betaBase('https://api.boldsign.com/v1/')).toBe('https://api.boldsign.com/v1-beta')
+    expect(betaBase('https://api.boldsign.com/v1-beta')).toBe('https://api.boldsign.com/v1-beta')
+  })
+  it('appends the version when the base has none', () => {
+    expect(betaBase('https://api.boldsign.com')).toBe('https://api.boldsign.com/v1-beta')
+  })
+})
+
+describe('sendDraftDocument — the one call that puts a document in front of a client', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  it('POSTs draftSend on the beta base, carrying the draft\'s own sender identity', async () => {
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn((url, opts) => {
+      calls.push({ url, method: opts.method })
+      return Promise.resolve(okResp('{"documentId":"doc-1"}'))
+    }))
+    await sendDraftDocument({ documentId: 'doc 1', onBehalfOf: 'agent@x.com' })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].method).toBe('POST')
+    // /v1-beta, not /v1 — on /v1 BoldSign answers a bare 404.
+    expect(calls[0].url).toContain('/v1-beta/document/draftSend')
+    expect(calls[0].url).toContain('documentId=doc+1')
+    expect(calls[0].url).toContain('onBehalfOf=agent%40x.com')
+  })
+
+  it('omits onBehalfOf entirely when there is no approved identity', async () => {
+    let seen = ''
+    vi.stubGlobal('fetch', vi.fn((url) => { seen = url; return Promise.resolve(okResp()) }))
+    await sendDraftDocument({ documentId: 'doc-1' })
+    expect(seen).not.toContain('onBehalfOf')
+  })
+
+  it('is NOT retried on a 5xx — a repeat is a second binding agreement in the inbox', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(errResp(500)))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(sendDraftDocument({ documentId: 'doc-1' })).rejects.toMatchObject({ status: 500 })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports an UNKNOWN outcome when the connection dies mid-send', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('socket hang up'))))
+    // Must not read as "nothing happened" — BoldSign may already have sent it.
+    await expect(sendDraftDocument({ documentId: 'doc-1' })).rejects.toMatchObject({ indeterminate: true })
+  })
+})
+
+describe('describeDraftSendFailure — a refusal an agent can act on', () => {
+  const err = (status, message) => ({ status, message })
+
+  it('names the rate limit and says the draft is untouched', () => {
+    const msg = describeDraftSendFailure(err(429, 'Too many requests'))
+    expect(msg).toMatch(/rate-limit/i)
+    expect(msg).toMatch(/Nothing was sent/i)
+  })
+
+  it('points a missing-signer rejection at Edit Fields, keeping BoldSign\'s own words', () => {
+    const msg = describeDraftSendFailure(err(400, 'SignerName or SignerEmail is missing in roles'))
+    expect(msg).toMatch(/Edit Fields/)
+    // BoldSign's text says WHICH problem; dropping it turns a one-look fix into guesswork.
+    expect(msg).toContain('SignerName or SignerEmail is missing in roles')
+  })
+
+  it('explains a form-field rejection as unplaced fields', () => {
+    expect(describeDraftSendFailure(err(400, 'Form field is invalid'))).toMatch(/signature field has been placed/i)
+  })
+
+  it('tells the agent to rebuild when BoldSign no longer has the draft', () => {
+    expect(describeDraftSendFailure(err(404, 'Not found'))).toMatch(/rebuild it from the template/i)
+  })
+
+  it('passes an unrecognized message through rather than inventing one', () => {
+    expect(describeDraftSendFailure(err(400, 'Labels exceed the maximum'))).toBe('Labels exceed the maximum')
+  })
+
+  it('never returns an empty string, even with nothing to go on', () => {
+    expect(describeDraftSendFailure({})).toMatch(/BoldSign refused the send/)
   })
 })
 
