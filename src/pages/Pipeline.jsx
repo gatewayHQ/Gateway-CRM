@@ -16,7 +16,7 @@ import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty } from '../lib/dealPeople.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, templateEmbedUrl, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -1574,6 +1574,8 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
   const [editDraft,   setEditDraft]   = React.useState(null)  // { url, env } — draft reopened in BoldSign
   const [layouts,     setLayouts]     = React.useState([])    // saved per-deal field arrangements
   const [savingPdf,   setSavingPdf]   = React.useState({})    // env.id → building its PDF copy
+  const [sendingDraft, setSendingDraft] = React.useState({})  // env.id → draftSend in flight
+  const [sendAsk,     setSendAsk]     = React.useState(null)  // env awaiting "yes, send it" confirmation
 
   React.useEffect(() => {
     if (!deal?.id) return
@@ -1805,6 +1807,35 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
     }
   }
 
+  // Release a prepared draft to its signers — BoldSign's draftSend. The last step
+  // of prepare-and-print, and the ONLY button on this page that puts a document in
+  // front of a client.
+  //
+  // Behind a confirm on purpose. Every other draft action is reversible; this one
+  // emails a binding agreement, and the whole point of the draft workflow is that
+  // an agent can prepare, print and review without that ever happening by
+  // accident. `sendAsk` holds the row being confirmed.
+  // The dialog stays up, busy, until BoldSign answers — closing it first would
+  // leave the agent looking at a row that hasn't changed yet, with no way to tell
+  // whether the send is in flight or silently failed.
+  const sendDraftNow = async (env) => {
+    setSendingDraft(p => ({ ...p, [env.id]: true }))
+    try {
+      await apiSendDraft(env.document_id)
+      pushToast('Sent for signature — the signers have been notified.', 'success')
+    } catch (err) {
+      // The API refuses (409) when BoldSign says the document already went out,
+      // and corrects the row when it does — so reload either way rather than
+      // leaving a Send button that keeps failing.
+      pushToast(err.message, 'error')
+    } finally {
+      setSendingDraft(p => ({ ...p, [env.id]: false }))
+      setSendAsk(null)
+      loadEnvelopes()
+      loadLayouts()
+    }
+  }
+
   // Remove a draft/unsigned/expired document to keep this tab tidy. The API
   // refuses to delete a completed record (that's the signed legal record), so
   // this action is only ever offered for non-completed statuses (see render).
@@ -1888,8 +1919,12 @@ create policy "agent_notifications_policy" on agent_notifications
         </div>
         <div style={{ display:'flex', gap:8 }}>
           {templates.length > 0 && (
-            <button className="btn btn--secondary btn--sm" onClick={() => setTplOpen(true)}>
-              <Icon name="file" size={13}/> Send from Template
+            <button
+              className="btn btn--secondary btn--sm"
+              onClick={() => setTplOpen(true)}
+              title="Fill a template from this deal's data and save it as a draft — print it for the client, then send when they're ready"
+            >
+              <Icon name="file" size={13}/> Prepare from Template
             </button>
           )}
           <button className="btn btn--primary btn--sm" onClick={() => setSendOpen(true)}>
@@ -1999,31 +2034,48 @@ create policy "agent_notifications_policy" on agent_notifications
                     )}
                   </div>
                   {/* A draft is unfinished work, not a sent document — say so, and
-                      give the agent the door back into it. Before this the row
+                      give the agent the doors back into it. Before this the row
                       showed a "Draft" chip and nothing else, so a send interrupted
-                      by a screen change could only be restarted from scratch. */}
+                      by a screen change could only be restarted from scratch.
+
+                      The three things an agent can do with a draft are genuinely
+                      different acts: read it on paper,
+                      change it, or put it in front of the client. They get three
+                      separate buttons for that reason — the printed review copy is
+                      the whole point of preparing a draft rather than sending one,
+                      and it must never be one mis-click away from a real send. */}
                   {isDraft && (
                     <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'#fff8ec', display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
                       <Icon name="alert" size={13} style={{ color:'var(--gw-amber)', flexShrink:0 }}/>
                       <span style={{ fontSize:12, flex:1, minWidth:180, color:'var(--gw-ink)' }}>
-                        <strong>Not sent yet.</strong> Pick up where you left off — edit signers &amp; fields, preview, then send.
+                        <strong>Draft — nothing sent.</strong> Print a filled copy for the client, keep editing, or send it when they’re happy.
                       </span>
                       <button
                         className="btn btn--secondary btn--sm"
                         style={{ fontSize:11, flexShrink:0 }}
                         onClick={() => savePdf(env)}
                         disabled={savingPdf[env.id]}
-                        title="Download it as a PDF before it goes anywhere"
+                        title="Download this draft as a PDF with every value you filled in — for printing and taking to the client. Not a signed document."
                       >
-                        <Icon name="document" size={12}/> {savingPdf[env.id] ? 'Preparing…' : 'Save PDF'}
+                        <Icon name="document" size={12}/> {savingPdf[env.id] ? 'Preparing…' : 'Download Filled PDF'}
+                      </button>
+                      <button
+                        className="btn btn--secondary btn--sm"
+                        style={{ fontSize:11, flexShrink:0 }}
+                        onClick={() => openDraft(env)}
+                        disabled={opening[env.id]}
+                        title="Reopen this draft in BoldSign to change values, signers or field placement"
+                      >
+                        <Icon name="edit" size={12}/> {opening[env.id] ? 'Opening…' : 'Edit Fields'}
                       </button>
                       <button
                         className="btn btn--primary btn--sm"
                         style={{ fontSize:11, flexShrink:0 }}
-                        onClick={() => openDraft(env)}
-                        disabled={opening[env.id]}
+                        onClick={() => setSendAsk(env)}
+                        disabled={sendingDraft[env.id]}
+                        title="Email this document to its signers for e-signature"
                       >
-                        <Icon name="edit" size={12}/> {opening[env.id] ? 'Opening…' : 'Edit & Send'}
+                        <Icon name="send" size={12}/> {sendingDraft[env.id] ? 'Sending…' : 'Send for Signature'}
                       </button>
                     </div>
                   )}
@@ -2085,18 +2137,56 @@ create policy "agent_notifications_policy" on agent_notifications
           deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} dealAgents={dealAgents} templates={templates} activeAgent={activeAgent}
           onClose={() => { setTplOpen(false); loadEnvelopes(); loadLayouts() }}
           onSent={() => { setTplOpen(false); loadEnvelopes(); loadLayouts() }}
+          onSaved={() => { setTplOpen(false); loadEnvelopes(); loadLayouts() }}
+        />
+      )}
+
+      {/* The one irreversible step in the draft workflow. It names the actual
+          recipients rather than asking "are you sure?", because the mistake this
+          catches is sending the RIGHT document to the WRONG people — a confirm
+          that doesn't show who is about to be emailed cannot catch that. */}
+      {sendAsk && (
+        <ConfirmDialog
+          eyebrow="BoldSign · Send for Signature"
+          title="Send this document to its signers?"
+          confirmLabel="Send for Signature"
+          busyLabel="Sending…"
+          confirmVariant="btn--primary"
+          busy={Boolean(sendingDraft[sendAsk.id])}
+          onCancel={() => setSendAsk(null)}
+          onConfirm={() => sendDraftNow(sendAsk)}
+          message={
+            <>
+              <p style={{ margin:'0 0 10px', color:'var(--gw-ink)' }}>
+                <strong>{sendAsk.document_name || 'This document'}</strong> will be emailed for e-signature to:
+              </p>
+              <p style={{ margin:'0 0 10px', color:'var(--gw-ink)' }}>{sendAsk.signer_email || sendAsk.signer_name || 'its signers'}</p>
+              <p style={{ margin:0 }}>
+                It stops being a draft, so it can no longer be edited here. If the client still has changes,
+                cancel and use <strong>Edit Fields</strong> instead.
+              </p>
+            </>
+          }
         />
       )}
     </div>
   )
 }
 
-// ── Send from Template modal — dynamic. Reads the template's actual roles +
+// ── Prepare from Template modal — dynamic. Reads the template's actual roles +
 //    fillable fields from BoldSign, renders a signer input per role and an
-//    editable (CRM-prefilled) input per field, then sends via /api/boldsign.
+//    editable (CRM-prefilled) input per field, then creates the document as a
+//    DRAFT on the deal.
+//
+//    It has no send button, deliberately. Both of its actions end at a draft —
+//    "Save as Draft" straight away, "Place Fields in BoldSign" via the embedded
+//    editor — and sending is a separate, confirmed act on the draft row (see
+//    sendDraftNow / the draft-send action). That separation is the workflow: an
+//    agent prints the filled draft, walks a client through it on paper, edits it
+//    as many times as the client asks, and sends only at the end.
 const prettyLabel = (id) => String(id || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 
-function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], dealAgents = [], templates, activeAgent, onClose, onSent }) {
+function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], dealAgents = [], templates, activeAgent, onClose, onSent, onSaved }) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
 
@@ -2111,6 +2201,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [embedUrl,   setEmbedUrl]   = React.useState(null)   // BoldSign prepare/send iframe URL
   const [embedDocId, setEmbedDocId] = React.useState(null)   // its document id — needed to capture the field layout
   const [sending,    setSending]    = React.useState(false)
+  const [savingDraft, setSavingDraft] = React.useState(false)
   const [details,    setDetails]    = React.useState(null)   // { roles, fields }
   const [loadingDet, setLoadingDet] = React.useState(false)
   const [detailsErr, setDetailsErr] = React.useState('')     // why the roles/fields could not be read
@@ -2172,12 +2263,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const setSigner = (idx, k, v) => setSigners(p => ({ ...p, [idx]: { ...(p[idx] || {}), [k]: v } }))
   const setValue  = (id, v)     => setValues(p => ({ ...p, [id]: v }))
 
-  const submit = async () => {
-    if (!templateId) { pushToast('Pick a template', 'error'); return }
+  // The payload both actions below send. Returns null (having said why) when the
+  // modal isn't ready — the two buttons must agree exactly on what is valid, so
+  // this is built once rather than duplicated per action.
+  const buildArgs = () => {
+    if (!templateId) { pushToast('Pick a template', 'error'); return null }
     const roleList = details?.roles || []
     const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())
-    if (!filled.length) { pushToast('At least one signer needs a name and email', 'error'); return }
-    setSending(true)
+    if (!filled.length) { pushToast('At least one signer needs a name and email', 'error'); return null }
 
     // Attach each filled field value to the role that owns it (or the first
     // filled role if the field isn't role-scoped). CRM-entered values are locked.
@@ -2204,23 +2297,56 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
     const docName = [tpl?.name || deal?.title, property?.address].filter(Boolean).join(' — ')
     const labels  = [tpl?.state, tpl?.doc_type, `deal:${deal.id}`].filter(Boolean)
-    const args    = { templateId, deal_id: deal.id, roles, roleRemovalIndices, emailSubject: subject, documentName: docName, labels }
+    return { templateId, deal_id: deal.id, roles, roleRemovalIndices, emailSubject: subject, documentName: docName, labels }
+  }
 
+  // This deal's remembered arrangement was restored over the template's defaults —
+  // say so, because the document will not match the blank template and that should
+  // read as intentional. A partial restore reports BOTH what came back and what
+  // didn't; only a total failure is an error, since a form that is mostly right is
+  // worth saying out loud but is not a broken document.
+  const reportLayout = (data) => {
+    if (data.layoutApplied) {
+      pushToast(`Restored this deal's saved field layout — ${data.layoutFieldCount} field${data.layoutFieldCount === 1 ? '' : 's'}.`, 'success')
+    }
+    if (data.layoutWarning) pushToast(data.layoutWarning, data.layoutApplied ? 'info' : 'error')
+  }
+
+  // SAVE AS DRAFT — the prepare-and-print path. Creates the document in BoldSign
+  // with every value entered above already written into it, and stops. Nothing is
+  // sent, no editor opens; the agent lands back on the Signatures tab where the
+  // draft can be downloaded as a filled PDF, printed, re-edited, and sent later.
+  //
+  // This is the default action because it is the safe one: the packet exists, the
+  // client can read it on paper, and no email has gone anywhere.
+  const saveDraft = async () => {
+    const args = buildArgs()
+    if (!args) return
+    setSavingDraft(true)
     try {
-      // Open BoldSign's embedded prepare/send UI in-frame with the signers +
-      // prefilled values passed through; the agent reviews and sends there.
+      const data = await saveTemplateDraft(args)
+      reportLayout(data)
+      pushToast('Saved as a draft — nothing sent. Use "Download Filled PDF" on the draft to print a copy for the client.', 'success')
+      onSaved()
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setSavingDraft(false)
+    }
+  }
+
+  // PLACE FIELDS — the same draft, opened in BoldSign's embedded editor. Needed
+  // when the template's own field placement has to be adjusted for this deal
+  // (an extra initial box, a label only this county wants). Still a draft on the
+  // other side: BoldSign sends only if the agent clicks Send in there.
+  const placeFields = async () => {
+    const args = buildArgs()
+    if (!args) return
+    setSending(true)
+    try {
       const data = await templateEmbedUrl({ ...args, redirectUrl: window.location.href })
       if (!data?.url) { pushToast('BoldSign did not return a send URL', 'error'); return }
-      // This deal's remembered arrangement was restored over the template's
-      // defaults — say so, because the form the agent is about to see will not
-      // match the blank template and that should read as intentional.
-      if (data.layoutApplied) {
-        pushToast(`Restored this deal's saved field layout — ${data.layoutFieldCount} field${data.layoutFieldCount === 1 ? '' : 's'}.`, 'success')
-      }
-      // A partial restore reports BOTH: what came back, and what didn't. Only a
-      // total failure is an error — a form that is mostly right is worth saying
-      // out loud, but it is not a broken send.
-      if (data.layoutWarning) pushToast(data.layoutWarning, data.layoutApplied ? 'info' : 'error')
+      reportLayout(data)
       setEmbedDocId(data.documentId || null)
       setEmbedUrl(data.url)
     } catch (err) {
@@ -2253,8 +2379,8 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     <Modal open={true} onClose={onClose} width={520}>
       <div className="modal__head">
         <div>
-          <div className="eyebrow-label">BoldSign · Send from Template</div>
-          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Send for Signature</h3>
+          <div className="eyebrow-label">BoldSign · Prepare from Template</div>
+          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Prepare Draft Agreement</h3>
         </div>
         <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
       </div>
@@ -2364,15 +2490,31 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         )}
 
         <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px' }}>
-          Next: BoldSign opens here in the app with these signers &amp; details filled in — review field placement and click Send.
-          Anything filled in above is sent locked: signers see it and cannot change it. Values typed or ticked inside BoldSign&rsquo;s
-          own editor are placement previews and do <strong>not</strong> reach the signers — set them here.
+          <strong>Neither button sends anything.</strong> Both save this as a draft on the deal, filled in with the values above —
+          from there you can download a filled PDF to print for the client, keep editing, and send only when they&rsquo;re happy.
+          Anything filled in above is carried locked: signers see it and cannot change it. Values typed or ticked inside
+          BoldSign&rsquo;s own editor are placement previews and do <strong>not</strong> reach the signers — set them here.
         </div>
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-        <button className="btn btn--primary" onClick={submit} disabled={sending || loadingDet || Boolean(detailsErr) || !details}>
-          {sending ? 'Opening…' : 'Continue in BoldSign'}
+        {/* Secondary, because most packets need no placement work: the template
+            already has its fields and this is the detour, not the route. */}
+        <button
+          className="btn btn--secondary"
+          onClick={placeFields}
+          disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details}
+          title="Save the draft and open it in BoldSign to move, add or remove fields"
+        >
+          {sending ? 'Opening…' : 'Place Fields in BoldSign'}
+        </button>
+        <button
+          className="btn btn--primary"
+          onClick={saveDraft}
+          disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details}
+          title="Create the filled document on this deal as a draft — nothing is sent"
+        >
+          {savingDraft ? 'Saving…' : 'Save as Draft'}
         </button>
       </div>
     </Modal>
