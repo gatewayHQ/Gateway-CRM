@@ -316,7 +316,7 @@ export function sharedDataOnSignerFields({ fields = [], values = {} } = {}) {
   return (fields || []).filter(f => (
     f?.id
     && !isSharedField(f.type)
-    && isCrmToken(f.id)
+    && isCrmToken(f)
     && Boolean(prefillFieldEntry(f, values?.[f.id]))
   ))
 }
@@ -505,25 +505,52 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
   }
 }
 
-// Template field ids are typed by hand in BoldSign's editor, where `Agent_Name`,
-// `agent_name` and `AGENT_NAME` all look like the same thing — and a mismatch
-// fails silently as an empty box the agent has to retype on every send. Match
-// case-insensitively so the id only has to be spelled right, not cased right.
-export function tokenValueFor(tokenVals, fieldId) {
-  if (!fieldId) return ''
-  const direct = tokenVals?.[fieldId]
-  if (direct) return direct
-  const want = String(fieldId).trim().toLowerCase()
-  for (const [k, v] of Object.entries(tokenVals || {})) {
-    if (k.toLowerCase() === want) return v
+// ── Matching a template field to a CRM token ─────────────────────────────────
+// A token is typed by hand in BoldSign's template editor, and there are three
+// ways for it to arrive here — none of which we control:
+//
+//   • the field's **id**    — what the API addresses it by, but BoldSign
+//                             AUTO-ASSIGNS these (`Label1`, `Label2`; those are
+//                             the ids in BoldSign's own API examples), so a
+//                             hand-typed token usually is NOT the id;
+//   • the field's **name**  — the box an admin actually types into in the editor;
+//   • the field's **label** — the caption shown on the document.
+//
+// Matching the id alone is why a template carefully labelled `client_names`
+// arrived blank: it was addressed as `Label1`, matched nothing, and the send
+// screen showed an empty box with no indication of why. All three are tried now,
+// and the comparison is normalized — case, spaces, and dashes all collapse — so
+// `Agent_Name`, `agent name` and `AGENT-NAME` are one token.
+export const normalizeTokenKey = (s) => String(s || '').trim().toLowerCase()
+  .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+
+// Which CRM token this field means, or '' when it is not one of ours. Accepts a
+// field object or a bare id string.
+export function fieldTokenKey(field, tokenKeys = SHARED_PREFILL_TOKENS) {
+  const candidates = (typeof field === 'string' || field == null)
+    ? [field]
+    : [field.id, field.name, field.label]
+  for (const c of candidates) {
+    const key = normalizeTokenKey(c)
+    if (key && tokenKeys.has(key)) return key
   }
   return ''
 }
 
-// Is this field id one of ours, whatever its casing? Used to spot shared deal
+// The deal's value for a template field, by whichever of id/name/label carries
+// the token. '' when the field isn't one of ours — that's a blank the agent
+// fills in by hand, not an error.
+export function fieldTokenValue(tokenVals, field) {
+  const key = fieldTokenKey(field, new Set(Object.keys(tokenVals || {})))
+  return key ? (tokenVals[key] || '') : ''
+}
+
+// Same lookup from a bare id — kept for callers that only have the string.
+export const tokenValueFor = (tokenVals, fieldId) => fieldTokenValue(tokenVals, fieldId)
+
+// Is this field one of ours, however it was spelled? Used to spot shared deal
 // data sitting on a signer-private field.
-export const isCrmToken = (fieldId) =>
-  Boolean(fieldId) && SHARED_PREFILL_TOKENS.has(String(fieldId).trim().toLowerCase())
+export const isCrmToken = (field) => Boolean(fieldTokenKey(field))
 
 // Role names that should be filled with the deal's client(s) rather than an
 // agent. Broad on purpose so generic template roles ("Signer 1") still seed.

@@ -16,7 +16,7 @@ import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty } from '../lib/dealPeople.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, buildPrefillFields, sharedDataOnSignerFields, tokenValueFor, appointedAgent, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, buildPrefillFields, sharedDataOnSignerFields, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2251,9 +2251,10 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         for (const f of fields) {
           // Tick boxes start as null — "leave it to the signer" — rather than
           // false, so an untouched box isn't sent out locked as a deliberate no.
-          // tokenValueFor matches the id case-insensitively: `Agent_Name` typed
-          // in BoldSign's editor is the same field as `agent_name`.
-          seededValues[f.id] = isTickableField(f.type) ? null : tokenValueFor(tokenVals, f.id)
+          // fieldTokenValue matches on the field's id, name OR label, normalized
+          // for case and separators — BoldSign auto-assigns the id (`Label1`), so
+          // a hand-typed token usually lives in the name or the label.
+          seededValues[f.id] = isTickableField(f.type) ? null : fieldTokenValue(tokenVals, f)
         }
         setValues(seededValues)
       })
@@ -2388,9 +2389,24 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // send is the person who will hear about the blank from the client.
   const sharedGaps = sharedDataOnSignerFields({ fields, values })
 
+  // What BoldSign actually calls this field, and whether it matched a CRM token.
+  // A blank box used to be unreadable — "did the deal have no value, or is the
+  // field named something the CRM doesn't recognise?" — and the answer lived in
+  // an API response nobody could see. It is on screen now: the field's real id,
+  // and the token it resolved to when it resolved to one.
+  const fieldOrigin = (f) => {
+    const token = fieldTokenKey(f)
+    return token && normalizeTokenKey(f.id) !== token ? `${f.id} → ${token}` : String(f.id || '')
+  }
+
   const renderTextField = (f) => (
     <div key={f.id} style={{ marginBottom:8 }}>
-      <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2 }}>{f.label || prettyLabel(f.id)}</div>
+      <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2, display:'flex', gap:8, alignItems:'baseline' }}>
+        <span style={{ flex:1 }}>{f.label || f.name || prettyLabel(f.id)}</span>
+        <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7 }} title="The field id BoldSign uses, and the CRM token it matched">
+          {fieldOrigin(f)}
+        </span>
+      </div>
       {f.options?.length
         ? (
           <select className="form-control" value={values[f.id] || ''} onChange={e => setValue(f.id, e.target.value)}>

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -495,30 +495,52 @@ describe('appointedAgent — the agreement names the deal’s agent, not the sen
   })
 })
 
-describe('tokenValueFor — a template id only has to be spelled right, not cased right', () => {
+describe('fieldTokenValue — finding the token wherever BoldSign put it', () => {
   const vals = crmTokenValues({ contact: { first_name: 'Jane', last_name: 'Doe' }, agent: { name: 'Alex Agent' } })
 
-  it('fills a field id typed with capitals in BoldSign’s editor', () => {
-    // A mismatch used to fail silently: an empty box the agent retypes every send.
-    expect(tokenValueFor(vals, 'Agent_Name')).toBe('Alex Agent')
-    expect(tokenValueFor(vals, 'Client_names')).toBe('Jane Doe')
-    expect(tokenValueFor(vals, 'PROPERTY_ADDRESS')).toBe('')     // exists, but empty on this deal
+  it('REGRESSION: matches the field NAME, because BoldSign auto-assigns the id', () => {
+    // The reported failure: a template carefully labelled `client_names` arrived
+    // blank. BoldSign had assigned the field id `Label1` (the ids in its own API
+    // examples), the CRM matched on id alone, and the send screen showed an empty
+    // box with nothing to explain it.
+    expect(fieldTokenValue(vals, { id: 'Label1', name: 'client_names' })).toBe('Jane Doe')
+    expect(fieldTokenValue(vals, { id: 'Label2', name: 'agent_name' })).toBe('Alex Agent')
   })
 
-  it('still matches an exactly-cased id', () => {
-    expect(tokenValueFor(vals, 'agent_name')).toBe('Alex Agent')
+  it('matches the label too, for a field whose caption carries the token', () => {
+    expect(fieldTokenValue(vals, { id: 'Label3', label: 'agent_name' })).toBe('Alex Agent')
+  })
+
+  it('prefers the id when the id is itself a token', () => {
+    expect(fieldTokenValue(vals, { id: 'agent_name', name: 'client_name' })).toBe('Alex Agent')
+  })
+
+  it('normalizes case, spaces and dashes — all one token', () => {
+    expect(fieldTokenValue(vals, { id: 'Agent_Name' })).toBe('Alex Agent')
+    expect(fieldTokenValue(vals, { id: 'x', name: 'Agent Name' })).toBe('Alex Agent')
+    expect(fieldTokenValue(vals, { id: 'x', name: 'AGENT-NAME' })).toBe('Alex Agent')
+    expect(fieldTokenValue(vals, 'Client_names')).toBe('Jane Doe')
+  })
+
+  it('names which token a field resolved to, for the send screen’s field id hint', () => {
+    expect(fieldTokenKey({ id: 'Label1', name: 'Client Names' })).toBe('client_names')
+    expect(fieldTokenKey({ id: 'Label9', name: 'Buyer licence' })).toBe('')
   })
 
   it('returns empty for a field that is not one of our tokens', () => {
-    expect(tokenValueFor(vals, 'buyer_license_no')).toBe('')
-    expect(tokenValueFor(vals, '')).toBe('')
-    expect(tokenValueFor(undefined, 'agent_name')).toBe('')
+    expect(fieldTokenValue(vals, { id: 'Label7', name: 'buyer_license_no' })).toBe('')
+    expect(fieldTokenValue(vals, { id: '' })).toBe('')
+    expect(fieldTokenValue(vals, null)).toBe('')
+    expect(fieldTokenValue(undefined, { id: 'agent_name' })).toBe('')
   })
 
-  it('flags shared data on a signer field whatever the id’s casing', () => {
+  it('flags shared data on a signer field however the token was spelled', () => {
     expect(sharedDataOnSignerFields({
       fields: [{ id: 'List_Price', type: 'Textbox', roleIndex: 2 }], values: { List_Price: '$1,350,000' },
     }).map(f => f.id)).toEqual(['List_Price'])
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'Label4', name: 'list_price', type: 'Textbox', roleIndex: 2 }], values: { Label4: '$1,350,000' },
+    }).map(f => f.id)).toEqual(['Label4'])
   })
 })
 

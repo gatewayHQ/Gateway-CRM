@@ -2392,6 +2392,13 @@ async function handler(req, res) {
         id:        f.id || f.fieldId || f.name,
         type:      f.fieldType || f.type,
         roleIndex: f.roleIndex != null ? Number(f.roleIndex) : (f.signerIndex != null ? Number(f.signerIndex) : null),
+        // `name` rides along SEPARATELY from `id`. BoldSign auto-assigns field
+        // ids (Label1, Label2 — the ids in its own API examples), and the box an
+        // admin types a CRM token into in the template editor is the field's
+        // NAME. Collapsing the two here meant a template labelled `client_names`
+        // was addressed as `Label1`, matched no token, and arrived blank — with
+        // nothing on screen to show why.
+        name:      f.name || '',
         label:     f.label || f.placeholder || f.placeHolder || '',
         required:  Boolean(f.isRequired),
         value:     f.value != null ? String(f.value) : '',
