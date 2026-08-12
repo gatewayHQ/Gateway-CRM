@@ -16,7 +16,7 @@ import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty } from '../lib/dealPeople.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, buildPrefillFields, sharedDataOnSignerFields, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, buildPrefillFields, sharedDataOnSignerFields, tokenValueFor, appointedAgent, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2234,14 +2234,26 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
         // Seed signer name/email from the deal's linked contact (+ spouse for a
         // second client role) and the acting agent. See seedSignersFromDeal.
-        const tokenVals = crmTokenValues({ deal, property, contact, agent: activeAgent })
+        //
+        // The token values follow the SAME people: every client on the deal (so
+        // `client_names` prints "Jane Doe and John Doe" on a two-buyer packet),
+        // and the deal's own agent rather than whoever happens to be sending —
+        // an admin sending on an agent's behalf must not have their own name
+        // printed as the appointed agent. See appointedAgent().
+        const tokenVals = crmTokenValues({
+          deal, property, contact,
+          additionalContacts: extraContacts,
+          agent: appointedAgent({ activeAgent, dealAgents }),
+        })
         setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent, dealAgents }))
 
         const seededValues = {}
         for (const f of fields) {
           // Tick boxes start as null — "leave it to the signer" — rather than
           // false, so an untouched box isn't sent out locked as a deliberate no.
-          seededValues[f.id] = isTickableField(f.type) ? null : (tokenVals[f.id] || '')
+          // tokenValueFor matches the id case-insensitively: `Agent_Name` typed
+          // in BoldSign's editor is the same field as `agent_name`.
+          seededValues[f.id] = isTickableField(f.type) ? null : tokenValueFor(tokenVals, f.id)
         }
         setValues(seededValues)
       })

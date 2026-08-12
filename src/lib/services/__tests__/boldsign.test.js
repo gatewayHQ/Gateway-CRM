@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -404,6 +404,137 @@ describe('buildTemplateRoles — index shift after role removal', () => {
 // the moment the document is sent, editable by none, prefilled through ONE role's
 // existingFormFields. These tests pin the routing that makes that true.
 // ─────────────────────────────────────────────────────────────────────────────
+describe('client name tokens — every party named, not just the primary contact', () => {
+  const jane = { first_name: 'Jane', last_name: 'Doe', email: 'jane@x.com' }
+  const john = { first_name: 'John', last_name: 'Doe', email: 'john@x.com' }
+  const acme = { first_name: 'Acme', last_name: 'Holdings LLC', email: 'ops@acme.com' }
+
+  it('prints both buyers on the parties line — naming one misstates who is bound', () => {
+    const v = crmTokenValues({ contact: jane, additionalContacts: [john] })
+    expect(v.client_names).toBe('Jane Doe and John Doe')
+    expect(v.seller_names).toBe('Jane Doe and John Doe')
+    expect(v.client_name).toBe('Jane Doe')      // the primary alone, unchanged
+    expect(v.client_2_name).toBe('John Doe')
+  })
+
+  it('reads as a sentence with three or more parties', () => {
+    expect(crmTokenValues({ contact: jane, additionalContacts: [john, acme] }).client_names)
+      .toBe('Jane Doe, John Doe and Acme Holdings LLC')
+  })
+
+  it('falls back to the stored spouse name when no additional contact is linked', () => {
+    const v = crmTokenValues({ contact: { ...jane, spouse_name: 'John Doe' } })
+    expect(v.client_names).toBe('Jane Doe and John Doe')
+    expect(v.client_2_name).toBe('John Doe')
+  })
+
+  it('ignores the spouse name once a real co-buyer is linked — no duplicate party', () => {
+    const v = crmTokenValues({ contact: { ...jane, spouse_name: 'Stale Spouse' }, additionalContacts: [john] })
+    expect(v.client_names).toBe('Jane Doe and John Doe')
+  })
+
+  it('is just the one name on a single-buyer deal, with no dangling "and"', () => {
+    const v = crmTokenValues({ contact: jane })
+    expect(v.client_names).toBe('Jane Doe')
+    expect(v.client_2_name).toBe('')
+  })
+
+  it('leaves every client token blank when the deal has no contact', () => {
+    const v = crmTokenValues({})
+    expect(v.client_names).toBe('')
+    expect(v.client_name).toBe('')
+    expect(v.client_2_name).toBe('')
+  })
+
+  it('seeds signer rows from the same list the printed names come from', () => {
+    // The parties clause and the signature rows must never disagree about who
+    // the clients are.
+    const roles = [{ index: 1, name: 'Buyer' }, { index: 2, name: 'Co-Buyer' }]
+    const seeded = seedSignersFromDeal({ roles, contact: jane, additionalContacts: [john] })
+    const printed = crmTokenValues({ contact: jane, additionalContacts: [john] })
+    expect([seeded[1].name, seeded[2].name]).toEqual(['Jane Doe', 'John Doe'])
+    expect(printed.client_names).toBe('Jane Doe and John Doe')
+  })
+})
+
+describe('appointedAgent — the agreement names the deal’s agent, not the sender', () => {
+  const alex  = { name: 'Alex Agent',  email: 'alex@brokerage.com' }
+  const nic   = { name: 'Nic Madsen',  email: 'nic@brokerage.com' }
+  const admin = { name: 'Office Admin', email: 'admin@brokerage.com' }
+
+  it('REGRESSION: a TC sending on an agent’s behalf does not get named as the agent', () => {
+    // An Appointed Agency form states who is licensed to represent the client.
+    // Printing the coordinator's name there is a statement about the wrong
+    // person — and the signature row below already named the agent correctly.
+    expect(appointedAgent({ activeAgent: admin, dealAgents: [alex] })).toEqual(alex)
+    expect(crmTokenValues({ agent: appointedAgent({ activeAgent: admin, dealAgents: [alex] }) }).agent_name)
+      .toBe('Alex Agent')
+  })
+
+  it('keeps the acting agent when they are actually on the deal', () => {
+    expect(appointedAgent({ activeAgent: nic, dealAgents: [alex, nic] })).toEqual(nic)
+  })
+
+  it('matches the acting agent by email regardless of how the name is stored', () => {
+    expect(appointedAgent({ activeAgent: { name: 'A. Agent', email: 'ALEX@brokerage.com' }, dealAgents: [alex] }))
+      .toMatchObject({ email: 'ALEX@brokerage.com' })
+  })
+
+  it('falls back to the sender when the deal has no agents on it', () => {
+    expect(appointedAgent({ activeAgent: admin, dealAgents: [] })).toEqual(admin)
+  })
+
+  it('returns null when there is nobody to name', () => {
+    expect(appointedAgent()).toBeNull()
+    expect(appointedAgent({ activeAgent: { name: '', email: '' }, dealAgents: [] })).toBeNull()
+  })
+
+  it('agrees with the agent-signer ordering the rows already use', () => {
+    expect(appointedAgent({ activeAgent: admin, dealAgents: [alex, nic] }).email)
+      .toBe(orderAgentSigners({ activeAgent: admin, dealAgents: [alex, nic] })[0].email)
+  })
+})
+
+describe('tokenValueFor — a template id only has to be spelled right, not cased right', () => {
+  const vals = crmTokenValues({ contact: { first_name: 'Jane', last_name: 'Doe' }, agent: { name: 'Alex Agent' } })
+
+  it('fills a field id typed with capitals in BoldSign’s editor', () => {
+    // A mismatch used to fail silently: an empty box the agent retypes every send.
+    expect(tokenValueFor(vals, 'Agent_Name')).toBe('Alex Agent')
+    expect(tokenValueFor(vals, 'Client_names')).toBe('Jane Doe')
+    expect(tokenValueFor(vals, 'PROPERTY_ADDRESS')).toBe('')     // exists, but empty on this deal
+  })
+
+  it('still matches an exactly-cased id', () => {
+    expect(tokenValueFor(vals, 'agent_name')).toBe('Alex Agent')
+  })
+
+  it('returns empty for a field that is not one of our tokens', () => {
+    expect(tokenValueFor(vals, 'buyer_license_no')).toBe('')
+    expect(tokenValueFor(vals, '')).toBe('')
+    expect(tokenValueFor(undefined, 'agent_name')).toBe('')
+  })
+
+  it('flags shared data on a signer field whatever the id’s casing', () => {
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'List_Price', type: 'Textbox', roleIndex: 2 }], values: { List_Price: '$1,350,000' },
+    }).map(f => f.id)).toEqual(['List_Price'])
+  })
+})
+
+describe('joinNames', () => {
+  it('reads as a parties clause rather than a comma list', () => {
+    expect(joinNames(['Jane'])).toBe('Jane')
+    expect(joinNames(['Jane', 'John'])).toBe('Jane and John')
+    expect(joinNames(['Jane', 'John', 'Acme LLC'])).toBe('Jane, John and Acme LLC')
+  })
+  it('drops blanks and handles nothing at all', () => {
+    expect(joinNames(['Jane', '', '  ', 'John'])).toBe('Jane and John')
+    expect(joinNames([])).toBe('')
+    expect(joinNames()).toBe('')
+  })
+})
+
 describe('isSharedField / partitionPrefillFields — which fields everyone can see', () => {
   it('treats Label (only) as the shared field type', () => {
     expect(isSharedField('Label')).toBe(true)

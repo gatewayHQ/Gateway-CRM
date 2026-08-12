@@ -316,7 +316,7 @@ export function sharedDataOnSignerFields({ fields = [], values = {} } = {}) {
   return (fields || []).filter(f => (
     f?.id
     && !isSharedField(f.type)
-    && SHARED_PREFILL_TOKENS.has(f.id)
+    && isCrmToken(f.id)
     && Boolean(prefillFieldEntry(f, values?.[f.id]))
   ))
 }
@@ -411,14 +411,62 @@ export function buildTemplateRoles({ roleList = [], signers = {}, fieldsByRole =
 }
 
 // ── CRM → template field prefill ─────────────────────────────────────────────
+// The people on the client side of a deal, in the order they belong on the
+// agreement: the primary contact, then any Additional Contacts (co-buyer,
+// spouse, co-owner), then — only when no real additional contact is linked —
+// the primary contact's stored spouse name, which has no email of its own.
+//
+// Shared by seedSignersFromDeal() (who signs) and crmTokenValues() (whose names
+// are printed in the body), so the signature rows and the parties clause can
+// never disagree about who the clients are.
+export function dealClientList({ contact, additionalContacts = [] } = {}) {
+  const toPerson = c => ({ name: `${c?.first_name || ''} ${c?.last_name || ''}`.trim(), email: c?.email || '' })
+  const people = []
+  if (contact && (contact.first_name || contact.last_name || contact.email)) people.push(toPerson(contact))
+  for (const c of (additionalContacts || [])) {
+    const p = toPerson(c)
+    if (p.name || p.email) people.push(p)
+  }
+  if (!(additionalContacts || []).length && contact?.spouse_name) people.push({ name: contact.spouse_name, email: '' })
+  return people
+}
+
+// "Jane Doe" · "Jane Doe and John Doe" · "Jane Doe, John Doe and Acme LLC" —
+// how a parties clause reads, rather than a comma-joined list.
+export function joinNames(names = []) {
+  const list = (names || []).map(n => String(n || '').trim()).filter(Boolean)
+  if (list.length <= 1) return list[0] || ''
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`
+}
+
+// The agent whose name belongs IN THE BODY of the agreement — the appointed
+// agent, the listing agent — which is not always whoever clicked Send.
+//
+// This mirrors orderAgentSigners(), the rule the signer rows already follow: the
+// acting agent only when they are actually on the deal, otherwise the deal's own
+// first agent. Before this, `agent_name` was hard-wired to the acting agent, so
+// an admin or transaction coordinator sending a packet on an agent's behalf
+// printed THEIR name into the agreement — on an Appointed Agency form, that is a
+// licensing statement about the wrong person — while the signature row three
+// inches below correctly named the agent. Same question, two answers.
+export function appointedAgent({ activeAgent = null, dealAgents = [] } = {}) {
+  const key    = (a) => String(a?.email || a?.name || '').toLowerCase()
+  const list   = (dealAgents || []).filter(a => a?.name || a?.email)
+  const acting = (activeAgent?.name || activeAgent?.email) ? activeAgent : null
+  if (!list.length) return acting
+  if (acting && list.some(a => key(a) === key(acting))) return acting
+  return list[0]
+}
+
 // Maps our fixed label/id tokens to values pulled from the deal + its property
 // and primary contact. Only tokens the template actually declares get sent.
 // The canonical token → value map from a deal's context. Field IDs on a
 // template that match one of these keys get auto-filled.
-export function crmTokenValues({ deal, property, contact, agent } = {}) {
+export function crmTokenValues({ deal, property, contact, additionalContacts = [], agent } = {}) {
   const money = (n) => (n != null && n !== '' ? `$${Number(n).toLocaleString()}` : '')
   const fullAddr = [property?.address, property?.city, property?.state, property?.zip].filter(Boolean).join(', ')
   const dealComm = describeDealCommission(deal)
+  const clients  = dealClientList({ contact, additionalContacts })
   return {
     property_address:   property?.address || deal?.prop_address || '',
     property_full:      fullAddr,
@@ -433,14 +481,49 @@ export function crmTokenValues({ deal, property, contact, agent } = {}) {
     commission_amount:  dealComm ? money(dealComm.gross) : '',
     listing_start_date: deal?.comp_data?.listing_start || '',
     listing_end_date:   deal?.comp_data?.listing_end || deal?.expected_close_date || '',
-    seller_name:        [contact?.first_name, contact?.last_name].filter(Boolean).join(' '),
-    client_name:        [contact?.first_name, contact?.last_name].filter(Boolean).join(' '),
+    // The PRIMARY contact alone. A form with one signature line for "Client"
+    // still wants one name.
+    seller_name:        clients[0]?.name || '',
+    client_name:        clients[0]?.name || '',
+    // EVERY client, as a parties clause reads: "Jane Doe and John Doe". This is
+    // the one to use on the "entered into by and between ______" line of an
+    // agency agreement, where naming only the primary buyer misstates who is
+    // bound by it.
+    client_names:       joinNames(clients.map(c => c.name)),
+    seller_names:       joinNames(clients.map(c => c.name)),
+    // The co-buyer / spouse / co-owner on their own, for forms with a second
+    // named line rather than one combined one.
+    client_2_name:      clients[1]?.name || '',
+    seller_2_name:      clients[1]?.name || '',
     close_date:         deal?.expected_close_date || '',
+    // The deal's agent, NOT necessarily the sender — see appointedAgent().
     agent_name:         agent?.name || '',
     agent_email:        agent?.email || '',
+    // No brokerage is stored on an agent today, so this is effectively always
+    // blank: put the firm name in the template as fixed text instead.
     broker_name:        agent?.brokerage || agent?.broker_name || '',
   }
 }
+
+// Template field ids are typed by hand in BoldSign's editor, where `Agent_Name`,
+// `agent_name` and `AGENT_NAME` all look like the same thing — and a mismatch
+// fails silently as an empty box the agent has to retype on every send. Match
+// case-insensitively so the id only has to be spelled right, not cased right.
+export function tokenValueFor(tokenVals, fieldId) {
+  if (!fieldId) return ''
+  const direct = tokenVals?.[fieldId]
+  if (direct) return direct
+  const want = String(fieldId).trim().toLowerCase()
+  for (const [k, v] of Object.entries(tokenVals || {})) {
+    if (k.toLowerCase() === want) return v
+  }
+  return ''
+}
+
+// Is this field id one of ours, whatever its casing? Used to spot shared deal
+// data sitting on a signer-private field.
+export const isCrmToken = (fieldId) =>
+  Boolean(fieldId) && SHARED_PREFILL_TOKENS.has(String(fieldId).trim().toLowerCase())
 
 // Role names that should be filled with the deal's client(s) rather than an
 // agent. Broad on purpose so generic template roles ("Signer 1") still seed.
@@ -516,18 +599,10 @@ export function orderAgentSigners({ activeAgent = null, dealAgents = [] } = {}) 
 // field before sending. Requires the deal to have a linked contact; with none,
 // client roles fall back to the template placeholder (usually blank).
 export function seedSignersFromDeal({ roles = [], contact = null, additionalContacts = [], activeAgent = null, dealAgents = [] } = {}) {
-  const toPerson = c => ({ name: `${c?.first_name || ''} ${c?.last_name || ''}`.trim(), email: c?.email || '' })
-  const people = []
-  if (contact && (contact.first_name || contact.last_name || contact.email)) people.push(toPerson(contact))
-  // Real linked additional contacts (co-buyers / spouses) come next, in order —
-  // these carry their own email, unlike the stored spouse_name below.
-  for (const c of (additionalContacts || [])) {
-    const p = toPerson(c)
-    if (p.name || p.email) people.push(p)
-  }
-  // Fall back to the primary contact's stored spouse name (no email on file)
-  // only when no real additional contacts are linked to the deal.
-  if (!(additionalContacts || []).length && contact?.spouse_name) people.push({ name: contact.spouse_name, email: '' })
+  // Primary contact, then Additional Contacts (each with their own email), then
+  // the stored spouse name as a last resort — see dealClientList, which the
+  // printed `client_names` token also uses so the two never disagree.
+  const people = dealClientList({ contact, additionalContacts })
   const agentSigners = orderAgentSigners({ activeAgent, dealAgents })
 
   const out = {}

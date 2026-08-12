@@ -807,7 +807,35 @@ parties cannot see them until that signer finishes." The fix is in BoldSign —
 make those fields Labels — and then the warning disappears.
 
 ## CRM prefill tokens
-`property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `broker_name` · `agent_name` · `agent_email` · `list_price` · `commission_pct` · `commission_amount` · `listing_start_date` · `listing_end_date` · `close_date`
+`property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `seller_names` / `client_names` · `seller_2_name` / `client_2_name` · `broker_name` · `agent_name` · `agent_email` · `list_price` · `commission_pct` · `commission_amount` · `listing_start_date` · `listing_end_date` · `close_date`
+
+**Field ids match case-insensitively.** Ids are typed by hand in BoldSign's
+editor, where `Agent_Name` and `agent_name` look like the same thing, and a
+mismatch used to fail silently as an empty box the agent retyped every send.
+`tokenValueFor()` owns this.
+
+**Which client token to use.** `client_name` is the **primary contact alone** —
+right for a form with one "Client" line. `client_names` is **every client on the
+deal**, written as a parties clause ("Jane Doe and John Doe"), which is what the
+"entered into by and between ______" line of an agency agreement needs: naming
+only the primary buyer misstates who is bound by it. `client_2_name` is the
+co-buyer on their own, for forms with a second named line. The `seller_*` names
+are aliases of the same values. All of them come from `dealClientList()` — the
+primary contact, then **Additional Contacts**, then the primary's stored
+`spouse_name` when no additional contact is linked — which is the same list
+`seedSignersFromDeal()` uses for the signature rows, so the parties clause and
+the signer rows can never disagree about who the clients are.
+
+**`agent_name` / `agent_email` are the deal's agent, not the sender.**
+`appointedAgent()` applies the rule the signer rows already followed: the acting
+agent only when they are on the deal, otherwise the deal's own first agent. These
+were hard-wired to the acting agent, so an admin or TC sending a packet on an
+agent's behalf printed *their* name into the agreement — on an Appointed Agency
+form that is a licensing statement about the wrong person — while the signature
+row below correctly named the agent.
+
+**`broker_name` is effectively always blank:** `agents` has no brokerage column.
+Put the firm name in the template as fixed text.
 
 Both commission tokens come from the agent's entry on the deal's **Details** tab
 (`deals.commission_type` / `commission_pct` / `commission_flat` — migration 0024).
