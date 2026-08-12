@@ -739,7 +739,7 @@ export default function App() {
           {route === 'review'     && <AdminReviewPage {...props} />}
           {route === 'form-library' && <FormLibraryPage isAdmin={isAdmin} />}
           {route === 'leads'      && <LeadsPage {...props} />}
-          {route === 'integrations'      && <IntegrationsPage db={db} />}
+          {route === 'integrations'      && <IntegrationsPage />}
           {route === 'data-management'   && <DataManagementPage />}
           {route === 'settings'          && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} activeAgentId={activeAgentId} hideableNav={HIDEABLE_NAV} />}
         </ErrorBoundary>

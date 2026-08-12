@@ -56,8 +56,6 @@ create policy "Auth read" on lead_captures for select using (auth.role() = 'auth
 
 export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnabled, activeAgentId, hideableNav, go }) {
   const [companyName, setCompanyName] = useState('Gateway Real Estate Advisors')
-  const [clearing, setClearing] = useState(false)
-  const [confirmClear, setConfirmClear] = useState(false)
   const [copied, setCopied] = useState(null)
 
   // ── Sidebar customization ──────────────────────────────────────────────────
@@ -84,36 +82,21 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
     pushToast('Sidebar preferences saved')
   }
 
-  // AI key — loaded from Supabase auth metadata (persists across devices)
-  const [aiKey, setAiKey]         = useState('')
-  const [aiKeySaved, setAiKeySaved] = useState(false)
-  const [showAiKey, setShowAiKey] = useState(false)
-
-  // Resend key — same storage strategy
+  // Resend key — loaded from Supabase auth metadata (persists across devices)
   const [resendKey, setResendKey]         = useState('')
   const [resendKeySaved, setResendKeySaved] = useState(false)
   const [showResendKey, setShowResendKey]   = useState(false)
   const [resendFrom, setResendFrom]         = useState('')
-  const [resendFromSaved, setResendFromSaved] = useState(false)
 
-  // Load keys from Supabase auth user metadata on mount
+  // Load the key from Supabase auth user metadata on mount
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (!user) return
       const meta = user.user_metadata || {}
-      setAiKey(meta.anthropic_key || localStorage.getItem('gw_anthropic_key') || '')
       setResendKey(meta.resend_key || localStorage.getItem('gw_resend_key') || '')
       setResendFrom(meta.resend_from || localStorage.getItem('gw_resend_from') || '')
     })
   }, [])
-
-  const saveAiKey = async () => {
-    await supabase.auth.updateUser({ data: { anthropic_key: aiKey.trim() } })
-    localStorage.setItem('gw_anthropic_key', aiKey.trim())
-    setAiKeySaved(true)
-    setTimeout(() => setAiKeySaved(false), 2000)
-    pushToast('AI key saved — works on all your devices now')
-  }
 
   const saveResendKey = async () => {
     await supabase.auth.updateUser({ data: { resend_key: resendKey.trim(), resend_from: resendFrom.trim() } })
@@ -138,26 +121,41 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
     pushToast(next ? 'Website Leads enabled' : 'Website Leads hidden')
   }
 
-  const exportData = () => {
-    const blob = new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' })
+  // Export is scoped to the signed-in agent, never the whole workspace. `db` is
+  // loaded firm-wide for office admins, so every collection is filtered by
+  // ownership here before it reaches the file.
+  const exportMyData = () => {
+    if (!activeAgentId) { pushToast('No agent profile detected', 'error'); return }
+
+    const mine = (rows, col) => (rows || []).filter(r => r[col] === activeAgentId)
+
+    const contacts   = mine(db.contacts, 'assigned_agent_id')
+    const properties = mine(db.properties, 'assigned_agent_id')
+    // Own deals plus deals where this agent is a commission co-agent
+    const deals = (db.deals || []).filter(d =>
+      d.agent_id === activeAgentId || (d.co_agent_ids || []).includes(activeAgentId))
+    const dealIds     = new Set(deals.map(d => d.id))
+    const propertyIds = new Set(properties.map(p => p.id))
+
+    const payload = {
+      exported_at:      new Date().toISOString(),
+      agent:            activeAgent || null,
+      contacts,
+      properties,
+      deals,
+      tasks:            mine(db.tasks, 'agent_id'),
+      templates:        mine(db.templates, 'agent_id'),
+      activities:       mine(db.activities, 'agent_id'),
+      commissions:      (db.commissions || []).filter(c => dealIds.has(c.deal_id)),
+      dealContacts:     (db.dealContacts || []).filter(dc => dealIds.has(dc.deal_id)),
+      propertyContacts: (db.propertyContacts || []).filter(pc => propertyIds.has(pc.property_id)),
+    }
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a'); a.href = url; a.download = 'gateway-crm-export.json'; a.click()
     URL.revokeObjectURL(url)
-    pushToast('Data exported successfully')
-  }
-
-  const clearAll = async () => {
-    setClearing(true)
-    await Promise.all([
-      supabase.from('tasks').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
-      supabase.from('deals').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
-      supabase.from('properties').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
-      supabase.from('templates').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
-      supabase.from('contacts').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
-    ])
-    setDb(p => ({ ...p, contacts:[], properties:[], deals:[], tasks:[], templates:[] }))
-    setClearing(false); setConfirmClear(false)
-    pushToast('All data cleared', 'info')
+    pushToast('Your data exported successfully')
   }
 
   const stats = [
@@ -335,64 +333,10 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
         )}
       </div>
 
-      {/* ── AI Configuration ── */}
-      <div className="settings-section">
-        <div className="settings-section__title">AI Configuration</div>
-        <div className="settings-section__sub">Powers AI email generation in the Templates page. Key is saved to your account — works on any device you log in from.</div>
-        <div style={{ maxWidth: 480 }}>
-          <div className="form-group">
-            <label className="form-label">Anthropic API Key</label>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                className="form-control"
-                type={showAiKey ? 'text' : 'password'}
-                value={aiKey}
-                onChange={e => setAiKey(e.target.value)}
-                placeholder="sk-ant-..."
-                style={{ flex: 1, fontFamily: aiKey && !showAiKey ? 'var(--font-mono)' : undefined }}
-              />
-              <button className="btn btn--ghost btn--icon" onClick={() => setShowAiKey(v => !v)}>
-                <Icon name="eye" size={15} />
-              </button>
-            </div>
-            <div className="form-hint">Get your key at <strong>console.anthropic.com</strong> → API Keys.</div>
-          </div>
-          <button className="btn btn--primary btn--sm" onClick={saveAiKey} disabled={!aiKey.trim()}>
-            {aiKeySaved ? '✓ Saved' : 'Save Key'}
-          </button>
-          {aiKey && (
-            <button className="btn btn--ghost btn--sm" style={{ marginLeft: 8 }} onClick={async () => {
-              await supabase.auth.updateUser({ data: { anthropic_key: '' } })
-              localStorage.removeItem('gw_anthropic_key')
-              setAiKey('')
-              pushToast('Key removed')
-            }}>Remove</button>
-          )}
-        </div>
-      </div>
-
       {/* ── Email Sending (Resend) ── */}
       <div className="settings-section">
         <div className="settings-section__title">Email Sending</div>
-        <div className="settings-section__sub">
-          Uses <strong>Resend</strong> to send emails directly from the CRM. Free tier: 3,000 emails/month.{' '}
-          Sign up at <strong>resend.com</strong>, verify your domain, and paste your API key below.
-        </div>
-
-        {/* Setup steps */}
-        <div style={{ background: 'var(--gw-sky)', border: '1px solid #c5d9f5', borderRadius: 'var(--radius)', padding: 14, marginBottom: 20, fontSize: 12, lineHeight: 1.8 }}>
-          <strong style={{ fontSize: 13 }}>Quick setup (5 min):</strong>
-          <ol style={{ margin: '8px 0 0 16px', padding: 0 }}>
-            <li>Go to <strong>resend.com</strong> → sign up for free</li>
-            <li>Click <strong>Domains</strong> → Add Domain → enter your domain (e.g. <code style={{ background: '#fff', padding: '1px 5px', borderRadius: 3 }}>gatewayrealestate.com</code>)</li>
-            <li>Add the DNS records Resend shows you (takes ~5 min to verify)</li>
-            <li>Go to <strong>API Keys</strong> → Create API Key → paste it below</li>
-            <li>Set your From address to any email on your verified domain</li>
-          </ol>
-          <div style={{ marginTop: 8, color: 'var(--gw-mist)' }}>
-            No domain yet? Use <code style={{ background: '#fff', padding: '1px 4px', borderRadius: 3 }}>onboarding@resend.dev</code> as the From address during testing — it works without domain verification.
-          </div>
-        </div>
+        <div className="settings-section__sub">Send emails directly from the CRM.</div>
 
         <div style={{ maxWidth: 480 }}>
           <div className="form-group">
@@ -439,20 +383,8 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
 
       <div className="settings-section">
         <div className="settings-section__title">Data Management</div>
-        <div className="settings-section__sub">Export or reset your CRM data</div>
-        <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
-          <button className="btn btn--secondary" onClick={exportData}><Icon name="document" size={14} /> Export All Data (JSON)</button>
-          <button className="btn btn--danger" onClick={() => setConfirmClear(true)}><Icon name="trash" size={14} /> Clear All Data</button>
-        </div>
-        {confirmClear && (
-          <div style={{ marginTop:16, padding:16, background:'var(--gw-red-light)', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)' }}>
-            <div style={{ fontWeight:600, marginBottom:8, color:'var(--gw-red)' }}>This will permanently delete all contacts, properties, deals, tasks, and templates.</div>
-            <div style={{ display:'flex', gap:8 }}>
-              <button className="btn btn--danger btn--sm" onClick={clearAll} disabled={clearing}>{clearing?'Clearing…':'Yes, delete everything'}</button>
-              <button className="btn btn--secondary btn--sm" onClick={() => setConfirmClear(false)}>Cancel</button>
-            </div>
-          </div>
-        )}
+        <div className="settings-section__sub">Download a JSON copy of your own CRM records</div>
+        <button className="btn btn--secondary" onClick={exportMyData}><Icon name="document" size={14} /> Export My Data (JSON)</button>
       </div>
 
       {activeAgent?.is_admin && <BoldSignAdmin agents={db.agents || []} go={go} />}
