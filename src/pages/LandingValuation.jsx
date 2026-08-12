@@ -10,6 +10,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
 import AdvisorDark from '../components/landing/AdvisorDark.jsx'
 
 const PROPERTY_TYPES = [
@@ -60,6 +61,10 @@ export default function LandingValuation({ mailingId }) {
   const [form, setForm] = useState({
     property_address:'', property_type:'single-family', name:'', phone:'', email:'', message:'',
   })
+
+  // Capture the QR scan's visit id (and replay the scan if the server could not
+  // confirm the write) before anything else — see src/lib/scanTracking.js.
+  useEffect(() => { initScanTracking() }, [])
 
   useEffect(() => {
     ;(async () => {
@@ -120,7 +125,7 @@ export default function LandingValuation({ mailingId }) {
     setError(null); setSubmitting(true)
     const res = await fetch('/api/campaigns', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ action:'capture_lead', mailing_id:mailingId, source_landing:'valuation', ...form }),
+      body: JSON.stringify(withVisitId({ action:'capture_lead', mailing_id:mailingId, source_landing:'valuation', ...form })),
     })
     const data = await res.json()
     setSubmitting(false)

@@ -20,6 +20,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
 import AdvisorDark from '../components/landing/AdvisorDark.jsx'
 
 const UNIT_RANGES = [
@@ -54,6 +55,10 @@ export default function LandingMultifamily({ mailingId }) {
     units:            '5-20',
     message:          '',
   })
+
+  // Capture the QR scan's visit id (and replay the scan if the server could not
+  // confirm the write) before anything else — see src/lib/scanTracking.js.
+  useEffect(() => { initScanTracking() }, [])
 
   useEffect(() => {
     (async () => {
@@ -133,7 +138,7 @@ export default function LandingMultifamily({ mailingId }) {
     }
     const res = await fetch('/api/campaigns', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(withVisitId(payload)),
     })
     const data = await res.json()
     setSubmitting(false)

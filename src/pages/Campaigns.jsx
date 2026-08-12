@@ -15,6 +15,8 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { Icon, Modal, pushToast, EmptyState, ConfirmDialog } from '../components/UI.jsx'
+import QrCode from '../components/QrCode.jsx'
+import { shortUrl, downloadQr } from '../lib/qr.js'
 
 const MAILING_TYPE_OPTS = [
   { value: 'postcard',    label: 'Postcard'    },
@@ -154,6 +156,71 @@ function FunnelRow({ label, rate, color }) {
   )
 }
 
+// Horizontal share bars for a {key: count} map — device, OS, browser splits.
+function ShareBars({ title, data, color = 'var(--gw-azure)', limit = 5, empty = null }) {
+  const rows = Object.entries(data || {})
+    .filter(([, v]) => v > 0)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, limit)
+  if (!rows.length) return empty
+  const total = rows.reduce((n, [, v]) => n + v, 0) || 1
+  return (
+    <div>
+      <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase',
+                    letterSpacing:0.6, marginBottom:6 }}>{title}</div>
+      <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+        {rows.map(([k, v]) => (
+          <div key={k} style={{ display:'flex', alignItems:'center', gap:8 }}>
+            <div style={{ width:78, fontSize:11.5, color:'var(--gw-ink)', textTransform:'capitalize',
+                          overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{k}</div>
+            <div style={{ flex:1, background:'var(--gw-bone)', borderRadius:4, height:7, overflow:'hidden' }}>
+              <div style={{ width:`${(v / total) * 100}%`, height:'100%', background:color, borderRadius:4 }} />
+            </div>
+            <div style={{ width:28, textAlign:'right', fontSize:11, fontWeight:700, color:'var(--gw-mist)' }}>{v}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// Device / OS / location splits. Rendered only when the analytics RPC supplied
+// them, so a database still on the pre-0031 schema simply shows nothing here
+// rather than a row of empty boxes.
+function Breakdowns({ analytics }) {
+  if (!analytics) return null
+  const hasDevice = analytics.by_device && Object.keys(analytics.by_device).length > 0
+  const regions   = Array.isArray(analytics.by_region) ? analytics.by_region.filter(r => r.count > 0) : []
+  if (!hasDevice && !regions.length) return null
+
+  return (
+    <div style={{ marginTop:18, display:'grid', gridTemplateColumns:'1fr 1fr', gap:18 }}>
+      {hasDevice && <ShareBars title="Device" data={analytics.by_device} />}
+      {analytics.by_os && Object.keys(analytics.by_os).length > 0 &&
+        <ShareBars title="Platform" data={analytics.by_os} color="#7c3aed" />}
+      {regions.length > 0 && (
+        <div style={{ gridColumn:'1 / -1' }}>
+          <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase',
+                        letterSpacing:0.6, marginBottom:6 }}>Where scans came from</div>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+            {regions.slice(0, 12).map((r, i) => (
+              <span key={`${r.region}-${r.city}-${i}`}
+                    style={{ fontSize:11.5, padding:'3px 9px', borderRadius:20, background:'var(--gw-bone)',
+                             border:'1px solid var(--gw-border)', color:'var(--gw-ink)' }}>
+                {[r.city, r.region].filter(v => v && v !== '—').join(', ') || 'Unknown'}
+                <strong style={{ marginLeft:6, color:'var(--gw-azure)' }}>{r.count}</strong>
+              </span>
+            ))}
+          </div>
+          <div style={{ fontSize:10.5, color:'var(--gw-mist)', marginTop:6 }}>
+            Approximate — derived from network location, not the mailing address.
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function StatCard({ value, label, sub, color }) {
   return (
     <div style={{ background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'14px 18px', minWidth:120 }}>
@@ -165,24 +232,9 @@ function StatCard({ value, label, sub, color }) {
 }
 
 // ─── QR code utilities ────────────────────────────────────────────────────────
-
-// Branded short-link domain. Set VITE_PUBLIC_LINK_DOMAIN (e.g. https://gatewayre.link)
-// in Vercel to make QR codes point at a clean, professional domain instead of the
-// CRM's own URL. Falls back to the current origin when unset.
-function linkBase() {
-  const custom = import.meta.env.VITE_PUBLIC_LINK_DOMAIN
-  return (custom && custom.trim() ? custom.trim().replace(/\/+$/, '') : window.location.origin)
-}
-
-function qrImageUrl(token, opts = {}) {
-  const { size = 400, format = 'png', margin = 1 } = opts
-  const target = `${linkBase()}/m/${token}`
-  return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&format=${format}&margin=${margin}&data=${encodeURIComponent(target)}`
-}
-
-function shortUrl(token) {
-  return `${linkBase()}/m/${token}`
-}
+// Generation moved to src/lib/qr.js (local, no external image service) and the
+// <QrCode> component. `shortUrl` / `linkBase` are re-exported from there so the
+// branded-domain rule lives in exactly one place.
 
 // ─── CSV parser (handles quoted fields with commas/newlines) ──────────────────
 
@@ -1746,13 +1798,20 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
     pushToast('Tracking URL copied')
   }
 
-  const downloadQR = (format = 'png') => {
-    const url = qrImageUrl(mailing.qr_token, { size: 1000, format, margin: 2 })
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `mailing-${mailing.qr_token}.${format}`
-    a.target = '_blank'
-    a.click()
+  // Generated locally and handed over as a Blob, so the download works offline
+  // and always produces a real file (the old version linked out to a third-party
+  // image service and silently produced nothing when it was unreachable).
+  const downloadQR = async (format = 'png') => {
+    try {
+      const slug = (mailing.name || 'mailing').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase()
+      await downloadQr(mailing.qr_token, {
+        format,
+        size: format === 'png' ? 2000 : 1000,
+        filename: `${slug || 'mailing'}-qr.${format}`,
+      })
+    } catch {
+      pushToast('Could not generate the QR code — please try again.', 'error')
+    }
   }
 
   const removeRecipient = async (id) => {
@@ -1852,9 +1911,8 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
           <div style={{ display:'grid', gridTemplateColumns:'320px 1fr', gap:24 }}>
             <div>
               <div style={{ background:'#fff', border:'1px solid var(--gw-border)', borderRadius:12, padding:16, textAlign:'center' }}>
-                <img src={qrImageUrl(mailing.qr_token, { size: 400 })}
-                     alt="QR code"
-                     style={{ width:'100%', maxWidth:280, height:'auto', display:'block', margin:'0 auto' }} />
+                <QrCode token={mailing.qr_token} size={280} alt={`QR code for ${mailing.name}`}
+                        style={{ width:'100%', maxWidth:280, height:'auto', display:'block', margin:'0 auto' }} />
                 <div style={{ fontFamily:'monospace', fontSize:13, marginTop:8, padding:'6px 10px',
                               background:'var(--gw-bone)', borderRadius:6, wordBreak:'break-all' }}>
                   {shortUrl(mailing.qr_token)}
@@ -1879,21 +1937,59 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
             <div>
               <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:10 }}>
                 <StatCard value={analytics?.recipients_total ?? '—'} label="Mailed" />
-                <StatCard value={analytics?.total_scans ?? '—'}      label="Scans" color="var(--gw-azure)" />
-                <StatCard value={analytics?.unique_scanners ?? '—'}  label="Unique" sub="(approx.)" />
-                <StatCard value={analytics?.total_leads ?? '—'}      label="Leads" color="var(--gw-green)" />
+                <StatCard value={analytics?.total_scans ?? '—'}      label="Scans" color="var(--gw-azure)"
+                          sub={analytics?.raw_scans > analytics?.total_scans
+                                 ? `${analytics.raw_scans - analytics.total_scans} filtered` : null} />
+                <StatCard value={analytics?.unique_scanners ?? '—'}  label="People"
+                          sub={analytics?.returning_scanners > 0 ? `${analytics.returning_scanners} came back` : null} />
+                <StatCard value={analytics?.total_leads ?? '—'}      label="Leads" color="var(--gw-green)"
+                          sub={analytics?.attributed_leads > 0 ? `${analytics.attributed_leads} from a scan` : null} />
               </div>
 
+              {/* Response index, not "scan rate".
+                  With one QR code per campaign every mailer carries the SAME
+                  code, so there is no way to know WHICH recipients scanned —
+                  only how many scans a drop of N pieces produced. The old bar
+                  claimed "X% of recipients scanned" and, because the underlying
+                  per-recipient columns were never written, always read 0%. */}
               <div style={{ marginTop:18 }}>
-                <div style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)', marginBottom:8 }}>Scan Rate</div>
+                <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', marginBottom:8 }}>
+                  <div style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)' }}>Response Index</div>
+                  <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
+                    scans per 100 pieces mailed
+                  </div>
+                </div>
                 <div style={{ background:'var(--gw-bone)', borderRadius:6, height:10, overflow:'hidden' }}>
-                  <div style={{ width:`${Math.min(100, (analytics?.scan_rate || 0) * 100)}%`, height:'100%',
+                  <div style={{ width:`${Math.min(100, Number(analytics?.response_index) || 0)}%`, height:'100%',
                                 background:'linear-gradient(90deg, var(--gw-azure), var(--gw-green))' }} />
                 </div>
                 <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>
-                  {Math.round((analytics?.scan_rate || 0) * 100)}% of recipients scanned the QR
+                  {analytics?.response_index != null
+                    ? <><strong style={{ color:'var(--gw-ink)' }}>{analytics.response_index}</strong> scans per 100 pieces
+                        {analytics.total_scans > 0 && analytics.unique_scanners > 0 &&
+                          ` · ${analytics.unique_scanners} distinct ${analytics.unique_scanners === 1 ? 'person' : 'people'}`}</>
+                    : 'Add recipients to see how this drop performed'}
                 </div>
               </div>
+
+              {/* Scan → lead conversion */}
+              {analytics?.total_scans > 0 && (
+                <div style={{ marginTop:14 }}>
+                  <div style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)', marginBottom:6 }}>
+                    Scan → Lead Conversion
+                  </div>
+                  <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
+                    <strong style={{ color:'var(--gw-green)', fontSize:14 }}>
+                      {Math.round((Number(analytics.conversion_rate) || 0) * 100)}%
+                    </strong>
+                    {' '}of scans became a lead
+                    {analytics.attributed_leads > 0 &&
+                      ` · ${analytics.attributed_leads} tied to a specific scan`}
+                  </div>
+                </div>
+              )}
+
+              <Breakdowns analytics={analytics} />
 
               {analytics?.timeline?.length > 0 && (
                 <div style={{ marginTop:18 }}>
@@ -2012,17 +2108,33 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
                   <thead style={{ background:'var(--gw-bone)' }}>
                     <tr>
                       <th style={{ padding:'8px 12px', textAlign:'left', fontSize:11, textTransform:'uppercase' }}>When</th>
-                      <th style={{ padding:'8px 12px', textAlign:'left', fontSize:11, textTransform:'uppercase' }}>Country</th>
+                      <th style={{ padding:'8px 12px', textAlign:'left', fontSize:11, textTransform:'uppercase' }}>Location</th>
                       <th style={{ padding:'8px 12px', textAlign:'left', fontSize:11, textTransform:'uppercase' }}>Device</th>
+                      <th style={{ padding:'8px 12px', textAlign:'left', fontSize:11, textTransform:'uppercase' }}>Outcome</th>
                     </tr>
                   </thead>
                   <tbody>
                     {scans.map(s => (
-                      <tr key={s.id} style={{ borderTop:'1px solid var(--gw-border)' }}>
-                        <td style={{ padding:'8px 12px' }}>{new Date(s.scanned_at).toLocaleString()}</td>
-                        <td style={{ padding:'8px 12px' }}>{s.country || '—'}</td>
-                        <td style={{ padding:'8px 12px', color:'var(--gw-mist)', fontSize:11 }}>
-                          {(s.user_agent || '').slice(0, 80) || '—'}
+                      <tr key={s.id} style={{ borderTop:'1px solid var(--gw-border)',
+                                              opacity: (s.is_bot || s.is_duplicate) ? 0.55 : 1 }}>
+                        <td style={{ padding:'8px 12px', whiteSpace:'nowrap' }}>{new Date(s.scanned_at).toLocaleString()}</td>
+                        <td style={{ padding:'8px 12px' }}>
+                          {[s.city, s.region, s.country].filter(Boolean).join(', ') || s.country || '—'}
+                        </td>
+                        <td style={{ padding:'8px 12px', color:'var(--gw-mist)', fontSize:12 }}>
+                          {[s.device_type, s.os, s.browser].filter(Boolean).join(' · ')
+                            || (s.user_agent || '').slice(0, 60) || '—'}
+                        </td>
+                        <td style={{ padding:'8px 12px', fontSize:11 }}>
+                          {s.is_bot
+                            ? <span title={s.bot_reason || 'automated'} style={{ color:'var(--gw-mist)' }}>Bot / preview</span>
+                            : s.is_duplicate
+                              ? <span title="Same visitor within seconds — stored but not counted" style={{ color:'var(--gw-mist)' }}>Repeat</span>
+                              : <span style={{ color:'var(--gw-green)', fontWeight:600 }}>Counted</span>}
+                          {s.source === 'replay' && (
+                            <span title="Recovered by the landing page after the server could not confirm the write"
+                                  style={{ marginLeft:6, color:'var(--gw-azure)' }}>· recovered</span>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -2185,7 +2297,10 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
     const listParams = isAdmin ? { all: '1' } : { agent_id: activeAgent?.id || '' }
     const [mRes, dRes, cRes] = await Promise.all([
       api('list', listParams, 'GET'),
-      api('dashboard', {}, 'GET'),
+      // Same scope as the list. Previously the dashboard tiles aggregated the
+      // whole brokerage for everyone, so an agent's "Scans (30d)" disagreed with
+      // the campaigns listed directly beneath it.
+      api('dashboard', listParams, 'GET'),
       supabase.from('contacts').select('id, first_name, last_name, email, phone, owner_address, owner_city, owner_state, owner_zip').order('last_name'),
     ])
     if (mRes.error && /does not exist|relation|invalid path|server misconfigured/i.test(mRes.error)) {
@@ -2422,8 +2537,8 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
                   <div style={{ fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase' }}>Leads</div>
                 </div>
                 <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end' }}>
-                  <img src={qrImageUrl(m.qr_token, { size: 60 })} alt=""
-                       style={{ width:38, height:38, border:'1px solid var(--gw-border)', borderRadius:4 }} />
+                  <QrCode token={m.qr_token} size={38} alt=""
+                          style={{ width:38, height:38, border:'1px solid var(--gw-border)', borderRadius:4 }} />
                 </div>
               </div>
             )

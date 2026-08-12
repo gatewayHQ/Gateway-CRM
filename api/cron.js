@@ -390,11 +390,39 @@ export default async function handler(req, res) {
     result = await runNudges(supabase)
   } else if (task === 'boldsign-sync' || task === 'boldsign-template-sync') {
     result = await runBoldsignTemplateSync(supabase)
+  } else if (task === 'scan-reconcile') {
+    result = await runScanReconcile(supabase)
   } else {
-    return res.status(400).json({ error: `Unknown task "${task}" — use ?task=reminders, ?task=sequence, ?task=nudges, or ?task=boldsign-sync` })
+    return res.status(400).json({ error: `Unknown task "${task}" — use ?task=reminders, ?task=sequence, ?task=nudges, ?task=boldsign-sync, or ?task=scan-reconcile` })
   }
 
   return res.status(result.status).json(result.body)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task: QR scan counter reconciliation
+//
+// The denormalized counters on `mailings` (scan_count / lead_count /
+// recipient_count) are a cache; mailing_scans / mailing_leads /
+// mailing_recipients are the truth. They can drift for legitimate reasons — a
+// scan replayed by a landing page after the counter had already been read, a
+// transaction rolled back mid-increment, rows deleted directly in the SQL
+// editor. This repairs the drift nightly so a campaign card and its drill-down
+// can never disagree for more than a day.
+//
+// All the work happens inside reconcile_mailing_counters() (migration 0031),
+// which is a no-op when nothing has drifted.
+// ─────────────────────────────────────────────────────────────────────────────
+async function runScanReconcile(supabase) {
+  const { data, error } = await supabase.rpc('reconcile_mailing_counters')
+  if (error) {
+    // Not yet migrated is a normal state, not a failure worth paging on.
+    if (/does not exist|PGRST202|schema cache/i.test(error.message || '')) {
+      return { status: 200, body: { ok: true, skipped: 'migration 0031 not applied yet' } }
+    }
+    return { status: 500, body: { ok: false, error: error.message } }
+  }
+  return { status: 200, body: data || { ok: true } }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
