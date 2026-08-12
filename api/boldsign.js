@@ -1478,6 +1478,46 @@ export function normalizeTemplateRoles(roles) {
   return base.map((r, i) => ({ name: (r?.name || `Signer ${i + 1}`).trim(), index: Number(r?.index) || i + 1 }))
 }
 
+// ─── Shared (Label) prefill values ────────────────────────────────────────────
+// A prefilled value has to be visible to EVERY signer the moment the document is
+// sent, not just to whoever it was assigned to. BoldSign's default is the
+// opposite: a form field belongs to one role, and the other recipients cannot see
+// it (or its prefilled value) until that role has finished signing. On a
+// two-party listing agreement that means the co-seller opens the packet and finds
+// the price and dates blank because they sit on the agent's fields.
+//
+// The fix, per BoldSign's own guidance, is the LABEL field: a common, read-only
+// field that every signer sees immediately. Its value is supplied on ONE role's
+// `existingFormFields` — it is not role-scoped, so which role carries it is a
+// wire detail, not a visibility decision.
+//   https://support.boldsign.com/kb/article/19096/prefill-form-fields-to-be-visible-to-both-signers-when-using-templates-via-api
+//
+// Callers therefore send Label values as a flat, top-level `sharedFormFields`
+// array and this function puts them where BoldSign wants them: on the FIRST role.
+// It also strips any same-id entry from the other roles, so a stray role-scoped
+// copy of a Label can never shadow the shared value with a per-signer one. Every
+// entry goes out `isReadOnly: true` — a Label is not the signer's to change.
+//
+// Idempotent and non-mutating: re-running it on its own output changes nothing,
+// and an empty/absent `sharedFormFields` returns the roles untouched.
+export function mergeSharedFormFields(roles, sharedFormFields) {
+  const shared = (Array.isArray(sharedFormFields) ? sharedFormFields : [])
+    .filter(f => f?.id != null && String(f.id).trim())
+    .map(f => ({ ...f, id: String(f.id), value: f.value == null ? '' : String(f.value), isReadOnly: true }))
+  if (!Array.isArray(roles) || !roles.length || !shared.length) return roles
+
+  // Last write wins on a duplicated id, so a caller that sends the same Label
+  // twice gets one field rather than an ambiguous pair.
+  const byId = new Map(shared.map(f => [f.id, f]))
+  const sharedIds = new Set(byId.keys())
+
+  return roles.map((r, i) => {
+    const own = (r?.existingFormFields || []).filter(f => !sharedIds.has(String(f?.id)))
+    const existingFormFields = i === 0 ? [...own, ...byId.values()] : own
+    return { ...r, existingFormFields }
+  })
+}
+
 // BoldSign's multipart /document/send binds ONE signer per repeated `Signers`
 // field, each value a single JSON object — NOT one field holding a JSON array
 // (that yields {"Signers":["Value is invalid"]}). Append them the right way.
@@ -2330,10 +2370,24 @@ async function handler(req, res) {
         defaultName:  r.signerName || r.defaultSignerName || '',
         defaultEmail: r.signerEmail || r.defaultSignerEmail || '',
       }))
-      const rawFields = data.formFields || data.fields || []
+      // Field discovery — the ids the send payload addresses fields by, including
+      // the LABEL ids whose values must reach every signer (see
+      // mergeSharedFormFields). BoldSign returns a template's fields at the top
+      // level, but role-scoped ones can also come back nested on their role, so
+      // both are collected and deduped by id. Missing a Label here would silently
+      // drop a shared value from the send rather than fail loudly.
+      const rawFields = []
+      for (const f of (data.formFields || data.fields || [])) rawFields.push(f)
+      for (const [i, r] of (rawRoles || []).entries()) {
+        const idx = Number(r?.roleIndex ?? r?.index ?? i + 1)
+        for (const f of (r?.formFields || r?.fields || [])) {
+          rawFields.push({ roleIndex: idx, ...f })
+        }
+      }
       // label/options/value ride along so the send modal can render a real control
       // per field — a tick box for a CheckBox, the template's own choices for a
       // Dropdown — instead of a bare text input for everything.
+      const seenFieldIds = new Set()
       const fields = rawFields.map(f => ({
         id:        f.id || f.fieldId || f.name,
         type:      f.fieldType || f.type,
@@ -2342,7 +2396,11 @@ async function handler(req, res) {
         required:  Boolean(f.isRequired),
         value:     f.value != null ? String(f.value) : '',
         ...(Array.isArray(f.dropdownOptions) && f.dropdownOptions.length ? { options: f.dropdownOptions } : {}),
-      })).filter(f => f.id)
+      })).filter(f => {
+        if (!f.id || seenFieldIds.has(f.id)) return false
+        seenFieldIds.add(f.id)
+        return true
+      })
       return res.json({ roles, fields })
     }
 
@@ -2428,8 +2486,10 @@ async function handler(req, res) {
     // Send a document generated from a template, with CRM-prefilled fields.
     // roles: [{ roleIndex, signerName, signerEmail, signerOrder?,
     //           existingFormFields: [{ id, value, isReadOnly }] }]
+    // sharedFormFields: [{ id, value }] — Label (common) fields every signer must
+    //   see immediately. Merged onto the first role by mergeSharedFormFields.
     if (body.action === 'template-send') {
-      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, roleRemovalIndices } = body
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, roleRemovalIndices, sharedFormFields } = body
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
@@ -2440,7 +2500,7 @@ async function handler(req, res) {
         // filename). Prefer the caller's documentName so it's deal-specific.
         title:   documentName || emailSubject || 'Please sign this document',
         message: message || 'Please review and sign.',
-        roles,
+        roles:   mergeSharedFormFields(roles, sharedFormFields),
         ...(Array.isArray(roleRemovalIndices) && roleRemovalIndices.length ? { roleRemovalIndices } : {}),
         ...(cc ? { cc } : {}),
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),   // BoldSign tags
@@ -2485,13 +2545,15 @@ async function handler(req, res) {
     // Neither path sends. BoldSign sends only when the agent clicks Send inside
     // the editor, or when `draft-send` is called explicitly.
     const createTemplateDraft = async (svc, {
-      templateId, dealId, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices,
+      templateId, dealId, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices, sharedFormFields,
     }) => {
       const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
       const payload = {
         title:          documentName || emailSubject || 'Please sign this document',
         message:        message || 'Please review and sign.',
-        roles,
+        // Label values ride on the first role so every signer sees them from the
+        // moment the draft is sent — see mergeSharedFormFields.
+        roles:          mergeSharedFormFields(roles, sharedFormFields),
         sendViewOption: 'PreparePage',   // land on the field-placement editor
         showToolbar:    true,
         redirectUrl:    redirectUrl || '',
@@ -2562,7 +2624,7 @@ async function handler(req, res) {
     // client is happy. `deal_id` is required, unlike the embedded path: a draft
     // nobody can find again is not a draft, it is a leak.
     if (body.action === 'template-draft') {
-      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, roleRemovalIndices } = body
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, roleRemovalIndices, sharedFormFields } = body
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
       if (!deal_id)        return res.status(400).json({ error: 'deal_id required — a draft has to be saved against a deal to be reopened later' })
@@ -2570,7 +2632,7 @@ async function handler(req, res) {
       const svc = getServiceClient()
       const { url, documentId, layout } = await createTemplateDraft(svc, {
         templateId, dealId: deal_id, roles, emailSubject, message, cc, documentName, labels,
-        redirectUrl: body.redirectUrl, roleRemovalIndices,
+        redirectUrl: body.redirectUrl, roleRemovalIndices, sharedFormFields,
       })
       if (!documentId) {
         return res.status(502).json({ error: 'BoldSign created the document but did not return its id, so it could not be saved to this deal.' })
@@ -2587,14 +2649,14 @@ async function handler(req, res) {
     // the agent can move/add/remove field placements before clicking Send. The
     // document stays a draft until they send; the Sent webhook flips it to 'sent'.
     if (body.action === 'template-embed-url') {
-      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices } = body
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices, sharedFormFields } = body
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
       const svc = getServiceClient()
       const { url, documentId, layout } = await createTemplateDraft(svc, {
         templateId, dealId: deal_id, roles, emailSubject, message, cc, documentName, labels,
-        redirectUrl, roleRemovalIndices,
+        redirectUrl, roleRemovalIndices, sharedFormFields,
       })
       return res.json({ url, documentId, ...layoutReport(layout) })
     }

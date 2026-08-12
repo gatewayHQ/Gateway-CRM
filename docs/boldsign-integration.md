@@ -426,6 +426,8 @@ paths already use, in two layers:
    `{ deal, property, contact, agent }`. Set the id when authoring the template —
    either in the visual editor or as the fifth segment of a text tag
    (`{{fieldType|signerIndex|required|label|fieldId}}`).
+   Make it a **Label** field whenever every party has to see the value straight
+   away — see "Prefilled data every signer must see" below.
 2. **By hand, in the modal.** Every remaining field the agent *can* fill is
    rendered as a control: `isFillableField()` → a text input (or a `<select>` of
    the template's own options), `isTickableField()` → a three-way **Signer decides
@@ -688,6 +690,7 @@ template with the template's defaults and the agent re-did the work from memory.
 - **Preferred: Text Tags.** Type `{{fieldType|signerIndex|required|label|fieldId}}` directly into the source document at each blank, using a CRM token as `fieldId` (see the token list below) — the same string both places the field and tells the CRM what to prefill. Upload with `useTextTags: true` (the "PDF has text tags" checkbox in Form Library / the ad-hoc send modal) and BoldSign auto-places fields on create/send. See `buildTextTag()` in `src/lib/services/boldsign.js` for a builder helper, and BoldSign's text-tags/supported-fields + advanced-usage docs for the full tag syntax.
 - **Alternative: visual editor.** Build/adjust via the embedded template editor (`template-editor-url`, opened from Form Library's "Build in BoldSign").
 - **Role convention:** Role 1 = Seller/Client, Role 2 = Listing Agent (same order across all state templates). Recipient name/email in the template are placeholders; the CRM overrides them per send and drops unused roles via `roleRemovalIndices`.
+- **Shared data must be a `Label` field.** A field assigned to a role is invisible to the other signers until that role signs, so anything all parties must read up front (address, price, commission, dates, reference numbers) belongs in a **Label**, not a Textbox/Name/Email. Full rationale and the code path: "Prefilled data every signer must see" below. In a text tag that is `{{Label|1|false|List price|list_price}}`.
 
 **Package templates (multiple files in one template):**
 - A packet's PDF upload is **multi-file** — add a listing agreement + disclosures + addenda and "Build in BoldSign" sends every file as a repeated `Files` field to `createEmbeddedTemplateUrl`, which **combines them into one template document** (in the order shown). The admin then places fields across the whole combined document in the embedded editor. This is BoldSign's single-template-from-many-files behavior, not the separate mergeAndSend-at-send-time feature.
@@ -732,9 +735,76 @@ So the send modal now offers every **prefillable** field, not just the text ones
   agent decided is what every signer sees, and none of them can change it after the
   send. All three are pure and unit-tested in `src/lib/services/__tests__/boldsign.test.js`.
 
+Where each of those values *lands* — one shared copy visible to everyone, or one
+signer's private field — is decided by `buildPrefillFields()`; see "Prefilled data
+every signer must see" below. The modal renders the two groups separately
+("Shared details" / "Signer details") so it is visible before sending which is
+which.
+
 `template-details` returns `label`, `required`, `value` and `options` alongside each
 field's `id`/`type`/`roleIndex` so those controls can be rendered with the
 template's own wording rather than a prettified field id.
+
+## Prefilled data every signer must see — use Label fields
+
+**BoldSign's default hides prefilled data from everyone but the field's own
+signer.** A form field belongs to a role, and the other recipients cannot see it
+— or the value we prefilled into it — until that role has finished signing. On a
+two-party listing agreement that means the co-seller opens the packet and finds
+the price, the dates and the commission blank, because those fields sit on the
+listing agent's role. Nothing about the send is broken; that is simply what
+role-scoped fields do.
+
+**The fix is the Label field.** A Label is a *common* field:
+
+- every signer sees it the moment the document is sent, in any signing order;
+- no signer can edit it — it is read-only by construction;
+- its value is supplied at send time through **one** role's
+  `existingFormFields`, because it is not scoped to a role at all.
+
+([BoldSign KB 19096](https://support.boldsign.com/kb/article/19096/prefill-form-fields-to-be-visible-to-both-signers-when-using-templates-via-api))
+
+### Template rule (authoring)
+Anything **every party must be able to read immediately** — property address,
+list price, commission, listing/closing dates, reference numbers, the parties'
+own names and emails as printed on the agreement — goes in the template as a
+**Label**, *never* as a Textbox/Name/Email/Company assigned to a role. Give the
+Label the CRM token as its field id and it auto-fills (see "CRM prefill tokens").
+
+Keep role-scoped field types (`Textbox`, `CheckBox`, `Name`, `Email`, …) for what
+that one signer supplies themselves — a licence number, a signer-chosen box. That
+is the only case where per-signer visibility is the right behavior.
+
+### Send rule (code)
+`buildPrefillFields()` (`src/lib/services/boldsign.js`) is the single place that
+decides where a prefilled value goes, and it splits the payload in two:
+
+| | goes out as | who sees it | editable |
+|---|---|---|---|
+| **Label** field | top-level `sharedFormFields` | every signer, immediately | no |
+| role-scoped field | `roles[].existingFormFields` | its own signer until they sign | no (`isReadOnly`) |
+
+- A Label's own `roleIndex` in the template is ignored — that is the whole point.
+- A role-scoped field whose role this send drops falls back to the anchor role
+  rather than being lost.
+- `partitionPrefillFields()` returns the same split as `{ shared, signerSpecific }`
+  for anything that needs to *display* the distinction.
+- The API (`api/boldsign.js`) takes `sharedFormFields` on `template-send`,
+  `template-draft` and `template-embed-url`, and `mergeSharedFormFields()`
+  attaches it to the **first role**, forces `isReadOnly: true`, and strips any
+  role-scoped copy of a shared id so a per-signer value can never shadow the
+  Label. It is idempotent and does not mutate its input.
+- `template-details` collects fields from the template's top-level `formFields`
+  **and** from each role's nested list, deduped by id — a Label missed here would
+  silently drop a shared value from the send.
+
+### When a template still has it wrong
+The CRM cannot convert a template field to a Label from code. Instead
+`sharedDataOnSignerFields()` finds prefilled **CRM tokens sitting on a
+role-scoped field** and the send modal names them before the agent sends:
+"…these are filled in, but the template assigns them to one signer, so the other
+parties cannot see them until that signer finishes." The fix is in BoldSign —
+make those fields Labels — and then the warning disappears.
 
 ## CRM prefill tokens
 `property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `broker_name` · `agent_name` · `agent_email` · `list_price` · `commission_pct` · `commission_amount` · `listing_start_date` · `listing_end_date` · `close_date`
@@ -855,8 +925,10 @@ on Live stay on Live — they are real signed records and are not portable.
 ## Testing
 - `api/__tests__/boldsign.test.js` — retry/idempotency, `buildSignerPayload`/`requiresExplicitFieldPlacement` (retired-placement contract), `normalizeTemplateRoles` (the Roles-empty fix), `resolveOnBehalfOf` (agent identity → org-default fallback → null), `betaBase` (region-preserving `/v1-beta` derivation), `sendDraftDocument` (beta path, `onBehalfOf`, never-retried, indeterminate outcome) and `describeDraftSendFailure`.
 - `api/__tests__/cron-boldsign-sync.test.js` — `detectStateFromTitle`.
-- `src/lib/services/__tests__/boldsign.test.js` — `buildTextTag`, `normalizeState`, `crmTokenValues`/`buildPrefill`, `isFillableField`.
+- `src/lib/services/__tests__/boldsign.test.js` — `buildTextTag`, `normalizeState`, `crmTokenValues`/`buildPrefill`, `isFillableField`, and the shared-field routing (`isSharedField`, `partitionPrefillFields`, `buildPrefillFields`, `sharedDataOnSignerFields`).
+- `api/__tests__/boldsign.test.js` also covers `mergeSharedFormFields` — Labels land on the first role, read-only, deduped against role-scoped copies, idempotent.
 - Manual smoke test after deploy: Form Library → Add/Edit Packet → confirm the dialog scrolls and shows Save/Cancel → Build in BoldSign (confirms the Roles/DocumentTitle fix) → place a field and click Finish inside the embedded editor → confirm it auto-saves and closes back to the library list with the new template id and a "Sendable" badge, with no separate Save click needed → click "Rebuild in BoldSign" on that same packet and confirm it reopens the *same* template (not a new one) → send from a deal → sign in Sandbox → confirm the signed PDF + audit trail land in Documents with a "Signed by … on …" note → delete an unsigned draft from the Signatures tab filter view.
+- **Shared-visibility check (multi-signer, do this after any change to the prefill payload):** send a two-signer packet from a template that has Label fields, then open the signing link for the **second** signer *before the first has signed*. Every Label value must already be on the page and none of them editable. If a value is missing, it is on a role-scoped field in the template — convert it to a Label (the send modal warns about the ones it can detect).
 
 ## Chasing signatures (reminders)
 - **Manual:** a **Remind** button on every row awaiting signature (Signatures

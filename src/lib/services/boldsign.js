@@ -197,6 +197,130 @@ export const isTickableField = (t) => TICKABLE_FIELD_TYPES.has(String(t || '').t
 // Every field an agent can set a value for before sending.
 export const isPrefillableField = (t) => isFillableField(t) || isTickableField(t)
 
+// ── Shared (Label) fields vs signer-specific fields ──────────────────────────
+// READ THIS BEFORE CHANGING HOW PREFILLED VALUES ARE ROUTED.
+//
+// BoldSign's default is that a form field assigned to a role is visible ONLY to
+// that role's signer, and only becomes visible to the other recipients once that
+// signer has finished signing. For a signer's OWN input that is correct. For
+// prefilled deal data — the address, the price, the commission, the dates, the
+// reference number — it is exactly wrong: the co-buyer who opens the packet
+// first sees blanks wherever the listing agent's fields sit, and cannot read the
+// document as a whole until somebody else signs.
+//
+// BoldSign's answer is the LABEL field. A Label is a COMMON field:
+//   • every signer sees it the moment the document is sent, in any signing order;
+//   • no signer can edit it — it is read-only by construction;
+//   • its value is supplied at send time via `existingFormFields`, on ONE role
+//     (we use the first filled one), because it is not scoped to a role at all.
+// See https://support.boldsign.com/kb/article/19096/prefill-form-fields-to-be-visible-to-both-signers-when-using-templates-via-api
+//
+// The rule for template authors: anything every party must be able to read
+// immediately goes in the template as a **Label**, never as a Textbox/Name/Email
+// assigned to a role. The rule for this code: every Label value is routed to the
+// first filled role's `existingFormFields`, whatever roleIndex the template
+// happens to carry on it. `buildPrefillFields()` below is the only place that
+// decides, and `sharedDataOnSignerFields()` reports templates that still put
+// shared data on a role-scoped field so the template can be fixed.
+export const SHARED_FIELD_TYPES = new Set(['label'])
+export const isSharedField = (t) => SHARED_FIELD_TYPES.has(String(t || '').toLowerCase())
+
+// Split a template's fields into the two groups that behave differently at send
+// time, so callers never have to re-derive the distinction:
+//   • shared         — Label fields. One shared copy, visible to everyone at once.
+//   • signerSpecific — role-scoped fields (Textbox, CheckBox, Name, Email, …).
+//                      Only the assigned signer sees them until they sign.
+// Fields with no id, and signer actions like Signature/Initial, are dropped:
+// there is nothing to prefill.
+export function partitionPrefillFields(fields = []) {
+  const shared = []
+  const signerSpecific = []
+  for (const f of (fields || [])) {
+    if (!f?.id || !isPrefillableField(f.type)) continue
+    if (isSharedField(f.type)) shared.push(f)
+    else signerSpecific.push(f)
+  }
+  return { shared, signerSpecific }
+}
+
+// Every CRM token describes the DEAL, not one signer's private input — the
+// address, the price, the commission, the dates, the parties' own names. All of
+// it is information each party is signing up to, so all of it must be legible to
+// all of them from the moment the packet lands. Derived from crmTokenValues() so
+// a new token is covered the day it is added.
+export const SHARED_PREFILL_TOKENS = new Set(Object.keys(crmTokenValues()))
+
+// Build the `existingFormFields` payload for a send, with Label values pulled out
+// of the per-role lists and onto one shared list.
+//
+//   fields            — the template's fields (from `template-details`)
+//   values            — fieldId → what the agent entered (text, or true/false/null)
+//   filledRoleIndices — ORIGINAL template indices of the roles that have a signer
+//   anchorRoleIndex   — which of those carries the shared values; defaults to the
+//                       first, which is the convention in BoldSign's own docs
+//
+// Returns:
+//   sharedFormFields — Label entries, for ONE role. Visible to every signer
+//                      immediately, editable by none.
+//   byRole           — { originalRoleIndex: entries[] } for the role-scoped
+//                      fields, keyed by ORIGINAL index (buildTemplateRoles applies
+//                      BoldSign's post-removal index shift afterwards).
+//   sharedIds / signerScopedIds — what landed where, for the UI and for tests.
+export function buildPrefillFields({ fields = [], values = {}, filledRoleIndices = [], anchorRoleIndex = null } = {}) {
+  const filled = (filledRoleIndices || []).map(Number).filter(Number.isFinite)
+  const anchor = filled.includes(Number(anchorRoleIndex)) ? Number(anchorRoleIndex) : filled[0]
+
+  const sharedFormFields = []
+  const byRole = {}
+  const sharedIds = []
+  const signerScopedIds = []
+
+  // No signer, no send: there is no role for BoldSign to hang either list on, so
+  // returning half a payload would only make an impossible send look prepared.
+  if (anchor == null) return { sharedFormFields, byRole, sharedIds, signerScopedIds, anchorRoleIndex: null }
+
+  for (const f of (fields || [])) {
+    // prefillFieldEntry decides what (if anything) this field contributes: text
+    // when the agent typed something, "true"/"false" for a box they ticked or
+    // deliberately cleared, nothing at all when it is left to the signer. Every
+    // entry it returns is read-only.
+    const entry = prefillFieldEntry(f, values?.[f?.id])
+    if (!entry) continue
+
+    if (isSharedField(f.type)) {
+      // A Label is common to the whole document. Its template roleIndex is
+      // irrelevant — sending it on one role is what makes it visible to all.
+      sharedFormFields.push(entry)
+      sharedIds.push(entry.id)
+      continue
+    }
+
+    // Role-scoped. Keep it on its own signer where the template says so; fall
+    // back to the anchor role when the field names no role, or names one that
+    // this send is dropping.
+    const owner = (f.roleIndex && filled.includes(Number(f.roleIndex))) ? Number(f.roleIndex) : anchor
+    if (owner == null) continue
+    ;(byRole[owner] ||= []).push(entry)
+    signerScopedIds.push(entry.id)
+  }
+
+  return { sharedFormFields, byRole, sharedIds, signerScopedIds, anchorRoleIndex: anchor ?? null }
+}
+
+// Templates the CRM cannot fix by itself: a field carrying shared deal data
+// (a CRM token) that is NOT a Label, so BoldSign will hide it from everyone
+// except its assigned signer until that signer is done. Returns the offending
+// fields so the send modal can name them and an admin can convert them to Labels
+// in the template. Empty is the healthy state.
+export function sharedDataOnSignerFields({ fields = [], values = {} } = {}) {
+  return (fields || []).filter(f => (
+    f?.id
+    && !isSharedField(f.type)
+    && SHARED_PREFILL_TOKENS.has(f.id)
+    && Boolean(prefillFieldEntry(f, values?.[f.id]))
+  ))
+}
+
 // BoldSign wants a checkbox value as the string "true"/"false".
 export const tickValue = (on) => (on ? 'true' : 'false')
 
@@ -258,6 +382,11 @@ export function normalizeState(s) {
 //
 // `fieldsByRole` is keyed by ORIGINAL role index (template field metadata is
 // unaffected by removal), and is looked up before the shift is applied.
+//
+// `fieldsByRole` carries ONLY role-scoped fields — never Label values. A Label is
+// common to the document rather than owned by a signer, so it travels as the
+// send's top-level `sharedFormFields` and the API attaches it to the first role
+// (see buildPrefillFields above and mergeSharedFormFields in api/boldsign.js).
 export function buildTemplateRoles({ roleList = [], signers = {}, fieldsByRole = {}, inOrder = false } = {}) {
   const value = (idx, key) => String(signers?.[idx]?.[key] || '').trim()
   const filled = roleList.filter(r => value(r.index, 'name') && value(r.index, 'email'))

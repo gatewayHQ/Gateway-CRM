@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -393,6 +393,181 @@ describe('buildTemplateRoles — index shift after role removal', () => {
   it('handles an empty role list and an empty signer map', () => {
     expect(buildTemplateRoles({})).toEqual({ roles: [], roleRemovalIndices: [], filledCount: 0 })
     expect(buildTemplateRoles({ roleList: IOWA_PACKET, signers: {} }).roleRemovalIndices).toEqual([1, 2, 3, 4, 5])
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Label (shared) fields — prefilled data every signer can read immediately.
+//
+// BoldSign hides a role-scoped field from every recipient except its own signer
+// until that signer has finished. A Label is a COMMON field: visible to all from
+// the moment the document is sent, editable by none, prefilled through ONE role's
+// existingFormFields. These tests pin the routing that makes that true.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('isSharedField / partitionPrefillFields — which fields everyone can see', () => {
+  it('treats Label (only) as the shared field type', () => {
+    expect(isSharedField('Label')).toBe(true)
+    expect(isSharedField('label')).toBe(true)
+    expect(isSharedField('Textbox')).toBe(false)
+    expect(isSharedField('CheckBox')).toBe(false)
+    expect(isSharedField('Name')).toBe(false)
+    expect(isSharedField('Email')).toBe(false)
+    expect(isSharedField(undefined)).toBe(false)
+  })
+
+  it('splits a template into the shared set and the signer-private set', () => {
+    const fields = [
+      { id: 'property_full', type: 'Label',   roleIndex: 1 },
+      { id: 'list_price',    type: 'Label',   roleIndex: 2 },
+      { id: 'county',        type: 'Textbox', roleIndex: 2 },
+      { id: 'exclusive',     type: 'CheckBox', roleIndex: 1 },
+    ]
+    const { shared, signerSpecific } = partitionPrefillFields(fields)
+    expect(shared.map(f => f.id)).toEqual(['property_full', 'list_price'])
+    expect(signerSpecific.map(f => f.id)).toEqual(['county', 'exclusive'])
+  })
+
+  it('drops signer actions and id-less fields — there is nothing to prefill', () => {
+    const { shared, signerSpecific } = partitionPrefillFields([
+      { id: 'sig', type: 'Signature', roleIndex: 1 },
+      { id: 'ini', type: 'Initial',   roleIndex: 1 },
+      { type: 'Label' },
+    ])
+    expect(shared).toEqual([])
+    expect(signerSpecific).toEqual([])
+  })
+
+  it('survives an empty or missing field list', () => {
+    expect(partitionPrefillFields()).toEqual({ shared: [], signerSpecific: [] })
+    expect(partitionPrefillFields([])).toEqual({ shared: [], signerSpecific: [] })
+  })
+})
+
+describe('buildPrefillFields — Labels go out shared, role fields stay with their signer', () => {
+  const FIELDS = [
+    { id: 'property_full',  type: 'Label',    roleIndex: 2 },
+    { id: 'list_price',     type: 'Label',    roleIndex: 1 },
+    { id: 'ref_no',         type: 'Label',    roleIndex: null },
+    { id: 'agent_license',  type: 'Textbox',  roleIndex: 2 },
+    { id: 'county',         type: 'Textbox',  roleIndex: null },
+    { id: 'exclusive',      type: 'CheckBox', roleIndex: 1 },
+  ]
+  const VALUES = {
+    property_full: '2212 Okoboji Ave, Milford, IA',
+    list_price:    '$1,350,000',
+    ref_no:        'RE-98765432',
+    agent_license: 'S-60912',
+    county:        'Dickinson',
+    exclusive:     true,
+  }
+
+  it('THE REQUIREMENT: every Label value goes on ONE shared list, whatever role the template assigned it to', () => {
+    // property_full is a role-2 Label in the template. Left on role 2 it would be
+    // invisible to the seller until the agent signed. As a shared field it is
+    // visible to everyone the moment the document is sent.
+    const { sharedFormFields, byRole } = buildPrefillFields({
+      fields: FIELDS, values: VALUES, filledRoleIndices: [1, 2],
+    })
+    expect(sharedFormFields).toEqual([
+      { id: 'property_full', value: '2212 Okoboji Ave, Milford, IA', isReadOnly: true },
+      { id: 'list_price',    value: '$1,350,000',                   isReadOnly: true },
+      { id: 'ref_no',        value: 'RE-98765432',                  isReadOnly: true },
+    ])
+    // …and no role carries a copy of them.
+    const allRoleIds = Object.values(byRole).flat().map(f => f.id)
+    expect(allRoleIds).not.toContain('property_full')
+    expect(allRoleIds).not.toContain('list_price')
+    expect(allRoleIds).not.toContain('ref_no')
+  })
+
+  it('every shared entry is read-only — a Label is not the signer’s to change', () => {
+    const { sharedFormFields } = buildPrefillFields({ fields: FIELDS, values: VALUES, filledRoleIndices: [1, 2] })
+    expect(sharedFormFields.every(f => f.isReadOnly === true)).toBe(true)
+  })
+
+  it('keeps a role-scoped field on its own signer', () => {
+    const { byRole } = buildPrefillFields({ fields: FIELDS, values: VALUES, filledRoleIndices: [1, 2] })
+    expect(byRole[2].map(f => f.id)).toEqual(['agent_license'])
+    expect(byRole[1].map(f => f.id)).toContain('exclusive')
+  })
+
+  it('parks an unscoped role field on the anchor role, and reports which role that is', () => {
+    const { byRole, anchorRoleIndex } = buildPrefillFields({ fields: FIELDS, values: VALUES, filledRoleIndices: [1, 2] })
+    expect(anchorRoleIndex).toBe(1)
+    expect(byRole[1].map(f => f.id)).toContain('county')
+  })
+
+  it('re-homes a role field whose role this send is dropping, rather than losing it', () => {
+    // Role 2 left blank → removed. Its Textbox value still has to travel, so it
+    // falls back to the anchor role instead of addressing a role that is gone.
+    const { byRole, sharedFormFields } = buildPrefillFields({ fields: FIELDS, values: VALUES, filledRoleIndices: [1] })
+    expect(byRole[1].map(f => f.id)).toEqual(['agent_license', 'county', 'exclusive'])
+    expect(byRole[2]).toBeUndefined()
+    expect(sharedFormFields).toHaveLength(3)      // Labels are unaffected by removal
+  })
+
+  it('honours an explicit anchor role, and ignores one that is not being sent', () => {
+    expect(buildPrefillFields({ fields: FIELDS, values: VALUES, filledRoleIndices: [1, 2], anchorRoleIndex: 2 }).anchorRoleIndex).toBe(2)
+    expect(buildPrefillFields({ fields: FIELDS, values: VALUES, filledRoleIndices: [1, 2], anchorRoleIndex: 9 }).anchorRoleIndex).toBe(1)
+  })
+
+  it('omits a field the agent left blank, and a box left to the signer', () => {
+    const { sharedFormFields, byRole } = buildPrefillFields({
+      fields: FIELDS,
+      values: { list_price: '  ', exclusive: null, ref_no: 'RE-1' },
+      filledRoleIndices: [1, 2],
+    })
+    expect(sharedFormFields.map(f => f.id)).toEqual(['ref_no'])
+    expect(Object.values(byRole).flat()).toEqual([])
+  })
+
+  it('sends a deliberately unticked box, since an unticked term is still a term', () => {
+    const { byRole } = buildPrefillFields({ fields: FIELDS, values: { exclusive: false }, filledRoleIndices: [1] })
+    expect(byRole[1]).toEqual([{ id: 'exclusive', value: 'false', isReadOnly: true }])
+  })
+
+  it('produces nothing at all when no role has a signer', () => {
+    expect(buildPrefillFields({ fields: FIELDS, values: VALUES, filledRoleIndices: [] })).toEqual({
+      sharedFormFields: [], byRole: {}, sharedIds: [], signerScopedIds: [], anchorRoleIndex: null,
+    })
+    expect(buildPrefillFields()).toMatchObject({ sharedFormFields: [], byRole: {} })
+  })
+})
+
+describe('sharedDataOnSignerFields — templates that will hide deal data from a party', () => {
+  it('flags a CRM token sitting on a role-scoped field', () => {
+    const gaps = sharedDataOnSignerFields({
+      fields: [
+        { id: 'property_full', type: 'Label',   roleIndex: 1 },
+        { id: 'list_price',    type: 'Textbox', roleIndex: 2 },
+      ],
+      values: { property_full: 'Somewhere', list_price: '$1,350,000' },
+    })
+    expect(gaps.map(f => f.id)).toEqual(['list_price'])
+  })
+
+  it('says nothing about a field left blank — nothing is being hidden', () => {
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'list_price', type: 'Textbox', roleIndex: 2 }], values: {},
+    })).toEqual([])
+  })
+
+  it('says nothing about a signer’s own input — a licence number is not shared data', () => {
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'agent_license', type: 'Textbox', roleIndex: 2 }], values: { agent_license: 'S-60912' },
+    })).toEqual([])
+  })
+
+  it('is empty for a healthy Label-based template', () => {
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'list_price', type: 'Label', roleIndex: 2 }], values: { list_price: '$1,350,000' },
+    })).toEqual([])
+  })
+
+  it('covers every CRM token, so a new one is shared-by-default the day it is added', () => {
+    for (const token of Object.keys(crmTokenValues())) expect(SHARED_PREFILL_TOKENS.has(token)).toBe(true)
+    expect(SHARED_PREFILL_TOKENS.has('property_full')).toBe(true)
+    expect(SHARED_PREFILL_TOKENS.has('commission_amount')).toBe(true)
   })
 })
 

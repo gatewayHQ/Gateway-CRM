@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -280,6 +280,82 @@ describe('buildSignerPayload — retired coordinate auto-placement', () => {
       id: 'f_1_1', fieldType: 'Signature', pageNumber: 2,
       bounds: { x: 100, y: 200, width: 150, height: 40 }, isRequired: true,
     }])
+  })
+})
+
+describe('mergeSharedFormFields — Label values every signer sees at once', () => {
+  // BoldSign hides a role-scoped field from every recipient except its own signer
+  // until that signer finishes. A Label is a common field: prefilled through ONE
+  // role's existingFormFields and visible to everyone immediately. This is where
+  // the API guarantees that, whatever the caller supplied.
+  const roles = () => ([
+    { roleIndex: 1, signerName: 'Jean', signerEmail: 'jean@x.com', existingFormFields: [{ id: 'county', value: 'Dickinson', isReadOnly: true }] },
+    { roleIndex: 2, signerName: 'Dan',  signerEmail: 'dan@x.com',  existingFormFields: [{ id: 'agent_license', value: 'S-609', isReadOnly: true }] },
+  ])
+  const shared = [{ id: 'property_full', value: '2212 Okoboji Ave' }, { id: 'list_price', value: '$1,350,000' }]
+
+  it('puts every shared value on the FIRST role, read-only', () => {
+    const out = mergeSharedFormFields(roles(), shared)
+    expect(out[0].existingFormFields).toEqual([
+      { id: 'county',        value: 'Dickinson',        isReadOnly: true },
+      { id: 'property_full', value: '2212 Okoboji Ave', isReadOnly: true },
+      { id: 'list_price',    value: '$1,350,000',       isReadOnly: true },
+    ])
+    expect(out[1].existingFormFields).toEqual([{ id: 'agent_license', value: 'S-609', isReadOnly: true }])
+  })
+
+  it('forces isReadOnly even when the caller omitted or contradicted it', () => {
+    const out = mergeSharedFormFields(roles(), [{ id: 'ref_no', value: 'RE-1', isReadOnly: false }])
+    expect(out[0].existingFormFields.at(-1)).toEqual({ id: 'ref_no', value: 'RE-1', isReadOnly: true })
+  })
+
+  it('strips a role-scoped copy of a shared id, so a per-signer value cannot shadow the Label', () => {
+    const withDupe = roles()
+    withDupe[1].existingFormFields.push({ id: 'list_price', value: 'WRONG', isReadOnly: true })
+    const out = mergeSharedFormFields(withDupe, shared)
+    expect(out[1].existingFormFields.map(f => f.id)).toEqual(['agent_license'])
+    expect(out[0].existingFormFields.find(f => f.id === 'list_price').value).toBe('$1,350,000')
+  })
+
+  it('collapses a duplicated shared id rather than sending an ambiguous pair', () => {
+    const out = mergeSharedFormFields(roles(), [{ id: 'ref_no', value: 'RE-1' }, { id: 'ref_no', value: 'RE-2' }])
+    const refs = out[0].existingFormFields.filter(f => f.id === 'ref_no')
+    expect(refs).toEqual([{ id: 'ref_no', value: 'RE-2', isReadOnly: true }])
+  })
+
+  it('is idempotent — re-running it on its own output changes nothing', () => {
+    const once  = mergeSharedFormFields(roles(), shared)
+    const twice = mergeSharedFormFields(once, shared)
+    expect(twice).toEqual(once)
+  })
+
+  it('does not mutate the roles it was given', () => {
+    const input = roles()
+    mergeSharedFormFields(input, shared)
+    expect(input[0].existingFormFields.map(f => f.id)).toEqual(['county'])
+  })
+
+  it('stringifies a value and drops an entry with no id', () => {
+    const out = mergeSharedFormFields(roles(), [{ id: 'count', value: 3 }, { id: '  ' }, { value: 'orphan' }])
+    expect(out[0].existingFormFields.at(-1)).toEqual({ id: 'count', value: '3', isReadOnly: true })
+    expect(out[0].existingFormFields).toHaveLength(2)
+  })
+
+  it('returns the roles untouched when there is nothing shared to add', () => {
+    const input = roles()
+    expect(mergeSharedFormFields(input, [])).toBe(input)
+    expect(mergeSharedFormFields(input, undefined)).toBe(input)
+    expect(mergeSharedFormFields(input, null)).toBe(input)
+  })
+
+  it('survives an empty or missing roles array', () => {
+    expect(mergeSharedFormFields([], shared)).toEqual([])
+    expect(mergeSharedFormFields(undefined, shared)).toBeUndefined()
+  })
+
+  it('gives a single-role send its shared fields too', () => {
+    const out = mergeSharedFormFields([{ roleIndex: 1, signerName: 'Solo', signerEmail: 's@x.com' }], shared)
+    expect(out[0].existingFormFields.map(f => f.id)).toEqual(['property_full', 'list_price'])
   })
 })
 
