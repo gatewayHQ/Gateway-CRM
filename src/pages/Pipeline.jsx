@@ -16,7 +16,7 @@ import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty } from '../lib/dealPeople.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, buildPrefillFields, sharedDataOnSignerFields, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2272,21 +2272,17 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())
     if (!filled.length) { pushToast('At least one signer needs a name and email', 'error'); return null }
 
-    // Attach each filled field value to the role that owns it (or the first
-    // filled role if the field isn't role-scoped). CRM-entered values are locked.
+    // Split the prefilled values in two — this is the whole point of Label
+    // fields. `sharedFormFields` (the template's Labels) go out as ONE common,
+    // read-only set that every signer sees the instant the document lands, no
+    // matter who signs first; `byRole` holds the role-scoped fields, which
+    // BoldSign keeps private to their own signer until that signer is done.
     // Keyed by ORIGINAL role index — buildTemplateRoles handles the index shift.
-    const firstIdx = filled[0].index
-    const byRole = {}
-    for (const f of (details.fields || [])) {
-      // prefillFieldEntry decides what (if anything) this field contributes: text
-      // when the agent typed something, "true"/"false" for a box they ticked or
-      // deliberately cleared, nothing at all when it's left to the signer. Every
-      // entry it returns is read-only — see its comment.
-      const entry = prefillFieldEntry(f, values[f.id])
-      if (!entry) continue
-      const idx = (f.roleIndex && filled.some(r => r.index === f.roleIndex)) ? f.roleIndex : firstIdx
-      ;(byRole[idx] ||= []).push(entry)
-    }
+    const { sharedFormFields, byRole } = buildPrefillFields({
+      fields: details.fields || [],
+      values,
+      filledRoleIndices: filled.map(r => r.index),
+    })
     // Roles + removals, with BoldSign's post-removal index shift applied — see
     // buildTemplateRoles. Leaving a middle role blank (e.g. Co-seller, with a
     // co-listing agent filled below it) used to send an index past the end of
@@ -2297,7 +2293,10 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
     const docName = [tpl?.name || deal?.title, property?.address].filter(Boolean).join(' — ')
     const labels  = [tpl?.state, tpl?.doc_type, `deal:${deal.id}`].filter(Boolean)
-    return { templateId, deal_id: deal.id, roles, roleRemovalIndices, emailSubject: subject, documentName: docName, labels }
+    return {
+      templateId, deal_id: deal.id, roles, roleRemovalIndices, sharedFormFields,
+      emailSubject: subject, documentName: docName, labels,
+    }
   }
 
   // This deal's remembered arrangement was restored over the template's defaults —
@@ -2359,6 +2358,37 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const fields     = details?.fields || []
   const tickFields = fields.filter(f => isTickableField(f.type))
   const textFields = fields.filter(f => isFillableField(f.type))
+
+  // Shared (Label) fields vs signer-specific ones. The difference is not
+  // cosmetic: a Label is common to the document and every signer reads it the
+  // moment it arrives, while a role-scoped field stays invisible to everyone but
+  // its own signer until that signer has finished. The two groups are shown
+  // apart, and labelled, so nobody has to guess which one a value lands in.
+  const sharedTextFields = textFields.filter(f => isSharedField(f.type))
+  const signerTextFields = textFields.filter(f => !isSharedField(f.type))
+  // A role-scoped field can name no role at all, in which case it rides on the
+  // first signer — either way it is one signer's, which is what the warning below
+  // needs to say.
+  const roleNameFor = (idx) => details?.roles?.find(r => r.index === Number(idx))?.name || (idx ? `Signer ${idx}` : 'one signer only')
+
+  // Deal data sitting on a role-scoped field — the template needs fixing, and no
+  // send-time payload can work around it. Named here because the agent about to
+  // send is the person who will hear about the blank from the client.
+  const sharedGaps = sharedDataOnSignerFields({ fields, values })
+
+  const renderTextField = (f) => (
+    <div key={f.id} style={{ marginBottom:8 }}>
+      <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2 }}>{f.label || prettyLabel(f.id)}</div>
+      {f.options?.length
+        ? (
+          <select className="form-control" value={values[f.id] || ''} onChange={e => setValue(f.id, e.target.value)}>
+            <option value="">— signer chooses —</option>
+            {f.options.map(o => <option key={o} value={o}>{o}</option>)}
+          </select>
+        )
+        : <input className="form-control" value={values[f.id] || ''} onChange={e => setValue(f.id, e.target.value)}/>}
+    </div>
+  )
 
   // Step 2 — BoldSign's embedded prepare/send UI (replaces our own send popup).
   if (embedUrl) {
@@ -2442,23 +2472,43 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
               </label>
             </div>
 
-            {/* Editable, CRM-prefilled detail fields the sellers see filled in. */}
-            {textFields.length > 0 && (
+            {/* SHARED — the template's Label fields. One common copy, visible to
+                every signer as soon as the document is sent (no waiting for the
+                first signature) and editable by none of them. */}
+            {sharedTextFields.length > 0 && (
               <div className="form-group">
-                <label className="form-label">Document details <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— prefilled from the deal; edit as needed</span></label>
-                {textFields.map(f => (
-                  <div key={f.id} style={{ marginBottom:8 }}>
-                    <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2 }}>{f.label || prettyLabel(f.id)}</div>
-                    {f.options?.length
-                      ? (
-                        <select className="form-control" value={values[f.id] || ''} onChange={e => setValue(f.id, e.target.value)}>
-                          <option value="">— signer chooses —</option>
-                          {f.options.map(o => <option key={o} value={o}>{o}</option>)}
-                        </select>
-                      )
-                      : <input className="form-control" value={values[f.id] || ''} onChange={e => setValue(f.id, e.target.value)}/>}
-                  </div>
-                ))}
+                <label className="form-label">
+                  Shared details <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— every signer sees these straight away, and none can change them</span>
+                </label>
+                {sharedTextFields.map(renderTextField)}
+              </div>
+            )}
+
+            {/* SIGNER-SPECIFIC — role-scoped fields. BoldSign shows each of these
+                only to its own signer until that signer has finished, so anything
+                the other parties need to read up front belongs above, as a Label
+                in the template. */}
+            {signerTextFields.length > 0 && (
+              <div className="form-group">
+                <label className="form-label">
+                  Signer details <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— each of these is visible only to the signer it belongs to until they sign</span>
+                </label>
+                {signerTextFields.map(renderTextField)}
+              </div>
+            )}
+
+            {/* The one problem this modal cannot fix from here: shared deal data
+                the template put on a role's own field. Say which fields, and say
+                what it means, rather than letting a client find the blank. */}
+            {sharedGaps.length > 0 && (
+              <div style={{ background:'#fffbe6', border:'1px solid #d4a017', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:12, fontSize:12, lineHeight:1.6 }}>
+                <strong>Some deal details will not be visible to everyone right away.</strong>
+                <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
+                  {sharedGaps.map(f => `“${f.label || prettyLabel(f.id)}” (${roleNameFor(f.roleIndex)})`).join(', ')} —
+                  {' '}these are filled in, but the template assigns them to one signer, so the other parties
+                  cannot see them until that signer finishes. Ask an admin to make them <strong>Label</strong> fields
+                  in the BoldSign template and they will show to everyone immediately.
+                </div>
               </div>
             )}
 
@@ -2468,7 +2518,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 BoldSign's editor instead does NOT carry to the signers. */}
             {tickFields.length > 0 && (
               <div className="form-group">
-                <label className="form-label">Selections <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— set these here and they reach every signer locked</span></label>
+                <label className="form-label">Selections <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— set these here and they travel with the send, locked</span></label>
                 {tickFields.map(f => (
                   <div key={f.id} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
                     <div style={{ flex:1, fontSize:12 }}>{f.label || prettyLabel(f.id)}</div>
@@ -2492,8 +2542,10 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px' }}>
           <strong>Neither button sends anything.</strong> Both save this as a draft on the deal, filled in with the values above —
           from there you can download a filled PDF to print for the client, keep editing, and send only when they&rsquo;re happy.
-          Anything filled in above is carried locked: signers see it and cannot change it. Values typed or ticked inside
-          BoldSign&rsquo;s own editor are placement previews and do <strong>not</strong> reach the signers — set them here.
+          Anything filled in above is carried locked: signers see it and cannot change it. <strong>Shared details</strong> are
+          the template&rsquo;s Label fields — one common copy every signer can read the moment the document arrives, without
+          waiting for anyone else to sign. Values typed or ticked inside BoldSign&rsquo;s own editor are placement previews
+          and do <strong>not</strong> reach the signers — set them here.
         </div>
       </div>
       <div className="modal__foot">
