@@ -12,6 +12,7 @@
  */
 import React, { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
 import '../components/landing/landing.css'
 import {
   LandingShell, Hero, Section, DetailGrid, Gallery, Lightbox,
@@ -38,6 +39,10 @@ export default function LandingProperty({ mailingId, preview = null }) {
   const [loading, setLoading] = useState(!preview)
   const [error, setError] = useState(null)
   const [lightbox, setLightbox] = useState(-1) // -1 = closed
+
+  // Capture the QR scan's visit id (and replay the scan if the server could not
+  // confirm the write) before anything else — see src/lib/scanTracking.js.
+  useEffect(() => { initScanTracking() }, [])
 
   useEffect(() => {
     if (preview) return // skip fetch in demo mode
@@ -138,7 +143,7 @@ export default function LandingProperty({ mailingId, preview = null }) {
     if (preview) { await new Promise(r => setTimeout(r, 700)); return } // demo: simulate send
     const res = await fetch('/api/campaigns', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'capture_lead', mailing_id: mailingId, source_landing: 'property', ...form }),
+      body: JSON.stringify(withVisitId({ action: 'capture_lead', mailing_id: mailingId, source_landing: 'property', ...form })),
     })
     const data = await res.json().catch(() => ({}))
     if (!res.ok || data.error) throw new Error(data.error || 'Could not submit — please try again.')

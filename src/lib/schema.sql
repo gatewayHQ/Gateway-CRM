@@ -969,8 +969,9 @@ create table if not exists mailings (
   landing_config         jsonb default '{}',                  -- collage/headline/highlights for custom + multifamily + mailing landings
   send_date              date,                                -- when the mailer was/will be dropped
   recipient_count        integer default 0,                   -- denormalized counter
-  scan_count             integer default 0,                   -- denormalized counter
-  lead_count             integer default 0,                   -- denormalized counter
+  scan_count             integer default 0,                   -- denormalized cache; truth is mailing_scans (reconciled nightly)
+  lead_count             integer default 0,                   -- denormalized cache; truth is mailing_leads
+  last_scan_at           timestamptz,                         -- most recent non-bot scan
   created_at             timestamptz default now(),
   updated_at             timestamptz default now()
 );
@@ -993,7 +994,8 @@ exception when others then null; end $$;
 create index if not exists mailings_agent_id_idx     on mailings(agent_id);
 create index if not exists mailings_status_idx       on mailings(status);
 create index if not exists mailings_property_id_idx  on mailings(property_id);
-create index if not exists mailings_qr_token_idx     on mailings(qr_token);
+-- NOTE: no separate qr_token index — the UNIQUE constraint above is already
+-- backed by one. (migrations/0031 drops the duplicate from existing installs.)
 
 drop trigger if exists mailings_updated_at on mailings;
 create trigger mailings_updated_at before update on mailings
@@ -1047,19 +1049,46 @@ do $$ begin
   end if;
 end $$;
 
+-- Every hit on /m/{token} lands here — including bots, link previews and rapid
+-- repeats. They are FLAGGED rather than dropped (is_bot / is_duplicate) so the
+-- headline counts stay honest without ever destroying an event. See
+-- migrations/0031_qr_scan_reliability.sql for the reasoning and the RPCs that
+-- read this table.
 create table if not exists mailing_scans (
-  id            uuid primary key default uuid_generate_v4(),
+  id            uuid primary key default uuid_generate_v4(),   -- supplied by the API, so a retry/replay is idempotent
   mailing_id    uuid not null references mailings(id) on delete cascade,
   recipient_id  uuid references mailing_recipients(id) on delete set null,
   ip_hash       text,                          -- sha256(ip + daily-salt) — privacy-preserving uniqueness
+  visitor_hash  text,                          -- sha256(ip + ua + monthly-salt) — unique-people counting
+  visit_id      text,                          -- stitches scan → landing page → captured lead
   user_agent    text,
   referrer      text,
   country       text,                          -- inferred from Vercel headers
+  region        text,
+  city          text,
+  latitude      text,
+  longitude     text,
+  timezone      text,
+  device_type   text,                          -- mobile | tablet | desktop
+  os            text,
+  browser       text,
+  is_bot        boolean default false,         -- crawler / scanner / prefetch — stored, not counted
+  bot_reason    text,
+  is_duplicate  boolean default false,         -- same visitor within the dedupe window
+  source        text default 'qr',             -- qr | crawler | replay
+  latency_ms    integer,
   scanned_at    timestamptz default now()
 );
 
-create index if not exists mailing_scans_mailing_idx  on mailing_scans(mailing_id, scanned_at desc);
-create index if not exists mailing_scans_recipient_idx on mailing_scans(recipient_id);
+create index if not exists mailing_scans_mailing_idx    on mailing_scans(mailing_id, scanned_at desc);
+create index if not exists mailing_scans_recipient_idx  on mailing_scans(recipient_id);
+-- The dashboard's rolling-window query filters on scanned_at alone.
+create index if not exists mailing_scans_scanned_at_idx on mailing_scans(scanned_at desc);
+-- The shape every analytics query uses: one campaign's real scans, newest first.
+create index if not exists mailing_scans_real_idx       on mailing_scans(mailing_id, scanned_at desc)
+  where is_bot = false and is_duplicate = false;
+create index if not exists mailing_scans_visit_idx      on mailing_scans(visit_id)   where visit_id is not null;
+create index if not exists mailing_scans_visitor_idx    on mailing_scans(mailing_id, visitor_hash) where visitor_hash is not null;
 
 alter table mailing_scans enable row level security;
 do $$ begin
@@ -1084,11 +1113,14 @@ create table if not exists mailing_leads (
   property_type     text,
   source_landing    text check (source_landing in ('property','valuation','custom','multifamily','mailing')),
   ip_hash           text,
+  visit_id          text,                      -- ties this lead to the scan that produced it
+  scan_id           uuid references mailing_scans(id) on delete set null,
   created_at        timestamptz default now()
 );
 
 create index if not exists mailing_leads_mailing_idx on mailing_leads(mailing_id);
 create index if not exists mailing_leads_contact_idx on mailing_leads(contact_id);
+create index if not exists mailing_leads_visit_idx   on mailing_leads(visit_id) where visit_id is not null;
 
 alter table mailing_leads enable row level security;
 do $$ begin
@@ -1122,6 +1154,8 @@ create table if not exists mailing_subscribers (
   consent           boolean default true,          -- explicit opt-in captured at signup
   source            text default 'landing',        -- landing | manual | import
   ip_hash           text,                           -- privacy-preserving signup fingerprint
+  visit_id          text,                           -- ties this subscriber to the scan that produced them
+  scan_id           uuid references mailing_scans(id) on delete set null,
   unsubscribe_token text not null unique default replace(uuid_generate_v4()::text, '-', ''),
   subscribed_at     timestamptz default now(),
   unsubscribed_at   timestamptz,
@@ -1131,6 +1165,7 @@ create table if not exists mailing_subscribers (
 -- One address can only be on a given list once. Emails are always stored
 -- lower-cased by the API, so a plain composite unique index both dedupes
 -- case-insensitively AND is a valid ON CONFLICT target for upserts.
+create index if not exists mailing_subscribers_visit_idx on mailing_subscribers(visit_id) where visit_id is not null;
 create unique index if not exists mailing_subscribers_unique
   on mailing_subscribers(mailing_id, email);
 create index if not exists mailing_subscribers_mailing_idx on mailing_subscribers(mailing_id, status);
@@ -1722,3 +1757,542 @@ drop policy if exists agent_nudges_scope on agent_nudges;
 create policy agent_nudges_scope on agent_nudges for all to authenticated
   using      (app_is_admin() or agent_id = app_current_agent_id() or deal_id in (select app_visible_deal_ids()))
   with check (app_is_admin() or agent_id = app_current_agent_id() or deal_id in (select app_visible_deal_ids()));
+
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- MAILING SCAN PIPELINE — functions
+--
+-- The QR scan path does NOT insert into mailing_scans directly. It calls
+-- record_mailing_scan(), which resolves the token, stores the event and bumps
+-- the counter in ONE atomic round trip — so concurrent scans cannot lose
+-- updates against each other, and the scanner is not made to wait on three
+-- sequential network hops.
+--
+-- Reporting likewise goes through mailing_stats / mailing_analytics /
+-- mailing_dashboard rather than pulling raw rows into a serverless function,
+-- which used to cap silently at PostgREST's max-rows.
+--
+-- Introduced by migrations/0031_qr_scan_reliability.sql — see that file for the
+-- full rationale, the grants, and the rollback block.
+-- ═════════════════════════════════════════════════════════════════════════════
+
+-- SECTION 3 — record_mailing_scan()
+--
+-- Resolves the token AND records the scan AND bumps the counter in ONE round
+-- trip. Replaces: SELECT-then-INSERT-then-UPDATE across three network hops.
+--
+-- Counter semantics: `mailings.scan_count` counts what an agent means by a
+-- scan — a real human, first hit within the dedupe window. Bot and duplicate
+-- rows are still stored and are still returned by the analytics RPCs, they just
+-- don't inflate the headline number.
+--
+-- p_record = false resolves the mailing without recording, which is what the
+-- social-crawler branch needs (it must render Open Graph tags but must not
+-- count as a scan).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create or replace function record_mailing_scan(
+  p_token        text,
+  p_scan_id      uuid    default null,
+  p_visit_id     text    default null,
+  p_ip_hash      text    default null,
+  p_visitor_hash text    default null,
+  p_user_agent   text    default null,
+  p_referrer     text    default null,
+  p_country      text    default null,
+  p_region       text    default null,
+  p_city         text    default null,
+  p_latitude     text    default null,
+  p_longitude    text    default null,
+  p_timezone     text    default null,
+  p_device_type  text    default null,
+  p_os           text    default null,
+  p_browser      text    default null,
+  p_is_bot       boolean default false,
+  p_bot_reason   text    default null,
+  p_source       text    default 'qr',
+  p_latency_ms   integer default null,
+  p_record       boolean default true,
+  p_dedupe_secs  integer default 30
+)
+returns table (
+  mailing_id         uuid,
+  name               text,
+  landing_type       text,
+  landing_custom_url text,
+  landing_config     jsonb,
+  property_id        uuid,
+  status             text,
+  scan_id            uuid,
+  recorded           boolean,
+  duplicate          boolean
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  m            record;
+  v_scan_id    uuid    := coalesce(p_scan_id, uuid_generate_v4());
+  v_duplicate  boolean := false;
+  v_recorded   boolean := false;
+  v_inserted   integer := 0;
+begin
+  select mg.id, mg.name, mg.landing_type, mg.landing_custom_url,
+         mg.landing_config, mg.property_id, mg.status
+    into m
+    from mailings mg
+   where mg.qr_token = p_token
+   limit 1;
+
+  -- Unknown token: return zero rows so the caller can 404 without a second trip.
+  if not found then
+    return;
+  end if;
+
+  if p_record then
+    -- A repeat hit from the same visitor inside the window is the same physical
+    -- scan (iOS preview then open, a double-tap, a refresh). Stored, flagged,
+    -- and kept out of the headline count.
+    if p_visitor_hash is not null then
+      select exists (
+        select 1 from mailing_scans s
+         where s.mailing_id   = m.id
+           and s.visitor_hash = p_visitor_hash
+           and s.is_bot       = false
+           and s.scanned_at   > now() - make_interval(secs => greatest(p_dedupe_secs, 0))
+      ) into v_duplicate;
+    end if;
+
+    -- The caller owns the primary key, so a retried request or a client-side
+    -- replay of a write that already landed collides here and is absorbed.
+    insert into mailing_scans (
+      id, mailing_id, ip_hash, visitor_hash, visit_id, user_agent, referrer,
+      country, region, city, latitude, longitude, timezone,
+      device_type, os, browser, is_bot, bot_reason, is_duplicate,
+      source, latency_ms
+    ) values (
+      v_scan_id, m.id, p_ip_hash, p_visitor_hash, p_visit_id,
+      left(coalesce(p_user_agent, ''), 500), left(coalesce(p_referrer, ''), 500),
+      p_country, p_region, p_city, p_latitude, p_longitude, p_timezone,
+      p_device_type, p_os, p_browser, coalesce(p_is_bot, false), p_bot_reason,
+      v_duplicate, coalesce(p_source, 'qr'), p_latency_ms
+    )
+    on conflict (id) do nothing;
+
+    get diagnostics v_inserted = row_count;
+    v_recorded := v_inserted > 0;
+
+    -- Atomic increment off the stored value — never a read-modify-write from
+    -- something the application read earlier. Concurrent scans serialize on the
+    -- row and every one of them counts.
+    if v_recorded and not coalesce(p_is_bot, false) and not v_duplicate then
+      update mailings
+         set scan_count   = coalesce(scan_count, 0) + 1,
+             last_scan_at = now()
+       where id = m.id;
+    end if;
+  end if;
+
+  return query select
+    m.id, m.name, m.landing_type, m.landing_custom_url,
+    m.landing_config, m.property_id, m.status,
+    v_scan_id, v_recorded, v_duplicate;
+end $$;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SECTION 4 — link_visit_conversion()
+--
+-- Called when a landing page captures a lead or a subscriber. Ties the
+-- conversion back to the scan that produced it via the visit id, and — because
+-- that scan is the only evidence we have with one QR code per campaign — rolls
+-- the recipient-side scan columns forward when the converting person can be
+-- matched to a known recipient by contact.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create or replace function link_visit_conversion(
+  p_visit_id   text,
+  p_mailing_id uuid,
+  p_lead_id    uuid default null,
+  p_sub_id     uuid default null,
+  p_contact_id uuid default null
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_scan_id      uuid;
+  v_recipient_id uuid;
+  v_scanned_at   timestamptz;
+begin
+  if p_visit_id is null or p_visit_id = '' then
+    return null;
+  end if;
+
+  select s.id, s.scanned_at
+    into v_scan_id, v_scanned_at
+    from mailing_scans s
+   where s.visit_id = p_visit_id
+     and (p_mailing_id is null or s.mailing_id = p_mailing_id)
+   order by s.scanned_at asc
+   limit 1;
+
+  if v_scan_id is null then
+    return null;
+  end if;
+
+  if p_lead_id is not null then
+    update mailing_leads set scan_id = v_scan_id where id = p_lead_id;
+  end if;
+  if p_sub_id is not null then
+    update mailing_subscribers set scan_id = v_scan_id where id = p_sub_id;
+  end if;
+
+  -- Deterministic recipient attribution: only when the converting contact is
+  -- actually on this campaign's recipient list. Never guessed from geography.
+  if p_contact_id is not null and p_mailing_id is not null then
+    select r.id into v_recipient_id
+      from mailing_recipients r
+     where r.mailing_id = p_mailing_id
+       and r.contact_id = p_contact_id
+     limit 1;
+
+    if v_recipient_id is not null then
+      update mailing_scans
+         set recipient_id = v_recipient_id
+       where id = v_scan_id and recipient_id is null;
+
+      update mailing_recipients
+         set scan_count       = coalesce(scan_count, 0) + 1,
+             first_scanned_at = least(coalesce(first_scanned_at, v_scanned_at), v_scanned_at),
+             last_scanned_at  = greatest(coalesce(last_scanned_at, v_scanned_at), v_scanned_at)
+       where id = v_recipient_id;
+
+      if p_lead_id is not null then
+        update mailing_leads set recipient_id = v_recipient_id
+         where id = p_lead_id and recipient_id is null;
+      end if;
+    end if;
+  end if;
+
+  return v_scan_id;
+end $$;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SECTION 5 — mailing_stats()
+--
+-- Per-campaign totals computed in SQL. Replaces the JS tally in `action=list`,
+-- which fetched every scan row for every campaign and therefore stopped being
+-- correct past PostgREST's row cap.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create or replace function mailing_stats(p_ids uuid[])
+returns table (
+  mailing_id      uuid,
+  scans           bigint,
+  raw_scans       bigint,
+  bot_scans       bigint,
+  unique_visitors bigint,
+  leads           bigint,
+  subscribers     bigint,
+  recipients      bigint,
+  converted       bigint,
+  last_scan_at    timestamptz
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with ids as (select unnest(p_ids) as id)
+  select
+    ids.id,
+    coalesce(sc.scans, 0),
+    coalesce(sc.raw_scans, 0),
+    coalesce(sc.bot_scans, 0),
+    coalesce(sc.unique_visitors, 0),
+    coalesce(ld.leads, 0),
+    coalesce(sb.subscribers, 0),
+    coalesce(rc.recipients, 0),
+    coalesce(ld.converted, 0),
+    sc.last_scan_at
+  from ids
+  left join (
+    select s.mailing_id,
+           count(*) filter (where not s.is_bot and not s.is_duplicate) as scans,
+           count(*)                                                     as raw_scans,
+           count(*) filter (where s.is_bot)                             as bot_scans,
+           count(distinct s.visitor_hash) filter (
+             where not s.is_bot and s.visitor_hash is not null
+           )                                                            as unique_visitors,
+           max(s.scanned_at) filter (where not s.is_bot)                as last_scan_at
+      from mailing_scans s
+     where s.mailing_id = any(p_ids)
+     group by s.mailing_id
+  ) sc on sc.mailing_id = ids.id
+  left join (
+    select l.mailing_id,
+           count(*)                                    as leads,
+           count(*) filter (where l.scan_id is not null) as converted
+      from mailing_leads l
+     where l.mailing_id = any(p_ids)
+     group by l.mailing_id
+  ) ld on ld.mailing_id = ids.id
+  left join (
+    select b.mailing_id, count(*) as subscribers
+      from mailing_subscribers b
+     where b.mailing_id = any(p_ids) and b.status = 'subscribed'
+     group by b.mailing_id
+  ) sb on sb.mailing_id = ids.id
+  left join (
+    select r.mailing_id, count(*) as recipients
+      from mailing_recipients r
+     where r.mailing_id = any(p_ids)
+     group by r.mailing_id
+  ) rc on rc.mailing_id = ids.id;
+$$;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SECTION 6 — mailing_analytics()
+--
+-- One campaign's full report as a single jsonb document, computed in SQL.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create or replace function mailing_analytics(p_mailing_id uuid, p_days integer default 90)
+returns jsonb
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with bounds as (
+    select (now() - make_interval(days => greatest(p_days, 1)))::timestamptz as since
+  ),
+  scans as (
+    select s.* from mailing_scans s, bounds
+     where s.mailing_id = p_mailing_id and s.scanned_at >= bounds.since
+  ),
+  real_scans as (
+    select * from scans where not is_bot and not is_duplicate
+  ),
+  recips as (
+    select * from mailing_recipients where mailing_id = p_mailing_id
+  ),
+  lds as (
+    select l.* from mailing_leads l, bounds
+     where l.mailing_id = p_mailing_id and l.created_at >= bounds.since
+  ),
+  days as (
+    select generate_series(
+      (select since::date from bounds), current_date, interval '1 day'
+    )::date as d
+  )
+  select jsonb_build_object(
+    'window_days',          greatest(p_days, 1),
+    'recipients_total',     (select count(*) from recips),
+    'recipients_scanned',   (select count(*) from recips where coalesce(scan_count, 0) > 0),
+    'recipients_responded', (select count(*) from recips where responded),
+    'total_scans',          (select count(*) from real_scans),
+    'raw_scans',            (select count(*) from scans),
+    'bot_scans',            (select count(*) from scans where is_bot),
+    'duplicate_scans',      (select count(*) from scans where is_duplicate and not is_bot),
+    'unique_scanners',      (select count(distinct visitor_hash) from real_scans where visitor_hash is not null),
+    'returning_scanners',   (select count(*) from (
+                               select visitor_hash from real_scans
+                                where visitor_hash is not null
+                                group by visitor_hash having count(*) > 1
+                             ) t),
+    'total_leads',          (select count(*) from lds),
+    'attributed_leads',     (select count(*) from lds where scan_id is not null),
+    'first_scan_at',        (select min(scanned_at) from real_scans),
+    'last_scan_at',         (select max(scanned_at) from real_scans),
+    -- Scans per 100 pieces mailed. With one QR code per campaign we cannot know
+    -- WHICH recipients scanned, so this is a response index, not a per-person
+    -- rate — the UI must label it as such.
+    'response_index',       case when (select count(*) from recips) > 0
+                              then round(((select count(*) from real_scans)::numeric
+                                          / (select count(*) from recips)) * 100, 1)
+                              else null end,
+    'conversion_rate',      case when (select count(*) from real_scans) > 0
+                              then round(((select count(*) from lds)::numeric
+                                          / (select count(*) from real_scans)), 4)
+                              else 0 end,
+    'response_rate',        case when (select count(*) from recips) > 0
+                              then round(((select count(*) from recips where responded)::numeric
+                                          / (select count(*) from recips)), 4)
+                              else 0 end,
+    'timeline',             (select coalesce(jsonb_agg(jsonb_build_object(
+                               'date', d, 'count', c, 'unique', u
+                             ) order by d), '[]'::jsonb) from (
+                               select days.d,
+                                      count(r.id)                      as c,
+                                      count(distinct r.visitor_hash)   as u
+                                 from days
+                                 left join real_scans r on r.scanned_at::date = days.d
+                                group by days.d
+                             ) t),
+    'by_hour',              (select coalesce(jsonb_agg(jsonb_build_object(
+                               'hour', h, 'count', c) order by h), '[]'::jsonb) from (
+                               select extract(hour from scanned_at)::int as h, count(*) as c
+                                 from real_scans group by 1
+                             ) t),
+    'by_device',            (select coalesce(jsonb_object_agg(k, c), '{}'::jsonb) from (
+                               select coalesce(device_type, 'unknown') as k, count(*) as c
+                                 from real_scans group by 1
+                             ) t),
+    'by_os',                (select coalesce(jsonb_object_agg(k, c), '{}'::jsonb) from (
+                               select coalesce(os, 'unknown') as k, count(*) as c
+                                 from real_scans group by 1
+                             ) t),
+    'by_country',           (select coalesce(jsonb_object_agg(k, c), '{}'::jsonb) from (
+                               select coalesce(country, 'unknown') as k, count(*) as c
+                                 from real_scans group by 1
+                             ) t),
+    'by_region',            (select coalesce(jsonb_agg(jsonb_build_object(
+                               'region', k, 'city', ct, 'count', c) order by c desc), '[]'::jsonb) from (
+                               select coalesce(region, '—') as k, coalesce(city, '—') as ct, count(*) as c
+                                 from real_scans group by 1, 2 order by count(*) desc limit 25
+                             ) t),
+    'by_response',          (select coalesce(jsonb_object_agg(k, c), '{}'::jsonb) from (
+                               select response_type as k, count(*) as c
+                                 from recips where response_type is not null group by 1
+                             ) t)
+  );
+$$;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SECTION 7 — mailing_dashboard()
+--
+-- Org- or agent-scoped rollup. Scoping is applied inside the query so an agent
+-- can never be handed another agent's totals.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create or replace function mailing_dashboard(
+  p_agent_id uuid    default null,
+  p_all      boolean default false,
+  p_days     integer default 30
+)
+returns jsonb
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with bounds as (
+    select (now() - make_interval(days => greatest(p_days, 1)))::timestamptz as since
+  ),
+  scoped as (
+    select m.* from mailings m
+     where p_all
+        or (p_agent_id is not null and (
+              m.agent_id = p_agent_id
+              or (m.landing_config -> 'agent_ids') @> to_jsonb(p_agent_id::text)
+           ))
+  ),
+  scans as (
+    select s.* from mailing_scans s, bounds
+     where s.mailing_id in (select id from scoped)
+       and s.scanned_at >= bounds.since
+       and not s.is_bot and not s.is_duplicate
+  ),
+  lds as (
+    select l.* from mailing_leads l, bounds
+     where l.mailing_id in (select id from scoped) and l.created_at >= bounds.since
+  ),
+  days as (
+    select generate_series(
+      (select since::date from bounds), current_date, interval '1 day'
+    )::date as d
+  )
+  select jsonb_build_object(
+    'window_days',      greatest(p_days, 1),
+    'total_mailings',   (select count(*) from scoped),
+    'active_mailings',  (select count(*) from scoped where status in ('active', 'sent')),
+    'total_recipients', (select coalesce(sum(coalesce(recipient_count, 0)), 0) from scoped),
+    'total_scans_30d',  (select count(*) from scans),
+    'unique_scanners',  (select count(distinct visitor_hash) from scans where visitor_hash is not null),
+    'total_leads_30d',  (select count(*) from lds),
+    'attributed_leads', (select count(*) from lds where scan_id is not null),
+    'scans_today',      (select count(*) from scans where scanned_at::date = current_date),
+    'scans_last_hour',  (select count(*) from scans where scanned_at > now() - interval '1 hour'),
+    'trend',            (select coalesce(jsonb_agg(jsonb_build_object(
+                           'date', d, 'count', c) order by d), '[]'::jsonb) from (
+                           select days.d, count(s.id) as c
+                             from days left join scans s on s.scanned_at::date = days.d
+                            group by days.d
+                         ) t),
+    'top_mailings',     (select coalesce(jsonb_agg(jsonb_build_object(
+                           'id', id, 'name', name, 'status', status,
+                           'agent_id', agent_id, 'scan_count', c,
+                           'recipient_count', recipient_count) order by c desc), '[]'::jsonb) from (
+                           select sc.id, sc.name, sc.status, sc.agent_id, sc.recipient_count,
+                                  count(s.id) as c
+                             from scoped sc left join scans s on s.mailing_id = sc.id
+                            group by sc.id, sc.name, sc.status, sc.agent_id, sc.recipient_count
+                            order by count(s.id) desc limit 5
+                         ) t)
+  );
+$$;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SECTION 8 — reconcile_mailing_counters()
+--
+-- Self-healing safety net, run nightly by /api/cron?task=scan-reconcile. The
+-- denormalized counters are a cache; the event tables are the truth. Any drift
+-- (a counter bumped for a row that rolled back, a row inserted by a replay after
+-- the counter had already been read) is repaired here, so the cards and the
+-- drill-down can never disagree for more than a day.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create or replace function reconcile_mailing_counters()
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_fixed integer := 0;
+begin
+  with truth as (
+    select m.id,
+           (select count(*) from mailing_scans s
+             where s.mailing_id = m.id and not s.is_bot and not s.is_duplicate) as scans,
+           (select count(*) from mailing_leads l      where l.mailing_id = m.id) as leads,
+           (select count(*) from mailing_recipients r where r.mailing_id = m.id) as recips,
+           (select max(s.scanned_at) from mailing_scans s
+             where s.mailing_id = m.id and not s.is_bot)                         as last_scan
+      from mailings m
+  ),
+  drifted as (
+    select t.* from truth t
+      join mailings m on m.id = t.id
+     where coalesce(m.scan_count, 0)      is distinct from t.scans
+        or coalesce(m.lead_count, 0)      is distinct from t.leads
+        or coalesce(m.recipient_count, 0) is distinct from t.recips
+        or m.last_scan_at                 is distinct from t.last_scan
+  ),
+  upd as (
+    update mailings m
+       set scan_count      = d.scans,
+           lead_count      = d.leads,
+           recipient_count = d.recips,
+           last_scan_at    = d.last_scan
+      from drifted d
+     where m.id = d.id
+     returning m.id
+  )
+  select count(*) into v_fixed from upd;
+
+  return jsonb_build_object(
+    'ok', true,
+    'mailings_repaired', v_fixed,
+    'ran_at', now()
+  );
+end $$;

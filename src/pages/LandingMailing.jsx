@@ -30,6 +30,7 @@
  */
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
 import { useReveal, useCountUp, useScrollProgress, useParallax, usePrefersReducedMotion } from '../components/landing/hooks.js'
 
 // Light / dark luxury palettes. Everything else is derived from `accent`.
@@ -84,6 +85,10 @@ export default function LandingMailing({ mailingId }) {
   const [submitting, setSubmitting] = useState(false)
   const [error,      setError]      = useState(null)
   const [form, setForm] = useState({ email: '', name: '', phone: '', message: '' })
+
+  // Capture the QR scan's visit id (and replay the scan if the server could not
+  // confirm the write) before anything else — see src/lib/scanTracking.js.
+  useEffect(() => { initScanTracking() }, [])
 
   useEffect(() => {
     let active = true
@@ -149,12 +154,12 @@ export default function LandingMailing({ mailingId }) {
     try {
       const res = await fetch('/api/campaigns', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify(withVisitId({
           action: 'capture_subscriber', mailing_id: mailingId,
           email, name: collectName ? form.name : '', phone: collectPhone ? form.phone : '',
           message: collectMessage ? form.message : '',
           consent: true,
-        }),
+        })),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok || data.error) throw new Error(data.error || 'Could not subscribe — please try again.')

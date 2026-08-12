@@ -3,10 +3,12 @@
 Proves, against a **disposable** Postgres database, that:
 
 1. `src/lib/schema.sql` runs top-to-bottom on a fresh database and is
-   idempotent (safe to re-run), and
+   idempotent (safe to re-run),
 2. the RLS visibility model does exactly what was decided (2026-06):
    *a regular agent sees only their own deals & earnings plus deals they are
-   co-listed on and will get paid on; firm-wide visibility is admin only.*
+   co-listed on and will get paid on; firm-wide visibility is admin only*, and
+3. the QR scan pipeline records every scan exactly once and counts it honestly
+   (`qr_scan_matrix.sql` — 56 assertions, see its header for the full list).
 
 `rls_matrix.sql` seeds five agents (an office admin/TC, two commercial
 advisors where one is co-listed on the other's deal via
@@ -29,6 +31,23 @@ psql -d crm_verify -v ON_ERROR_STOP=1 -f scripts/db-verify/rls_matrix.sql
 # expect: NOTICE PASS ... ×16 and "ALL RLS TESTS PASSED"
 dropdb crm_verify
 ```
+
+The QR scan pipeline is verified the same way, on its own scratch database
+(it seeds campaigns and scan events, so keep it separate from the RLS run):
+
+```bash
+createdb crm_qr_verify
+psql -d crm_qr_verify -v ON_ERROR_STOP=1 -f scripts/db-verify/supabase_shim.sql
+psql -d crm_qr_verify -v ON_ERROR_STOP=1 -f src/lib/schema.sql
+psql -d crm_qr_verify -f scripts/db-verify/qr_scan_matrix.sql
+# expect: 56 × "pass" and "ALL ASSERTIONS PASSED"
+dropdb crm_qr_verify
+```
+
+To verify the scan pipeline's **upgrade path**, apply the pre-0031 schema
+first, then `migrations/0031_qr_scan_reliability.sql`, then run
+`qr_scan_matrix.sql` — the assertions are identical and must all pass either
+way.
 
 To verify the **upgrade path** instead (what the live database goes through),
 apply the old schema first, then the migration chain in the order documented
