@@ -302,7 +302,7 @@ export default function MessagesPage({ db, activeAgent }) {
     if (!activeConv) return
     const fromNumber = activeConv.twilio_number || activeAgent?.twilio_number
     if (!fromNumber) {
-      pushToast('No Twilio number assigned. Go to Integrations → Twilio to set one up.', 'error')
+      pushToast('No sending number assigned to your profile — ask your office admin to set one up.', 'error')
       return
     }
     setSending(true)
@@ -398,7 +398,7 @@ export default function MessagesPage({ db, activeAgent }) {
         {!activeAgent?.twilio_number && (
           <div style={{ fontSize: 12, color: 'var(--gw-amber)', background: 'var(--gw-amber-light)', padding: '6px 12px', borderRadius: 'var(--radius)', display: 'flex', alignItems: 'center', gap: 6 }}>
             <Icon name="alert" size={13} />
-            No number assigned — go to <strong style={{ marginLeft: 2 }}>Integrations → Twilio</strong>
+            No sending number assigned to your profile
           </div>
         )}
       </div>

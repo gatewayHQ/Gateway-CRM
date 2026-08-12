@@ -27,7 +27,7 @@ function TemplateDrawer({ open, onClose, template, agents, onSave }) {
 
   const generateWithAI = async () => {
     const apiKey = await loadUserKey('anthropic_key', 'gw_anthropic_key')
-    if (!apiKey) { pushToast('Add your Anthropic API key in Settings → AI Configuration', 'error'); return }
+    if (!apiKey) { pushToast('No Anthropic API key on this account — ask your office admin to enable AI generation', 'error'); return }
     if (!aiPrompt.trim()) { pushToast('Enter a prompt first', 'error'); return }
     setGenerating(true)
     setForm(p => ({ ...p, body: '' }))
