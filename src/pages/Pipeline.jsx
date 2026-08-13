@@ -16,7 +16,7 @@ import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty } from '../lib/dealPeople.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, buildPrefillFields, sharedDataOnSignerFields, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, buildPrefillFields, sharedDataOnSignerFields, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2207,13 +2207,23 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [detailsErr, setDetailsErr] = React.useState('')     // why the roles/fields could not be read
   const [reloadKey,  setReloadKey]  = React.useState(0)      // bumped by Retry
   const [signers,    setSigners]    = React.useState({})     // roleIndex → { name, email }
-  // Signing order. Parallel is the DEFAULT: this used to be hard-wired to
-  // sequential (signerOrder = role index), so two co-buyers sitting at the same
-  // table couldn't sign together — the second signer's email wasn't even sent
-  // until the first finished and the webhook landed. Sequential is still
-  // available for the cases that need it (client signs, then the agent
-  // countersigns), it's just no longer imposed on every send.
-  const [inOrder,    setInOrder]    = React.useState(false)
+  // Signing order. SEQUENTIAL is the default, and that is a deliberate
+  // reversal — it was parallel, so that two co-buyers sitting at the same table
+  // could sign together instead of the second one waiting on the first.
+  //
+  // What changed is that BoldSign scopes FIELD VISIBILITY by role: a field
+  // assigned to a signer is invisible to every other recipient until that signer
+  // completes. Our packets carry the deal's own details — the agency type, the
+  // appointed agent, the property, the price — on fields assigned to a signer,
+  // and on a parallel send the other parties open the document and find those
+  // lines blank. On an Appointed Agency form that means a client being asked to
+  // sign an agreement without seeing which agent is being appointed.
+  //
+  // In order, with the client first, every later signer sees everything the
+  // earlier ones did. The cost is real and accepted: co-buyers can no longer
+  // sign simultaneously, they go one after the other. The box below still turns
+  // it off for a packet that genuinely has nothing prefilled to share.
+  const [inOrder,    setInOrder]    = React.useState(true)
   const [values,     setValues]     = React.useState({})     // fieldId → value
 
   const tpl = templates.find(t => t.template_id === templateId)
@@ -2234,14 +2244,27 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
         // Seed signer name/email from the deal's linked contact (+ spouse for a
         // second client role) and the acting agent. See seedSignersFromDeal.
-        const tokenVals = crmTokenValues({ deal, property, contact, agent: activeAgent })
+        //
+        // The token values follow the SAME people: every client on the deal (so
+        // `client_names` prints "Jane Doe and John Doe" on a two-buyer packet),
+        // and the deal's own agent rather than whoever happens to be sending —
+        // an admin sending on an agent's behalf must not have their own name
+        // printed as the appointed agent. See appointedAgent().
+        const tokenVals = crmTokenValues({
+          deal, property, contact,
+          additionalContacts: extraContacts,
+          agent: appointedAgent({ activeAgent, dealAgents }),
+        })
         setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent, dealAgents }))
 
         const seededValues = {}
         for (const f of fields) {
           // Tick boxes start as null — "leave it to the signer" — rather than
           // false, so an untouched box isn't sent out locked as a deliberate no.
-          seededValues[f.id] = isTickableField(f.type) ? null : (tokenVals[f.id] || '')
+          // fieldTokenValue matches on the field's id, name OR label, normalized
+          // for case and separators — BoldSign auto-assigns the id (`Label1`), so
+          // a hand-typed token usually lives in the name or the label.
+          seededValues[f.id] = isTickableField(f.type) ? null : fieldTokenValue(tokenVals, f)
         }
         setValues(seededValues)
       })
@@ -2374,11 +2397,32 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // Deal data sitting on a role-scoped field — the template needs fixing, and no
   // send-time payload can work around it. Named here because the agent about to
   // send is the person who will hear about the blank from the client.
-  const sharedGaps = sharedDataOnSignerFields({ fields, values })
+  // Who signs first decides what everyone else can see: BoldSign reveals a
+  // signer's fields to the rest once that signer completes, so prefilled details
+  // carried by the first signer reach every later one. Filled rows in template
+  // order — the same order buildTemplateRoles emits.
+  const firstSignerIndex = (details?.roles || [])
+    .filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())[0]?.index ?? null
+  const sharedGaps = sharedDataOnSignerFields({ fields, values, firstSignerIndex, inOrder })
+
+  // What BoldSign actually calls this field, and whether it matched a CRM token.
+  // A blank box used to be unreadable — "did the deal have no value, or is the
+  // field named something the CRM doesn't recognise?" — and the answer lived in
+  // an API response nobody could see. It is on screen now: the field's real id,
+  // and the token it resolved to when it resolved to one.
+  const fieldOrigin = (f) => {
+    const token = fieldTokenKey(f)
+    return token && normalizeTokenKey(f.id) !== token ? `${f.id} → ${token}` : String(f.id || '')
+  }
 
   const renderTextField = (f) => (
     <div key={f.id} style={{ marginBottom:8 }}>
-      <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2 }}>{f.label || prettyLabel(f.id)}</div>
+      <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2, display:'flex', gap:8, alignItems:'baseline' }}>
+        <span style={{ flex:1 }}>{f.label || f.name || prettyLabel(f.id)}</span>
+        <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7 }} title="The field id BoldSign uses, and the CRM token it matched">
+          {fieldOrigin(f)}
+        </span>
+      </div>
       {f.options?.length
         ? (
           <select className="form-control" value={values[f.id] || ''} onChange={e => setValue(f.id, e.target.value)}>
@@ -2467,7 +2511,9 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 <input type="checkbox" checked={inOrder} onChange={e => setInOrder(e.target.checked)} style={{ width:14, height:14, cursor:'pointer' }}/>
                 <span style={{ fontSize:12, flex:1 }}>
                   <strong>Sign in this order</strong> — each signer waits for the one above.
-                  <span style={{ color:'var(--gw-mist)' }}> Leave off and everyone gets it at once (best for co-buyers).</span>
+                  <span style={{ color:'var(--gw-mist)' }}> Keep this on unless nothing above is prefilled: BoldSign
+                    only shows a signer&rsquo;s fields to the others once that signer has finished, so sending to
+                    everyone at once means the client opens the packet with the prefilled lines blank.</span>
                 </span>
               </label>
             </div>
@@ -2504,10 +2550,16 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
               <div style={{ background:'#fffbe6', border:'1px solid #d4a017', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:12, fontSize:12, lineHeight:1.6 }}>
                 <strong>Some deal details will not be visible to everyone right away.</strong>
                 <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
-                  {sharedGaps.map(f => `“${f.label || prettyLabel(f.id)}” (${roleNameFor(f.roleIndex)})`).join(', ')} —
-                  {' '}these are filled in, but the template assigns them to one signer, so the other parties
-                  cannot see them until that signer finishes. Ask an admin to make them <strong>Label</strong> fields
-                  in the BoldSign template and they will show to everyone immediately.
+                  {sharedGaps.map(f => `“${f.label || f.name || prettyLabel(f.id)}” (${roleNameFor(f.roleIndex)})`).join(', ')} —
+                  {' '}these are filled in, but each is assigned to one signer, and BoldSign only shows a
+                  signer&rsquo;s fields to the others once that signer has finished.
+                  {inOrder
+                    ? <> They belong to someone who signs <strong>after</strong> {roleNameFor(firstSignerIndex)}, so the
+                        earlier signers open the document with those lines blank. Fix it in the BoldSign template by
+                        assigning them to the first signer (read-only), or by making them <strong>Label</strong> fields.</>
+                    : <> This send goes to everyone at once, so nobody sees anybody else&rsquo;s fields. Tick
+                        <strong> Sign in this order</strong> above and put the client first, or ask an admin to make
+                        them <strong>Label</strong> fields, which every signer sees whatever the order.</>}
                 </div>
               </div>
             )}

@@ -807,7 +807,35 @@ parties cannot see them until that signer finishes." The fix is in BoldSign —
 make those fields Labels — and then the warning disappears.
 
 ## CRM prefill tokens
-`property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `broker_name` · `agent_name` · `agent_email` · `list_price` · `commission_pct` · `commission_amount` · `listing_start_date` · `listing_end_date` · `close_date`
+`property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `seller_names` / `client_names` · `seller_2_name` / `client_2_name` · `broker_name` · `agent_name` · `agent_email` · `list_price` · `commission_pct` · `commission_amount` · `listing_start_date` · `listing_end_date` · `close_date`
+
+**Field ids match case-insensitively.** Ids are typed by hand in BoldSign's
+editor, where `Agent_Name` and `agent_name` look like the same thing, and a
+mismatch used to fail silently as an empty box the agent retyped every send.
+`tokenValueFor()` owns this.
+
+**Which client token to use.** `client_name` is the **primary contact alone** —
+right for a form with one "Client" line. `client_names` is **every client on the
+deal**, written as a parties clause ("Jane Doe and John Doe"), which is what the
+"entered into by and between ______" line of an agency agreement needs: naming
+only the primary buyer misstates who is bound by it. `client_2_name` is the
+co-buyer on their own, for forms with a second named line. The `seller_*` names
+are aliases of the same values. All of them come from `dealClientList()` — the
+primary contact, then **Additional Contacts**, then the primary's stored
+`spouse_name` when no additional contact is linked — which is the same list
+`seedSignersFromDeal()` uses for the signature rows, so the parties clause and
+the signer rows can never disagree about who the clients are.
+
+**`agent_name` / `agent_email` are the deal's agent, not the sender.**
+`appointedAgent()` applies the rule the signer rows already followed: the acting
+agent only when they are on the deal, otherwise the deal's own first agent. These
+were hard-wired to the acting agent, so an admin or TC sending a packet on an
+agent's behalf printed *their* name into the agreement — on an Appointed Agency
+form that is a licensing statement about the wrong person — while the signature
+row below correctly named the agent.
+
+**`broker_name` is effectively always blank:** `agents` has no brokerage column.
+Put the firm name in the template as fixed text.
 
 Both commission tokens come from the agent's entry on the deal's **Details** tab
 (`deals.commission_type` / `commission_pct` / `commission_flat` — migration 0024).
@@ -968,14 +996,53 @@ unchanged, so payloads that already worked are unaffected.
 This only became reachable once co-agent seeding started filling a *middle* role
 (#56) — before that, blanks were always trailing.
 
-## Signing order
-Parallel is the **default**. `signerOrder` was previously hard-wired to the role
-index, which forced strictly sequential signing on every template send — two
-co-buyers at the same kitchen table couldn't sign together, because the second
-signer's email wasn't sent until the first finished and the webhook landed. The
-send modal now has a **"Sign in this order"** checkbox for the cases that need it
-(client signs, then the agent countersigns); left off, everyone is notified at
-once.
+## Signing order — sequential by default, because visibility depends on it
+**"Sign in this order" is ON by default**, and the order is the template's role
+order (client first, agent last, per the role convention above).
+
+This has been reversed twice, so the reasoning matters:
+
+1. `signerOrder` was originally hard-wired to the role index — strictly
+   sequential on every send. Two co-buyers at the same kitchen table couldn't
+   sign together, because the second one's email wasn't sent until the first
+   finished and the webhook landed.
+2. So parallel became the default, with a checkbox for the cases that needed
+   ordering.
+3. **Now sequential is the default again**, for a reason that has nothing to do
+   with convenience: BoldSign scopes field visibility by role. A field assigned
+   to a signer is invisible to every other recipient *until that signer
+   completes*. Our packets carry the deal's own details on role-scoped fields, so
+   on a parallel send the client opens an Appointed Agency Agreement and finds
+   the agency type and the appointed agent's name blank — they are on the
+   agent's role, and the agent signs last. In order, with the client first, every
+   later signer sees everything the earlier ones did.
+
+The cost is real and accepted: **co-buyers sign one after the other, not
+together.** The checkbox still turns it off for a packet with nothing prefilled
+to share.
+
+### The two ways to make prefilled data visible to everyone
+Either is correct, and `sharedDataOnSignerFields()` only warns when neither holds:
+
+| | works when | order-dependent? |
+|---|---|---|
+| **Label** field | always | no |
+| role-scoped field **on the first signer**, read-only | in-order sends | yes |
+
+The second is what the templates actually do — the prefilled data sits on the
+buyer's role with **Read Only** ticked, and the buyer signs first. It needs no
+field-type changes, which is why it was adopted over converting everything to
+Labels. It breaks the moment a send goes out parallel, or the data is assigned to
+a signer who isn't first, and the send modal names the offending fields in both
+cases.
+
+**Signature and initial fields never move.** Reassigning a signature field to
+another role means the wrong person signs. Only *prefilled data* belongs on the
+first signer.
+
+**Watch Required + Read Only.** A required, read-only field with no CRM value is
+a field the signer must complete and cannot — a dead end at signing time. Either
+guarantee the token resolves, or untick Required on CRM-filled fields.
 
 ## Roadmap
 1. ✅ Text-tags authoring + retired coordinate auto-placement.

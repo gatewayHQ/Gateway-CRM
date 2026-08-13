@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -404,6 +404,159 @@ describe('buildTemplateRoles — index shift after role removal', () => {
 // the moment the document is sent, editable by none, prefilled through ONE role's
 // existingFormFields. These tests pin the routing that makes that true.
 // ─────────────────────────────────────────────────────────────────────────────
+describe('client name tokens — every party named, not just the primary contact', () => {
+  const jane = { first_name: 'Jane', last_name: 'Doe', email: 'jane@x.com' }
+  const john = { first_name: 'John', last_name: 'Doe', email: 'john@x.com' }
+  const acme = { first_name: 'Acme', last_name: 'Holdings LLC', email: 'ops@acme.com' }
+
+  it('prints both buyers on the parties line — naming one misstates who is bound', () => {
+    const v = crmTokenValues({ contact: jane, additionalContacts: [john] })
+    expect(v.client_names).toBe('Jane Doe and John Doe')
+    expect(v.seller_names).toBe('Jane Doe and John Doe')
+    expect(v.client_name).toBe('Jane Doe')      // the primary alone, unchanged
+    expect(v.client_2_name).toBe('John Doe')
+  })
+
+  it('reads as a sentence with three or more parties', () => {
+    expect(crmTokenValues({ contact: jane, additionalContacts: [john, acme] }).client_names)
+      .toBe('Jane Doe, John Doe and Acme Holdings LLC')
+  })
+
+  it('falls back to the stored spouse name when no additional contact is linked', () => {
+    const v = crmTokenValues({ contact: { ...jane, spouse_name: 'John Doe' } })
+    expect(v.client_names).toBe('Jane Doe and John Doe')
+    expect(v.client_2_name).toBe('John Doe')
+  })
+
+  it('ignores the spouse name once a real co-buyer is linked — no duplicate party', () => {
+    const v = crmTokenValues({ contact: { ...jane, spouse_name: 'Stale Spouse' }, additionalContacts: [john] })
+    expect(v.client_names).toBe('Jane Doe and John Doe')
+  })
+
+  it('is just the one name on a single-buyer deal, with no dangling "and"', () => {
+    const v = crmTokenValues({ contact: jane })
+    expect(v.client_names).toBe('Jane Doe')
+    expect(v.client_2_name).toBe('')
+  })
+
+  it('leaves every client token blank when the deal has no contact', () => {
+    const v = crmTokenValues({})
+    expect(v.client_names).toBe('')
+    expect(v.client_name).toBe('')
+    expect(v.client_2_name).toBe('')
+  })
+
+  it('seeds signer rows from the same list the printed names come from', () => {
+    // The parties clause and the signature rows must never disagree about who
+    // the clients are.
+    const roles = [{ index: 1, name: 'Buyer' }, { index: 2, name: 'Co-Buyer' }]
+    const seeded = seedSignersFromDeal({ roles, contact: jane, additionalContacts: [john] })
+    const printed = crmTokenValues({ contact: jane, additionalContacts: [john] })
+    expect([seeded[1].name, seeded[2].name]).toEqual(['Jane Doe', 'John Doe'])
+    expect(printed.client_names).toBe('Jane Doe and John Doe')
+  })
+})
+
+describe('appointedAgent — the agreement names the deal’s agent, not the sender', () => {
+  const alex  = { name: 'Alex Agent',  email: 'alex@brokerage.com' }
+  const nic   = { name: 'Nic Madsen',  email: 'nic@brokerage.com' }
+  const admin = { name: 'Office Admin', email: 'admin@brokerage.com' }
+
+  it('REGRESSION: a TC sending on an agent’s behalf does not get named as the agent', () => {
+    // An Appointed Agency form states who is licensed to represent the client.
+    // Printing the coordinator's name there is a statement about the wrong
+    // person — and the signature row below already named the agent correctly.
+    expect(appointedAgent({ activeAgent: admin, dealAgents: [alex] })).toEqual(alex)
+    expect(crmTokenValues({ agent: appointedAgent({ activeAgent: admin, dealAgents: [alex] }) }).agent_name)
+      .toBe('Alex Agent')
+  })
+
+  it('keeps the acting agent when they are actually on the deal', () => {
+    expect(appointedAgent({ activeAgent: nic, dealAgents: [alex, nic] })).toEqual(nic)
+  })
+
+  it('matches the acting agent by email regardless of how the name is stored', () => {
+    expect(appointedAgent({ activeAgent: { name: 'A. Agent', email: 'ALEX@brokerage.com' }, dealAgents: [alex] }))
+      .toMatchObject({ email: 'ALEX@brokerage.com' })
+  })
+
+  it('falls back to the sender when the deal has no agents on it', () => {
+    expect(appointedAgent({ activeAgent: admin, dealAgents: [] })).toEqual(admin)
+  })
+
+  it('returns null when there is nobody to name', () => {
+    expect(appointedAgent()).toBeNull()
+    expect(appointedAgent({ activeAgent: { name: '', email: '' }, dealAgents: [] })).toBeNull()
+  })
+
+  it('agrees with the agent-signer ordering the rows already use', () => {
+    expect(appointedAgent({ activeAgent: admin, dealAgents: [alex, nic] }).email)
+      .toBe(orderAgentSigners({ activeAgent: admin, dealAgents: [alex, nic] })[0].email)
+  })
+})
+
+describe('fieldTokenValue — finding the token wherever BoldSign put it', () => {
+  const vals = crmTokenValues({ contact: { first_name: 'Jane', last_name: 'Doe' }, agent: { name: 'Alex Agent' } })
+
+  it('REGRESSION: matches the field NAME, because BoldSign auto-assigns the id', () => {
+    // The reported failure: a template carefully labelled `client_names` arrived
+    // blank. BoldSign had assigned the field id `Label1` (the ids in its own API
+    // examples), the CRM matched on id alone, and the send screen showed an empty
+    // box with nothing to explain it.
+    expect(fieldTokenValue(vals, { id: 'Label1', name: 'client_names' })).toBe('Jane Doe')
+    expect(fieldTokenValue(vals, { id: 'Label2', name: 'agent_name' })).toBe('Alex Agent')
+  })
+
+  it('matches the label too, for a field whose caption carries the token', () => {
+    expect(fieldTokenValue(vals, { id: 'Label3', label: 'agent_name' })).toBe('Alex Agent')
+  })
+
+  it('prefers the id when the id is itself a token', () => {
+    expect(fieldTokenValue(vals, { id: 'agent_name', name: 'client_name' })).toBe('Alex Agent')
+  })
+
+  it('normalizes case, spaces and dashes — all one token', () => {
+    expect(fieldTokenValue(vals, { id: 'Agent_Name' })).toBe('Alex Agent')
+    expect(fieldTokenValue(vals, { id: 'x', name: 'Agent Name' })).toBe('Alex Agent')
+    expect(fieldTokenValue(vals, { id: 'x', name: 'AGENT-NAME' })).toBe('Alex Agent')
+    expect(fieldTokenValue(vals, 'Client_names')).toBe('Jane Doe')
+  })
+
+  it('names which token a field resolved to, for the send screen’s field id hint', () => {
+    expect(fieldTokenKey({ id: 'Label1', name: 'Client Names' })).toBe('client_names')
+    expect(fieldTokenKey({ id: 'Label9', name: 'Buyer licence' })).toBe('')
+  })
+
+  it('returns empty for a field that is not one of our tokens', () => {
+    expect(fieldTokenValue(vals, { id: 'Label7', name: 'buyer_license_no' })).toBe('')
+    expect(fieldTokenValue(vals, { id: '' })).toBe('')
+    expect(fieldTokenValue(vals, null)).toBe('')
+    expect(fieldTokenValue(undefined, { id: 'agent_name' })).toBe('')
+  })
+
+  it('flags shared data on a signer field however the token was spelled', () => {
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'List_Price', type: 'Textbox', roleIndex: 2 }], values: { List_Price: '$1,350,000' },
+    }).map(f => f.id)).toEqual(['List_Price'])
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'Label4', name: 'list_price', type: 'Textbox', roleIndex: 2 }], values: { Label4: '$1,350,000' },
+    }).map(f => f.id)).toEqual(['Label4'])
+  })
+})
+
+describe('joinNames', () => {
+  it('reads as a parties clause rather than a comma list', () => {
+    expect(joinNames(['Jane'])).toBe('Jane')
+    expect(joinNames(['Jane', 'John'])).toBe('Jane and John')
+    expect(joinNames(['Jane', 'John', 'Acme LLC'])).toBe('Jane, John and Acme LLC')
+  })
+  it('drops blanks and handles nothing at all', () => {
+    expect(joinNames(['Jane', '', '  ', 'John'])).toBe('Jane and John')
+    expect(joinNames([])).toBe('')
+    expect(joinNames()).toBe('')
+  })
+})
+
 describe('isSharedField / partitionPrefillFields — which fields everyone can see', () => {
   it('treats Label (only) as the shared field type', () => {
     expect(isSharedField('Label')).toBe(true)
@@ -544,6 +697,54 @@ describe('sharedDataOnSignerFields — templates that will hide deal data from a
       values: { property_full: 'Somewhere', list_price: '$1,350,000' },
     })
     expect(gaps.map(f => f.id)).toEqual(['list_price'])
+  })
+
+  // The sanctioned template pattern: prefilled data lives on the FIRST signer's
+  // role, read-only, and every later signer sees it once that signer completes.
+  // Flagging it would train agents to ignore the warning that matters.
+  it('stays quiet when the first signer carries the data on an in-order send', () => {
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'agent_name', type: 'Name', roleIndex: 1 }],
+      values: { agent_name: 'Alex Agent' },
+      firstSignerIndex: 1, inOrder: true,
+    })).toEqual([])
+  })
+
+  it('flags it when the field belongs to someone who signs LATER', () => {
+    // Nobody ahead of role 2 ever sees this — the exact Appointed Agency bug.
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'agent_name', type: 'Name', roleIndex: 2 }],
+      values: { agent_name: 'Alex Agent' },
+      firstSignerIndex: 1, inOrder: true,
+    }).map(f => f.id)).toEqual(['agent_name'])
+  })
+
+  it('flags it on a PARALLEL send even when the first signer carries it', () => {
+    // Everyone opens at once, so nobody has completed and nobody sees anybody
+    // else's fields.
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'agent_name', type: 'Name', roleIndex: 1 }],
+      values: { agent_name: 'Alex Agent' },
+      firstSignerIndex: 1, inOrder: false,
+    }).map(f => f.id)).toEqual(['agent_name'])
+  })
+
+  it('treats a field naming no role as the first signer’s — it rides the anchor role', () => {
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'list_price', type: 'Textbox', roleIndex: null }],
+      values: { list_price: '$1,350,000' },
+      firstSignerIndex: 1, inOrder: true,
+    })).toEqual([])
+  })
+
+  it('never flags a Label, whatever the order or the role', () => {
+    for (const inOrder of [true, false]) {
+      expect(sharedDataOnSignerFields({
+        fields: [{ id: 'list_price', type: 'Label', roleIndex: 2 }],
+        values: { list_price: '$1,350,000' },
+        firstSignerIndex: 1, inOrder,
+      })).toEqual([])
+    }
   })
 
   it('says nothing about a field left blank — nothing is being hidden', () => {
