@@ -307,18 +307,37 @@ export function buildPrefillFields({ fields = [], values = {}, filledRoleIndices
   return { sharedFormFields, byRole, sharedIds, signerScopedIds, anchorRoleIndex: anchor ?? null }
 }
 
-// Templates the CRM cannot fix by itself: a field carrying shared deal data
-// (a CRM token) that is NOT a Label, so BoldSign will hide it from everyone
-// except its assigned signer until that signer is done. Returns the offending
-// fields so the send modal can name them and an admin can convert them to Labels
-// in the template. Empty is the healthy state.
-export function sharedDataOnSignerFields({ fields = [], values = {} } = {}) {
-  return (fields || []).filter(f => (
-    f?.id
-    && !isSharedField(f.type)
-    && isCrmToken(f)
-    && Boolean(prefillFieldEntry(f, values?.[f.id]))
-  ))
+// Prefilled deal data that some party will NOT be able to see when they open the
+// document. Returns the offending fields so the send modal can name them; empty
+// is the healthy state.
+//
+// There are two ways to get this right, and this only complains when neither
+// holds:
+//
+//   1. A **Label**. Common to the document, visible to everyone from the moment
+//      it is sent, in any order. Always fine.
+//   2. A role-scoped field **assigned to the first signer, on an in-order send**.
+//      BoldSign reveals a signer's fields to the remaining recipients once that
+//      signer completes, so if the client signs first and carries the prefilled
+//      details, everyone downstream sees them at the moment they are asked to
+//      sign. This is the pattern our templates actually use — the data sits on
+//      the buyer's role, read-only — and flagging it would train agents to
+//      ignore the warning that matters.
+//
+// So what is left is genuinely broken: prefilled data on a signer who is NOT
+// first (nobody ahead of them sees it), or any role-scoped prefill on a parallel
+// send (everyone opens at once, so nobody sees anybody else's fields).
+//
+// A field naming no role rides on the anchor role, which is the first signer —
+// so it is judged as if it were assigned there.
+export function sharedDataOnSignerFields({ fields = [], values = {}, firstSignerIndex = null, inOrder = false } = {}) {
+  return (fields || []).filter(f => {
+    if (!f?.id || isSharedField(f.type) || !isCrmToken(f)) return false
+    if (!prefillFieldEntry(f, values?.[f.id])) return false
+    const owner = f.roleIndex == null ? firstSignerIndex : Number(f.roleIndex)
+    const carriedByFirstSigner = firstSignerIndex != null && owner === Number(firstSignerIndex)
+    return !(inOrder && carriedByFirstSigner)
+  })
 }
 
 // BoldSign wants a checkbox value as the string "true"/"false".

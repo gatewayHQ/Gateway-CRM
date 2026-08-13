@@ -699,6 +699,54 @@ describe('sharedDataOnSignerFields — templates that will hide deal data from a
     expect(gaps.map(f => f.id)).toEqual(['list_price'])
   })
 
+  // The sanctioned template pattern: prefilled data lives on the FIRST signer's
+  // role, read-only, and every later signer sees it once that signer completes.
+  // Flagging it would train agents to ignore the warning that matters.
+  it('stays quiet when the first signer carries the data on an in-order send', () => {
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'agent_name', type: 'Name', roleIndex: 1 }],
+      values: { agent_name: 'Alex Agent' },
+      firstSignerIndex: 1, inOrder: true,
+    })).toEqual([])
+  })
+
+  it('flags it when the field belongs to someone who signs LATER', () => {
+    // Nobody ahead of role 2 ever sees this — the exact Appointed Agency bug.
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'agent_name', type: 'Name', roleIndex: 2 }],
+      values: { agent_name: 'Alex Agent' },
+      firstSignerIndex: 1, inOrder: true,
+    }).map(f => f.id)).toEqual(['agent_name'])
+  })
+
+  it('flags it on a PARALLEL send even when the first signer carries it', () => {
+    // Everyone opens at once, so nobody has completed and nobody sees anybody
+    // else's fields.
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'agent_name', type: 'Name', roleIndex: 1 }],
+      values: { agent_name: 'Alex Agent' },
+      firstSignerIndex: 1, inOrder: false,
+    }).map(f => f.id)).toEqual(['agent_name'])
+  })
+
+  it('treats a field naming no role as the first signer’s — it rides the anchor role', () => {
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'list_price', type: 'Textbox', roleIndex: null }],
+      values: { list_price: '$1,350,000' },
+      firstSignerIndex: 1, inOrder: true,
+    })).toEqual([])
+  })
+
+  it('never flags a Label, whatever the order or the role', () => {
+    for (const inOrder of [true, false]) {
+      expect(sharedDataOnSignerFields({
+        fields: [{ id: 'list_price', type: 'Label', roleIndex: 2 }],
+        values: { list_price: '$1,350,000' },
+        firstSignerIndex: 1, inOrder,
+      })).toEqual([])
+    }
+  })
+
   it('says nothing about a field left blank — nothing is being hidden', () => {
     expect(sharedDataOnSignerFields({
       fields: [{ id: 'list_price', type: 'Textbox', roleIndex: 2 }], values: {},
