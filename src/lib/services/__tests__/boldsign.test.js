@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -544,6 +544,81 @@ describe('fieldTokenValue — finding the token wherever BoldSign put it', () =>
   })
 })
 
+describe('Name fields — BoldSign prints the signer’s own name and ignores ours', () => {
+  it('classifies Name as signer-bound, and nothing else as signer-bound', () => {
+    expect(isSignerBoundField('Name')).toBe(true)
+    expect(isSignerBoundField('name')).toBe(true)
+    expect(isSignerBoundField('Textbox')).toBe(false)
+    expect(isSignerBoundField('Label')).toBe(false)
+    expect(isSignerBoundField('CheckBox')).toBe(false)
+    expect(isSignerBoundField(undefined)).toBe(false)
+  })
+
+  it('never offers a Name field as something to fill in', () => {
+    expect(isFillableField('Name')).toBe(false)
+    // …but still DISCOVERS it, so a misused one gets reported rather than hidden.
+    expect(isPrefillableField('Name')).toBe(true)
+  })
+
+  it('THE REQUIREMENT: no value is ever sent for a Name field', () => {
+    // BoldSign would accept this and discard it, leaving the send screen, the
+    // payload and the audit log all claiming a value the document never shows.
+    expect(prefillFieldEntry({ id: 'agent_name', type: 'Name' }, 'Alex Agent')).toBeNull()
+    expect(prefillFieldEntry({ id: 'Name1', type: 'name' }, 'Jane Buyer')).toBeNull()
+  })
+
+  it('keeps Name values out of both the shared list and every role’s list', () => {
+    const { sharedFormFields, byRole, signerScopedIds } = buildPrefillFields({
+      fields: [
+        { id: 'agent_name',    type: 'Name',    roleIndex: 1 },
+        { id: 'property_full', type: 'Label',   roleIndex: 1 },
+        { id: 'county',        type: 'Textbox', roleIndex: 1 },
+      ],
+      values: { agent_name: 'Alex Agent', property_full: '2212 Okoboji Ave', county: 'Dickinson' },
+      filledRoleIndices: [1],
+    })
+    expect(sharedFormFields.map(f => f.id)).toEqual(['property_full'])
+    expect(byRole[1].map(f => f.id)).toEqual(['county'])
+    expect(signerScopedIds).not.toContain('agent_name')
+  })
+
+  it('reports a Name field carrying a CRM token — the wrong-name defect', () => {
+    const bad = signerBoundPrefillFields({
+      fields: [
+        { id: 'Name1', name: 'agent_name', type: 'Name', roleIndex: 1 },
+        { id: 'Name2', type: 'Name', roleIndex: 2 },
+      ],
+      values: {},
+    })
+    expect(bad.map(f => f.id)).toEqual(['Name1'])
+  })
+
+  it('reports a Name field the agent typed into, token or not', () => {
+    expect(signerBoundPrefillFields({
+      fields: [{ id: 'Name3', label: 'Trustee', type: 'Name', roleIndex: 1 }],
+      values: { Name3: 'The Doe Family Trust' },
+    }).map(f => f.id)).toEqual(['Name3'])
+  })
+
+  it('leaves a plain Name field alone — that one really is the signer’s own name', () => {
+    expect(signerBoundPrefillFields({
+      fields: [{ id: 'Name1', type: 'Name', roleIndex: 1 }],
+      values: { Name1: '' },
+    })).toEqual([])
+    expect(signerBoundPrefillFields()).toEqual([])
+  })
+
+  it('ignores every other field type — this audit is about Name fields only', () => {
+    expect(signerBoundPrefillFields({
+      fields: [
+        { id: 'agent_name', type: 'Textbox', roleIndex: 1 },
+        { id: 'list_price', type: 'Label',   roleIndex: 1 },
+      ],
+      values: { agent_name: 'Alex Agent', list_price: '$1,350,000' },
+    })).toEqual([])
+  })
+})
+
 describe('joinNames', () => {
   it('reads as a parties clause rather than a comma list', () => {
     expect(joinNames(['Jane'])).toBe('Jane')
@@ -591,8 +666,19 @@ describe('isSharedField / partitionPrefillFields — which fields everyone can s
   })
 
   it('survives an empty or missing field list', () => {
-    expect(partitionPrefillFields()).toEqual({ shared: [], signerSpecific: [] })
-    expect(partitionPrefillFields([])).toEqual({ shared: [], signerSpecific: [] })
+    expect(partitionPrefillFields()).toEqual({ shared: [], signerSpecific: [], signerBound: [] })
+    expect(partitionPrefillFields([])).toEqual({ shared: [], signerSpecific: [], signerBound: [] })
+  })
+
+  it('keeps Name fields in their own bucket — they are neither shared nor prefillable', () => {
+    const { shared, signerSpecific, signerBound } = partitionPrefillFields([
+      { id: 'property_full', type: 'Label',   roleIndex: 1 },
+      { id: 'county',        type: 'Textbox', roleIndex: 2 },
+      { id: 'agent_name',    type: 'Name',    roleIndex: 2 },
+    ])
+    expect(shared.map(f => f.id)).toEqual(['property_full'])
+    expect(signerSpecific.map(f => f.id)).toEqual(['county'])
+    expect(signerBound.map(f => f.id)).toEqual(['agent_name'])
   })
 })
 
@@ -713,7 +799,7 @@ describe('sharedDataOnSignerFields — templates that will hide deal data from a
   it('flags it when the field belongs to someone who signs LATER', () => {
     // Nobody ahead of role 2 ever sees this — the exact Appointed Agency bug.
     expect(sharedDataOnSignerFields({
-      fields: [{ id: 'agent_name', type: 'Name', roleIndex: 2 }],
+      fields: [{ id: 'agent_name', type: 'Textbox', roleIndex: 2 }],
       values: { agent_name: 'Alex Agent' },
       firstSignerIndex: 1, inOrder: true,
     }).map(f => f.id)).toEqual(['agent_name'])
@@ -723,10 +809,49 @@ describe('sharedDataOnSignerFields — templates that will hide deal data from a
     // Everyone opens at once, so nobody has completed and nobody sees anybody
     // else's fields.
     expect(sharedDataOnSignerFields({
-      fields: [{ id: 'agent_name', type: 'Name', roleIndex: 1 }],
+      fields: [{ id: 'agent_name', type: 'Textbox', roleIndex: 1 }],
       values: { agent_name: 'Alex Agent' },
       firstSignerIndex: 1, inOrder: false,
     }).map(f => f.id)).toEqual(['agent_name'])
+  })
+
+  // A pre-ticked box is OUR decision — a term of the agreement, not the signer's
+  // own input — so it is subject to exactly the same visibility rule as a price.
+  // Nothing reported this before: the old CRM-token gate could never match a
+  // checkbox, so "Exclusive Agency" on the agent's role went out invisible to the
+  // seller with no warning anywhere.
+  it('flags a checkbox WE pre-ticked that the other parties cannot see', () => {
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'exclusive_agency', type: 'CheckBox', roleIndex: 2 }],
+      values: { exclusive_agency: true },
+      firstSignerIndex: 1, inOrder: true,
+    }).map(f => f.id)).toEqual(['exclusive_agency'])
+  })
+
+  it('flags a deliberately UNticked box too — an unticked box is itself a term', () => {
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'seller_pays', type: 'CheckBox', roleIndex: 2 }],
+      values: { seller_pays: false },
+      firstSignerIndex: 1, inOrder: true,
+    }).map(f => f.id)).toEqual(['seller_pays'])
+  })
+
+  it('says nothing about a box left to the signer — we are hiding nothing', () => {
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'exclusive_agency', type: 'CheckBox', roleIndex: 2 }],
+      values: { exclusive_agency: null },
+      firstSignerIndex: 1, inOrder: true,
+    })).toEqual([])
+  })
+
+  it('never flags a Name field — nothing we send reaches one at all', () => {
+    // Reported by signerBoundPrefillFields instead, which is a louder problem:
+    // not "hidden from someone" but "will print the wrong name for everyone".
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'agent_name', type: 'Name', roleIndex: 2 }],
+      values: { agent_name: 'Alex Agent' },
+      firstSignerIndex: 1, inOrder: true,
+    })).toEqual([])
   })
 
   it('treats a field naming no role as the first signer’s — it rides the anchor role', () => {
@@ -753,9 +878,25 @@ describe('sharedDataOnSignerFields — templates that will hide deal data from a
     })).toEqual([])
   })
 
-  it('says nothing about a signer’s own input — a licence number is not shared data', () => {
+  // DELIBERATE CHANGE. This used to be exempt, on the reasoning that a licence
+  // number is the agent's own detail rather than shared deal data. But the value
+  // is one WE put on the document before anyone opened it, and the party being
+  // asked to sign cannot see it — which is the same defect whatever the caption
+  // says. The exemption also could not be drawn accurately: it keyed off "is this
+  // a CRM token", which silently excused every pre-ticked checkbox as well.
+  it('flags any value the SENDER supplied, not only the ones matching a CRM token', () => {
     expect(sharedDataOnSignerFields({
-      fields: [{ id: 'agent_license', type: 'Textbox', roleIndex: 2 }], values: { agent_license: 'S-60912' },
+      fields: [{ id: 'agent_license', type: 'Textbox', roleIndex: 2 }],
+      values: { agent_license: 'S-60912' },
+      firstSignerIndex: 1, inOrder: true,
+    }).map(f => f.id)).toEqual(['agent_license'])
+  })
+
+  it('still stays quiet when that same value rides the first signer in order', () => {
+    expect(sharedDataOnSignerFields({
+      fields: [{ id: 'agent_license', type: 'Textbox', roleIndex: 1 }],
+      values: { agent_license: 'S-60912' },
+      firstSignerIndex: 1, inOrder: true,
     })).toEqual([])
   })
 
