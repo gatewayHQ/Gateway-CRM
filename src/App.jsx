@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase.js'
 import { primeCache, invalidate } from './lib/queryCache.js'
 import { fetchVisibleDeals, fetchVisibleCommissions } from './lib/services/deals.js'
+import { fetchVisibleProperties } from './lib/services/properties.js'
 import { resolveStageLabels } from './lib/stageLabels.js'
 import { isOfficeAdmin } from './lib/officeAdmins.js'
 import { teamVisibleAgentIds } from './lib/teamVisibility.js'
@@ -390,9 +391,10 @@ export default function App() {
         isAdminAgent
           ? supabase.from('contacts').select('*').order('created_at', { ascending: false })
           : supabase.from('contacts').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
-        isAdminAgent
-          ? supabase.from('properties').select('*').order('created_at', { ascending: false })
-          : supabase.from('properties').select('*').in('assigned_agent_id', myPropertyVisible).order('created_at', { ascending: false }),
+        // Assigned to me + team peers sharing properties + anything I co-agent
+        fetchVisibleProperties(supabase, {
+          isAdmin: isAdminAgent, agentId: matched.id, propertyAgentIds: myPropertyVisible,
+        }),
         // Own + team-shared + co-listed (commission participant) deals
         fetchVisibleDeals(supabase, { isAdmin: isAdminAgent, agentId: matched.id, dealAgentIds: myDealVisible }),
         // Tasks are personal — never shared, even for an admin
