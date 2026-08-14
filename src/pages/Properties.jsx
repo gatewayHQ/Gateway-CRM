@@ -1478,7 +1478,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
 
 // ─── Properties page ──────────────────────────────────────────────────────────
 
-export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgentIds, focusRecord, onFocusHandled }) {
+export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAgentIds, isAdmin, focusRecord, onFocusHandled }) {
   const [view, setView]               = useState('grid')
   const [search, setSearch]           = useState('')
   const [filterType, setFilterType]   = useState('')
@@ -1513,11 +1513,17 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
     return true
   })
 
+  // Scoped by the PROPERTY sharing list, not the contacts one — `properties`
+  // has no row-level scoping in the database (it is `allow_all_authenticated`),
+  // so this filter is the whole of a non-admin's property visibility.
+  // An admin re-reads the firm; everyone else re-reads their own scope. Without
+  // the admin arm this reload quietly shrank an admin's list to their own
+  // properties after every save (the same shape Contacts.jsx already handles).
   const reload = async () => {
-    if (!visibleAgentIds?.length) return
-    const { data, error } = await supabase.from('properties').select('*')
-      .in('assigned_agent_id', visibleAgentIds)
-      .order('created_at', { ascending: false })
+    if (!isAdmin && !propertyAgentIds?.length) return
+    let q = supabase.from('properties').select('*')
+    if (!isAdmin) q = q.in('assigned_agent_id', propertyAgentIds)
+    const { data, error } = await q.order('created_at', { ascending: false })
     if (!error && data) setDb(p => ({ ...p, properties: data }))
   }
 
