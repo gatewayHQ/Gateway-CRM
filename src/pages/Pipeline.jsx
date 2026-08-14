@@ -16,7 +16,7 @@ import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty } from '../lib/dealPeople.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, buildPrefillFields, sharedDataOnSignerFields, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2259,6 +2259,11 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
         const seededValues = {}
         for (const f of fields) {
+          // A Name field is left empty on purpose. BoldSign prints the assigned
+          // signer's own name in it and discards whatever we send, so seeding
+          // `agent_name` here would show the agent a value the document will
+          // never carry — the field is reported below instead of filled.
+          if (isSignerBoundField(f.type)) { seededValues[f.id] = ''; continue }
           // Tick boxes start as null — "leave it to the signer" — rather than
           // false, so an untouched box isn't sent out locked as a deliberate no.
           // fieldTokenValue matches on the field's id, name OR label, normalized
@@ -2405,6 +2410,21 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     .filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())[0]?.index ?? null
   const sharedGaps = sharedDataOnSignerFields({ fields, values, firstSignerIndex, inOrder })
 
+  // Name fields the template is using for somebody other than their own signer.
+  // Worse than the gap above and not fixable from here at all: BoldSign prints
+  // the assigned signer's name and silently drops whatever we send, so the
+  // document goes out with the WRONG name rather than a blank one.
+  const nameMisuse = signerBoundPrefillFields({ fields, values })
+
+  // Recomputed for the warning above, which names the value each misused Name
+  // field was SUPPOSED to print — that is what tells an admin which Label to
+  // put in its place. Same inputs as the seeding effect, and pure.
+  const tokenVals = React.useMemo(() => crmTokenValues({
+    deal, property, contact,
+    additionalContacts: extraContacts,
+    agent: appointedAgent({ activeAgent, dealAgents }),
+  }), [deal, property, contact, extraContacts, activeAgent, dealAgents])
+
   // What BoldSign actually calls this field, and whether it matched a CRM token.
   // A blank box used to be unreadable — "did the deal have no value, or is the
   // field named something the CRM doesn't recognise?" — and the answer lived in
@@ -2543,6 +2563,38 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
               </div>
             )}
 
+            {/* A Name field being used for someone other than its own signer.
+                This is the silent one — BoldSign accepts the value, ignores it,
+                and prints the assigned signer's name instead — so it is stated
+                as an outright defect in the template, with the fix. */}
+            {nameMisuse.length > 0 && (
+              <div style={{ background:'#fff5f5', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:12, fontSize:12, lineHeight:1.6 }} role="alert">
+                <strong>This template prints the wrong name in {nameMisuse.length === 1 ? 'one place' : `${nameMisuse.length} places`}.</strong>
+                <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
+                  A BoldSign <strong>Name</strong> field always shows the name of the signer it is assigned to, and ignores
+                  any value sent for it — so these cannot be filled from the CRM, and each one will show its own
+                  signer&rsquo;s name instead of what it is captioned for:
+                </div>
+                <ul style={{ margin:'6px 0 0', paddingLeft:18, color:'var(--gw-mist)' }}>
+                  {nameMisuse.map(f => {
+                    const token = fieldTokenKey(f)
+                    const want  = token ? tokenVals[token] : ''
+                    return (
+                      <li key={f.id}>
+                        “{f.label || f.name || prettyLabel(f.id)}” — assigned to {roleNameFor(f.roleIndex)}
+                        {token ? <>, meant to show <code>{token}</code>{want ? ` (“${want}”)` : ''}</> : ''}
+                      </li>
+                    )
+                  })}
+                </ul>
+                <div style={{ color:'var(--gw-mist)', marginTop:6 }}>
+                  Ask an admin to fix the template: delete each of these and place a <strong>Label</strong> in the same
+                  spot (BoldSign cannot change a placed field&rsquo;s type), naming the Label after the token above so it
+                  fills automatically. A Label is also read by every signer immediately, whatever the signing order.
+                </div>
+              </div>
+            )}
+
             {/* The one problem this modal cannot fix from here: shared deal data
                 the template put on a role's own field. Say which fields, and say
                 what it means, rather than letting a client find the blank. */}
@@ -2570,7 +2622,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 BoldSign's editor instead does NOT carry to the signers. */}
             {tickFields.length > 0 && (
               <div className="form-group">
-                <label className="form-label">Selections <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— set these here and they travel with the send, locked</span></label>
+                <label className="form-label">Selections <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— set these here and they travel with the send, locked. Each is still visible only to its own signer until they sign</span></label>
                 {tickFields.map(f => (
                   <div key={f.id} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
                     <div style={{ flex:1, fontSize:12 }}>{f.label || prettyLabel(f.id)}</div>
@@ -2594,10 +2646,12 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px' }}>
           <strong>Neither button sends anything.</strong> Both save this as a draft on the deal, filled in with the values above —
           from there you can download a filled PDF to print for the client, keep editing, and send only when they&rsquo;re happy.
-          Anything filled in above is carried locked: signers see it and cannot change it. <strong>Shared details</strong> are
+          Anything filled in above is carried locked, so no signer can change it. <strong>Shared details</strong> are
           the template&rsquo;s Label fields — one common copy every signer can read the moment the document arrives, without
-          waiting for anyone else to sign. Values typed or ticked inside BoldSign&rsquo;s own editor are placement previews
-          and do <strong>not</strong> reach the signers — set them here.
+          waiting for anyone else to sign. <strong>Signer details</strong> and <strong>Selections</strong> are locked too,
+          but each stays hidden from the other parties until its own signer has signed, which is why the order box above
+          matters. Values typed or ticked inside BoldSign&rsquo;s own editor are placement previews and do <strong>not</strong>
+          reach the signers — set them here.
         </div>
       </div>
       <div className="modal__foot">

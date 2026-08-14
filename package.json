@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check:enums": "node scripts/check-enums.mjs",
+    "audit:boldsign": "node scripts/audit-boldsign-templates.mjs",
     "test": "vitest run"
   },
   "dependencies": {
