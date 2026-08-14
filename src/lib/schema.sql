@@ -338,9 +338,18 @@ create or replace function app_current_agent_id()
 returns uuid language sql stable security definer set search_path = public as $$
   select id from agents where auth_id = auth.uid() limit 1;
 $$;
+-- Office admin: the explicit agents.is_admin flag, plus a legacy role-string
+-- fallback for profiles created before that column (migration 0005). The
+-- fallback is skipped for the two accounts that own the office-admin toggle —
+-- when they switch themselves off, RLS has to narrow with them (migration 0032;
+-- the list mirrors src/lib/officeAdmins.js).
 create or replace function app_is_admin()
 returns boolean language sql stable security definer set search_path = public as $$
-  select coalesce(bool_or(is_admin or role ilike '%admin%'), false)
+  select coalesce(bool_or(
+    is_admin
+    or (role ilike '%admin%'
+        and lower(coalesce(email, '')) not in ('erin@gatewayreadvisors.com', 'daniel@gatewayreadvisors.com'))
+  ), false)
   from agents where auth_id = auth.uid();
 $$;
 grant execute on function app_current_agent_id() to authenticated;
@@ -1558,11 +1567,16 @@ language sql stable security definer set search_path = public as $$
 $$;
 
 -- Office admin / transaction coordinator: explicit flag, with the legacy
--- role-string fallback for agents created before the column existed.
+-- role-string fallback for agents created before the column existed — and no
+-- fallback for the accounts that own the toggle (migration 0032; see above).
 create or replace function app_is_admin()
 returns boolean
 language sql stable security definer set search_path = public as $$
-  select coalesce(bool_or(is_admin or role ilike '%admin%'), false)
+  select coalesce(bool_or(
+    is_admin
+    or (role ilike '%admin%'
+        and lower(coalesce(email, '')) not in ('erin@gatewayreadvisors.com', 'daniel@gatewayreadvisors.com'))
+  ), false)
   from agents where auth_id = auth.uid();
 $$;
 

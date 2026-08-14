@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../../lib/imageCompress.js'
 import { saveAgentProfile } from '../../lib/services/agentProfile.js'
+import { canHoldOfficeAdmin } from '../../lib/officeAdmins.js'
 import { Icon, Drawer, pushToast } from '../../components/UI.jsx'
 
 const COLORS = ['#2d3561','#4a6fa5','#2e7d5e','#c9a84c','#6b4fa5','#c0392b','#d4820a','#1a1a2e']
@@ -32,6 +33,12 @@ export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = fa
   // the personal fields; the server (api/portal profile-save) + DB RLS enforce
   // the same rule even if the UI is bypassed.
   const isSelf = !!agent?.id && agent.id === activeAgent?.id
+  // The office-admin switch is not an admin power — it belongs to two named
+  // accounts (src/lib/officeAdmins.js) and is invisible everywhere else. It is
+  // deliberately NOT gated on `isAdmin`: turning yourself off would otherwise
+  // hide the only control that turns you back on. The API enforces the same
+  // pair of checks, so hiding the checkbox is convenience, not the security.
+  const canToggleOfficeAdmin = canHoldOfficeAdmin(activeAgent) && canHoldOfficeAdmin(agent)
   const [form,   setForm]   = useState(BLANK)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
@@ -138,15 +145,32 @@ export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = fa
     // never saw — and any drift in that stale value looks like a silent change.
     if (isAdmin) {
       payload.role               = form.role
-      payload.is_admin           = !!form.is_admin
       payload.no_brokerage_split = !!form.no_brokerage_split
       // "Keeps 100%" is the split, not an excuse to blank the field: store 100
       // so reports and the commission editor read the same number the UI shows.
       payload.default_split_pct  = form.no_brokerage_split ? 100 : Number(form.default_split_pct)
     }
 
+    // Sent on its own track: an allow-listed account may flip this even while
+    // toggled off (i.e. while `isAdmin` is false), which is how they get back on.
+    if (canToggleOfficeAdmin) payload.is_admin = !!form.is_admin
+
     try {
       const saved = await saveAgentProfile(payload)
+
+      // Flipping your OWN office-admin switch changes which rows the app loads
+      // — firm-wide versus just yours — and that fetch runs once at sign-in.
+      // Merging the row alone would leave the old scope's deals, contacts and
+      // commissions on screen, so re-read the app from scratch.
+      if (isSelf && !!saved?.is_admin !== !!agent?.is_admin) {
+        onSave(saved)
+        pushToast(saved.is_admin
+          ? 'Office admin on — reloading with the full firm view…'
+          : 'Office admin off — reloading with your own agent view…')
+        setTimeout(() => window.location.reload(), 600)
+        return
+      }
+
       pushToast(agent?.id ? 'Profile updated' : 'Agent added')
       // Hand back the row the DATABASE stored, not the values we sent — the
       // caller mirrors it into state so the UI can't show a save that didn't
@@ -286,8 +310,9 @@ export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = fa
         {/* ── Commission & access ─────────────────────────────────────────── */}
         {/* Admins edit; an agent viewing their own profile sees their split
             read-only. Hiding it entirely was worse than useless — the number
-            drives their pay and they had no way to check what it says. */}
-        {(isAdmin || isSelf) && (
+            drives their pay and they had no way to check what it says. The
+            office-admin switch below has its own, narrower audience. */}
+        {(isAdmin || isSelf || canToggleOfficeAdmin) && (
         <div style={{ borderTop: '1px solid var(--gw-border)', margin: '4px 0 16px', paddingTop: 16 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--gw-ink)', marginBottom: 12 }}>Commission &amp; Access</div>
 
@@ -319,19 +344,30 @@ export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = fa
                     : <div className="form-hint">This agent's share; the brokerage keeps the rest. Pre-fills the commission editor.</div>}
                 </div>
               )}
-
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, marginTop: 4, cursor: 'pointer' }}>
-                <input type="checkbox" checked={!!form.is_admin}
-                  onChange={e => set('is_admin', e.target.checked)} />
-                <span><strong>Office admin</strong> — can view every agent's deals, documents, signatures &amp; commissions</span>
-              </label>
             </>
-          ) : (
+          ) : isSelf ? (
             <div style={{ fontSize: 13, color: 'var(--gw-slate)' }}>
               {form.no_brokerage_split
                 ? <>You keep <strong>100%</strong> — no brokerage split.</>
                 : <>Your split: <strong>{form.default_split_pct ?? DEFAULT_SPLIT}%</strong> to you, {100 - Number(form.default_split_pct ?? DEFAULT_SPLIT)}% to the brokerage.</>}
               <div className="form-hint">Only an office admin can change this.</div>
+            </div>
+          ) : null}
+
+          {/* Office admin — rendered only for the accounts that own this switch
+              (Erin and Daniel), on their own profiles. Every other agent, admin
+              or not, never sees it. */}
+          {canToggleOfficeAdmin && (
+            <div style={{ marginTop: isAdmin || isSelf ? 12 : 0 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                <input type="checkbox" checked={!!form.is_admin}
+                  onChange={e => set('is_admin', e.target.checked)} />
+                <span><strong>Office admin</strong> — can view every agent's deals, documents, signatures &amp; commissions</span>
+              </label>
+              <div className="form-hint">
+                Turn it off to work as a normal agent — only your own deals, documents, contacts and
+                commissions. You can turn it back on here any time.
+              </div>
             </div>
           )}
         </div>
