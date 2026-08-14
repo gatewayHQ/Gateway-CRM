@@ -7,6 +7,7 @@ import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
 import { findMatchingBuyers } from '../lib/matching.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
+import { fetchVisibleProperties } from '../lib/services/properties.js'
 import { coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
@@ -1478,7 +1479,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
 
 // ─── Properties page ──────────────────────────────────────────────────────────
 
-export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgentIds, focusRecord, onFocusHandled }) {
+export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAgentIds, isAdmin, focusRecord, onFocusHandled }) {
   const [view, setView]               = useState('grid')
   const [search, setSearch]           = useState('')
   const [filterType, setFilterType]   = useState('')
@@ -1513,11 +1514,18 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, visibleAgen
     return true
   })
 
+  // Scoped by the PROPERTY sharing list, not the contacts one — `properties`
+  // has no row-level scoping in the database (it is `allow_all_authenticated`),
+  // so this filter is the whole of a non-admin's property visibility.
+  // Same scoped read the initial load uses, so a save can't widen or narrow the
+  // list relative to what sign-in produced. Before this it re-queried by
+  // assigned_agent_id alone, which dropped an admin to their own properties and
+  // dropped everyone else's co-listings after every save.
   const reload = async () => {
-    if (!visibleAgentIds?.length) return
-    const { data, error } = await supabase.from('properties').select('*')
-      .in('assigned_agent_id', visibleAgentIds)
-      .order('created_at', { ascending: false })
+    if (!isAdmin && !propertyAgentIds?.length) return
+    const { data, error } = await fetchVisibleProperties(supabase, {
+      isAdmin, agentId: activeAgent?.id, propertyAgentIds,
+    })
     if (!error && data) setDb(p => ({ ...p, properties: data }))
   }
 

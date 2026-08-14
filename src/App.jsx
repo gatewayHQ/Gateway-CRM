@@ -2,8 +2,10 @@ import React, { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase.js'
 import { primeCache, invalidate } from './lib/queryCache.js'
 import { fetchVisibleDeals, fetchVisibleCommissions } from './lib/services/deals.js'
+import { fetchVisibleProperties } from './lib/services/properties.js'
 import { resolveStageLabels } from './lib/stageLabels.js'
 import { isOfficeAdmin } from './lib/officeAdmins.js'
+import { teamVisibleAgentIds } from './lib/teamVisibility.js'
 import { StageLabelContext } from './lib/stageLabelContext.js'
 import { Icon, Avatar, Modal, Badge, ToastHost, Loading, ErrorBoundary, pushToast } from './components/UI.jsx'
 // All pages are lazy-loaded — only the current route's bundle downloads
@@ -220,8 +222,13 @@ export default function App() {
   const [route, setRoute] = useState('dashboard')
   const [collapsed, setCollapsed] = useState(false)
   const [activeAgentId, setActiveAgentId] = useState(null)
-  const [visibleAgentIds, setVisibleAgentIds] = useState([])
-  const [dealAgentIds, setDealAgentIds]       = useState([])
+  // One list per shared dimension, because each has its own opt-in flag on the
+  // team member row. `visibleAgentIds` is CONTACTS — it is not a general-purpose
+  // "people I can see" list, and using it for properties is what made the
+  // Properties sharing toggle do nothing (see the scoping block below).
+  const [visibleAgentIds, setVisibleAgentIds]   = useState([])
+  const [propertyAgentIds, setPropertyAgentIds] = useState([])
+  const [dealAgentIds, setDealAgentIds]         = useState([])
   const [compose, setCompose] = useState(null)
   const [mobileMore, setMobileMore] = useState(false)
   const [needsOnboarding, setNeedsOnboarding] = useState(false)
@@ -362,18 +369,16 @@ export default function App() {
 
       // ── Compute scoped agent ID lists ──────────────────────────────────────
       // Each team member row carries explicit share_* flags (default true).
-      // Visibility is driven purely by those flags — no team-type rules needed.
-      const myTeamIds  = allTeamSplits.filter(ts => ts.agent_id === matched.id).map(ts => ts.team_id)
-      const peerSplits = allTeamSplits.filter(ts => myTeamIds.includes(ts.team_id) && ts.agent_id !== matched.id)
-
-      // Peer rows where the peer has opted to share contacts/properties (default true when column is absent)
-      const contactPeerIds = [...new Set(peerSplits.filter(ts => ts.share_contacts !== false).map(ts => ts.agent_id))]
-      const dealPeerIds    = [...new Set(peerSplits.filter(ts => ts.share_deals    !== false).map(ts => ts.agent_id))]
-
-      const myVisible     = [matched.id, ...contactPeerIds]
-      const myDealVisible = [matched.id, ...dealPeerIds]
+      // Visibility is driven purely by those flags — no team-type rules needed,
+      // and each dimension reads only its own flag (see teamVisibility.js).
+      const {
+        contacts:   myVisible,
+        properties: myPropertyVisible,
+        deals:      myDealVisible,
+      } = teamVisibleAgentIds(allTeamSplits, matched.id)
 
       setVisibleAgentIds(myVisible)
+      setPropertyAgentIds(myPropertyVisible)
       setDealAgentIds(myDealVisible)
 
       // ── Phase 2: scoped data fetches ─────────────────────────────────────
@@ -386,9 +391,10 @@ export default function App() {
         isAdminAgent
           ? supabase.from('contacts').select('*').order('created_at', { ascending: false })
           : supabase.from('contacts').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
-        isAdminAgent
-          ? supabase.from('properties').select('*').order('created_at', { ascending: false })
-          : supabase.from('properties').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
+        // Assigned to me + team peers sharing properties + anything I co-agent
+        fetchVisibleProperties(supabase, {
+          isAdmin: isAdminAgent, agentId: matched.id, propertyAgentIds: myPropertyVisible,
+        }),
         // Own + team-shared + co-listed (commission participant) deals
         fetchVisibleDeals(supabase, { isAdmin: isAdminAgent, agentId: matched.id, dealAgentIds: myDealVisible }),
         // Tasks are personal — never shared, even for an admin
@@ -500,7 +506,7 @@ export default function App() {
   // enough to recompute (one spread over ~16 keys) that memoizing it after the
   // early returns above would only buy a rules-of-hooks violation.
   const stageLabels = resolveStageLabels(activeAgent?.stage_labels)
-  const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin, visibleAgentIds, dealAgentIds }
+  const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin, visibleAgentIds, propertyAgentIds, dealAgentIds }
 
   if (loading) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', flexDirection: 'column', gap: 16 }}>
@@ -625,6 +631,7 @@ export default function App() {
           <GlobalSearch
             db={db}
             visibleAgentIds={visibleAgentIds}
+            propertyAgentIds={propertyAgentIds}
             isAdmin={isAdmin}
             onNavigate={(item) => {
               if (item.kind === 'deal')     { setRoute(`deal/${item.id}`); return }

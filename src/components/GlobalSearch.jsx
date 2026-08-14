@@ -25,7 +25,7 @@ import {
   flattenResults, moveCursor,
 } from '../lib/search.js'
 
-export default function GlobalSearch({ db, visibleAgentIds = [], isAdmin = false, onNavigate }) {
+export default function GlobalSearch({ db, visibleAgentIds = [], propertyAgentIds = [], isAdmin = false, onNavigate }) {
   const [q, setQ]             = useState('')
   const [open, setOpen]       = useState(false)
   const [loading, setLoading] = useState(false)
@@ -37,9 +37,16 @@ export default function GlobalSearch({ db, visibleAgentIds = [], isAdmin = false
 
   // An admin searches the whole roster; everyone else searches the agents they
   // can already see. The RPC filters on this list AND RLS applies on top.
+  // Contacts and properties are shared under separate team flags, so they get
+  // separate lists — search must not surface a property the Properties page
+  // (correctly) won't show.
   const agentIds = useMemo(
     () => searchAgentIds({ isAdmin, agents: db.agents || [], visibleAgentIds }),
     [isAdmin, db.agents, visibleAgentIds]
+  )
+  const propertyIds = useMemo(
+    () => searchAgentIds({ isAdmin, agents: db.agents || [], visibleAgentIds: propertyAgentIds }),
+    [isAdmin, db.agents, propertyAgentIds]
   )
 
   useEffect(() => {
@@ -49,10 +56,9 @@ export default function GlobalSearch({ db, visibleAgentIds = [], isAdmin = false
     let cancelled = false
     setLoading(true)
     ;(async () => {
-      const args = { search_term: term, agent_ids: agentIds, result_limit: PER_SECTION }
       const [c, p] = await Promise.all([
-        supabase.rpc('search_contacts', args),
-        supabase.rpc('search_properties', args),
+        supabase.rpc('search_contacts',   { search_term: term, agent_ids: agentIds,    result_limit: PER_SECTION }),
+        supabase.rpc('search_properties', { search_term: term, agent_ids: propertyIds, result_limit: PER_SECTION }),
       ])
       if (cancelled) return
 
@@ -65,7 +71,7 @@ export default function GlobalSearch({ db, visibleAgentIds = [], isAdmin = false
     })()
 
     return () => { cancelled = true }
-  }, [debounced, agentIds, db.contacts, db.properties])
+  }, [debounced, agentIds, propertyIds, db.contacts, db.properties])
 
   // Deals are already in memory — filter directly.
   const deals = useMemo(
