@@ -3,6 +3,7 @@ import { supabase } from './lib/supabase.js'
 import { primeCache, invalidate } from './lib/queryCache.js'
 import { fetchVisibleDeals, fetchVisibleCommissions } from './lib/services/deals.js'
 import { resolveStageLabels } from './lib/stageLabels.js'
+import { isOfficeAdmin } from './lib/officeAdmins.js'
 import { StageLabelContext } from './lib/stageLabelContext.js'
 import { Icon, Avatar, Modal, Badge, ToastHost, Loading, ErrorBoundary, pushToast } from './components/UI.jsx'
 // All pages are lazy-loaded — only the current route's bundle downloads
@@ -267,10 +268,7 @@ export default function App() {
   const toolsBase = websiteEnabled ? NAV_TOOLS : NAV_TOOLS.filter(n => n.id !== 'leads')
   // Admin-only items disappear from the nav for everyone else (isAdmin is also
   // computed lower for prop-passing, but the nav builds before that)
-  const navAdmin = (() => {
-    const a = db.agents?.find(x => x.id === activeAgentId)
-    return a?.is_admin === true || (a?.role?.toLowerCase().includes('admin') ?? false)
-  })()
+  const navAdmin = isOfficeAdmin(db.agents?.find(x => x.id === activeAgentId))
   const officeBase = NAV_OFFICE.filter(n => navAdmin || !n.adminOnly)
   const NAV = [
     ...NAV_CORE.filter(n => !hiddenNav.includes(n.id)),
@@ -357,9 +355,10 @@ export default function App() {
       }
 
       setActiveAgentId(matched.id)
-      // Office admin: prefer the explicit is_admin flag (migration 0005); fall
-      // back to the free-text role for agents created before the column existed.
-      const isAdminAgent = matched.is_admin === true || (matched.role?.toLowerCase().includes('admin') ?? false)
+      // Office admin: the explicit is_admin flag (migration 0005), with a
+      // free-text role fallback for profiles created before the column — except
+      // for the accounts that own the toggle, where OFF means OFF.
+      const isAdminAgent = isOfficeAdmin(matched)
 
       // ── Compute scoped agent ID lists ──────────────────────────────────────
       // Each team member row carries explicit share_* flags (default true).
@@ -494,9 +493,7 @@ export default function App() {
   if (!session) return <LoginPage />
 
   const activeAgent = db.agents.find(a => a.id === activeAgentId) || null
-  // Office admin: honor the explicit is_admin flag (migration 0005) first, then
-  // fall back to the free-text role for profiles created before the column.
-  const isAdmin     = activeAgent?.is_admin === true || (activeAgent?.role?.toLowerCase().includes('admin') ?? false)
+  const isAdmin     = isOfficeAdmin(activeAgent)
   // Pipeline column headers this agent renamed, layered over the built-in
   // labels. Resolved once here and provided to every screen so the board, the
   // deal page, and the dashboard all speak the agent's own vocabulary. Cheap

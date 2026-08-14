@@ -12,6 +12,7 @@
 // place. Vercel does not route files in api/_lib/ — they are pure helpers.
 // ─────────────────────────────────────────────────────────────────────────────
 import { createClient } from '@supabase/supabase-js'
+import { isOfficeAdmin } from '../../src/lib/officeAdmins.js'
 
 // No hardcoded project fallback. A literal here meant a deployment with the env
 // var missing — a preview, a fork, a misconfigured environment — silently pointed
@@ -107,7 +108,10 @@ export async function requireAgent(req) {
   if (!agent) {
     const e = new Error('No agent profile for this account'); e.status = 403; throw e
   }
-  const isAdmin = agent.is_admin === true || (agent.role || '').toLowerCase().includes('admin')
+  // Same rule the browser applies (src/lib/officeAdmins.js): the explicit flag,
+  // with a legacy role fallback — but never that fallback for the two accounts
+  // that can toggle themselves off, or "off" would only be cosmetic here.
+  const isAdmin = isOfficeAdmin(agent)
   return { user, agent, isAdmin }
 }
 

@@ -78,9 +78,46 @@ describe('sanitizeProfilePayload — commission split validation', () => {
 
   it('coerces the flags to real booleans', () => {
     const { payload } = sanitizeProfilePayload(
-      { no_brokerage_split: 'yes', is_admin: 0 }, { isAdmin: true },
+      { no_brokerage_split: 'yes', is_admin: 0 }, { isAdmin: true, canSetOfficeAdmin: true },
     )
     expect(payload).toEqual({ no_brokerage_split: true, is_admin: false })
+  })
+})
+
+// ── The office-admin switch ──────────────────────────────────────────────────
+// Firm-wide visibility belongs to two named accounts (src/lib/officeAdmins.js),
+// so `is_admin` does NOT ride along with admin status: an office admin who is
+// not on that list can neither grant it nor keep it by re-saving a profile.
+describe('sanitizeProfilePayload — is_admin is allow-listed, not admin-gated', () => {
+  it('drops is_admin from an admin who is not allow-listed', () => {
+    const { payload } = sanitizeProfilePayload(
+      { name: 'Dana', is_admin: true, default_split_pct: 65 },
+      { isAdmin: true, canSetOfficeAdmin: false },
+    )
+    expect(payload).toEqual({ name: 'Dana', default_split_pct: 65 })
+  })
+
+  it('lets an allow-listed account toggle itself back ON while it is NOT an admin', () => {
+    const { payload } = sanitizeProfilePayload(
+      { name: 'Erin', is_admin: true },
+      { isAdmin: false, canSetOfficeAdmin: true },
+    )
+    expect(payload).toEqual({ name: 'Erin', is_admin: true })
+  })
+
+  it('lets an allow-listed account toggle itself OFF', () => {
+    const { payload } = sanitizeProfilePayload(
+      { is_admin: false }, { isAdmin: true, canSetOfficeAdmin: true },
+    )
+    expect(payload).toEqual({ is_admin: false })
+  })
+
+  it('still refuses the other privileged columns to a non-admin who is allow-listed', () => {
+    const { payload } = sanitizeProfilePayload(
+      { name: 'Erin', is_admin: true, role: 'Broker', default_split_pct: 100, cap_amount: 0 },
+      { isAdmin: false, canSetOfficeAdmin: true },
+    )
+    expect(payload).toEqual({ name: 'Erin', is_admin: true })
   })
 })
 

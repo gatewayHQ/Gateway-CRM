@@ -305,6 +305,7 @@ async function handlePortalSignLink(req, res) {
 // ─────────────────────────────────────────────────────────────────────────────
 import { agentSliceForDeal, capWindowStart } from '../src/lib/commission.js'
 import { normalizeStageLabels } from '../src/lib/stageLabels.js'
+import { canHoldOfficeAdmin } from '../src/lib/officeAdmins.js'
 import { requireAuthUser, requireAgent, getServiceClient, errorResponse } from './_lib/auth.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -313,7 +314,11 @@ import { requireAuthUser, requireAgent, getServiceClient, errorResponse } from '
 // enforces least-privilege authorization:
 //   • profile-save   : create (admin only) / update. A non-admin may update ONLY
 //                       their own row, and may NOT touch privileged columns
-//                       (role, is_admin, commission split/cap).
+//                       (role, commission split/cap). `is_admin` is stricter
+//                       still: allow-listed accounts only, on an allow-listed
+//                       profile (src/lib/officeAdmins.js) — an ordinary admin
+//                       cannot grant firm-wide visibility to anyone, itself
+//                       included.
 //   • profile-delete : admin only.
 // This is defense-in-depth: the database RLS + trigger (migration 0023) enforce
 // the same rules even if a write bypasses this endpoint.
@@ -323,7 +328,9 @@ import { requireAuthUser, requireAgent, getServiceClient, errorResponse } from '
 // preference (personal pipeline column headers) — never a permission.
 const PROFILE_SELF_FIELDS = ['name', 'initials', 'email', 'phone', 'photo_url', 'bio', 'tagline', 'stats', 'color', 'specialty', 'nav_hidden', 'stage_labels']
 // Fields only an admin may set (role doubles as a legacy admin flag).
-const PROFILE_ADMIN_FIELDS = ['role', 'is_admin', 'default_split_pct', 'no_brokerage_split', 'cap_amount', 'cap_anniversary']
+// `is_admin` is deliberately absent: being an admin does not let you hand out
+// firm-wide visibility. That column has its own gate — see canSetOfficeAdmin.
+const PROFILE_ADMIN_FIELDS = ['role', 'default_split_pct', 'no_brokerage_split', 'cap_amount', 'cap_anniversary']
 
 // Money/permission columns the `agents_guard_privileged` trigger freezes for an
 // untrusted caller. If one of these comes back from the write different to what
@@ -345,10 +352,14 @@ function coerceNumeric(value, label, { min, max }) {
 
 // Validate + normalize the profile payload. Returns { payload } or { error }.
 // Exported for unit tests — this is where a bad split is stopped, not the UI.
-export function sanitizeProfilePayload(fields, { isAdmin }) {
-  const allowed = isAdmin
-    ? [...PROFILE_SELF_FIELDS, ...PROFILE_ADMIN_FIELDS]
-    : PROFILE_SELF_FIELDS
+// `canSetOfficeAdmin` is resolved by the caller (handleProfile) from the
+// office-admin allow-list, NOT from isAdmin — see src/lib/officeAdmins.js.
+export function sanitizeProfilePayload(fields, { isAdmin, canSetOfficeAdmin = false }) {
+  const allowed = [
+    ...PROFILE_SELF_FIELDS,
+    ...(isAdmin ? PROFILE_ADMIN_FIELDS : []),
+    ...(canSetOfficeAdmin ? ['is_admin'] : []),
+  ]
   const payload = {}
   for (const k of allowed) if (k in fields) payload[k] = fields[k]
 
@@ -432,9 +443,24 @@ async function handleProfile(req, res) {
         return res.status(403).json({ error: 'You can only edit your own profile.' })
       }
 
+      // The office-admin switch answers to an allow-list, not to admin status:
+      // only Erin and Daniel may set it, and only on an allow-listed profile.
+      // It is checked independently of `isAdmin` on purpose — after toggling
+      // themselves off they are no longer an admin, and this is the only route
+      // back on. Anyone else's `is_admin` is dropped by the whitelist below.
+      let canSetOfficeAdmin = false
+      if ('is_admin' in fields && !isCreate && canHoldOfficeAdmin(me)) {
+        if (targetId === me.id) {
+          canSetOfficeAdmin = true
+        } else {
+          const { data: target } = await svc.from('agents').select('email').eq('id', targetId).maybeSingle()
+          canSetOfficeAdmin = canHoldOfficeAdmin(target)
+        }
+      }
+
       // Whitelist columns by role — this is where privilege escalation is
       // stopped — then validate the values themselves.
-      const { payload, error: badInput } = sanitizeProfilePayload(fields, { isAdmin })
+      const { payload, error: badInput } = sanitizeProfilePayload(fields, { isAdmin, canSetOfficeAdmin })
       if (badInput) return res.status(400).json({ error: badInput })
 
       // Trust the row, not the request. If the privilege-guard trigger swallowed
