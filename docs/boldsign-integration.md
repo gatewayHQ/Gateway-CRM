@@ -660,6 +660,35 @@ template with the template's defaults and the agent re-did the work from memory.
   `normalizeFieldType()` maps them, and a type it can't re-create is dropped from the
   layout rather than stored — one bad entry would fail the whole re-apply request. A
   field with no usable `bounds` is dropped too (BoldSign would stack it at 0,0).
+- **Restoring a layout never worked on a template with a signature field.**
+  BoldSign refuses `IsReadOnly` on nine types (*"IsReadOnly property is not
+  supported for the Signature, Initial, Attachment, Date signed, Hyperlink,
+  Title, Formula, Drawing and Company form fields"*), and all nine are in
+  `EDITABLE_FIELD_TYPES`. `normalizeCapturedField()` stamped `isReadOnly` on
+  **every** captured field, so a stored layout containing a signature carried a
+  property the edit endpoint will not take. `/document/edit` is atomic, so that
+  one field failed the entire restore. Every signable template has a signature
+  field, which makes this every layout the feature ever stored.
+
+  It did not read as a layout problem. `describeLayoutFailure()` passes a 400's
+  own text through, so the agent got a red toast quoting BoldSign about a
+  property they never set, on a send that had in fact created the draft
+  successfully. The retry made it worse rather than better:
+  `isFieldLevelRejection()` matches `/form field/i` and the message ends in
+  "form fields", so it was retried as though a single field were unplaceable,
+  and the second attempt carried the same property and failed identically.
+
+  `supportsFieldReadOnly()` now gates it in **two** places: `normalizeCapturedField()`
+  stops storing the property on those types, and `buildLayoutEditPayload()` strips
+  it at emission so layouts **already in the database** heal on their next use
+  instead of needing a backfill. Types that do accept a lock (`TextBox`, `Label`,
+  `CheckBox`, …) are unaffected and still restore read-only.
+
+  Kept as its own list rather than imported from
+  `src/lib/services/boldsignFields.js`, which governs the send payload: this file
+  imports nothing from `src/` by design. A test asserts every spelling in it is
+  one `normalizeFieldType()` actually produces, so the two cannot drift into
+  silently not matching.
 - **Never fatal, either direction.** Capture and apply both swallow their own
   failures: a capture failure loses only the convenience, and an apply failure means
   the draft opens with the template's default placement — the behavior that existed
@@ -772,12 +801,8 @@ Matching ignores spacing and casing, so `DateSigned`, `Date signed` and
 `date_signed` are one type; `initials` is listed beside `initial` because
 BoldSign reads that type back under both spellings.
 
-Not applied to the saved-layout path (`buildLayoutEditPayload`), which sends
-`isReadOnly` on every restored field. It has not been observed failing, its
-errors are swallowed as a `layoutWarning` rather than surfacing, and
-`api/boldsign.js` deliberately imports nothing from `src/`, so the rule would
-have to be duplicated across that boundary to apply there. Worth checking if a
-deal's layout ever stops restoring.
+**The saved-layout path had the same bug, and worse.** See "Restoring a layout
+never worked on a template with a signature field" under Per-deal field layouts.
 
 Where each of those values *lands* — one shared copy visible to everyone, or one
 signer's private field — is decided by `buildPrefillFields()`; see "Prefilled data

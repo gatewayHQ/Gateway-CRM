@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -687,11 +687,18 @@ describe('normalizeFieldType — read spelling → write enum', () => {
 
 describe('normalizeCapturedField', () => {
   it('keeps type, page, bounds and the flags needed to re-create the field', () => {
+    // No isReadOnly: the fixture is a Signature, and BoldSign refuses the
+    // property on that type. See "IsReadOnly is not accepted on every type".
     expect(normalizeCapturedField(field())).toEqual({
       id: 'f1', fieldType: 'Signature', pageNumber: 2,
       bounds: { x: 100, y: 200, width: 180, height: 35 },
-      isRequired: true, isReadOnly: false,
+      isRequired: true,
     })
+  })
+
+  it('keeps isReadOnly on a type that accepts it', () => {
+    expect(normalizeCapturedField(field({ type: 'Textbox', isReadOnly: true })).isReadOnly).toBe(true)
+    expect(normalizeCapturedField(field({ type: 'Textbox', isReadOnly: false })).isReadOnly).toBe(false)
   })
 
   it('drops a field with no usable bounds rather than stacking it at (0,0)', () => {
@@ -1418,5 +1425,94 @@ describe('shouldApplyStatus — out-of-order webhooks cannot rewind a document',
     expect(shouldApplyStatus('sent', 'remindersent')).toBe(false)
     expect(shouldApplyStatus('sent', null)).toBe(false)
     expect(shouldApplyStatus('somethingold', 'completed')).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IsReadOnly is not accepted on every type
+//
+// Reported live, sending the IA Agency Packet:
+//   "IsReadOnly property is not supported for the Signature, Initial,
+//    Attachment, Date signed, Hyperlink, Title, Formula, Drawing and Company
+//    form fields."
+//
+// /document/edit is ATOMIC, so one Signature carrying the property failed the
+// whole layout restore. Every signable template has a signature field, so this
+// broke the restore for effectively every layout the feature ever stored.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('supportsFieldReadOnly — layout restore must not send a refused property', () => {
+  it('refuses the nine types BoldSign named', () => {
+    for (const t of ['Signature', 'Initial', 'Attachment', 'DateSigned', 'Hyperlink', 'Title', 'Formula', 'Drawing', 'Company']) {
+      expect(supportsFieldReadOnly(t)).toBe(false)
+    }
+  })
+
+  it('allows the types that do accept it', () => {
+    for (const t of ['TextBox', 'Label', 'CheckBox', 'RadioButton', 'EditableDate', 'Dropdown', 'Image']) {
+      expect(supportsFieldReadOnly(t)).toBe(true)
+    }
+  })
+
+  it('every refused type is one normalizeFieldType can actually produce', () => {
+    // If a spelling here drifted from EDITABLE_FIELD_TYPES the guard would
+    // silently stop matching, which is how this bug behaves when it is present.
+    for (const t of ['Signature', 'Initial', 'Attachment', 'DateSigned', 'Hyperlink', 'Title', 'Formula', 'Drawing', 'Company']) {
+      expect(normalizeFieldType(t)).toBe(t)
+    }
+    // The read-back spellings BoldSign uses must land on the same refusal.
+    expect(supportsFieldReadOnly(normalizeFieldType('initials'))).toBe(false)
+    expect(supportsFieldReadOnly(normalizeFieldType('datesigned'))).toBe(false)
+    expect(supportsFieldReadOnly(normalizeFieldType('signaturedate'))).toBe(false)
+  })
+})
+
+describe('buildLayoutEditPayload — a stored layout heals on use', () => {
+  // Exactly what is sitting in deal_field_layouts today: captured before the
+  // fix, so every field carries isReadOnly including the signature.
+  const legacyLayout = {
+    signers: [{
+      signerRole: 'Seller', signerEmail: 'old@x.com', order: 1,
+      formFields: [
+        { id: 'tplSig',  fieldType: 'Signature', pageNumber: 1, bounds: { x: 50, y: 60, width: 180, height: 35 }, isRequired: true, isReadOnly: false },
+        { id: 'tplInit', fieldType: 'Initial',   pageNumber: 3, bounds: { x: 20, y: 30, width: 60,  height: 25 }, isRequired: true, isReadOnly: false },
+        { id: 'county',  fieldType: 'TextBox',   pageNumber: 1, bounds: { x: 10, y: 10, width: 100, height: 20 }, isRequired: false, isReadOnly: true },
+      ],
+    }],
+  }
+  const signerDetails = [{ id: 'n1', signerRole: 'Seller', formFields: [{ id: 'tplSig' }, { id: 'county' }] }]
+  const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
+
+  it('REGRESSION: strips isReadOnly from Signature and Initial on both Update and Add', () => {
+    const payload = buildLayoutEditPayload({ layout: legacyLayout, signerDetails })
+    const fields  = payload.signers[0].formFields
+    const byName  = (n) => fields.find(f => f.id === n || f.name === n)
+
+    // tplSig exists on the draft, so it is an Update; tplInit does not, so Add.
+    expect(byName('tplSig').editAction).toBe('Update')
+    expect(byName('tplInit').editAction).toBe('Add')
+    expect(has(byName('tplSig'),  'isReadOnly')).toBe(false)
+    expect(has(byName('tplInit'), 'isReadOnly')).toBe(false)
+  })
+
+  it('keeps the lock on a TextBox, which is the whole point of storing it', () => {
+    const payload = buildLayoutEditPayload({ layout: legacyLayout, signerDetails })
+    expect(payload.signers[0].formFields.find(f => f.id === 'county').isReadOnly).toBe(true)
+  })
+
+  it('nothing in the payload carries the property on a refused type', () => {
+    const payload = buildLayoutEditPayload({ layout: legacyLayout, signerDetails })
+    for (const f of payload.signers[0].formFields) {
+      if (f.editAction === 'Remove') continue
+      if (has(f, 'isReadOnly')) expect(supportsFieldReadOnly(f.fieldType)).toBe(true)
+    }
+  })
+
+  it('everything else about the restore is unchanged — position, page, required', () => {
+    const payload = buildLayoutEditPayload({ layout: legacyLayout, signerDetails })
+    const sig = payload.signers[0].formFields.find(f => f.id === 'tplSig')
+    expect(sig).toMatchObject({
+      fieldType: 'Signature', pageNumber: 1,
+      bounds: { x: 50, y: 60, width: 180, height: 35 }, isRequired: true,
+    })
   })
 })
