@@ -913,6 +913,37 @@ export function normalizeFieldType(type) {
   return FIELD_TYPE_BY_LOWER.get(key) || FIELD_TYPE_ALIASES[key] || null
 }
 
+// Types BoldSign refuses `IsReadOnly` on, in its own words:
+//
+//   "IsReadOnly property is not supported for the Signature, Initial,
+//    Attachment, Date signed, Hyperlink, Title, Formula, Drawing and Company
+//    form fields."
+//
+// Every one of them is in EDITABLE_FIELD_TYPES above, and normalizeCapturedField
+// used to stamp `isReadOnly` on EVERY captured field, so any saved layout
+// containing a signature field carried the property BoldSign will not accept.
+// `/document/edit` is ATOMIC, so that one field failed the whole re-apply and the
+// agent lost the entire arrangement. Since every signable template has a
+// signature field, that is effectively every layout this feature ever stored.
+//
+// It surfaced as a red toast quoting BoldSign verbatim (describeLayoutFailure
+// passes a 400's own text through), which reads like a failed send even though
+// the draft was created and is perfectly sendable. The retry path did not help:
+// isFieldLevelRejection() matches /form field/i and this message ends in "form
+// fields", so it was retried as if one field were unplaceable, and the second
+// attempt carried the same property and failed identically.
+//
+// Deliberately a separate list from READONLY_UNSUPPORTED_FIELD_TYPES in
+// src/lib/services/boldsignFields.js, which governs the SEND payload: this file
+// imports nothing from src/ (it is a Vercel function bundle, and that module
+// pulls in the browser's Supabase client through its sibling). Spelled to match
+// normalizeFieldType()'s output, so comparison is exact rather than fuzzy.
+const READONLY_UNSUPPORTED_TYPES = new Set([
+  'Signature', 'Initial', 'Attachment', 'DateSigned',
+  'Hyperlink', 'Title', 'Formula', 'Drawing', 'Company',
+])
+export const supportsFieldReadOnly = (fieldType) => !READONLY_UNSUPPORTED_TYPES.has(fieldType)
+
 // Fonts are an enum on write; a value outside it fails the request. Anything
 // unrecognized is simply omitted, leaving BoldSign's default.
 const EDIT_FONTS = new Set(['Helvetica', 'Courier', 'TimesRoman', 'NotoSans', 'Carlito'])
@@ -947,8 +978,13 @@ export function normalizeCapturedField(f) {
     pageNumber: num(f?.pageNumber, 1),
     bounds:     { x, y, width, height },
     isRequired: Boolean(f?.isRequired),
-    isReadOnly: Boolean(f?.isReadOnly),
   }
+  // Not stored on a type that can never carry it back — see
+  // READONLY_UNSUPPORTED_TYPES. Storing it was how a Signature field ended up
+  // sending a property BoldSign rejects. buildLayoutEditPayload() strips it at
+  // emission too, because layouts captured before this fix are already in the
+  // database with it set.
+  if (supportsFieldReadOnly(fieldType)) out.isReadOnly = Boolean(f?.isReadOnly)
   if (f?.value != null && f.value !== '')       out.value = String(f.value)
   // BoldSign's own name for the field. Kept because it is what re-creating a field
   // on a later draft is allowed to set — `id` refers to a field that already exists
@@ -1069,6 +1105,12 @@ export function buildLayoutEditPayload({ layout, signerDetails = [], confirmedOn
       const live = f.id ? byId.get(String(f.id)) : null
       if (!live && confirmedOnly) continue
       const { id, name, ...rest } = f
+      // A layout stored before READONLY_UNSUPPORTED_TYPES existed still has
+      // `isReadOnly` on its Signature and Initial fields, and this edit is
+      // atomic, so one of them fails the whole restore. Stripped here rather
+      // than only at capture, so those existing rows heal on their next use
+      // instead of needing a backfill.
+      if (!supportsFieldReadOnly(rest.fieldType)) delete rest.isReadOnly
       const field = live
         ? { editAction: 'Update', id, ...rest, ...(name ? { name } : {}) }
         // New to this draft: named, never id'd — see the note above.

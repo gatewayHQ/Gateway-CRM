@@ -660,6 +660,35 @@ template with the template's defaults and the agent re-did the work from memory.
   `normalizeFieldType()` maps them, and a type it can't re-create is dropped from the
   layout rather than stored — one bad entry would fail the whole re-apply request. A
   field with no usable `bounds` is dropped too (BoldSign would stack it at 0,0).
+- **Restoring a layout never worked on a template with a signature field.**
+  BoldSign refuses `IsReadOnly` on nine types (*"IsReadOnly property is not
+  supported for the Signature, Initial, Attachment, Date signed, Hyperlink,
+  Title, Formula, Drawing and Company form fields"*), and all nine are in
+  `EDITABLE_FIELD_TYPES`. `normalizeCapturedField()` stamped `isReadOnly` on
+  **every** captured field, so a stored layout containing a signature carried a
+  property the edit endpoint will not take. `/document/edit` is atomic, so that
+  one field failed the entire restore. Every signable template has a signature
+  field, which makes this every layout the feature ever stored.
+
+  It did not read as a layout problem. `describeLayoutFailure()` passes a 400's
+  own text through, so the agent got a red toast quoting BoldSign about a
+  property they never set, on a send that had in fact created the draft
+  successfully. The retry made it worse rather than better:
+  `isFieldLevelRejection()` matches `/form field/i` and the message ends in
+  "form fields", so it was retried as though a single field were unplaceable,
+  and the second attempt carried the same property and failed identically.
+
+  `supportsFieldReadOnly()` now gates it in **two** places: `normalizeCapturedField()`
+  stops storing the property on those types, and `buildLayoutEditPayload()` strips
+  it at emission so layouts **already in the database** heal on their next use
+  instead of needing a backfill. Types that do accept a lock (`TextBox`, `Label`,
+  `CheckBox`, …) are unaffected and still restore read-only.
+
+  Kept as its own list rather than imported from
+  `src/lib/services/boldsignFields.js`, which governs the send payload: this file
+  imports nothing from `src/` by design. A test asserts every spelling in it is
+  one `normalizeFieldType()` actually produces, so the two cannot drift into
+  silently not matching.
 - **Never fatal, either direction.** Capture and apply both swallow their own
   failures: a capture failure loses only the convenience, and an apply failure means
   the draft opens with the template's default placement — the behavior that existed
@@ -739,6 +768,41 @@ So the send modal now offers every **prefillable** field, not just the text ones
   (`"true"` / `"false"` for a box) and stamps **`isReadOnly: true`** — what the
   agent decided is what every signer sees, and none of them can change it after the
   send. All three are pure and unit-tested in `src/lib/services/__tests__/boldsign.test.js`.
+
+### Some types refuse to be locked, and say so by failing the whole send
+BoldSign rejects `IsReadOnly` outright on nine field types:
+
+> IsReadOnly property is not supported for the Signature, Initial, Attachment,
+> Date signed, Hyperlink, Title, Formula, Drawing and Company form fields.
+
+It is a hard failure on the **entire send**, not a warning about the one field,
+so a single box takes the whole packet down and names a property the agent never
+set on a field they may not know is there. Seen live on the IA Agency Packet.
+
+Two of the nine are reachable from our own send screen. **Company** and **Title**
+are in `FILLABLE_FIELD_TYPES`, because they are legitimately values an agent
+fills in (the brokerage, the signer's role on the agreement), so both render as
+inputs and both used to be stamped read-only like everything else. Any packet
+with a brokerage box hit this.
+
+`READONLY_UNSUPPORTED_FIELD_TYPES` / `supportsReadOnly()` encode the list, and
+`prefillFieldEntry()` now makes the lock conditional while the value is not.
+The property is **omitted** rather than sent as `false`: the message says it "is
+not supported", which reads as presence rather than value.
+
+So a prefilled Company or Title goes out editable by its signer. That is not a
+choice, it is the only state BoldSign will accept, and a prefilled box the signer
+could retype is worth incomparably more than a packet that refuses to send.
+**Where a value must be both locked and legible to every party, the answer is the
+same as everywhere else on this page: put it in the template as a `Label`**,
+which takes a lock and is common to the document.
+
+Matching ignores spacing and casing, so `DateSigned`, `Date signed` and
+`date_signed` are one type; `initials` is listed beside `initial` because
+BoldSign reads that type back under both spellings.
+
+**The saved-layout path had the same bug, and worse.** See "Restoring a layout
+never worked on a template with a signature field" under Per-deal field layouts.
 
 Where each of those values *lands* — one shared copy visible to everyone, or one
 signer's private field — is decided by `buildPrefillFields()`; see "Prefilled data
@@ -930,7 +994,70 @@ in order with the right party first. Where the value must be legible **regardles
 of order**, it is a Label — no exceptions.
 
 ## CRM prefill tokens
-`property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `seller_names` / `client_names` · `seller_2_name` / `client_2_name` · `broker_name` · `agent_name` · `agent_email` · `list_price` · `commission_pct` · `commission_amount` · `listing_start_date` · `listing_end_date` · `close_date`
+`property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `seller_names` / `client_names` · `seller_2_name` / `client_2_name` · `buyer_1_name` · `buyer_2_name` · `broker_name` · `agent_name` · `agent_2_name` · `agent_email` · `list_price` · `commission_pct` · `commission_amount` · `listing_start_date` · `listing_end_date` · `close_date`
+
+### Canonical Label field ids (the template-side vocabulary)
+
+Templates are moving to a fixed naming convention for their Label fields:
+PascalCase ids ending in `Label`, one id per category of data, reused across
+every template. A field id only has to be unique *within* a template, so the same
+id can mean the same thing account-wide, which is what keeps the send code
+template-agnostic.
+
+**These do not resolve through `normalizeTokenKey()` on their own.** That
+function collapses case and separators, which is why `Agent_Name` and
+`agent name` are already one token, but `Agent1NameLabel` has no separators to
+collapse: it normalizes to `agent1namelabel` and matches nothing. A template
+authored exactly to the convention rendered every one of these as an empty box on
+the send screen and sent no value for it. Not a wrong name, a blank, and nothing
+on screen said why.
+
+`CANONICAL_LABEL_TOKENS` (`src/lib/services/boldsignFields.js`) is the bridge.
+`fieldTokenKey()` tries a field's own spelling first and falls back to this table,
+matching with separators removed entirely, so `Agent1NameLabel`,
+`agent1namelabel` and `Agent1_Name_Label` are one id.
+
+| Canonical Label id | CRM token | Source |
+|---|---|---|
+| `Agent1NameLabel` | `agent_name` | `appointedAgent()` |
+| `Agent2NameLabel` | `agent_2_name` | `orderAgentSigners()[1]` |
+| `Buyer1NameLabel` | `buyer_1_name` | first client, buyer-side deals only |
+| `Buyer2NameLabel` | `buyer_2_name` | second client, buyer-side deals only |
+
+The table is an explicit list rather than a derived pattern on purpose: a wrong
+entry prints a real person's name under the wrong caption, which is the failure
+this module exists to prevent, and a table can be read against the template and
+checked. Every id in it is unit-tested to have a real token behind it, since an
+id pointing at a token that does not exist would resolve to `undefined` and
+quietly send nothing.
+
+The convention covers a much wider vocabulary (entities, licence numbers, lender,
+the financial terms, the staff selections that replace checkboxes). **None of
+those has a column in this schema**, so none is listed here. The table grows when
+the data model does, not before.
+
+### `buyer_*` is side-aware, `client_*` is not
+`client_name` and its `seller_name` alias mean "our client", whoever that is, and
+fill identically on a listing and on a buyer representation agreement. That is
+right for a form with one "Client" line and wrong for a form that says BUYER.
+
+`buyer_1_name` / `buyer_2_name` fill **only when the deal says our clients are the
+buyers**, read from `comp_data.transaction_type` via `dealClientSide()` (the same
+value the Form Library filters templates by). On a seller-side deal they stay
+blank on purpose: our clients are the sellers, the buyers are the other side of
+the table, and the CRM stores nothing about them. A `lease` or `general` deal, or
+one with no transaction type recorded, reads as "unknown side" and gets the blank
+too rather than a coin flip.
+
+Printing our seller's name on a line captioned "Buyer" is the same silent,
+plausible, wrong-name failure that `SIGNER_BOUND_FIELD_TYPES` exists to prevent,
+and it is worse than a blank. A blank is visible on the send screen as an empty
+box, and a Label field stays editable there precisely so the agent can fill it in
+by hand before sending.
+
+**The counterparty is not modelled.** Giving `Seller1NameLabel` a source on a
+buyer-side deal (and vice versa) needs a real other-side record on the deal, which
+is a schema change, not a token.
 
 **Field ids match case-insensitively.** Ids are typed by hand in BoldSign's
 editor, where `Agent_Name` and `agent_name` look like the same thing, and a
@@ -1076,7 +1203,7 @@ on Live stay on Live — they are real signed records and are not portable.
 ## Testing
 - `api/__tests__/boldsign.test.js` — retry/idempotency, `buildSignerPayload`/`requiresExplicitFieldPlacement` (retired-placement contract), `normalizeTemplateRoles` (the Roles-empty fix), `resolveOnBehalfOf` (agent identity → org-default fallback → null), `betaBase` (region-preserving `/v1-beta` derivation), `sendDraftDocument` (beta path, `onBehalfOf`, never-retried, indeterminate outcome) and `describeDraftSendFailure`.
 - `api/__tests__/cron-boldsign-sync.test.js` — `detectStateFromTitle`.
-- `src/lib/services/__tests__/boldsign.test.js` — `buildTextTag`, `normalizeState`, `crmTokenValues`/`buildPrefill`, `isFillableField`, and the shared-field routing (`isSharedField`, `partitionPrefillFields`, `buildPrefillFields`, `sharedDataOnSignerFields`).
+- `src/lib/services/__tests__/boldsign.test.js` — `buildTextTag`, `normalizeState`, `crmTokenValues`/`buildPrefill`, `isFillableField`, and the shared-field routing (`isSharedField`, `partitionPrefillFields`, `buildPrefillFields`, `sharedDataOnSignerFields`). Also the canonical Label ids: `CANONICAL_LABEL_TOKENS` resolution through `fieldTokenKey`, `dealClientSide`, the side-aware `buyer_*` tokens, and an end-to-end pass over the four fields on the live test template (all four routed to `sharedFormFields`, and a single-buyer deal sending no `Buyer2NameLabel` entry at all rather than an empty one).
 - `api/__tests__/boldsign.test.js` also covers `mergeSharedFormFields` — Labels land on the first role, read-only, deduped against role-scoped copies, idempotent.
 - Manual smoke test after deploy: Form Library → Add/Edit Packet → confirm the dialog scrolls and shows Save/Cancel → Build in BoldSign (confirms the Roles/DocumentTitle fix) → place a field and click Finish inside the embedded editor → confirm it auto-saves and closes back to the library list with the new template id and a "Sendable" badge, with no separate Save click needed → click "Rebuild in BoldSign" on that same packet and confirm it reopens the *same* template (not a new one) → send from a deal → sign in Sandbox → confirm the signed PDF + audit trail land in Documents with a "Signed by … on …" note → delete an unsigned draft from the Signatures tab filter view.
 - **Shared-visibility check (multi-signer, do this after any change to the prefill payload):** send a two-signer packet from a template that has Label fields, then open the signing link for the **second** signer *before the first has signed*. Every Label value — including any box we pre-ticked — must already be on the page and none of them editable. If a value is missing, it is on a role-scoped field in the template — convert it to a Label (the send modal warns about the ones it can detect).

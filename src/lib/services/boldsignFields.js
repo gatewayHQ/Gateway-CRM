@@ -254,6 +254,42 @@ export function sharedDataOnSignerFields({ fields = [], values = {}, firstSigner
   })
 }
 
+// ── Field types that REFUSE to be locked ─────────────────────────────────────
+// BoldSign rejects `IsReadOnly` outright on some types, with:
+//
+//   "IsReadOnly property is not supported for the Signature, Initial,
+//    Attachment, Date signed, Hyperlink, Title, Formula, Drawing and Company
+//    form fields."
+//
+// It is a hard failure on the WHOLE send, not a warning about the one field. So
+// a single Title or Company box with a value in it takes the entire packet down,
+// and the agent is told about a property they never set on a field they may not
+// know exists.
+//
+// Two of these are reachable from our own send screen: **Company** and **Title**
+// are in FILLABLE_FIELD_TYPES, because they are legitimately values an agent
+// fills in (the brokerage, the signer's role on the agreement), so both are
+// rendered as inputs and both used to be stamped read-only like everything else.
+// Any agency packet with a brokerage box hit this.
+//
+// The value still goes out. Only the lock is dropped, because BoldSign will not
+// grant it on these types under any payload. A prefilled Company the signer
+// could technically retype is worth incomparably more than a packet that refuses
+// to send. Where a value must be BOTH locked and legible to every party, the
+// answer is the one this whole file keeps arriving at: put it in the template as
+// a **Label**, which takes a lock and is common to the document.
+//
+// Listed in BoldSign's own terms, matched with spacing and casing removed, so
+// `DateSigned`, `Date signed` and `date_signed` are one type. `initials` is
+// included alongside `initial` because BoldSign reads that type back under both
+// spellings (the same split normalizeFieldType() handles in api/boldsign.js).
+export const READONLY_UNSUPPORTED_FIELD_TYPES = new Set([
+  'signature', 'initial', 'initials', 'attachment', 'datesigned',
+  'hyperlink', 'title', 'formula', 'drawing', 'company',
+])
+export const supportsReadOnly = (t) =>
+  !READONLY_UNSUPPORTED_FIELD_TYPES.has(String(t || '').toLowerCase().replace(/[^a-z]/g, ''))
+
 // BoldSign wants a checkbox value as the string "true"/"false".
 export const tickValue = (on) => (on ? 'true' : 'false')
 
@@ -272,13 +308,19 @@ export function prefillFieldEntry(field, value) {
   // in the audit log and on the send screen that the document never shows — the
   // silent wrong-name failure described at SIGNER_BOUND_FIELD_TYPES.
   if (isSignerBoundField(field?.type)) return null
+  // The lock is conditional; the value is not. BoldSign refuses `IsReadOnly` on
+  // a handful of types and fails the ENTIRE send when it sees one, so on those
+  // the property is omitted rather than sent as false: the message says the
+  // property "is not supported", which reads as presence rather than value.
+  // See READONLY_UNSUPPORTED_FIELD_TYPES.
+  const lock = supportsReadOnly(field?.type) ? { isReadOnly: true } : {}
   if (isTickableField(field?.type)) {
     if (value !== true && value !== false) return null      // left to the signer
-    return { id, value: tickValue(value), isReadOnly: true }
+    return { id, value: tickValue(value), ...lock }
   }
   const v = String(value ?? '').trim()
   if (!v) return null
-  return { id, value: v, isReadOnly: true }
+  return { id, value: v, ...lock }
 }
 
 // Normalize a state value to a 2-letter code. Accepts existing codes (IA) or
@@ -369,6 +411,25 @@ export function dealClientList({ contact, additionalContacts = [] } = {}) {
   return people
 }
 
+// Which side of the transaction the deal's own clients sit on, or null when the
+// deal does not say. Read from `comp_data.transaction_type`, the same value the
+// Form Library filters templates by ('buyer' | 'seller' | 'lease' | 'general').
+//
+// The CRM has no buyer table and no seller table. A deal has CLIENTS
+// (`deals.contact_id` + `deal_contacts`) and this one field saying which side of
+// the table they are on; the other side is not stored anywhere. So this is the
+// only thing that can tell a template captioned "Buyer" whether our client is
+// actually the buyer.
+//
+// 'lease' and 'general' resolve to null rather than being forced onto a side. A
+// lease has a lessor and a lessee, not a buyer and a seller, and 'general' means
+// nobody recorded it. See the side-aware tokens in crmTokenValues() for what a
+// null does, and why a blank is the right answer rather than a guess.
+export function dealClientSide(deal) {
+  const t = String(deal?.comp_data?.transaction_type || '').trim().toLowerCase()
+  return (t === 'buyer' || t === 'seller') ? t : null
+}
+
 // "Jane Doe" · "Jane Doe and John Doe" · "Jane Doe, John Doe and Acme LLC" —
 // how a parties clause reads, rather than a comma-joined list.
 export function joinNames(names = []) {
@@ -400,11 +461,16 @@ export function appointedAgent({ activeAgent = null, dealAgents = [] } = {}) {
 // and primary contact. Only tokens the template actually declares get sent.
 // The canonical token → value map from a deal's context. Field IDs on a
 // template that match one of these keys get auto-filled.
-export function crmTokenValues({ deal, property, contact, additionalContacts = [], agent } = {}) {
+// `agents` is the agent-side people in ROLE ORDER, i.e. orderAgentSigners()'
+// output. `agent` (the appointed agent) is kept as its own argument because it
+// is what every existing caller passes; the two never disagree, since
+// appointedAgent() is orderAgentSigners()[0] in each of their branches.
+export function crmTokenValues({ deal, property, contact, additionalContacts = [], agent, agents = [] } = {}) {
   const money = (n) => (n != null && n !== '' ? `$${Number(n).toLocaleString()}` : '')
   const fullAddr = [property?.address, property?.city, property?.state, property?.zip].filter(Boolean).join(', ')
   const dealComm = describeDealCommission(deal)
   const clients  = dealClientList({ contact, additionalContacts })
+  const side     = dealClientSide(deal)
   return {
     property_address:   property?.address || deal?.prop_address || '',
     property_full:      fullAddr,
@@ -433,10 +499,35 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
     // named line rather than one combined one.
     client_2_name:      clients[1]?.name || '',
     seller_2_name:      clients[1]?.name || '',
+    // ── Side-aware party names ─────────────────────────────────────────────
+    // Everything above is side-AGNOSTIC: `client_name` and its `seller_name`
+    // alias both mean "our client", whoever that is, and they fill the same on
+    // a listing and on a buyer representation agreement. That is right for a
+    // form with one "Client" line, and wrong for a form that says BUYER.
+    //
+    // These two fill only when the deal says our clients ARE the buyers. On a
+    // seller-side deal they stay blank on purpose: our clients are the sellers,
+    // the buyers are the other side of the table, and the CRM stores nothing
+    // about them. Printing our seller's name on a line captioned "Buyer" is the
+    // same silent, plausible, wrong-name failure that SIGNER_BOUND_FIELD_TYPES
+    // exists to prevent, and it is worse than a blank: a blank is visible on the
+    // send screen as an empty box the agent can fill in by hand before sending,
+    // and a Label field stays editable there precisely so they can.
+    //
+    // A deal with no transaction_type recorded reads as "unknown side", so it
+    // gets the blank too rather than a coin flip.
+    buyer_1_name:       side === 'buyer' ? (clients[0]?.name || '') : '',
+    buyer_2_name:       side === 'buyer' ? (clients[1]?.name || '') : '',
     close_date:         deal?.expected_close_date || '',
     // The deal's agent, NOT necessarily the sender — see appointedAgent().
     agent_name:         agent?.name || '',
     agent_email:        agent?.email || '',
+    // The SECOND agent-side person on the deal: a co-listing agent, or whoever
+    // else `dealAgentList()` found. For templates with two named agent lines.
+    // Taken from the same ordered list the signature rows are seeded from, so
+    // the agent printed in the body and the agent in the second signature row
+    // can never be two different people.
+    agent_2_name:       agents?.[1]?.name || '',
     // No brokerage is stored on an agent today, so this is effectively always
     // blank: put the firm name in the template as fixed text instead.
     broker_name:        agent?.brokerage || agent?.broker_name || '',
@@ -462,6 +553,54 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
 export const normalizeTokenKey = (s) => String(s || '').trim().toLowerCase()
   .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
 
+// ── Canonical Label field ids (the template-side half of the contract) ───────
+// The tokens above are the CRM's own vocabulary. The BoldSign templates use a
+// different one: PascalCase ids ending in `Label`, one fixed id per category of
+// data, reused across every template (a field id only has to be unique WITHIN a
+// template, so the same id can mean the same thing account-wide, which is what
+// keeps this code template-agnostic).
+//
+// The two spellings do NOT meet in the middle on their own. `normalizeTokenKey`
+// collapses case and separators, which is why `Agent_Name` and `agent name` are
+// already one token, but `Agent1NameLabel` has no separators to collapse: it
+// normalizes to `agent1namelabel` and matches nothing. A template authored
+// exactly to the convention therefore rendered every one of these as an empty
+// box on the send screen and sent no value for it. Not a wrong name, a blank,
+// with nothing on screen saying why.
+//
+// This table is the bridge, and it is deliberately an explicit list rather than
+// a derived pattern: a wrong entry here prints a real person's name under the
+// wrong caption, which is the failure this whole module is built to make
+// impossible, and a table can be read against the template and checked.
+//
+// Only ids the CRM can actually source are listed. The convention covers a much
+// wider vocabulary (entities, licence numbers, lender, the financial terms, the
+// staff selections that replace checkboxes); none of those has a column in this
+// schema yet. An id added here without a real token behind it would resolve to
+// `undefined`, match nothing, and quietly send nothing, so the list grows only
+// when the data does.
+export const CANONICAL_LABEL_TOKENS = {
+  Agent1NameLabel: 'agent_name',
+  Agent2NameLabel: 'agent_2_name',
+  Buyer1NameLabel: 'buyer_1_name',
+  Buyer2NameLabel: 'buyer_2_name',
+}
+
+// Canonical ids are matched with separators removed ENTIRELY, not merely
+// normalized, so `Agent1NameLabel`, `agent1namelabel` and `Agent1_Name_Label`
+// are all the same id. These are typed by hand in BoldSign's editor and the
+// convention's own casing is the only thing distinguishing the words.
+//
+// Kept as a separate collapse rather than loosening `normalizeTokenKey`:
+// that function decides every CRM token match in the app and in the account-wide
+// audit script, so widening it has a far larger blast radius than a four-entry
+// table needs.
+const squashFieldKey = (s) => String(s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '')
+
+const CANONICAL_ALIASES = Object.fromEntries(
+  Object.entries(CANONICAL_LABEL_TOKENS).map(([id, token]) => [squashFieldKey(id), token]),
+)
+
 // Which CRM token this field means, or '' when it is not one of ours. Accepts a
 // field object or a bare id string.
 export function fieldTokenKey(field, tokenKeys = SHARED_PREFILL_TOKENS) {
@@ -471,6 +610,11 @@ export function fieldTokenKey(field, tokenKeys = SHARED_PREFILL_TOKENS) {
   for (const c of candidates) {
     const key = normalizeTokenKey(c)
     if (key && tokenKeys.has(key)) return key
+    // Not one of ours under its own spelling. Try the canonical table before
+    // moving on: a field named `Agent1NameLabel` is correctly authored, it just
+    // names its data in the template's vocabulary instead of the CRM's.
+    const alias = CANONICAL_ALIASES[squashFieldKey(c)]
+    if (alias && tokenKeys.has(alias)) return alias
   }
   return ''
 }
