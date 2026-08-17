@@ -523,6 +523,39 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
   // name on a buyer agreement.
   const retainerStart = deal?.comp_data?.listing_start || ''
   const retainerEnd   = deal?.comp_data?.listing_end || deal?.expected_close_date || ''
+
+  // ── Per-deal terms that have no column of their own ────────────────────────
+  // Protection period, the property types a buyer is looking for, the areas they
+  // are looking in, escrow and lender details: all of these are terms of ONE
+  // agreement rather than facts about the property, and none has a column.
+  //
+  // They are read out of `deals.comp_data`, the jsonb the deal already uses for
+  // listing_start / listing_end / state / transaction_type. That means every id
+  // below is wired end to end TODAY with no migration: a blank one renders as a
+  // named, empty box on the send screen for the agent to fill once, and the same
+  // id fills itself the moment the value is stored on the deal. Adding a Deal
+  // page input later is then a UI change with no template work behind it.
+  const term = (key) => String(deal?.comp_data?.[key] ?? '').trim()
+
+  // The compensation clause as it reads in the agreement, not as two numbers.
+  // A form says "___% of the gross sales price" or "a service fee of $___", and
+  // an agent pasting "3" into the wrong one of those is a fee dispute. Derived
+  // from the deal's own commission entry so it always agrees with the Details
+  // tab, with a comp_data override for the packets that word it differently.
+  const compensation = () => {
+    if (term('broker_compensation')) return term('broker_compensation')
+    if (!dealComm) return ''
+    return dealComm.type === 'flat'
+      ? `a service fee of ${money(dealComm.flat)}`
+      : `${dealComm.pct}% of the gross sales price`
+  }
+
+  // "this __ day of ________, 20__" is three blanks on the page, so it is three
+  // ids here as well as one combined one. Split off the agreement date so the
+  // parts can never disagree with the whole.
+  const agreementIso = deal?.comp_data?.listing_start || today
+  const agParts = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(agreementIso || '').trim())
+  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
   return {
     property_address:   property?.address || deal?.prop_address || '',
     property_full:      fullAddr,
@@ -599,6 +632,39 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
     retainer_end_date:   usDate(retainerEnd),
     offer_expiration:    usDate(retainerEnd),
     closing_date_us:     usDate(deal?.expected_close_date),
+    listing_start_us:    usDate(retainerStart),
+    listing_end_us:      usDate(retainerEnd),
+    // The three blanks of "this __ day of ______, 20__".
+    agreement_day:       agParts ? String(Number(agParts[3])) : '',
+    agreement_month:     agParts ? MONTHS[Number(agParts[2]) - 1] : '',
+    agreement_year:      agParts ? agParts[1] : '',
+
+    // ── Buyer representation terms ─────────────────────────────────────────
+    protection_period_days: term('protection_period_days'),
+    property_types_sought:  term('property_types_sought'),
+    search_area:            term('search_area') || [property?.city, property?.county].filter(Boolean).join(', '),
+    broker_compensation:    compensation(),
+    // The agent a broker appoints IN ADDITION to the primary one. Falls back to
+    // the deal's second agent, which is who it usually is.
+    additional_agent_name:  term('additional_agent_name') || agents?.[1]?.name || '',
+    additional_agent_date:  usDate(term('additional_agent_date') || agreementIso),
+
+    // ── Purchase agreement / escrow ────────────────────────────────────────
+    earnest_money:          term('earnest_money'),
+    down_payment:           term('down_payment'),
+    financing_type:         term('financing_type'),
+    possession_date:        usDate(term('possession_date')),
+    inspection_deadline:    usDate(term('inspection_deadline')),
+    loan_approval_deadline: usDate(term('loan_approval_deadline')),
+    title_company:          term('title_company'),
+    lender_name:            term('lender_name'),
+    lender_institution:     term('lender_institution'),
+
+    // ── Listing / disclosure / MLS ─────────────────────────────────────────
+    listing_exclusivity:    term('listing_exclusivity'),
+    year_built:             term('year_built'),
+    mls_new_price:          term('mls_new_price'),
+    change_effective_date:  usDate(term('change_effective_date')),
     close_date:         deal?.expected_close_date || '',
     // The deal's agent, NOT necessarily the sender — see appointedAgent().
     agent_name:         agent?.name || '',
@@ -698,6 +764,39 @@ export const CANONICAL_LABEL_TOKENS = {
   RetainerDate2Label:    'retainer_end_date',
   RetainerStartLabel:    'retainer_start_date',
   RetainerEndLabel:      'retainer_end_date',
+  // "this __ day of ________, 20__" is three blanks on the page, so it is three
+  // ids. AgreementDateLabel is the same date as one value, for forms that print
+  // it whole.
+  AgreementDayLabel:     'agreement_day',
+  AgreementMonthLabel:   'agreement_month',
+  AgreementYearLabel:    'agreement_year',
+
+  // ── Buyer agreement terms ──────────────────────────────────────────────────
+  AdditionalAgentNameLabel: 'additional_agent_name',
+  AdditionalAgentDateLabel: 'additional_agent_date',
+  ProtectionPeriodDaysLabel: 'protection_period_days',
+  PropertyTypesSoughtLabel:  'property_types_sought',
+  SearchAreaLabel:           'search_area',
+  BrokerCompensationLabel:   'broker_compensation',
+
+  // ── Purchase agreement / escrow ────────────────────────────────────────────
+  EarnestMoneyLabel:        'earnest_money',
+  DownPaymentLabel:         'down_payment',
+  FinancingTypeLabel:       'financing_type',
+  PossessionDateLabel:      'possession_date',
+  InspectionDeadlineLabel:  'inspection_deadline',
+  LoanApprovalDeadlineLabel:'loan_approval_deadline',
+  TitleCompanyLabel:        'title_company',
+  LenderNameLabel:          'lender_name',
+  LenderInstitutionLabel:   'lender_institution',
+
+  // ── Listing / disclosure / MLS ─────────────────────────────────────────────
+  ListingStartDateLabel:    'listing_start_us',
+  ListingEndDateLabel:      'listing_end_us',
+  ListingExclusivityLabel:  'listing_exclusivity',
+  YearBuiltLabel:           'year_built',
+  NewListPriceLabel:        'mls_new_price',
+  ChangeEffectiveDateLabel: 'change_effective_date',
 }
 
 // Canonical ids are matched with separators removed ENTIRELY, not merely

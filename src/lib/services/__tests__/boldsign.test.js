@@ -1472,3 +1472,73 @@ describe('isUnconfiguredField — BoldSign echoes the id back as the name', () =
     }
   })
 })
+
+describe('per-deal agreement terms, stored in comp_data', () => {
+  const withTerms = (terms = {}) => crmTokenValues({
+    deal: { comp_data: { transaction_type: 'buyer', listing_start: '2026-08-01', ...terms }, value: 450000, commission_pct: 3 },
+    property: { address: '123 Main St', city: 'Ames', county: 'Story', state: 'IA', zip: '50010' },
+    agent: { name: 'Daniel Stillson' },
+    agents: [{ name: 'Daniel Stillson' }, { name: 'Jane Co-Agent' }],
+    today: '2026-08-17',
+  })
+  const val = (id, terms) => fieldTokenValue(withTerms(terms), { id })
+
+  it('every canonical id resolves to a token that exists', () => {
+    for (const [id, token] of Object.entries(CANONICAL_LABEL_TOKENS)) {
+      expect(SHARED_PREFILL_TOKENS.has(token), `${id} -> ${token}`).toBe(true)
+    }
+  })
+
+  it('reads buyer representation terms straight off the deal', () => {
+    const terms = {
+      protection_period_days: '180',
+      property_types_sought:  'Residential, Condo, Acreage',
+      search_area:            'Ames, Ankeny, Story County',
+    }
+    expect(val('ProtectionPeriodDaysLabel', terms)).toBe('180')
+    expect(val('PropertyTypesSoughtLabel', terms)).toBe('Residential, Condo, Acreage')
+    expect(val('SearchAreaLabel', terms)).toBe('Ames, Ankeny, Story County')
+  })
+
+  it('a term with nothing stored is blank, so the agent fills it once', () => {
+    // Blank is the point: the field still renders as a named box on the send
+    // screen, and starts filling itself the day the value lands on the deal.
+    expect(val('ProtectionPeriodDaysLabel')).toBe('')
+    expect(val('EarnestMoneyLabel')).toBe('')
+    expect(val('TitleCompanyLabel')).toBe('')
+  })
+
+  it('search area falls back to the property city and county', () => {
+    expect(val('SearchAreaLabel')).toBe('Ames, Story')
+    expect(val('SearchAreaLabel', { search_area: 'Des Moines Metro' })).toBe('Des Moines Metro')
+  })
+
+  it('writes the compensation as a clause, not as a bare number', () => {
+    // "3" pasted into the wrong blank of "___% or $___" is a fee dispute.
+    expect(val('BrokerCompensationLabel')).toBe('3% of the gross sales price')
+    const flat = crmTokenValues({ deal: { commission_type: 'flat', commission_flat: 5000 } })
+    expect(flat.broker_compensation).toBe('a service fee of $5,000')
+    // No commission entered means no clause, rather than a misleading 0%.
+    expect(crmTokenValues({ deal: {} }).broker_compensation).toBe('')
+    expect(val('BrokerCompensationLabel', { broker_compensation: '2.5% flat' })).toBe('2.5% flat')
+  })
+
+  it('splits the agreement date into the three blanks a form prints', () => {
+    expect(val('AgreementDayLabel')).toBe('1')
+    expect(val('AgreementMonthLabel')).toBe('August')
+    expect(val('AgreementYearLabel')).toBe('2026')
+    // And the whole date still agrees with its parts.
+    expect(val('AgreementDateLabel')).toBe('08/01/2026')
+  })
+
+  it('the additional appointed agent defaults to the deal second agent', () => {
+    expect(val('AdditionalAgentNameLabel')).toBe('Jane Co-Agent')
+    expect(val('AdditionalAgentDateLabel')).toBe('08/01/2026')
+    expect(val('AdditionalAgentNameLabel', { additional_agent_name: 'Pat Broker' })).toBe('Pat Broker')
+  })
+
+  it('formats every stored date the same way as the rest', () => {
+    expect(val('PossessionDateLabel', { possession_date: '2026-10-01' })).toBe('10/01/2026')
+    expect(val('ChangeEffectiveDateLabel', { change_effective_date: '2026-12-25' })).toBe('12/25/2026')
+  })
+})
