@@ -194,7 +194,15 @@ set search_path = public
 as $$
 declare
   m            record;
-  v_scan_id    uuid    := coalesce(p_scan_id, uuid_generate_v4());
+  -- gen_random_uuid(), NOT uuid_generate_v4(). This function pins
+  -- `set search_path = public` (below), and Supabase installs uuid-ossp into the
+  -- `extensions` schema — so uuid_generate_v4() is UNRESOLVABLE from in here even
+  -- though it works fine in table defaults, which resolve against the session's
+  -- search_path. Name resolution happens before COALESCE short-circuits, so this
+  -- failed on EVERY call even though the caller always passes p_scan_id: every
+  -- QR scan errored, and every scanner got the retry page. gen_random_uuid() is
+  -- core Postgres (pg_catalog), so no search_path can hide it.
+  v_scan_id    uuid    := coalesce(p_scan_id, gen_random_uuid());
   v_duplicate  boolean := false;
   v_recorded   boolean := false;
   v_inserted   integer := 0;

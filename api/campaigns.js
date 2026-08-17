@@ -379,27 +379,64 @@ function json(res, status, body, headers = {}) {
 // rather than being bumped from a stale read (the other original bug).
 // Returns the mailing, the string 'notfound', or null if it could not resolve.
 async function legacyScanFallback(token, ctx) {
-  const { data: m } = await db()
+  const m = await resolveMailingByToken(token)
+  if (!m) return 'notfound'
+  await directInsertScan(m.id, ctx)
+  return m
+}
+
+// ─── Destination resolve, independent of the tracking write ──────────────────
+//
+// THE POINT OF SEPARATING THESE:
+// record_mailing_scan() resolves the token AND stores the event AND bumps the
+// counter in one atomic round trip. That is right for correctness of the count,
+// but it fused the redirect to the write: any failure inside that function — a
+// constraint, a column a partially-applied migration never added, a slow cold
+// start blowing the latency budget — left the handler with no destination, and
+// the scanner got the "Opening your page…" retry page instead of the landing
+// page. On a QR code printed on a few thousand mailed postcards that is the
+// worst possible failure mode, and it is not recoverable by reprinting.
+//
+// So resolving the destination now has its own path that shares nothing with the
+// write. It is a single indexed lookup on a UNIQUE column, with no insert and no
+// update, so essentially the only way it fails is the database being unreachable
+// — in which case the retry page is genuinely the right answer.
+//
+// Returns the mailing, or null when the token does not exist.
+async function resolveMailingByToken(token) {
+  const { data: m, error } = await db()
     .from('mailings')
     .select('id, name, landing_type, landing_custom_url, landing_config, property_id, status')
     .eq('qr_token', token)
     .maybeSingle()
-  if (!m) return 'notfound'
+  if (error) throw error
+  if (!m) return null
+  return { ...m, mailing_id: m.id }
+}
 
+// Records a scan with a plain INSERT — no RPC. This is what keeps the scan when
+// record_mailing_scan itself is the broken part. The counter is deliberately NOT
+// bumped from here: it is left to reconcile_mailing_counters() nightly rather
+// than incremented from a stale read, which is how counts used to drift.
+// Returns true only if the row is known to be stored.
+async function directInsertScan(mailingId, ctx) {
   const { error } = await db().from('mailing_scans').insert({
     id:         ctx.scanId,
-    mailing_id: m.id,
+    mailing_id: mailingId,
     ip_hash:    hashIp(ctx.ip),
     user_agent: ctx.ua.slice(0, 500),
     referrer:   (ctx.req.headers.referer || '').slice(0, 500),
     country:    ctx.geo.country,
   })
-  if (error && !/duplicate key/i.test(error.message || '')) {
-    log.error('legacy scan insert failed', {
-      handler: 'campaigns', action: 'scan', err_message: String(error.message).slice(0, 200),
-    })
-  }
-  return { ...m, mailing_id: m.id }
+  if (!error) return true
+  // A primary-key collision means the RPC's write DID land after all — the scan
+  // is stored, which is exactly what this returns.
+  if (/duplicate key/i.test(error.message || '')) return true
+  log.error('direct scan insert failed', {
+    handler: 'campaigns', action: 'scan', mailing_id: mailingId,
+    err_message: String(error.message).slice(0, 200),
+  })
+  return false
 }
 
 // Calls a 0031 RPC, returning null (instead of throwing) when the function
@@ -522,10 +559,51 @@ export default async function handler(req, res) {
         if (legacy) { mailing = legacy; confirmed = true; cacheSet(token, legacy) }
       }
 
+      // ── The redirect does not depend on the tracking write ──────────────────
+      //
+      // Reached whenever the RPC gave us no destination for ANY reason — it timed
+      // out, or it errored for something other than "the function isn't there"
+      // (a constraint inside it, a column a partially-applied 0031 never added).
+      // Previously only the missing-function case had a fallback, so every other
+      // failure fell through to the retry page: a printed QR code that recorded
+      // nothing and rendered a spinner that never resolved.
+      //
+      // Resolving is a single indexed lookup that shares nothing with the write,
+      // so it survives a broken record_mailing_scan. The scan is then stored with
+      // a plain INSERT, which also does not depend on the RPC.
+      if (!mailing) {
+        const fallbackBudget = Number(process.env.SCAN_FALLBACK_BUDGET_MS || 1200)
+        const resolved = await withTimeout(resolveMailingByToken(token), fallbackBudget)
+
+        // withTimeout resolves a rejection to { error }, so a database failure
+        // here is an object with `error` — not a throw, and not null.
+        if (resolved !== TIMEOUT && !resolved?.error) {
+          // A definitive "no such token" is a 404, exactly as on the RPC path.
+          if (resolved === null) return res.status(404).send('Mailing not found')
+          mailing = resolved
+          cacheSet(token, resolved)
+
+          // Store the scan directly. If this confirms, no replay is needed; if it
+          // cannot, the replay token below lets the landing page re-report it.
+          const stored = await withTimeout(directInsertScan(resolved.id, {
+            scanId, ip, ua, geo, req,
+          }), fallbackBudget)
+          if (stored === true) confirmed = true
+
+          // warn, not error: the scanner got their page. The paired 'scan write
+          // unconfirmed' error above carries WHY the RPC failed — that is the
+          // line to search for when tracking looks light but pages load fine.
+          log.warn('scan resolved by fallback', {
+            handler: 'campaigns', action: 'scan', token: String(token).slice(0, 16),
+            scan_id: scanId, recorded: stored === true, duration_ms: Date.now() - t0,
+          })
+        }
+      }
+
       const replay = confirmed ? null : signPayload({ k: token, s: scanId, v: visitId, t: Date.now() })
 
-      // No destination at all — the database was unreachable and this instance
-      // had nothing cached. Hand back a page that keeps retrying rather than an
+      // No destination even from the independent lookup — the database is not
+      // reachable at all. Hand back a page that keeps retrying rather than an
       // error, so the scan is still captured once the database recovers.
       if (!mailing) {
         res.setHeader('Content-Type', 'text/html; charset=utf-8')
