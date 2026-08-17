@@ -1526,7 +1526,9 @@ describe('per-deal agreement terms, stored in comp_data', () => {
   it('splits the agreement date into the three blanks a form prints', () => {
     expect(val('AgreementDayLabel')).toBe('1')
     expect(val('AgreementMonthLabel')).toBe('August')
-    expect(val('AgreementYearLabel')).toBe('2026')
+    // Two digits: the form pre-prints "20", so a four-digit year reads "202026".
+    expect(val('AgreementYearLabel')).toBe('26')
+    expect(val('AgreementYearFullLabel')).toBe('2026')
     // And the whole date still agrees with its parts.
     expect(val('AgreementDateLabel')).toBe('08/01/2026')
   })

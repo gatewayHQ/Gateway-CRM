@@ -637,7 +637,11 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
     // The three blanks of "this __ day of ______, 20__".
     agreement_day:       agParts ? String(Number(agParts[3])) : '',
     agreement_month:     agParts ? MONTHS[Number(agParts[2]) - 1] : '',
-    agreement_year:      agParts ? agParts[1] : '',
+    // TWO digits, because the form pre-prints "20" and the blank that follows it
+    // takes only the last two. A four-digit year there reads "202026".
+    agreement_year:      agParts ? agParts[1].slice(2) : '',
+    // The whole year, for a form that prints the blank on its own.
+    agreement_year_full: agParts ? agParts[1] : '',
 
     // ── Buyer representation terms ─────────────────────────────────────────
     protection_period_days: term('protection_period_days'),
@@ -769,7 +773,8 @@ export const CANONICAL_LABEL_TOKENS = {
   // it whole.
   AgreementDayLabel:     'agreement_day',
   AgreementMonthLabel:   'agreement_month',
-  AgreementYearLabel:    'agreement_year',
+  AgreementYearLabel:     'agreement_year',
+  AgreementYearFullLabel: 'agreement_year_full',
 
   // ── Buyer agreement terms ──────────────────────────────────────────────────
   AdditionalAgentNameLabel: 'additional_agent_name',
