@@ -42,7 +42,11 @@ function mockRes() {
 const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 Version/17.4 Mobile/15E148 Safari/604.1'
 
 // Swap the Supabase client for a stub whose rpc() we control per test.
+// maybeSingleImpl covers the destination-resolve fallback: the scan handler falls
+// back to a plain `mailings` lookup whenever the RPC gives it no destination, so
+// a test that wants "no destination at all" has to make BOTH fail.
 let rpcImpl
+let maybeSingleImpl
 vi.mock('@supabase/supabase-js', () => ({
   createClient: () => ({
     rpc: (...args) => rpcImpl(...args),
@@ -51,8 +55,8 @@ vi.mock('@supabase/supabase-js', () => ({
         select: () => chain, insert: () => chain, update: () => chain, upsert: () => chain,
         delete: () => chain, eq: () => chain, in: () => chain, gt: () => chain, lt: () => chain,
         gte: () => chain, ilike: () => chain, order: () => chain, limit: () => chain,
-        single: () => Promise.resolve({ data: null, error: null }),
-        maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        single: () => maybeSingleImpl(),
+        maybeSingle: () => maybeSingleImpl(),
         then: (resolve) => resolve({ data: [], error: null, count: 0 }),
       }
       return chain
@@ -64,6 +68,7 @@ let handler
 beforeEach(async () => {
   vi.resetModules()
   rpcImpl = vi.fn(async () => ({ data: [MAILING], error: null }))
+  maybeSingleImpl = () => Promise.resolve({ data: null, error: null })
   handler = (await import('../campaigns.js')).default
 })
 
@@ -173,8 +178,15 @@ describe('/m/{token} — an unconfirmed write is never a lost scan', () => {
   })
 
   it('serves a self-retrying page when the destination cannot be resolved at all', async () => {
+    // "At all" means the database is unreachable, so BOTH the RPC and the
+    // fallback `mailings` lookup have to hang. If only the RPC fails, the
+    // fallback resolves the destination and the scanner is redirected instead —
+    // that is the point of the fallback, and it is covered in
+    // campaigns-scan-resilience.test.js.
     process.env.SCAN_WRITE_BUDGET_MS = '30'
+    process.env.SCAN_FALLBACK_BUDGET_MS = '30'
     rpcImpl = vi.fn(() => new Promise(() => {}))
+    maybeSingleImpl = () => new Promise(() => {})
 
     const res = mockRes()
     await handler(scanReq({}, { token: 'NeverSeenBefore' }), res)
@@ -182,6 +194,22 @@ describe('/m/{token} — an unconfirmed write is never a lost scan', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toContain('scan_replay')   // keeps trying until it lands
     expect(res.headers['cache-control']).toMatch(/no-store/)
+    delete process.env.SCAN_WRITE_BUDGET_MS
+    delete process.env.SCAN_FALLBACK_BUDGET_MS
+  })
+
+  it('a reachable database that says "no such token" is a 404, not a spinner', async () => {
+    // The distinction the fallback introduces: an authoritative "that token does
+    // not exist" is an answer, and answering it with an endless spinner would
+    // hide a mistyped or deleted campaign forever.
+    process.env.SCAN_WRITE_BUDGET_MS = '30'
+    rpcImpl = vi.fn(() => new Promise(() => {}))
+    maybeSingleImpl = () => Promise.resolve({ data: null, error: null })
+
+    const res = mockRes()
+    await handler(scanReq({}, { token: 'NeverSeenBefore' }), res)
+
+    expect(res.statusCode).toBe(404)
     delete process.env.SCAN_WRITE_BUDGET_MS
   })
 

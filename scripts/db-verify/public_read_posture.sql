@@ -19,73 +19,88 @@
 -- the number 0027 and never made it into the apply-order table in
 -- migrations/README.md), so ask the database.
 --
--- Read the four results top to bottom; each says what a good answer looks like.
+-- The consolidated query below returns everything in ONE result set, because the
+-- Supabase SQL Editor shows only the LAST statement's result when several are run
+-- together. The first three rows are the answer; the rest is supporting detail.
 -- ═════════════════════════════════════════════════════════════════════════════
 
 
--- ── 1. Is 0027 applied? ──────────────────────────────────────────────────────
--- Lists every policy an anonymous caller can use on the eight tables 0027
--- closed.
---
---   ZERO ROWS   → 0027 is applied. Expected. The app fixes are what make the
---                 public pages work again; nothing further to do here.
---   SOME ROWS   → 0027 is NOT fully applied on those tables, so they are still
---                 anonymously readable (and, if cmd is ALL, writable). The app
---                 fixes are still correct and still work — they just are not
---                 yet load-bearing. Apply 0027 to close the hole.
-select 'anon-reachable policy on a table 0027 closes' as finding,
-       tablename, policyname, roles, cmd
-from pg_policies
-where schemaname = 'public'
-  and tablename in ('properties', 'templates', 'teams', 'team_splits',
-                    'mailings', 'mailing_recipients', 'mailing_scans', 'mailing_leads')
-  and (roles = '{public}' or 'anon' = any(roles))
-order by tablename, policyname;
+-- ═════════════════════════════════════════════════════════════════════════════
 
-
--- ── 2. Can signed-in agents still use those tables? ──────────────────────────
--- The failure mode on the other side: a table locked with no working policy for
--- authenticated users locks the agents out of their own CRM.
---
---   Expect one row per table that exists in this database.
---   A MISSING table name here means nobody can read it — investigate before
---   anything else, this is worse than the anon hole.
-select 'authenticated policy present' as finding,
-       tablename, policyname, cmd
-from pg_policies
-where schemaname = 'public'
-  and tablename in ('properties', 'templates', 'teams', 'team_splits',
-                    'mailings', 'mailing_recipients', 'mailing_scans', 'mailing_leads')
-  and 'authenticated' = any(roles)
-order by tablename;
-
-
--- ── 3. Does the advisor-card view exist, and is it still narrow? ─────────────
--- The landing pages read `agents_public` (granted to anon on purpose) for the
--- advisor cards. This is the one anonymous table-ish read the app still makes,
--- so it is the one that must stay column-limited.
---
---   Expect exactly: id, name, role, tagline, bio, photo_url, color, phone, email,
---   stats — and NOTHING resembling cap_amount, default_split_pct, is_admin,
---   auth_id or twilio_*. If the view is missing entirely, 0027 §4 was not
---   applied and the advisor cards will be blank (the pages still render).
-select 'agents_public column' as finding, column_name, data_type
-from information_schema.columns
-where table_schema = 'public' and table_name = 'agents_public'
-order by ordinal_position;
-
-
--- ── 4. Anything else still open to anon, anywhere? ───────────────────────────
--- The whole-database sweep. `visitor_events` and `lead_captures` are intentional
--- (the website tracking snippet posts to them with the anon key), as is any
--- storage policy for the public campaign-images bucket.
---
---   Expect ONLY those. Anything else — especially a table holding credentials,
---   contacts or addresses — is a hole worth closing.
-select 'still anon-reachable' as finding,
-       tablename, policyname, roles, cmd
-from pg_policies
-where schemaname = 'public'
-  and (roles = '{public}' or 'anon' = any(roles))
-  and tablename not in ('visitor_events', 'lead_captures')
-order by tablename, policyname;
+with closed(t) as (
+  values ('properties'),('templates'),('teams'),('team_splits'),
+         ('mailings'),('mailing_recipients'),('mailing_scans'),('mailing_leads')
+),
+anon_open as (
+  select tablename, policyname, cmd, roles from pg_policies
+  where schemaname = 'public'
+    and tablename in (select t from closed)
+    and (roles = '{public}' or 'anon' = any(roles))
+),
+auth_ok as (
+  select tablename from pg_policies
+  where schemaname = 'public' and 'authenticated' = any(roles)
+  group by tablename
+),
+missing_auth as (
+  select c.t from closed c
+  where to_regclass('public.' || c.t) is not null
+    and c.t not in (select tablename from auth_ok)
+)
+select * from (
+  -- 1. Is 0027 applied? Zero anon-reachable policies on those eight tables = yes.
+  select 1 as ord, 'VERDICT' as section,
+    case when (select count(*) from anon_open) = 0
+      then 'PASS  0027 is applied - none of the 8 tables are anon-reachable'
+      else 'ACTION  ' || (select count(*) from anon_open) ||
+           ' anon-reachable policy(ies) remain - 0027 is NOT fully applied'
+    end as item, '' as detail
+  union all
+  -- 2. The opposite failure: a locked table with no policy for signed-in users
+  --    locks the agents out of their own CRM. Worse than the anon hole.
+  select 2, 'VERDICT',
+    case when (select count(*) from missing_auth) = 0
+      then 'PASS  every one of those tables still has an authenticated policy'
+      else 'ACTION  NO authenticated policy on: ' ||
+           (select string_agg(t, ', ') from missing_auth) ||
+           '  <- signed-in agents are locked out, fix this first'
+    end, ''
+  union all
+  -- 3. agents_public is the one anonymous read the app still makes (advisor
+  --    cards), so it must exist AND stay column-limited.
+  select 3, 'VERDICT',
+    case
+      when to_regclass('public.agents_public') is null
+        then 'ACTION  agents_public view is MISSING (0027 sec.4 not applied) - advisor cards will be blank'
+      when exists (
+        select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = 'agents_public'
+          and column_name in ('cap_amount','cap_anniversary','default_split_pct',
+                              'no_brokerage_split','is_admin','auth_id',
+                              'twilio_sid','twilio_number','nav_hidden'))
+        then 'ACTION  agents_public EXPOSES a sensitive column - see section 3 below'
+      else 'PASS  agents_public exists with ' ||
+           (select count(*) from information_schema.columns
+            where table_schema = 'public' and table_name = 'agents_public') ||
+           ' columns, none sensitive'
+    end, ''
+  union all
+  select 4, '1. anon-reachable on 0027 tables', tablename || '.' || policyname,
+         cmd || '   roles=' || roles::text from anon_open
+  union all
+  select 5, '2. authenticated policy present', tablename, 'ok' from auth_ok
+  where tablename in (select t from closed)
+  union all
+  select 6, '3. agents_public columns', column_name, data_type
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'agents_public'
+  union all
+  -- 4. Whole-database sweep. visitor_events / lead_captures are intentional:
+  --    the website tracking snippet posts to them with the anon key.
+  select 7, '4. anon-reachable anywhere else', tablename || '.' || policyname,
+         cmd || '   roles=' || roles::text
+  from pg_policies
+  where schemaname = 'public'
+    and (roles = '{public}' or 'anon' = any(roles))
+    and tablename not in ('visitor_events', 'lead_captures')
+) t order by ord, item;
