@@ -76,6 +76,33 @@ select ord, "check", value, note from (
 ) t order by ord, value;
 
 
+-- ═══ BLOCK 1b — the search_path trap (read-only) ═════════════════════════════
+-- This is what actually caused the 2026-08-17 outage, and it is invisible to
+-- every other check here.
+--
+-- record_mailing_scan() is `security definer` and pins `set search_path = public`.
+-- Supabase installs uuid-ossp into the `extensions` schema. So the function's
+-- first statement could not resolve uuid_generate_v4() and EVERY scan failed with
+-- 42883 — while `uuid_generate_v4()` kept working fine in table defaults, which
+-- resolve against the SESSION search_path. Migration 0033 removes the dependency
+-- by using core gen_random_uuid().
+--
+--   pinned = 'search_path=public' AND uuid_ossp_schema = 'extensions'
+--     → you have the bug. Apply migrations/0033_scan_uuid_searchpath.sql.
+--   pinned mentions extensions, or uuid_ossp_schema = 'public'
+--     → not this bug; carry on to blocks 2 and 3.
+--
+-- The general lesson: any `security definer` function that pins search_path can
+-- only call things in the schemas it pinned, plus pg_catalog.
+select 'G. search_path trap' as "check",
+       coalesce(array_to_string(p.proconfig, ', '), '(inherits session search_path)') as pinned,
+       coalesce((select string_agg(distinct n2.nspname, ', ')
+                 from pg_proc p2 join pg_namespace n2 on n2.oid = p2.pronamespace
+                 where p2.proname = 'uuid_generate_v4'), 'NOT INSTALLED ANYWHERE') as uuid_ossp_schema
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public' and p.proname = 'record_mailing_scan';
+
+
 -- ═══ BLOCK 2 — resolve-only dry run (writes nothing) ═════════════════════════
 -- p_record := false skips the write entirely, exercising only the half that
 -- produces the redirect.
