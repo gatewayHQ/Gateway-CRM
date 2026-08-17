@@ -930,7 +930,70 @@ in order with the right party first. Where the value must be legible **regardles
 of order**, it is a Label — no exceptions.
 
 ## CRM prefill tokens
-`property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `seller_names` / `client_names` · `seller_2_name` / `client_2_name` · `broker_name` · `agent_name` · `agent_email` · `list_price` · `commission_pct` · `commission_amount` · `listing_start_date` · `listing_end_date` · `close_date`
+`property_address` · `property_full` · `property_city` · `property_state` · `property_zip` · `seller_name` / `client_name` · `seller_names` / `client_names` · `seller_2_name` / `client_2_name` · `buyer_1_name` · `buyer_2_name` · `broker_name` · `agent_name` · `agent_2_name` · `agent_email` · `list_price` · `commission_pct` · `commission_amount` · `listing_start_date` · `listing_end_date` · `close_date`
+
+### Canonical Label field ids (the template-side vocabulary)
+
+Templates are moving to a fixed naming convention for their Label fields:
+PascalCase ids ending in `Label`, one id per category of data, reused across
+every template. A field id only has to be unique *within* a template, so the same
+id can mean the same thing account-wide, which is what keeps the send code
+template-agnostic.
+
+**These do not resolve through `normalizeTokenKey()` on their own.** That
+function collapses case and separators, which is why `Agent_Name` and
+`agent name` are already one token, but `Agent1NameLabel` has no separators to
+collapse: it normalizes to `agent1namelabel` and matches nothing. A template
+authored exactly to the convention rendered every one of these as an empty box on
+the send screen and sent no value for it. Not a wrong name, a blank, and nothing
+on screen said why.
+
+`CANONICAL_LABEL_TOKENS` (`src/lib/services/boldsignFields.js`) is the bridge.
+`fieldTokenKey()` tries a field's own spelling first and falls back to this table,
+matching with separators removed entirely, so `Agent1NameLabel`,
+`agent1namelabel` and `Agent1_Name_Label` are one id.
+
+| Canonical Label id | CRM token | Source |
+|---|---|---|
+| `Agent1NameLabel` | `agent_name` | `appointedAgent()` |
+| `Agent2NameLabel` | `agent_2_name` | `orderAgentSigners()[1]` |
+| `Buyer1NameLabel` | `buyer_1_name` | first client, buyer-side deals only |
+| `Buyer2NameLabel` | `buyer_2_name` | second client, buyer-side deals only |
+
+The table is an explicit list rather than a derived pattern on purpose: a wrong
+entry prints a real person's name under the wrong caption, which is the failure
+this module exists to prevent, and a table can be read against the template and
+checked. Every id in it is unit-tested to have a real token behind it, since an
+id pointing at a token that does not exist would resolve to `undefined` and
+quietly send nothing.
+
+The convention covers a much wider vocabulary (entities, licence numbers, lender,
+the financial terms, the staff selections that replace checkboxes). **None of
+those has a column in this schema**, so none is listed here. The table grows when
+the data model does, not before.
+
+### `buyer_*` is side-aware, `client_*` is not
+`client_name` and its `seller_name` alias mean "our client", whoever that is, and
+fill identically on a listing and on a buyer representation agreement. That is
+right for a form with one "Client" line and wrong for a form that says BUYER.
+
+`buyer_1_name` / `buyer_2_name` fill **only when the deal says our clients are the
+buyers**, read from `comp_data.transaction_type` via `dealClientSide()` (the same
+value the Form Library filters templates by). On a seller-side deal they stay
+blank on purpose: our clients are the sellers, the buyers are the other side of
+the table, and the CRM stores nothing about them. A `lease` or `general` deal, or
+one with no transaction type recorded, reads as "unknown side" and gets the blank
+too rather than a coin flip.
+
+Printing our seller's name on a line captioned "Buyer" is the same silent,
+plausible, wrong-name failure that `SIGNER_BOUND_FIELD_TYPES` exists to prevent,
+and it is worse than a blank. A blank is visible on the send screen as an empty
+box, and a Label field stays editable there precisely so the agent can fill it in
+by hand before sending.
+
+**The counterparty is not modelled.** Giving `Seller1NameLabel` a source on a
+buyer-side deal (and vice versa) needs a real other-side record on the deal, which
+is a schema change, not a token.
 
 **Field ids match case-insensitively.** Ids are typed by hand in BoldSign's
 editor, where `Agent_Name` and `agent_name` look like the same thing, and a
@@ -1076,7 +1139,7 @@ on Live stay on Live — they are real signed records and are not portable.
 ## Testing
 - `api/__tests__/boldsign.test.js` — retry/idempotency, `buildSignerPayload`/`requiresExplicitFieldPlacement` (retired-placement contract), `normalizeTemplateRoles` (the Roles-empty fix), `resolveOnBehalfOf` (agent identity → org-default fallback → null), `betaBase` (region-preserving `/v1-beta` derivation), `sendDraftDocument` (beta path, `onBehalfOf`, never-retried, indeterminate outcome) and `describeDraftSendFailure`.
 - `api/__tests__/cron-boldsign-sync.test.js` — `detectStateFromTitle`.
-- `src/lib/services/__tests__/boldsign.test.js` — `buildTextTag`, `normalizeState`, `crmTokenValues`/`buildPrefill`, `isFillableField`, and the shared-field routing (`isSharedField`, `partitionPrefillFields`, `buildPrefillFields`, `sharedDataOnSignerFields`).
+- `src/lib/services/__tests__/boldsign.test.js` — `buildTextTag`, `normalizeState`, `crmTokenValues`/`buildPrefill`, `isFillableField`, and the shared-field routing (`isSharedField`, `partitionPrefillFields`, `buildPrefillFields`, `sharedDataOnSignerFields`). Also the canonical Label ids: `CANONICAL_LABEL_TOKENS` resolution through `fieldTokenKey`, `dealClientSide`, the side-aware `buyer_*` tokens, and an end-to-end pass over the four fields on the live test template (all four routed to `sharedFormFields`, and a single-buyer deal sending no `Buyer2NameLabel` entry at all rather than an empty one).
 - `api/__tests__/boldsign.test.js` also covers `mergeSharedFormFields` — Labels land on the first role, read-only, deduped against role-scoped copies, idempotent.
 - Manual smoke test after deploy: Form Library → Add/Edit Packet → confirm the dialog scrolls and shows Save/Cancel → Build in BoldSign (confirms the Roles/DocumentTitle fix) → place a field and click Finish inside the embedded editor → confirm it auto-saves and closes back to the library list with the new template id and a "Sendable" badge, with no separate Save click needed → click "Rebuild in BoldSign" on that same packet and confirm it reopens the *same* template (not a new one) → send from a deal → sign in Sandbox → confirm the signed PDF + audit trail land in Documents with a "Signed by … on …" note → delete an unsigned draft from the Signatures tab filter view.
 - **Shared-visibility check (multi-signer, do this after any change to the prefill payload):** send a two-signer packet from a template that has Label fields, then open the signing link for the **second** signer *before the first has signed*. Every Label value — including any box we pre-ticked — must already be on the page and none of them editable. If a value is missing, it is on a role-scoped field in the template — convert it to a Label (the send modal warns about the ones it can detect).

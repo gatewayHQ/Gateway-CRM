@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -947,5 +947,219 @@ describe('describeTransportFailure — turning "Failed to fetch" into something 
 
   it('names the endpoint it could not reach', () => {
     expect(describeTransportFailure(err, { online: true, url: '/api/portal' })).toMatch(/\/api\/portal/)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Canonical Label field ids — the template-side vocabulary
+//
+// The templates name their fields `Agent1NameLabel`; the CRM names the same
+// value `agent_name`. normalizeTokenKey() bridges case and separators, but
+// there are no separators in `Agent1NameLabel`, so before CANONICAL_LABEL_TOKENS
+// a correctly authored template matched nothing and every one of these fields
+// went out blank with no error anywhere.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('dealClientSide — which side of the table our clients are on', () => {
+  const side = (t) => dealClientSide({ comp_data: { transaction_type: t } })
+
+  it('reads buyer and seller off the deal', () => {
+    expect(side('buyer')).toBe('buyer')
+    expect(side('seller')).toBe('seller')
+  })
+
+  it('refuses to guess a side for a lease or a general deal', () => {
+    // A lease has a lessor and a lessee, not a buyer and a seller.
+    expect(side('lease')).toBeNull()
+    expect(side('general')).toBeNull()
+  })
+
+  it('reads an unset, missing or oddly-cased value safely', () => {
+    expect(side('')).toBeNull()
+    expect(side(undefined)).toBeNull()
+    expect(dealClientSide({})).toBeNull()
+    expect(dealClientSide(null)).toBeNull()
+    expect(dealClientSide(undefined)).toBeNull()
+    expect(side(' Buyer ')).toBe('buyer')
+  })
+})
+
+describe('canonical Label ids resolve to CRM tokens', () => {
+  const ctx = {
+    deal:     { comp_data: { transaction_type: 'buyer' } },
+    contact:  { first_name: 'Jane', last_name: 'Buyer' },
+    additionalContacts: [{ first_name: 'John', last_name: 'Buyer', email: 'john@x.com' }],
+    agent:    { name: 'Nic Madsen', email: 'nic@gateway.com' },
+    agents:   [{ name: 'Nic Madsen', email: 'nic@gateway.com' }, { name: 'Dana Co', email: 'dana@gateway.com' }],
+  }
+
+  it('REGRESSION: Agent1NameLabel resolves — it normalizes to agent1namelabel and used to match nothing', () => {
+    expect(fieldTokenKey({ id: 'Agent1NameLabel' })).toBe('agent_name')
+    expect(fieldTokenValue(crmTokenValues(ctx), { id: 'Agent1NameLabel' })).toBe('Nic Madsen')
+  })
+
+  it('resolves all four ids on the live test template', () => {
+    const vals = crmTokenValues(ctx)
+    expect(fieldTokenValue(vals, { id: 'Agent1NameLabel' })).toBe('Nic Madsen')
+    expect(fieldTokenValue(vals, { id: 'Agent2NameLabel' })).toBe('Dana Co')
+    expect(fieldTokenValue(vals, { id: 'Buyer1NameLabel' })).toBe('Jane Buyer')
+    expect(fieldTokenValue(vals, { id: 'Buyer2NameLabel' })).toBe('John Buyer')
+  })
+
+  it('matches however an admin typed the id, since BoldSign auto-assigns the real one', () => {
+    expect(fieldTokenKey({ id: 'agent1namelabel' })).toBe('agent_name')
+    expect(fieldTokenKey({ id: 'AGENT1NAMELABEL' })).toBe('agent_name')
+    expect(fieldTokenKey({ id: 'Agent1_Name_Label' })).toBe('agent_name')
+    expect(fieldTokenKey({ id: ' Agent1NameLabel ' })).toBe('agent_name')
+  })
+
+  it('matches on the field NAME when BoldSign minted the id (Label1, Label2, ...)', () => {
+    // The box an admin types into in the template editor is the field's name;
+    // the id is auto-assigned and is not a stable identifier.
+    expect(fieldTokenKey({ id: 'Label1', name: 'Buyer1NameLabel' })).toBe('buyer_1_name')
+    expect(fieldTokenKey({ id: 'Label7', label: 'Agent2NameLabel' })).toBe('agent_2_name')
+  })
+
+  it('leaves the CRM vocabulary working exactly as before', () => {
+    expect(fieldTokenKey({ id: 'agent_name' })).toBe('agent_name')
+    expect(fieldTokenKey({ id: 'Agent_Name' })).toBe('agent_name')
+    expect(fieldTokenKey({ id: 'property_address' })).toBe('property_address')
+  })
+
+  it('still returns nothing for a field that is not ours', () => {
+    expect(fieldTokenKey({ id: 'WitnessInitials' })).toBe('')
+    expect(fieldTokenKey({ id: 'Label3' })).toBe('')
+    expect(fieldTokenKey(null)).toBe('')
+  })
+
+  it('every id in the table has a real token behind it', () => {
+    // An entry pointing at a token that does not exist would resolve to
+    // undefined and silently send nothing, which is the bug this table fixes.
+    for (const token of Object.values(CANONICAL_LABEL_TOKENS)) {
+      expect(SHARED_PREFILL_TOKENS.has(token)).toBe(true)
+    }
+  })
+})
+
+describe('side-aware buyer tokens', () => {
+  const people = {
+    contact: { first_name: 'Jane', last_name: 'Client' },
+    additionalContacts: [{ first_name: 'John', last_name: 'Client', email: 'john@x.com' }],
+  }
+  const on = (transaction_type) => crmTokenValues({ ...people, deal: { comp_data: { transaction_type } } })
+
+  it('fills the buyer lines when our clients ARE the buyers', () => {
+    const vals = on('buyer')
+    expect(vals.buyer_1_name).toBe('Jane Client')
+    expect(vals.buyer_2_name).toBe('John Client')
+  })
+
+  it('REGRESSION: a seller-side deal must not print our seller under a Buyer caption', () => {
+    // The counterparty is not stored anywhere in the CRM. A blank is visible on
+    // the send screen and fixable by hand; a plausible wrong name is not.
+    const vals = on('seller')
+    expect(vals.buyer_1_name).toBe('')
+    expect(vals.buyer_2_name).toBe('')
+    // The side-agnostic tokens still carry our clients, as they always did.
+    expect(vals.client_name).toBe('Jane Client')
+    expect(vals.client_2_name).toBe('John Client')
+  })
+
+  it('blanks the buyer lines when the deal never recorded a side', () => {
+    expect(on(undefined).buyer_1_name).toBe('')
+    expect(on('lease').buyer_1_name).toBe('')
+    expect(crmTokenValues(people).buyer_1_name).toBe('')
+  })
+
+  it('skips Buyer2 entirely on a single-buyer deal', () => {
+    const vals = crmTokenValues({ contact: people.contact, deal: { comp_data: { transaction_type: 'buyer' } } })
+    expect(vals.buyer_1_name).toBe('Jane Client')
+    expect(vals.buyer_2_name).toBe('')
+  })
+})
+
+describe('agent_2_name — the second agent line', () => {
+  const agents = [{ name: 'Nic Madsen' }, { name: 'Dana Co' }]
+
+  it('takes the second agent from the same ordered list the signature rows use', () => {
+    expect(crmTokenValues({ agents }).agent_2_name).toBe('Dana Co')
+  })
+
+  it('is blank when the deal has only one agent, and when none was passed', () => {
+    expect(crmTokenValues({ agents: [agents[0]] }).agent_2_name).toBe('')
+    expect(crmTokenValues({}).agent_2_name).toBe('')
+  })
+
+  it('agrees with appointedAgent about who agent 1 is', () => {
+    // appointedAgent() is orderAgentSigners()[0] in every branch, so the body's
+    // agent_name and agent_2_name can never name the same person twice.
+    const dealAgents  = [{ name: 'Nic Madsen', email: 'nic@g.com' }, { name: 'Dana Co', email: 'dana@g.com' }]
+    const activeAgent = { name: 'Dana Co', email: 'dana@g.com' }
+    const ordered = orderAgentSigners({ activeAgent, dealAgents })
+    const vals = crmTokenValues({ agent: appointedAgent({ activeAgent, dealAgents }), agents: ordered })
+    expect(vals.agent_name).toBe('Dana Co')
+    expect(vals.agent_2_name).toBe('Nic Madsen')
+    expect(vals.agent_name).not.toBe(vals.agent_2_name)
+  })
+})
+
+describe('canonical Labels reach every signer, end to end', () => {
+  // The four fields on the live test template, as BoldSign returns them.
+  const fields = [
+    { id: 'Agent1NameLabel', type: 'Label' },
+    { id: 'Agent2NameLabel', type: 'Label' },
+    { id: 'Buyer1NameLabel', type: 'Label' },
+    { id: 'Buyer2NameLabel', type: 'Label' },
+  ]
+  const seed = (vals) => Object.fromEntries(fields.map(f => [f.id, fieldTokenValue(vals, f)]))
+
+  const twoBuyers = crmTokenValues({
+    deal:    { comp_data: { transaction_type: 'buyer' } },
+    contact: { first_name: 'Jane', last_name: 'Buyer' },
+    additionalContacts: [{ first_name: 'John', last_name: 'Buyer', email: 'john@x.com' }],
+    agent:   { name: 'Nic Madsen' },
+    agents:  [{ name: 'Nic Madsen' }, { name: 'Dana Co' }],
+  })
+
+  it('routes all four to sharedFormFields, not to any one signer', () => {
+    const out = buildPrefillFields({ fields, values: seed(twoBuyers), filledRoleIndices: [1, 2] })
+    expect(out.sharedFormFields).toEqual([
+      { id: 'Agent1NameLabel', value: 'Nic Madsen', isReadOnly: true },
+      { id: 'Agent2NameLabel', value: 'Dana Co',    isReadOnly: true },
+      { id: 'Buyer1NameLabel', value: 'Jane Buyer', isReadOnly: true },
+      { id: 'Buyer2NameLabel', value: 'John Buyer', isReadOnly: true },
+    ])
+    // Nothing lands on a role, which is what makes them visible to everyone
+    // immediately rather than gated behind whoever signs first.
+    expect(out.byRole).toEqual({})
+    expect(out.signerScopedIds).toEqual([])
+  })
+
+  it('ACCEPTANCE: a single-buyer deal sends no Buyer2 field at all, not an empty one', () => {
+    const oneBuyer = crmTokenValues({
+      deal:    { comp_data: { transaction_type: 'buyer' } },
+      contact: { first_name: 'Jane', last_name: 'Buyer' },
+      agent:   { name: 'Nic Madsen' },
+      agents:  [{ name: 'Nic Madsen' }],
+    })
+    const out = buildPrefillFields({ fields, values: seed(oneBuyer), filledRoleIndices: [1] })
+    const ids = out.sharedFormFields.map(f => f.id)
+    expect(ids).toEqual(['Agent1NameLabel', 'Buyer1NameLabel'])
+    expect(ids).not.toContain('Buyer2NameLabel')
+    expect(ids).not.toContain('Agent2NameLabel')
+    // No entry means no empty string and no malformed field on the wire.
+    expect(out.sharedFormFields.every(f => f.value)).toBe(true)
+  })
+
+  it('none of them trips the hidden-data audit, because a Label is common', () => {
+    const values = seed(twoBuyers)
+    expect(sharedDataOnSignerFields({ fields, values, firstSignerIndex: 1, inOrder: false })).toEqual([])
+  })
+
+  it('the same ids on a Name field are reported as a template defect', () => {
+    // A Name field prints its own signer's name and discards ours, so this has
+    // to be caught in the template rather than worked around in the payload.
+    const broken = [{ id: 'Agent1NameLabel', type: 'Name', roleIndex: 1 }]
+    expect(signerBoundPrefillFields({ fields: broken, values: {} })).toHaveLength(1)
+    expect(prefillFieldEntry(broken[0], 'Nic Madsen')).toBeNull()
   })
 })

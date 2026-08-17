@@ -16,7 +16,7 @@ import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty } from '../lib/dealPeople.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2250,10 +2250,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         // and the deal's own agent rather than whoever happens to be sending —
         // an admin sending on an agent's behalf must not have their own name
         // printed as the appointed agent. See appointedAgent().
+        // `agents` is the same ordered list seedSignersFromDeal() fills the
+        // agent signature rows from, so a template's second agent LINE and its
+        // second agent ROW name the same person.
         const tokenVals = crmTokenValues({
           deal, property, contact,
           additionalContacts: extraContacts,
-          agent: appointedAgent({ activeAgent, dealAgents }),
+          agent:  appointedAgent({ activeAgent, dealAgents }),
+          agents: orderAgentSigners({ activeAgent, dealAgents }),
         })
         setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent, dealAgents }))
 
@@ -2422,7 +2426,8 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const tokenVals = React.useMemo(() => crmTokenValues({
     deal, property, contact,
     additionalContacts: extraContacts,
-    agent: appointedAgent({ activeAgent, dealAgents }),
+    agent:  appointedAgent({ activeAgent, dealAgents }),
+    agents: orderAgentSigners({ activeAgent, dealAgents }),
   }), [deal, property, contact, extraContacts, activeAgent, dealAgents])
 
   // What BoldSign actually calls this field, and whether it matched a CRM token.
