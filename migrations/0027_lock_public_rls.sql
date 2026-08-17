@@ -53,17 +53,32 @@
 --          analytics. Fixed by ?action=landing (a service-key read of the four
 --          rendered columns) behind src/lib/publicMailing.js.
 --
---   /listing/:id, /share/:id  are STILL BROKEN by this migration as of writing.
---          PropertyLanding.jsx reads `properties` in the browser on the anon
---          key, and api/property-public.js's handleShare() reads `properties`
---          with the ANON key server-side — not the service key this paragraph
---          claims. Both need an explicit-column service-key read; `properties`
---          carries internal columns (notably `notes`) that must not be
---          published, so it needs a projection decision, not a key swap.
+--   /listing/:id, /share/:id  were broken by this migration too, in two
+--          different ways. PropertyLanding.jsx read `properties` in the browser
+--          on the anon key. api/property-public.js's handleShare() read
+--          `properties` with the ANON key SERVER-SIDE — a serverless function is
+--          not privileged because it runs on a server, only by the key it
+--          presents. Both now go through ?action=listing / the service key, with
+--          an explicit column list and the free-form `details` blob filtered to
+--          the spec keys the page renders (it holds internal `co_agent_ids`).
+--
+--   api/listings.js  the same server-side-anon-key mistake on the public
+--          listings feed that website widgets embed. It began returning
+--          `{ listings: [], count: 0 }` — a 200 with an empty feed, which every
+--          widget renders as "no listings" rather than as an error. Fixed to the
+--          service key; it already emitted an explicit field mapping.
 --
 --   The lesson is that this file's audit was done by reading the api/ directory
---   and not the SPA router. src/lib/__tests__/publicPageDataAccess.test.js now
---   checks the claim mechanically, against the pages main.jsx actually mounts.
+--   and not the SPA router — and that reading api/ is not enough on its own
+--   either, since two handlers in there were presenting the anon key.
+--   src/lib/__tests__/publicPageDataAccess.test.js now checks both claims
+--   mechanically: the pages main.jsx actually mounts, and the key every handler
+--   presents.
+--
+--   To check what any given database actually looks like (this file is not in
+--   the apply-order table in migrations/README.md, so the repo cannot tell you
+--   whether it ran), use the read-only
+--   scripts/db-verify/public_read_posture.sql.
 --
 -- NOT TOUCHED — these genuinely need anon INSERT and are already scoped:
 --     visitor_events, lead_captures  (the website tracking snippet that

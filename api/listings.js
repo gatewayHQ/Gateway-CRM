@@ -5,8 +5,20 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' })
 
-  const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
-  const ANON_KEY     = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR3Z3dlbWtpaHB3bGdsaWZ0YWdnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNjkzMjAsImV4cCI6MjA5MjY0NTMyMH0.YRaCsDpExXjuPyrssFyzXP9RQktFAW7GTuEMgQq8sZU'
+  const SUPABASE_URL = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co').trim().replace(/\/+$/, '')
+
+  // Service key, NOT the anon key. This endpoint is a PUBLIC feed (website
+  // listing widgets) but it is server-side, so it reads with service-role
+  // credentials and decides for itself what to publish — see the explicit field
+  // mapping below, which only ever emits `details.photos`.
+  //
+  // It used to present the anon key. Migration 0027 closed `properties` to anon
+  // and RLS filters rather than erroring, so this quietly started returning
+  // `{ listings: [], count: 0 }` — a 200 with an empty feed, which every widget
+  // renders as "no listings" rather than as an error.
+  const SERVICE_KEY = (process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
+  if (!SERVICE_KEY) return res.status(500).json({ error: 'Server configuration error' })
+  const AUTH = { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` }
 
   // Health check — folded into this endpoint so external uptime monitors can
   // ping /api/listings?action=health without consuming a Vercel function slot.
@@ -16,7 +28,7 @@ export default async function handler(req, res) {
     let supabaseLatency = null
     try {
       const r = await fetch(`${SUPABASE_URL}/rest/v1/agents?select=id&limit=1`, {
-        headers: { apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` },
+        headers: AUTH,
       })
       supabaseOk = r.ok
       supabaseLatency = Date.now() - t0
@@ -43,7 +55,7 @@ export default async function handler(req, res) {
 
   const r = await fetch(
     `${SUPABASE_URL}/rest/v1/properties?status=eq.${encodeURIComponent(statusFilter)}&select=id,address,city,state,zip,type,status,list_price,beds,baths,sqft,details,assigned_agent_id&order=created_at.desc`,
-    { headers: { apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` } }
+    { headers: AUTH }
   )
   if (!r.ok) return res.status(500).json({ error: 'Failed to fetch listings' })
   const rows = await r.json()

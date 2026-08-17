@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase } from '../lib/supabase.js'
+import { fetchPublicProperty } from '../lib/publicProperty.js'
 
 const fmt = (n) => n != null ? `$${Number(n).toLocaleString()}` : null
 const COMMERCIAL = ['multifamily','office','land','retail','industrial','mixed-use','commercial']
@@ -354,15 +354,21 @@ export default function PropertyLandingPage({ propertyId }) {
 
   useEffect(() => {
     async function load() {
-      const { data, error } = await supabase
-        .from('properties')
-        .select('*, agent:assigned_agent_id(id, name, email, role, color, initials)')
-        .eq('id', propertyId)
-        .single()
-      setLoading(false)
-      if (error || !data) { setNotFound(true); return }
-      setProperty(data)
-      if (data.agent) setAgent(data.agent)
+      // Service-key read, not `supabase.from('properties')` — this page is
+      // anonymous and 0027 closed that table to anon. See lib/publicProperty.js.
+      try {
+        const data = await fetchPublicProperty(propertyId)
+        setLoading(false)
+        if (!data) { setNotFound(true); return }
+        setProperty(data)
+        if (data.agent) setAgent(data.agent)
+      } catch {
+        // Transport/server failure. The old supabase.from() returned an error
+        // object instead of throwing, and this page has only a not-found state,
+        // so that is where an unreachable server still lands.
+        setLoading(false)
+        setNotFound(true)
+      }
     }
     load()
   }, [propertyId])

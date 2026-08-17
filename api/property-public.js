@@ -1,13 +1,29 @@
 /**
  * Gateway CRM — Public Property Endpoint
  *
- * GET  /api/property-public?id=<uuid>   — social-share HTML for a listing
- *                                          (served at /share/:id via rewrite)
- * POST /api/property-public             — landing-page lead capture (gate)
+ * GET  /api/property-public?id=<uuid>                — social-share HTML for a
+ *                                        listing (served at /share/:id via rewrite)
+ * GET  /api/property-public?action=listing&id=<uuid> — the listing JSON that
+ *                                        /listing/:id renders
+ * POST /api/property-public                          — landing-page lead capture
  *
- * Two public-facing property actions share one serverless function (Vercel
- * Hobby caps total functions at 12). GET renders Open Graph / Twitter cards
+ * Public-facing property actions share one serverless function (Vercel Hobby
+ * caps total functions at 12). The share GET renders Open Graph / Twitter cards
  * and redirects real users to the full listing; POST creates/links a contact.
+ *
+ * ── WHY THE LISTING ACTION EXISTS ───────────────────────────────────────────
+ * /listing/:id is served by the SPA (vercel.json's catch-all → index.html), so
+ * PropertyLanding.jsx renders in the visitor's browser and used to read
+ * `properties` with the ANON key. Migration 0027 closed that table to anon, and
+ * RLS FILTERS rather than erroring — so the select came back with zero rows and
+ * the public listing page showed "not found" to every visitor. Same bug that
+ * took out the QR campaign landing pages; see the correction note in
+ * migrations/0027_lock_public_rls.sql, whose safety audit read the api/
+ * directory and not the SPA router.
+ *
+ * handleShare had a second flavour of it: that code runs server-side but
+ * authenticated with the ANON key, so /share/:id broke for the same reason
+ * despite being a serverless function. It uses the service key now.
  */
 
 const TYPE_LABELS = {
@@ -20,17 +36,98 @@ function esc(str) {
   return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
 }
 
+// ── What a public listing page is allowed to see ─────────────────────────────
+// Explicit, not `select(*)`. `properties` is a CRM table: it carries the
+// assigned agent, linked contact, price history, comps and listing-expiry data,
+// and it will grow more columns that nobody intends to publish. This list is
+// exactly what PropertyLanding.jsx renders.
+//
+// `notes` IS public here — it is the page's "About This Property" copy and has
+// always been in the share card's description. That is a product decision this
+// list inherits rather than makes.
+const PUBLIC_PROPERTY_COLUMNS = [
+  'id', 'address', 'city', 'state', 'zip', 'county',
+  'type', 'status', 'list_price',
+  'beds', 'baths', 'sqft', 'garage', 'mls_number',
+  'notes', 'details',
+].join(',')
+
+// `details` is a free-form jsonb blob, so publishing it whole would publish
+// whatever the CRM starts putting in it — it already holds `co_agent_ids`, which
+// is internal. Only the spec keys the page actually renders are passed through.
+const PUBLIC_DETAILS_KEYS = new Set([
+  'photos',
+  'year_built', 'lot_size', 'stories', 'style', 'acres', 'zoning', 'utilities',
+  'total_units', 'unit_mix', 'floors', 'vacancy',
+  'cap_rate', 'noi', 'class', 'parking', 'frontage', 'land_status',
+  'comm_sqft', 'office_sqft', 'res_sqft', 'anchor_tenants',
+  'clear_height', 'loading_docks', 'drive_in_doors',
+])
+
+function publicDetails(details) {
+  if (!details || typeof details !== 'object') return {}
+  return Object.fromEntries(
+    Object.entries(details).filter(([k]) => PUBLIC_DETAILS_KEYS.has(k))
+  )
+}
+
+// Service-role credentials. The share card used the ANON key, which RLS now
+// (correctly) returns nothing for — a serverless function is not automatically
+// privileged, it is privileged by the key it presents.
+function serviceCreds() {
+  const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !key) return null
+  return {
+    url: url.trim().replace(/\/+$/, ''),
+    headers: { apikey: key.trim(), Authorization: `Bearer ${key.trim()}` },
+  }
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// ── GET ?action=listing: the JSON /listing/:id renders ────────────────────────
+async function handleListing(req, res) {
+  const { id } = req.query
+  if (!UUID_RE.test(String(id || ''))) {
+    return res.status(400).json({ error: 'A valid property id is required' })
+  }
+
+  const creds = serviceCreds()
+  if (!creds) return res.status(500).json({ error: 'Server configuration error' })
+
+  // The advisor card is joined here rather than read from `agents_public` in the
+  // browser, because it needs `initials`, which that view does not expose.
+  const select = `${PUBLIC_PROPERTY_COLUMNS},agent:assigned_agent_id(id,name,email,role,color,initials)`
+  const r = await fetch(
+    `${creds.url}/rest/v1/properties?id=eq.${id}&select=${encodeURIComponent(select)}&limit=1`,
+    { headers: creds.headers }
+  )
+  if (!r.ok) return res.status(500).json({ error: 'Database error' })
+
+  const [row] = await r.json()
+  if (!row) return res.status(404).json({ error: 'Listing not found' })
+
+  res.setHeader('Cache-Control', 'no-store')
+  return res.status(200).json({
+    property: { ...row, details: publicDetails(row.details) },
+  })
+}
+
 // ── GET: social-share HTML (formerly /api/share) ─────────────────────────────
 async function handleShare(req, res) {
   const id = req.query.id || req.url?.split('/').pop()?.split('?')[0]
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).send('Invalid property ID')
 
-  const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://twgwemkihpwlgliftagg.supabase.co'
-  const ANON_KEY     = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR3Z3dlbWtpaHB3bGdsaWZ0YWdnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNjkzMjAsImV4cCI6MjA5MjY0NTMyMH0.YRaCsDpExXjuPyrssFyzXP9RQktFAW7GTuEMgQq8sZU'
+  // Service key, NOT the anon key. This ran on the anon key and so returned
+  // nothing once 0027 closed `properties` to anon — a server-side call is only
+  // as privileged as the key it presents.
+  const creds = serviceCreds()
+  if (!creds) return res.status(500).send('Server configuration error')
 
   const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/properties?id=eq.${id}&select=address,city,state,zip,type,status,list_price,beds,baths,sqft,details,notes&limit=1`,
-    { headers: { apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` } }
+    `${creds.url}/rest/v1/properties?id=eq.${id}&select=address,city,state,zip,type,status,list_price,beds,baths,sqft,details,notes&limit=1`,
+    { headers: creds.headers }
   )
   if (!r.ok) return res.status(500).send('Database error')
   const rows = await r.json()
@@ -320,5 +417,6 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end()
 
   if (req.method === 'POST') return handleGate(req, res)
+  if (req.query?.action === 'listing') return handleListing(req, res)
   return handleShare(req, res)
 }

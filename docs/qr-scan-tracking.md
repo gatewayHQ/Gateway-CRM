@@ -153,6 +153,17 @@ the shared `src/lib/publicMailing.js` helper. Two rules keep it safe:
   pages `main.jsx` mounts, so the next table lockdown fails the build instead of
   silently emptying a public page.
 
+The same 0027 breakage hit three non-QR surfaces, all now fixed the same way:
+`/listing/:id` (read `properties` in the browser), `/share/:id` and
+`/api/listings` (both ran server-side but **presented the anon key** — a
+serverless function is privileged by the key it presents, not by where it runs).
+The listings feed was the sneakiest: it returned `{ listings: [], count: 0 }`, a
+200 that every embedded widget renders as "no listings" rather than as an error.
+That second flavour has its own check in the same test file.
+
+To see what a given database's posture actually is, run the read-only
+`scripts/db-verify/public_read_posture.sql` in the Supabase SQL Editor.
+
 The handoff itself is covered end to end by
 `api/__tests__/campaigns-scan-to-landing.test.js`, which follows the real
 `Location` header through the real route regex into the real landing fetch. The

@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 
 const pagesDir = fileURLToPath(new URL('../../pages/', import.meta.url))
 const mainJsx  = readFileSync(fileURLToPath(new URL('../../main.jsx', import.meta.url)), 'utf8')
+const apiDir   = fileURLToPath(new URL('../../../api/', import.meta.url))
 
 // Tables migration 0027 closed to anon. A public page reaching any of these
 // through the browser client gets zero rows, not an error.
@@ -28,24 +29,11 @@ const CLOSED_TO_ANON = [
   'mailings', 'mailing_recipients', 'mailing_scans', 'mailing_leads',
 ]
 
-// ── KNOWN BROKEN, NOT YET FIXED ─────────────────────────────────────────────
-// The same 0027 breakage on the property-listing pages, found by this guard
-// while fixing the QR landing pages. Recorded here rather than deleted from the
-// deny-list so the guard keeps passing on a green build without pretending these
-// are fine — they are NOT fine, they are the identical bug on another route:
-//
-//   PropertyLanding.jsx (/listing/:id) reads `properties` with the anon key, so
-//   post-0027 the public listing page renders "not found" for every visitor.
-//
-// Fixing it needs a projection decision this change should not make on its own:
-// the page does `select('*')`, and `properties` carries internal columns
-// (notably `notes`) that must not be published. It needs its own service-key
-// endpoint with an explicit column list, plus a look at api/property-public.js,
-// whose handleShare() reads `properties` with the ANON key server-side and is
-// therefore broken on /share/:id for the same reason.
-const KNOWN_BROKEN = new Set([
-  'PropertyLanding.jsx:properties',
-])
+// Exemptions, with the reason each one is safe. Empty is the goal: the two
+// entries this started with (PropertyLanding.jsx reading `properties`, and
+// api/property-public.js's handleShare using the anon key server-side) are both
+// fixed, so nothing is exempt any more.
+const KNOWN_BROKEN = new Set([])
 
 /**
  * Drop comments so the scan reads CODE only.
@@ -135,6 +123,7 @@ describe('public pages never read RLS-closed tables with the anon key', () => {
   })
 
   it('reading agents through the column-limited view is still allowed', () => {
+    // (see the anon-key check below for the server-side flavour of this bug)
     // agents_public is granted to anon on purpose (0027 §4) — the advisor cards
     // need it. This asserts the guard above does not overreach into it.
     const usesView = pages.filter(p => /supabase\.from\('agents_public'\)/.test(p.src))
@@ -143,5 +132,60 @@ describe('public pages never read RLS-closed tables with the anon key', () => {
       expect(p.src, `${p.file} must use agents_public, not agents`)
         .not.toMatch(/supabase\s*\n?\s*\.from\(\s*'agents'\s*\)/)
     }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The server-side flavour of the same bug.
+//
+// A serverless function is not privileged because it runs on a server; it is
+// privileged by the key it presents. api/property-public.js and api/listings.js
+// both ran server-side while authenticating with the ANON key, so 0027 broke
+// them exactly as if they had been browser code — /share/:id stopped resolving
+// and the public listings feed started returning `{ listings: [], count: 0 }`,
+// a 200 that every widget renders as "no listings" instead of as an error.
+//
+// This is harder to spot than the client-side flavour precisely because the code
+// looks like a backend, so it gets a check of its own.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('server-side reads use the service key, not the anon key', () => {
+  const files = readdirSync(apiDir)
+    .filter(f => f.endsWith('.js'))
+    .map(f => ({ file: f, src: readFileSync(apiDir + f, 'utf8') }))
+
+  // api/_lib/auth.js's getUserClient() presents the anon key WITH the caller's
+  // JWT on purpose — that is how it acts as the signed-in user so RLS applies to
+  // them. It lives in _lib/ and so is not scanned here; this asserts the
+  // distinction is deliberate rather than an oversight.
+  const authLib = readFileSync(apiDir + '_lib/auth.js', 'utf8')
+
+  it('finds the api handlers to check', () => {
+    expect(files.length).toBeGreaterThan(5)
+    expect(files.map(f => f.file)).toContain('property-public.js')
+  })
+
+  it('no handler embeds a hardcoded anon JWT', () => {
+    // The bundled anon key is fine in the browser (RLS is the boundary) but a
+    // hardcoded fallback in a handler silently downgrades it to anon rights.
+    const offenders = files
+      .filter(f => /eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\./.test(f.src))
+      .map(f => f.file)
+    expect(offenders, `${offenders.join(', ')} embed an anon JWT — read with ` +
+      `SUPABASE_SERVICE_KEY instead`).toEqual([])
+  })
+
+  it('no handler authenticates a read with VITE_SUPABASE_ANON_KEY', () => {
+    const offenders = files
+      .filter(f => /VITE_SUPABASE_ANON_KEY/.test(f.src))
+      .map(f => f.file)
+    expect(offenders, `${offenders.join(', ')} read with the anon key. RLS ` +
+      `applies to anon, so post-0027 these return zero rows — as a 200 with an ` +
+      `empty body, not an error. Use SUPABASE_SERVICE_KEY.`).toEqual([])
+  })
+
+  it('getUserClient still uses the anon key deliberately, with the caller JWT', () => {
+    expect(authLib).toMatch(/ANON_KEY/)
+    expect(authLib, 'getUserClient must pass the caller JWT, not act as anon')
+      .toMatch(/Authorization:\s*`Bearer \$\{jwt\}`/)
   })
 })
