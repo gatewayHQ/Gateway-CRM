@@ -1243,6 +1243,128 @@ export function isFieldLevelRejection(err) {
   return /form field/i.test(msg) || /field with the id/i.test(msg)
 }
 
+// ─── The IsReadOnly escape hatch ─────────────────────────────────────────────
+// Two rounds of predicting which field types accept `IsReadOnly` have now been
+// wrong against a live template, and the reason is structural rather than a bad
+// list. This code addresses fields by ID; BoldSign auto-assigns those IDs; and
+// the TYPE behind an ID is whatever an admin drew in the editor. A field whose
+// id reads `Name3` may be a TextBox, a Title or a Company, and only the first of
+// those takes a lock. On a template the server cannot read, no type list can be
+// verified, so each attempt is a guess wearing a constant's clothes.
+//
+// So stop guessing. BoldSign states the problem precisely, by name, in its own
+// 400. Catch exactly that refusal and send the request once more with every
+// isReadOnly stripped, which is a payload it cannot refuse for this reason. The
+// lock is a nice-to-have. The packet reaching the client is not.
+//
+// SAFE TO RETRY, unlike most writes here. A 400 means BoldSign validated the
+// request and rejected it, so no document exists and no email went anywhere.
+// That is the same reasoning the 429/408 write-retry rests on, and the opposite
+// of a dropped connection, where the outcome is genuinely unknown.
+//
+// This mirrors the two retries already in this file: createDraftEditUrl() flips
+// sendViewOption when a 400 names it, and applyFieldLayout() retries with
+// confirmedOnly when a 400 names a form field. Same shape, same reasoning.
+//
+// The type allowlists stay. They keep the lock where it is known to work, so
+// this path is the fallback for a template we guessed wrong about, not the
+// primary mechanism.
+export function isReadOnlyRejection(err) {
+  if (err?.status !== 400) return false
+  const msg = `${err?.message || ''} ${JSON.stringify(err?.data || {})}`
+  return /isreadonly/i.test(msg)
+}
+
+// Every `isReadOnly` out of a template payload's roles. Non-mutating, and the
+// property is REMOVED rather than set false: BoldSign's message is about the
+// property being unsupported on the type, which reads as presence.
+export function stripRoleReadOnly(roles) {
+  if (!Array.isArray(roles)) return roles
+  return roles.map(r => {
+    const fields = r?.existingFormFields
+    if (!Array.isArray(fields) || !fields.length) return r
+    return { ...r, existingFormFields: fields.map(({ isReadOnly, ...rest }) => rest) }
+  })
+}
+
+// The same, for a /document/edit layout payload ({ signers: [{ formFields }] }).
+export function stripLayoutReadOnly(payload) {
+  if (!Array.isArray(payload?.signers)) return payload
+  return {
+    ...payload,
+    signers: payload.signers.map(s => (
+      Array.isArray(s?.formFields)
+        ? { ...s, formFields: s.formFields.map(({ isReadOnly, ...rest }) => rest) }
+        : s
+    )),
+  }
+}
+
+// Does this set of roles actually ask for a sequential signing order?
+//
+// BoldSign treats `signerOrder` as INERT unless `enableSigningOrder` is also
+// true: the property defaults to false, so a payload carrying 1, 2, 3 and
+// nothing else is a parallel send in which every signer is notified at once.
+//
+// That is how the template paths have behaved. `buildTemplateRoles()` has been
+// numbering roles from the modal's "Sign in this order" box since it shipped,
+// the two ad-hoc document paths below send EnableSigningOrder correctly, and the
+// two TEMPLATE paths never sent it at all. So the box was decorative, and the
+// note beside it ("BoldSign only shows a signer's fields to the others once that
+// signer has finished") described a guarantee the send did not request. Anything
+// prefilled on a role other than the first was invisible to everybody else for
+// the life of the document, which is the exact failure Label fields exist to
+// avoid and which the send screen believed it had already avoided.
+//
+// Derived rather than taken from the client, and derived the same way the ad-hoc
+// paths do it, so one rule covers every send: distinct orders mean sequential.
+export const rolesWantSigningOrder = (roles) =>
+  (Array.isArray(roles) ? roles : []).some(r => Number(r?.signerOrder || 1) !== 1)
+
+// POST a template payload, and if BoldSign refuses the locks, post it again
+// without any. Returns { data, unlocked } so the caller can tell the agent that
+// what they filled in went out editable rather than fixed.
+async function postTemplatePayload(path, payload) {
+  try {
+    return { data: await boldsign(path, { method: 'POST', json: payload }), unlocked: false }
+  } catch (err) {
+    if (!isReadOnlyRejection(err)) throw err
+    console.warn(`[boldsign] ${path}: BoldSign refused IsReadOnly, retrying with every lock dropped — ${err.message}`)
+    const data = await boldsign(path, { method: 'POST', json: { ...payload, roles: stripRoleReadOnly(payload.roles) } })
+    return { data, unlocked: true }
+  }
+}
+
+// Confirm a restore actually landed, and describe it. A 200 from /document/edit
+// means BoldSign accepted the request, not that the draft now holds the
+// arrangement, and the number the agent is shown ("restored 14 fields") must be
+// what is really on the document rather than what we hoped to put there. A
+// failed re-read is NOT treated as a failed restore: the edit was accepted, so
+// the saved count is reported and the discrepancy goes to the log.
+//
+// Extracted so the IsReadOnly retry path reports its result exactly the way the
+// normal path does, instead of duplicating the check or skipping it.
+async function confirmLayoutApplied(documentId, savedFieldCount, skipped = 0) {
+  let fieldCount = savedFieldCount
+  try {
+    const after = await boldsign(`/document/properties?documentId=${encodeURIComponent(documentId)}`)
+    const live  = countSignerFields(after)
+    if (!live) {
+      console.error(`[boldsign] layout apply for ${documentId}: BoldSign accepted the edit but reports no fields on the draft`)
+      return { applied: false, reason: 'BoldSign accepted the change but the draft came back with no fields' }
+    }
+    fieldCount = live
+  } catch (verifyErr) {
+    console.warn(`[boldsign] layout apply for ${documentId}: could not verify the restore (${verifyErr.message})`)
+  }
+  // A partial restore is still a restore, but the agent is told, because the form
+  // they are about to see is missing something they placed last time.
+  return skipped
+    ? { applied: true, fieldCount, partial: true, skipped,
+        reason: `${skipped} field${skipped === 1 ? '' : 's'} could not be re-created on this draft` }
+    : { applied: true, fieldCount }
+}
+
 // Apply a deal's saved layout to a freshly created draft. Also never throws: if
 // this fails the draft simply opens with the template's default placement, which
 // is the behavior that existed before layouts — a degraded send beats no send.
@@ -1275,6 +1397,17 @@ export async function applyFieldLayout(supabase, { documentId, dealId, templateI
     try {
       await editDocumentFields(documentId, { ...payload, ...(onBehalfOf ? { onBehalfOf } : {}) })
     } catch (editErr) {
+      // BoldSign refused the locks rather than the fields. Retry with every one
+      // stripped: the arrangement is what a layout is for, and a restored field
+      // that a signer could edit beats losing the whole arrangement. Checked
+      // BEFORE isFieldLevelRejection, because this message ends in "form fields"
+      // and would otherwise be misread as one unplaceable field and retried
+      // identically. See isReadOnlyRejection.
+      if (isReadOnlyRejection(editErr)) {
+        console.warn(`[boldsign] layout apply for ${documentId}: BoldSign refused IsReadOnly, retrying with every lock dropped — ${editErr.message}`)
+        await editDocumentFields(documentId, { ...stripLayoutReadOnly(payload), ...(onBehalfOf ? { onBehalfOf } : {}) })
+        return await confirmLayoutApplied(documentId, saved.field_count, 0)
+      }
       if (!isFieldLevelRejection(editErr)) throw editErr
       const confirmed = buildLayoutEditPayload({ layout: saved.layout, signerDetails, confirmedOnly: true })
       skipped = countPayloadFields(payload) - countPayloadFields(confirmed)
@@ -1289,24 +1422,7 @@ export async function applyFieldLayout(supabase, { documentId, dealId, templateI
     // document, not what we hoped to put there. A failed re-read is not treated as
     // a failed restore: the edit was accepted, so the saved count is reported and
     // the discrepancy goes to the log.
-    let fieldCount = saved.field_count
-    try {
-      const after = await boldsign(`/document/properties?documentId=${encodeURIComponent(documentId)}`)
-      const live  = countSignerFields(after)
-      if (!live) {
-        console.error(`[boldsign] layout apply for ${documentId}: BoldSign accepted the edit but reports no fields on the draft`)
-        return { applied: false, reason: 'BoldSign accepted the change but the draft came back with no fields' }
-      }
-      fieldCount = live
-    } catch (verifyErr) {
-      console.warn(`[boldsign] layout apply for ${documentId}: could not verify the restore (${verifyErr.message})`)
-    }
-    // A partial restore is still a restore — but the agent is told, because the form
-    // they are about to see is missing something they placed last time.
-    return skipped
-      ? { applied: true, fieldCount, partial: true, skipped,
-          reason: `${skipped} field${skipped === 1 ? '' : 's'} could not be re-created on this draft` }
-      : { applied: true, fieldCount }
+    return await confirmLayoutApplied(documentId, saved.field_count, skipped)
   } catch (err) {
     // The full API response is already logged by boldsign() (status + body); this
     // adds which deal/document it was for, so one grep explains a degraded send.
@@ -2563,12 +2679,15 @@ async function handler(req, res) {
         title:   documentName || emailSubject || 'Please sign this document',
         message: message || 'Please review and sign.',
         roles:   mergeSharedFormFields(roles, sharedFormFields),
+        // Without this, signerOrder is inert and every signer is notified at
+        // once. See rolesWantSigningOrder.
+        enableSigningOrder: rolesWantSigningOrder(roles),
         ...(Array.isArray(roleRemovalIndices) && roleRemovalIndices.length ? { roleRemovalIndices } : {}),
         ...(cc ? { cc } : {}),
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),   // BoldSign tags
         ...(onBehalfOf ? { onBehalfOf } : {}),
       }
-      const data = await boldsign(`/template/send?templateId=${encodeURIComponent(templateId)}`, { method: 'POST', json: payload })
+      const { data, unlocked: sendUnlocked } = await postTemplatePayload(`/template/send?templateId=${encodeURIComponent(templateId)}`, payload)
 
       // Already sent at this point, so a tracking failure can't be undone by
       // deleting the document — surface it instead of failing silently, and tell
@@ -2616,6 +2735,9 @@ async function handler(req, res) {
         // Label values ride on the first role so every signer sees them from the
         // moment the draft is sent — see mergeSharedFormFields.
         roles:          mergeSharedFormFields(roles, sharedFormFields),
+        // Without this, signerOrder is inert and every signer is notified at
+        // once. See rolesWantSigningOrder.
+        enableSigningOrder: rolesWantSigningOrder(roles),
         sendViewOption: 'PreparePage',   // land on the field-placement editor
         showToolbar:    true,
         redirectUrl:    redirectUrl || '',
@@ -2624,7 +2746,7 @@ async function handler(req, res) {
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),
         ...(onBehalfOf ? { onBehalfOf } : {}),
       }
-      const data = await boldsign(`/template/createEmbeddedRequestUrl?templateId=${encodeURIComponent(templateId)}`, { method: 'POST', json: payload })
+      const { data, unlocked } = await postTemplatePayload(`/template/createEmbeddedRequestUrl?templateId=${encodeURIComponent(templateId)}`, payload)
 
       // Track it so the agent can find the draft again, and so status updates
       // land when it is eventually sent and BoldSign fires the Sent webhook.
@@ -2662,8 +2784,20 @@ async function handler(req, res) {
         url:        data.sendUrl || data.embeddedSendUrl || data.url || null,
         documentId: data.documentId || null,
         layout,
+        unlocked,
       }
     }
+
+    // The send went through, but only after dropping the locks BoldSign refused.
+    // Said out loud because it changes what the signers can do: the values are
+    // all there and correct, and a signer could now retype one. Silence here
+    // would be the agent believing a guarantee they no longer have.
+    const readOnlyReport = (unlocked) => (unlocked
+      // Leads with the reassurance, because the agent's first question is "did
+      // that work?" and the answer is yes. Read the other way round it looked
+      // like a failure report for a send that had in fact succeeded.
+      ? { readOnlyWarning: 'Saved. Every value was filled in. BoldSign does not allow locking on a few of this template\'s field types, so a signer could edit those ones.' }
+      : {})
 
     // Three outcomes, three sentences: restored, restored-but-short, or not at
     // all. The middle one used to be invisible, which made a silently incomplete
@@ -2692,7 +2826,7 @@ async function handler(req, res) {
       if (!deal_id)        return res.status(400).json({ error: 'deal_id required — a draft has to be saved against a deal to be reopened later' })
 
       const svc = getServiceClient()
-      const { url, documentId, layout } = await createTemplateDraft(svc, {
+      const { url, documentId, layout, unlocked } = await createTemplateDraft(svc, {
         templateId, dealId: deal_id, roles, emailSubject, message, cc, documentName, labels,
         redirectUrl: body.redirectUrl, roleRemovalIndices, sharedFormFields,
       })
@@ -2704,7 +2838,7 @@ async function handler(req, res) {
       // `prepareUrl`, not `editUrl`, because it is BoldSign's create-time send
       // URL; reopening the draft LATER goes through `document-edit-url`, which
       // mints a fresh URL and handles the draft's view-option and edit-lock rules.
-      return res.json({ documentId, status: 'draft', prepareUrl: url, ...layoutReport(layout) })
+      return res.json({ documentId, status: 'draft', prepareUrl: url, ...readOnlyReport(unlocked), ...layoutReport(layout) })
     }
 
     // Like template-send, but returns an embedded BoldSign "prepare" URL where
@@ -2716,11 +2850,11 @@ async function handler(req, res) {
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
       const svc = getServiceClient()
-      const { url, documentId, layout } = await createTemplateDraft(svc, {
+      const { url, documentId, layout, unlocked } = await createTemplateDraft(svc, {
         templateId, dealId: deal_id, roles, emailSubject, message, cc, documentName, labels,
         redirectUrl, roleRemovalIndices, sharedFormFields,
       })
-      return res.json({ url, documentId, ...layoutReport(layout) })
+      return res.json({ url, documentId, ...readOnlyReport(unlocked), ...layoutReport(layout) })
     }
 
     return res.status(400).json({ error: 'Unknown action' })
