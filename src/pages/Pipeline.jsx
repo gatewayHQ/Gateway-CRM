@@ -16,7 +16,7 @@ import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty } from '../lib/dealPeople.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2292,6 +2292,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     return () => { cancelled = true }
   }, [templateId, reloadKey])
 
+  const [showAllFields, setShowAllFields] = React.useState(false)
   const setSigner = (idx, k, v) => setSigners(p => ({ ...p, [idx]: { ...(p[idx] || {}), [k]: v } }))
   const setValue  = (id, v)     => setValues(p => ({ ...p, [id]: v }))
 
@@ -2337,6 +2338,10 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // didn't; only a total failure is an error, since a form that is mostly right is
   // worth saying out loud but is not a broken document.
   const reportLayout = (data) => {
+    // BoldSign refused the locks and the send went through unlocked. Worth a
+    // toast: every value is still filled in, but the guarantee the agent was
+    // told about on this screen ("none can change them") no longer holds.
+    if (data.readOnlyWarning) pushToast(data.readOnlyWarning, 'info')
     if (data.layoutApplied) {
       pushToast(`Restored this deal's saved field layout — ${data.layoutFieldCount} field${data.layoutFieldCount === 1 ? '' : 's'}.`, 'success')
     }
@@ -2396,8 +2401,20 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // moment it arrives, while a role-scoped field stays invisible to everyone but
   // its own signer until that signer has finished. The two groups are shown
   // apart, and labelled, so nobody has to guess which one a value lands in.
-  const sharedTextFields = textFields.filter(f => isSharedField(f.type))
-  const signerTextFields = textFields.filter(f => !isSharedField(f.type))
+  // Fields the admin never named, whose ids are BoldSign's own auto-counters
+  // (`Label1`, `Checkbox2`), are folded away by default. One live agency packet
+  // renders 27 such Labels and 14 such tick boxes, which buries the three fields
+  // that actually matter and turns a review step into something to scroll past.
+  // They are hidden, never dropped: the toggle brings every one of them back,
+  // because an unnamed checkbox is still a term somebody may need to tick.
+  const shown = (list) => (showAllFields ? list : list.filter(f => !isUnconfiguredField(f)))
+
+  const sharedTextFields = shown(textFields.filter(f => isSharedField(f.type)))
+  const signerTextFields = shown(textFields.filter(f => !isSharedField(f.type)))
+  const shownTickFields  = shown(tickFields)
+  const hiddenCount = showAllFields
+    ? 0
+    : [...textFields, ...tickFields].filter(isUnconfiguredField).length
   // A role-scoped field can name no role at all, in which case it rides on the
   // first signer — either way it is one signer's, which is what the warning below
   // needs to say.
@@ -2440,12 +2457,19 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     return token && normalizeTokenKey(f.id) !== token ? `${f.id} → ${token}` : String(f.id || '')
   }
 
+  // The field's BoldSign TYPE, shown next to its id. Without this the screen
+  // names fields `Label1` and `Name3` and there is no way to tell a TextBox from
+  // a Company or a Name — which is exactly the distinction that decides whether
+  // a value can be prefilled, whether it can be locked, and whether every signer
+  // can read it. Two send-breaking bugs were diagnosed blind for want of it.
+  const fieldType = (f) => String(f?.type || 'unknown')
+
   const renderTextField = (f) => (
     <div key={f.id} style={{ marginBottom:8 }}>
       <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2, display:'flex', gap:8, alignItems:'baseline' }}>
         <span style={{ flex:1 }}>{f.label || f.name || prettyLabel(f.id)}</span>
-        <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7 }} title="The field id BoldSign uses, and the CRM token it matched">
-          {fieldOrigin(f)}
+        <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7 }} title="The field id BoldSign uses, its type, and the CRM token it matched">
+          {fieldOrigin(f)} · {fieldType(f)}
         </span>
       </div>
       {f.options?.length
@@ -2625,12 +2649,15 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 here they go out as real, locked values every signer sees; left
                 alone they stay the signer's to fill. Setting one inside
                 BoldSign's editor instead does NOT carry to the signers. */}
-            {tickFields.length > 0 && (
+            {shownTickFields.length > 0 && (
               <div className="form-group">
                 <label className="form-label">Selections <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— set these here and they travel with the send, locked. Each is still visible only to its own signer until they sign</span></label>
-                {tickFields.map(f => (
+                {shownTickFields.map(f => (
                   <div key={f.id} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
-                    <div style={{ flex:1, fontSize:12 }}>{f.label || prettyLabel(f.id)}</div>
+                    <div style={{ flex:1, fontSize:12 }}>
+                      {f.label || prettyLabel(f.id)}
+                      <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7, marginLeft:8 }}>{f.id} · {fieldType(f)}</span>
+                    </div>
                     <select
                       className="form-control"
                       style={{ width:150, flex:'none' }}
@@ -2643,6 +2670,25 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                     </select>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {hiddenCount > 0 && (
+              <button
+                type="button"
+                className="btn btn--secondary btn--sm"
+                style={{ width:'100%', marginBottom:12 }}
+                onClick={() => setShowAllFields(true)}
+              >
+                Show {hiddenCount} unnamed template field{hiddenCount === 1 ? '' : 's'}
+              </button>
+            )}
+            {showAllFields && (
+              <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:12 }}>
+                Showing every field on the template, including the ones with no name of their own.
+                Give a field a name in BoldSign&rsquo;s template editor (a CRM token, or just a caption)
+                and it will show here by default.{' '}
+                <button type="button" className="btn btn--link btn--sm" onClick={() => setShowAllFields(false)}>Hide them again</button>
               </div>
             )}
           </>

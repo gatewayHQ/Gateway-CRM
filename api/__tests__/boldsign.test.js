@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -1541,5 +1541,91 @@ describe('supportsFieldReadOnly — allowlist, so a new type cannot reopen this'
     for (const t of ['TextBox', 'Label', 'CheckBox', 'RadioButton', 'Dropdown', 'EditableDate']) {
       expect(normalizeFieldType(t)).toBe(t)
     }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The IsReadOnly escape hatch
+//
+// Predicting which types accept the property has now been wrong twice against a
+// live template, because the TYPE behind an auto-assigned id is not something
+// this code can see for a template it cannot read. These make the send survive
+// being wrong about it.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('isReadOnlyRejection', () => {
+  const err = (message, status = 400, data = {}) => Object.assign(new Error(message), { status, data })
+
+  it('matches BoldSign own refusal, however it is cased', () => {
+    expect(isReadOnlyRejection(err('IsReadOnly property is not supported for the Signature, Initial, Attachment, Date signed, Hyperlink, Title, Formula, Drawing and Company form fields.'))).toBe(true)
+    expect(isReadOnlyRejection(err('isReadOnly property is not supported for the Signature'))).toBe(true)
+  })
+
+  it('finds it in the response body as well as the message', () => {
+    expect(isReadOnlyRejection(err('BoldSign API 400', 400, { errors: ['IsReadOnly property is not supported'] }))).toBe(true)
+  })
+
+  it('ignores anything that is not this refusal', () => {
+    expect(isReadOnlyRejection(err('SignerName or SignerEmail is missing in roles'))).toBe(false)
+    expect(isReadOnlyRejection(err('The document does not have a form field with the ID'))).toBe(false)
+    // Only a 400 means BoldSign validated and refused; a 500 is not a verdict.
+    expect(isReadOnlyRejection(err('IsReadOnly property is not supported', 500))).toBe(false)
+    expect(isReadOnlyRejection(undefined)).toBe(false)
+  })
+
+  it('is checked BEFORE isFieldLevelRejection, which also matches this text', () => {
+    // Both match, since the message ends in "form fields". Ordering is what stops
+    // it being retried as one unplaceable field and failing identically.
+    const e = err('IsReadOnly property is not supported for the Signature, Initial and Company form fields.')
+    expect(isReadOnlyRejection(e)).toBe(true)
+    expect(isFieldLevelRejection(e)).toBe(true)
+  })
+})
+
+describe('stripRoleReadOnly / stripLayoutReadOnly', () => {
+  const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
+
+  it('removes the property from every role field, keeping ids and values', () => {
+    const roles = [
+      { roleIndex: 1, signerName: 'A', existingFormFields: [{ id: 'x', value: '1', isReadOnly: true }, { id: 'y', value: '2' }] },
+      { roleIndex: 2, signerName: 'B', existingFormFields: [{ id: 'z', value: '3', isReadOnly: true }] },
+    ]
+    const out = stripRoleReadOnly(roles)
+    expect(out[0].existingFormFields).toEqual([{ id: 'x', value: '1' }, { id: 'y', value: '2' }])
+    expect(out[1].existingFormFields).toEqual([{ id: 'z', value: '3' }])
+    expect(out[0].signerName).toBe('A')
+  })
+
+  it('REMOVES rather than sets false, since the refusal is about presence', () => {
+    const out = stripRoleReadOnly([{ existingFormFields: [{ id: 'x', value: '1', isReadOnly: true }] }])
+    expect(has(out[0].existingFormFields[0], 'isReadOnly')).toBe(false)
+  })
+
+  it('does not mutate its input', () => {
+    const roles = [{ existingFormFields: [{ id: 'x', value: '1', isReadOnly: true }] }]
+    stripRoleReadOnly(roles)
+    expect(roles[0].existingFormFields[0].isReadOnly).toBe(true)
+  })
+
+  it('tolerates roles with no fields at all', () => {
+    expect(stripRoleReadOnly([{ roleIndex: 1 }])).toEqual([{ roleIndex: 1 }])
+    expect(stripRoleReadOnly([{ roleIndex: 1, existingFormFields: [] }])[0].existingFormFields).toEqual([])
+    expect(stripRoleReadOnly(undefined)).toBeUndefined()
+  })
+
+  it('does the same for a layout edit payload, keeping bounds and type', () => {
+    const payload = { signers: [{ editAction: 'Update', id: 'n1', formFields: [
+      { editAction: 'Update', id: 'sig', fieldType: 'Signature', bounds: { x: 1, y: 2, width: 3, height: 4 }, isReadOnly: false },
+      { editAction: 'Update', id: 'txt', fieldType: 'TextBox',   bounds: { x: 5, y: 6, width: 7, height: 8 }, isReadOnly: true },
+    ] }] }
+    const out = stripLayoutReadOnly(payload)
+    for (const f of out.signers[0].formFields) expect(has(f, 'isReadOnly')).toBe(false)
+    expect(out.signers[0].formFields[0]).toMatchObject({ fieldType: 'Signature', bounds: { x: 1, y: 2, width: 3, height: 4 } })
+    expect(out.signers[0].id).toBe('n1')
+    expect(payload.signers[0].formFields[1].isReadOnly).toBe(true)   // not mutated
+  })
+
+  it('leaves a payload with no signers alone', () => {
+    expect(stripLayoutReadOnly({})).toEqual({})
+    expect(stripLayoutReadOnly(null)).toBeNull()
   })
 })

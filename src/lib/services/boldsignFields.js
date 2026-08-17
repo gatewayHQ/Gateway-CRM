@@ -672,6 +672,41 @@ export const tokenValueFor = (tokenVals, fieldId) => fieldTokenValue(tokenVals, 
 // data sitting on a signer-private field.
 export const isCrmToken = (field) => Boolean(fieldTokenKey(field))
 
+// ── Fields nobody configured ─────────────────────────────────────────────────
+// BoldSign auto-names a placed field by type plus a counter: `Label1`,
+// `Checkbox2`, `Name3`, `EditableDate1`. That id is all the send screen has to
+// show when the admin never typed a name or a caption in the template editor.
+//
+// A real packet has a lot of these. One live agency template renders 27 Label
+// boxes captioned `Label1` through `Label27` plus 14 tick boxes captioned
+// `Checkbox1`, none of which tell the agent what they are for or what belongs in
+// them. Buried in that list are the three fields that DO matter, and the whole
+// screen becomes something to scroll past rather than read, which is the
+// opposite of what a review-before-send step is for.
+//
+// So a field counts as unconfigured when ALL of these hold:
+//   • it matches no CRM token, so nothing fills it automatically;
+//   • it has no name and no label, so there is no caption but the raw id;
+//   • that id is one of BoldSign's auto-assigned type+counter names.
+//
+// All three matter. A hand-named field is always shown even if it matches no
+// token (the name is the admin telling the agent what to put there), and a field
+// carrying a token is always shown even if its id is auto-assigned, which is the
+// normal case for a Label whose NAME carries the token.
+//
+// These are HIDDEN BEHIND A TOGGLE, never dropped: the agent can still open them
+// and type, and a checkbox nobody named is still a term of the agreement they
+// may need to tick.
+const AUTO_FIELD_ID_RE = /^(label|textbox|text|checkbox|radiobutton|radio|name|email|company|title|date|editabledate|datesigned|signature|initial|initials|dropdown|hyperlink|attachment|image|formula|drawing)\d+$/i
+
+export function isUnconfiguredField(field) {
+  if (!field?.id) return true
+  if (fieldTokenKey(field))                  return false
+  if (String(field.name || '').trim())       return false
+  if (String(field.label || '').trim())      return false
+  return AUTO_FIELD_ID_RE.test(String(field.id).trim())
+}
+
 // Role names that should be filled with the deal's client(s) rather than an
 // agent. Broad on purpose so generic template roles ("Signer 1") still seed.
 const CLIENT_ROLE_RE = /(seller|buyer|client|owner|purchaser|grantor|grantee|landlord|tenant|lessor|lessee|borrower|customer|signer)/

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS, supportsReadOnly, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS, supportsReadOnly, isUnconfiguredField, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -1316,5 +1316,46 @@ describe('sharedFormFields can only ever contain a lockable type', () => {
     // If a type is ever added to SHARED_FIELD_TYPES that BoldSign refuses,
     // mergeSharedFormFields would force the property onto it and break sends.
     for (const t of ['label']) expect(supportsReadOnly(t)).toBe(true)
+  })
+})
+
+describe('isUnconfiguredField — what the send screen folds away', () => {
+  it('hides a field with an auto id, no name, no label and no token', () => {
+    expect(isUnconfiguredField({ id: 'Label1',       type: 'Label' })).toBe(true)
+    expect(isUnconfiguredField({ id: 'Checkbox2',    type: 'CheckBox' })).toBe(true)
+    expect(isUnconfiguredField({ id: 'Name3',        type: 'Name' })).toBe(true)
+    expect(isUnconfiguredField({ id: 'EditableDate1', type: 'EditableDate' })).toBe(true)
+    expect(isUnconfiguredField({ id: 'Label27',      type: 'Label' })).toBe(true)
+  })
+
+  it('KEEPS a field carrying a CRM token, however its id was assigned', () => {
+    expect(isUnconfiguredField({ id: 'Agent1NameLabel', type: 'Label' })).toBe(false)
+    expect(isUnconfiguredField({ id: 'agent_name',      type: 'Label' })).toBe(false)
+    // The normal case: BoldSign minted the id, the admin put the token in the name.
+    expect(isUnconfiguredField({ id: 'Label4', name: 'Buyer1NameLabel', type: 'Label' })).toBe(false)
+  })
+
+  it('KEEPS a hand-named field even when it matches no token', () => {
+    // The name is the admin telling the agent what belongs there.
+    expect(isUnconfiguredField({ id: 'Label9', name: 'Earnest money', type: 'Label' })).toBe(false)
+    expect(isUnconfiguredField({ id: 'Label9', label: 'Closing date',  type: 'Label' })).toBe(false)
+  })
+
+  it('KEEPS an id that is not one of BoldSign auto-counter names', () => {
+    expect(isUnconfiguredField({ id: 'ParcelNo', type: 'Label' })).toBe(false)
+    expect(isUnconfiguredField({ id: 'Label',    type: 'Label' })).toBe(false)
+  })
+
+  it('folds away the bulk of a real agency packet but keeps what matters', () => {
+    // The live "Buyer Agreement/IA Agency Packet (IA)" shape.
+    const fields = [
+      ...Array.from({ length: 27 }, (_, i) => ({ id: `Label${i + 1}`, type: 'Label' })),
+      ...Array.from({ length: 14 }, (_, i) => ({ id: `Checkbox${i + 1}`, type: 'CheckBox' })),
+      { id: 'Agent1NameLabel', type: 'Label' },
+      { id: 'Agent2NameLabel', type: 'Label' },
+      { id: 'Buyer1NameLevel', type: 'Label' },   // template typo, kept and visible
+    ]
+    const kept = fields.filter(f => !isUnconfiguredField(f))
+    expect(kept.map(f => f.id)).toEqual(['Agent1NameLabel', 'Agent2NameLabel', 'Buyer1NameLevel'])
   })
 })
