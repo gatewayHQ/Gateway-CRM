@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS, supportsReadOnly, READONLY_UNSUPPORTED_FIELD_TYPES } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS, supportsReadOnly, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -1195,20 +1195,30 @@ describe('supportsReadOnly — the types BoldSign refuses to lock', () => {
     }
   })
 
-  it('treats an unknown or missing type as lockable, since that is the default', () => {
-    expect(supportsReadOnly('SomethingNew')).toBe(true)
-    expect(supportsReadOnly(undefined)).toBe(true)
-    expect(supportsReadOnly('')).toBe(true)
-  })
-
-  it('the two reachable ones are exactly the fillable types on the send screen', () => {
+  it('the two reachable ones are offered as inputs on the send screen', () => {
     // Company and Title are offered as inputs, which is how a value ever reached
     // them and how this became a send-breaking bug rather than a theoretical one.
     expect(isFillableField('Company')).toBe(true)
     expect(isFillableField('Title')).toBe(true)
-    for (const t of READONLY_UNSUPPORTED_FIELD_TYPES) {
-      if (t === 'company' || t === 'title') continue
-      expect(isFillableField(t)).toBe(false)
+    expect(supportsReadOnly('Company')).toBe(false)
+    expect(supportsReadOnly('Title')).toBe(false)
+  })
+
+  it('ALLOWLIST: an unknown or future field type is not locked', () => {
+    // The point of the allowlist. A denylist would let a new BoldSign type
+    // through and break the send exactly the way Signature and Company did.
+    expect(supportsReadOnly('SomeFutureType')).toBe(false)
+    expect(supportsReadOnly('Image')).toBe(false)
+    expect(supportsReadOnly(undefined)).toBe(false)
+    expect(supportsReadOnly('')).toBe(false)
+  })
+
+  it('covers every type we actually prefill, so nothing silently unlocks', () => {
+    // Each fillable/tickable type is either lockable or one BoldSign refuses.
+    // A type in neither bucket would be a value going out editable by accident.
+    const refused = ['company', 'title']
+    for (const t of [...FILLABLE_FIELD_TYPES, ...TICKABLE_FIELD_TYPES]) {
+      expect(supportsReadOnly(t)).toBe(!refused.includes(t))
     }
   })
 })
@@ -1278,5 +1288,33 @@ describe('prefillFieldEntry — the lock is conditional, the value is not', () =
     for (const entry of all) {
       if (has(entry, 'isReadOnly')) expect(supportsReadOnly(typeOf(entry.id))).toBe(true)
     }
+  })
+})
+
+describe('sharedFormFields can only ever contain a lockable type', () => {
+  // mergeSharedFormFields() in api/boldsign.js stamps isReadOnly: true on every
+  // shared entry unconditionally, and it has no field type to check against.
+  // That is only safe while buildPrefillFields() routes nothing but Labels into
+  // that list, so the invariant is pinned here rather than left as a comment.
+  it('routes only Label fields into the shared list', () => {
+    const fields = [
+      { id: 'a', type: 'Label' },
+      { id: 'b', type: 'Company', roleIndex: 1 },
+      { id: 'c', type: 'Title',   roleIndex: 1 },
+      { id: 'd', type: 'Textbox', roleIndex: 1 },
+      { id: 'e', type: 'CheckBox', roleIndex: 1 },
+    ]
+    const values = { a: 'x', b: 'x', c: 'x', d: 'x', e: true }
+    const out = buildPrefillFields({ fields, values, filledRoleIndices: [1] })
+    expect(out.sharedIds).toEqual(['a'])
+    for (const id of out.sharedIds) {
+      expect(isSharedField(fields.find(f => f.id === id).type)).toBe(true)
+    }
+  })
+
+  it('and every shared type is one that accepts a lock', () => {
+    // If a type is ever added to SHARED_FIELD_TYPES that BoldSign refuses,
+    // mergeSharedFormFields would force the property onto it and break sends.
+    for (const t of ['label']) expect(supportsReadOnly(t)).toBe(true)
   })
 })

@@ -1448,7 +1448,9 @@ describe('supportsFieldReadOnly — layout restore must not send a refused prope
   })
 
   it('allows the types that do accept it', () => {
-    for (const t of ['TextBox', 'Label', 'CheckBox', 'RadioButton', 'EditableDate', 'Dropdown', 'Image']) {
+    // Image is deliberately absent: BoldSign does not refuse it, but we have no
+    // confirmation either, and an allowlist errs toward omitting the property.
+    for (const t of ['TextBox', 'Label', 'CheckBox', 'RadioButton', 'EditableDate', 'Dropdown']) {
       expect(supportsFieldReadOnly(t)).toBe(true)
     }
   })
@@ -1514,5 +1516,30 @@ describe('buildLayoutEditPayload — a stored layout heals on use', () => {
       fieldType: 'Signature', pageNumber: 1,
       bounds: { x: 50, y: 60, width: 180, height: 35 }, isRequired: true,
     })
+  })
+})
+
+describe('supportsFieldReadOnly — allowlist, so a new type cannot reopen this', () => {
+  it('allows only the six restorable types that accept a lock', () => {
+    for (const t of ['TextBox', 'Label', 'CheckBox', 'RadioButton', 'Dropdown', 'EditableDate']) {
+      expect(supportsFieldReadOnly(t)).toBe(true)
+    }
+  })
+
+  it('excludes Image too, which BoldSign does not refuse but we cannot confirm', () => {
+    expect(supportsFieldReadOnly('Image')).toBe(false)
+  })
+
+  it('a future or unknown type defaults to NOT carrying the property', () => {
+    expect(supportsFieldReadOnly('SomeFutureType')).toBe(false)
+    expect(supportsFieldReadOnly(undefined)).toBe(false)
+    expect(supportsFieldReadOnly(null)).toBe(false)
+  })
+
+  it('every allowlisted spelling is one normalizeFieldType can actually produce', () => {
+    // A drift here would silently stop matching, which looks exactly like the bug.
+    for (const t of ['TextBox', 'Label', 'CheckBox', 'RadioButton', 'Dropdown', 'EditableDate']) {
+      expect(normalizeFieldType(t)).toBe(t)
+    }
   })
 })
