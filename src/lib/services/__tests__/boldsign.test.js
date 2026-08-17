@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS, supportsReadOnly, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS, supportsReadOnly, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -1015,7 +1015,7 @@ describe('canonical Label ids resolve to CRM tokens', () => {
   it('matches on the field NAME when BoldSign minted the id (Label1, Label2, ...)', () => {
     // The box an admin types into in the template editor is the field's name;
     // the id is auto-assigned and is not a stable identifier.
-    expect(fieldTokenKey({ id: 'Label1', name: 'Buyer1NameLabel' })).toBe('buyer_1_name')
+    expect(fieldTokenKey({ id: 'Label1', name: 'Buyer1NameLabel' })).toBe('party_buyer_1')
     expect(fieldTokenKey({ id: 'Label7', label: 'Agent2NameLabel' })).toBe('agent_2_name')
   })
 
@@ -1316,5 +1316,231 @@ describe('sharedFormFields can only ever contain a lockable type', () => {
     // If a type is ever added to SHARED_FIELD_TYPES that BoldSign refuses,
     // mergeSharedFormFields would force the property onto it and break sends.
     for (const t of ['label']) expect(supportsReadOnly(t)).toBe(true)
+  })
+})
+
+describe('isUnconfiguredField — what the send screen folds away', () => {
+  it('hides a field with an auto id, no name, no label and no token', () => {
+    expect(isUnconfiguredField({ id: 'Label1',       type: 'Label' })).toBe(true)
+    expect(isUnconfiguredField({ id: 'Checkbox2',    type: 'CheckBox' })).toBe(true)
+    expect(isUnconfiguredField({ id: 'Name3',        type: 'Name' })).toBe(true)
+    expect(isUnconfiguredField({ id: 'EditableDate1', type: 'EditableDate' })).toBe(true)
+    expect(isUnconfiguredField({ id: 'Label27',      type: 'Label' })).toBe(true)
+  })
+
+  it('KEEPS a field carrying a CRM token, however its id was assigned', () => {
+    expect(isUnconfiguredField({ id: 'Agent1NameLabel', type: 'Label' })).toBe(false)
+    expect(isUnconfiguredField({ id: 'agent_name',      type: 'Label' })).toBe(false)
+    // The normal case: BoldSign minted the id, the admin put the token in the name.
+    expect(isUnconfiguredField({ id: 'Label4', name: 'Buyer1NameLabel', type: 'Label' })).toBe(false)
+  })
+
+  it('KEEPS a hand-named field even when it matches no token', () => {
+    // The name is the admin telling the agent what belongs there.
+    expect(isUnconfiguredField({ id: 'Label9', name: 'Earnest money', type: 'Label' })).toBe(false)
+    expect(isUnconfiguredField({ id: 'Label9', label: 'Closing date',  type: 'Label' })).toBe(false)
+  })
+
+  it('KEEPS an id that is not one of BoldSign auto-counter names', () => {
+    expect(isUnconfiguredField({ id: 'ParcelNo', type: 'Label' })).toBe(false)
+    expect(isUnconfiguredField({ id: 'Label',    type: 'Label' })).toBe(false)
+  })
+
+  it('folds away the bulk of a real agency packet but keeps what matters', () => {
+    // The live "Buyer Agreement/IA Agency Packet (IA)" shape.
+    const fields = [
+      ...Array.from({ length: 27 }, (_, i) => ({ id: `Label${i + 1}`, type: 'Label' })),
+      ...Array.from({ length: 14 }, (_, i) => ({ id: `Checkbox${i + 1}`, type: 'CheckBox' })),
+      { id: 'Agent1NameLabel', type: 'Label' },
+      { id: 'Agent2NameLabel', type: 'Label' },
+      { id: 'Buyer1NameLevel', type: 'Label' },   // template typo, kept and visible
+    ]
+    const kept = fields.filter(f => !isUnconfiguredField(f))
+    expect(kept.map(f => f.id)).toEqual(['Agent1NameLabel', 'Agent2NameLabel', 'Buyer1NameLevel'])
+  })
+})
+
+describe('the expanded canonical vocabulary', () => {
+  const ctx = {
+    deal: {
+      comp_data: { transaction_type: 'buyer', listing_start: '2026-08-01', listing_end: '2027-02-01' },
+      expected_close_date: '2026-09-15', value: 450000, commission_pct: 3,
+    },
+    property: { address: '123 Main St', city: 'Ames', state: 'IA', zip: '50010', county: 'Story', mls_number: 'MLS-1', type: 'residential', price: 450000 },
+    contact: { first_name: 'Daniel', last_name: 'Stilson' },
+    agent:  { name: 'Daniel Stillson' },
+    agents: [{ name: 'Daniel Stillson' }],
+    today:  '2026-08-17',
+  }
+  const val = (id) => fieldTokenValue(crmTokenValues(ctx), { id })
+
+  it('every id in the table has a real token behind it', () => {
+    for (const token of Object.values(CANONICAL_LABEL_TOKENS)) {
+      expect(SHARED_PREFILL_TOKENS.has(token)).toBe(true)
+    }
+  })
+
+  it('fills property, money and party ids from the deal', () => {
+    expect(val('PropertyAddressLabel')).toBe('123 Main St')
+    expect(val('PropertyCityStateZipLabel')).toBe('Ames, IA 50010')
+    expect(val('PropertyCountyLabel')).toBe('Story')
+    expect(val('MlsNumberLabel')).toBe('MLS-1')
+    expect(val('PurchasePriceLabel')).toBe('$450,000')
+    expect(val('CommissionRateLabel')).toBe('3%')
+    expect(val('Buyer1NameLabel')).toBe('Daniel Stilson')
+    expect(val('Agent1NameLabel')).toBe('Daniel Stillson')
+  })
+
+  it('the retainer period is the deal representation window, as US dates', () => {
+    expect(val('RetainerDate1')).toBe('08/01/2026')
+    expect(val('RetainerDate2')).toBe('02/01/2027')
+    // Both the bare spelling and the ...Label form, since the live packet used
+    // the bare one.
+    expect(val('RetainerDate1Label')).toBe('08/01/2026')
+    expect(val('RetainerStartLabel')).toBe('08/01/2026')
+    expect(val('ClosingDateLabel')).toBe('09/15/2026')
+  })
+
+  it('formats dates without letting a timezone move the day', () => {
+    // `new Date('2026-08-01')` is midnight UTC, which is 31 July in the US.
+    const vals = crmTokenValues({ deal: { expected_close_date: '2026-01-01' } })
+    expect(vals.closing_date_us).toBe('01/01/2026')
+  })
+
+  it('city/state/zip degrades without a dangling comma when parts are missing', () => {
+    expect(crmTokenValues({ property: { city: 'Ames' } }).property_city_state_zip).toBe('Ames')
+    expect(crmTokenValues({ property: { state: 'IA', zip: '50010' } }).property_city_state_zip).toBe('IA 50010')
+    expect(crmTokenValues({ property: {} }).property_city_state_zip).toBe('')
+  })
+
+  it('seller ids stay blank on a buyer deal, and swap over on a seller deal', () => {
+    expect(val('Seller1NameLabel')).toBe('')
+    const seller = { ...ctx, deal: { ...ctx.deal, comp_data: { ...ctx.deal.comp_data, transaction_type: 'seller' } } }
+    expect(fieldTokenValue(crmTokenValues(seller), { id: 'Seller1NameLabel' })).toBe('Daniel Stilson')
+    expect(fieldTokenValue(crmTokenValues(seller), { id: 'Buyer1NameLabel' })).toBe('')
+  })
+
+  it('agreement_date falls back to today only when the deal has no start date', () => {
+    expect(val('AgreementDateLabel')).toBe('08/01/2026')
+    const noStart = { ...ctx, deal: { ...ctx.deal, comp_data: { transaction_type: 'buyer' } } }
+    expect(fieldTokenValue(crmTokenValues(noStart), { id: 'AgreementDateLabel' })).toBe('08/17/2026')
+    // Pure: omit `today` and it is blank rather than whatever the clock says.
+    expect(crmTokenValues({}).agreement_date).toBe('')
+  })
+})
+
+describe('date fields get a picker, not a text box', () => {
+  it('spots a date by BoldSign type or by the CRM token behind it', () => {
+    expect(isDateField({ id: 'x', type: 'EditableDate' })).toBe(true)
+    expect(isDateField({ id: 'RetainerDate1', type: 'Label' })).toBe(true)
+    expect(isDateField({ id: 'ClosingDateLabel', type: 'Label' })).toBe(true)
+    expect(isDateField({ id: 'OfferExpirationLabel', type: 'Label' })).toBe(true)
+    expect(isDateField({ id: 'Buyer1NameLabel', type: 'Label' })).toBe(false)
+    expect(isDateField({ id: 'Label7', type: 'Label' })).toBe(false)
+  })
+
+  it('round-trips between what the document shows and what the input speaks', () => {
+    expect(usDateToIso('08/01/2026')).toBe('2026-08-01')
+    expect(usDateToIso('8/1/2026')).toBe('2026-08-01')
+    expect(isoDateToUs('2026-08-01')).toBe('08/01/2026')
+    expect(isoDateToUs(usDateToIso('12/31/2027'))).toBe('12/31/2027')
+  })
+
+  it('returns blank rather than guessing at a partial date', () => {
+    for (const bad of ['', '08/2026', 'next Tuesday', undefined, '2026-08-01']) {
+      expect(usDateToIso(bad)).toBe('')
+    }
+    expect(isoDateToUs('not a date')).toBe('')
+  })
+})
+
+describe('isUnconfiguredField — BoldSign echoes the id back as the name', () => {
+  it('REGRESSION: name equal to the id is not somebody naming the field', () => {
+    // BoldSign populates `name` with the auto id when nobody typed one, so
+    // without this the rule matched almost nothing and the screen stayed long.
+    expect(isUnconfiguredField({ id: 'Label7', name: 'Label7', type: 'Label' })).toBe(true)
+    expect(isUnconfiguredField({ id: 'Checkbox2', name: 'checkbox2', type: 'CheckBox' })).toBe(true)
+  })
+
+  it('but a real name still keeps the field on screen', () => {
+    expect(isUnconfiguredField({ id: 'Label7', name: 'Earnest money', type: 'Label' })).toBe(false)
+  })
+
+  it('a field carrying any canonical id is always shown', () => {
+    for (const id of Object.keys(CANONICAL_LABEL_TOKENS)) {
+      expect(isUnconfiguredField({ id, type: 'Label' })).toBe(false)
+    }
+  })
+})
+
+describe('per-deal agreement terms, stored in comp_data', () => {
+  const withTerms = (terms = {}) => crmTokenValues({
+    deal: { comp_data: { transaction_type: 'buyer', listing_start: '2026-08-01', ...terms }, value: 450000, commission_pct: 3 },
+    property: { address: '123 Main St', city: 'Ames', county: 'Story', state: 'IA', zip: '50010' },
+    agent: { name: 'Daniel Stillson' },
+    agents: [{ name: 'Daniel Stillson' }, { name: 'Jane Co-Agent' }],
+    today: '2026-08-17',
+  })
+  const val = (id, terms) => fieldTokenValue(withTerms(terms), { id })
+
+  it('every canonical id resolves to a token that exists', () => {
+    for (const [id, token] of Object.entries(CANONICAL_LABEL_TOKENS)) {
+      expect(SHARED_PREFILL_TOKENS.has(token), `${id} -> ${token}`).toBe(true)
+    }
+  })
+
+  it('reads buyer representation terms straight off the deal', () => {
+    const terms = {
+      protection_period_days: '180',
+      property_types_sought:  'Residential, Condo, Acreage',
+      search_area:            'Ames, Ankeny, Story County',
+    }
+    expect(val('ProtectionPeriodDaysLabel', terms)).toBe('180')
+    expect(val('PropertyTypesSoughtLabel', terms)).toBe('Residential, Condo, Acreage')
+    expect(val('SearchAreaLabel', terms)).toBe('Ames, Ankeny, Story County')
+  })
+
+  it('a term with nothing stored is blank, so the agent fills it once', () => {
+    // Blank is the point: the field still renders as a named box on the send
+    // screen, and starts filling itself the day the value lands on the deal.
+    expect(val('ProtectionPeriodDaysLabel')).toBe('')
+    expect(val('EarnestMoneyLabel')).toBe('')
+    expect(val('TitleCompanyLabel')).toBe('')
+  })
+
+  it('search area falls back to the property city and county', () => {
+    expect(val('SearchAreaLabel')).toBe('Ames, Story')
+    expect(val('SearchAreaLabel', { search_area: 'Des Moines Metro' })).toBe('Des Moines Metro')
+  })
+
+  it('writes the compensation as a clause, not as a bare number', () => {
+    // "3" pasted into the wrong blank of "___% or $___" is a fee dispute.
+    expect(val('BrokerCompensationLabel')).toBe('3% of the gross sales price')
+    const flat = crmTokenValues({ deal: { commission_type: 'flat', commission_flat: 5000 } })
+    expect(flat.broker_compensation).toBe('a service fee of $5,000')
+    // No commission entered means no clause, rather than a misleading 0%.
+    expect(crmTokenValues({ deal: {} }).broker_compensation).toBe('')
+    expect(val('BrokerCompensationLabel', { broker_compensation: '2.5% flat' })).toBe('2.5% flat')
+  })
+
+  it('splits the agreement date into the three blanks a form prints', () => {
+    expect(val('AgreementDayLabel')).toBe('1')
+    expect(val('AgreementMonthLabel')).toBe('August')
+    // Two digits: the form pre-prints "20", so a four-digit year reads "202026".
+    expect(val('AgreementYearLabel')).toBe('26')
+    expect(val('AgreementYearFullLabel')).toBe('2026')
+    // And the whole date still agrees with its parts.
+    expect(val('AgreementDateLabel')).toBe('08/01/2026')
+  })
+
+  it('the additional appointed agent defaults to the deal second agent', () => {
+    expect(val('AdditionalAgentNameLabel')).toBe('Jane Co-Agent')
+    expect(val('AdditionalAgentDateLabel')).toBe('08/01/2026')
+    expect(val('AdditionalAgentNameLabel', { additional_agent_name: 'Pat Broker' })).toBe('Pat Broker')
+  })
+
+  it('formats every stored date the same way as the rest', () => {
+    expect(val('PossessionDateLabel', { possession_date: '2026-10-01' })).toBe('10/01/2026')
+    expect(val('ChangeEffectiveDateLabel', { change_effective_date: '2026-12-25' })).toBe('12/25/2026')
   })
 })
