@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS, supportsReadOnly, READONLY_UNSUPPORTED_FIELD_TYPES } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -1161,5 +1161,122 @@ describe('canonical Labels reach every signer, end to end', () => {
     const broken = [{ id: 'Agent1NameLabel', type: 'Name', roleIndex: 1 }]
     expect(signerBoundPrefillFields({ fields: broken, values: {} })).toHaveLength(1)
     expect(prefillFieldEntry(broken[0], 'Nic Madsen')).toBeNull()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IsReadOnly is not universally accepted
+//
+// Live failure, sending the IA Agency Packet:
+//   "IsReadOnly property is not supported for the Signature, Initial,
+//    Attachment, Date signed, Hyperlink, Title, Formula, Drawing and Company
+//    form fields."
+// It fails the WHOLE send, so one brokerage box took the entire packet down.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('supportsReadOnly — the types BoldSign refuses to lock', () => {
+  it('refuses every type BoldSign named in the error', () => {
+    for (const t of ['Signature', 'Initial', 'Attachment', 'DateSigned', 'Hyperlink', 'Title', 'Formula', 'Drawing', 'Company']) {
+      expect(supportsReadOnly(t)).toBe(false)
+    }
+  })
+
+  it('matches however the type is spelled or spaced', () => {
+    expect(supportsReadOnly('Date signed')).toBe(false)
+    expect(supportsReadOnly('date_signed')).toBe(false)
+    expect(supportsReadOnly('datesigned')).toBe(false)
+    expect(supportsReadOnly('COMPANY')).toBe(false)
+    // BoldSign reads Initial back under both spellings.
+    expect(supportsReadOnly('Initials')).toBe(false)
+  })
+
+  it('leaves the types that DO take a lock alone', () => {
+    for (const t of ['Textbox', 'TextBox', 'Label', 'Dropdown', 'CheckBox', 'RadioButton', 'EditableDate', 'Email']) {
+      expect(supportsReadOnly(t)).toBe(true)
+    }
+  })
+
+  it('treats an unknown or missing type as lockable, since that is the default', () => {
+    expect(supportsReadOnly('SomethingNew')).toBe(true)
+    expect(supportsReadOnly(undefined)).toBe(true)
+    expect(supportsReadOnly('')).toBe(true)
+  })
+
+  it('the two reachable ones are exactly the fillable types on the send screen', () => {
+    // Company and Title are offered as inputs, which is how a value ever reached
+    // them and how this became a send-breaking bug rather than a theoretical one.
+    expect(isFillableField('Company')).toBe(true)
+    expect(isFillableField('Title')).toBe(true)
+    for (const t of READONLY_UNSUPPORTED_FIELD_TYPES) {
+      if (t === 'company' || t === 'title') continue
+      expect(isFillableField(t)).toBe(false)
+    }
+  })
+})
+
+describe('prefillFieldEntry — the lock is conditional, the value is not', () => {
+  const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
+
+  it('REGRESSION: a Company field sends its value with NO isReadOnly key at all', () => {
+    // Sent as `false` it would still be the unsupported property; BoldSign's
+    // message is about presence, so it is omitted entirely.
+    const entry = prefillFieldEntry({ id: 'BrokerageCompany', type: 'Company' }, 'Gateway Real Estate Advisors')
+    expect(entry).toEqual({ id: 'BrokerageCompany', value: 'Gateway Real Estate Advisors' })
+    expect(has(entry, 'isReadOnly')).toBe(false)
+  })
+
+  it('same for a Title field', () => {
+    const entry = prefillFieldEntry({ id: 'AgentTitle', type: 'Title' }, 'Managing Broker')
+    expect(entry).toEqual({ id: 'AgentTitle', value: 'Managing Broker' })
+    expect(has(entry, 'isReadOnly')).toBe(false)
+  })
+
+  it('still locks every type that accepts a lock', () => {
+    expect(prefillFieldEntry({ id: 'a', type: 'Textbox' }, 'x')).toEqual({ id: 'a', value: 'x', isReadOnly: true })
+    expect(prefillFieldEntry({ id: 'b', type: 'Label' }, 'x')).toEqual({ id: 'b', value: 'x', isReadOnly: true })
+    expect(prefillFieldEntry({ id: 'c', type: 'Dropdown' }, 'x')).toEqual({ id: 'c', value: 'x', isReadOnly: true })
+    // A ticked box is a term of the agreement and stays locked.
+    expect(prefillFieldEntry({ id: 'd', type: 'CheckBox' }, true)).toEqual({ id: 'd', value: 'true', isReadOnly: true })
+    expect(prefillFieldEntry({ id: 'e', type: 'CheckBox' }, false)).toEqual({ id: 'e', value: 'false', isReadOnly: true })
+  })
+
+  it('the earlier rules are unchanged — a blank sends nothing, a Name sends nothing', () => {
+    expect(prefillFieldEntry({ id: 'a', type: 'Company' }, '')).toBeNull()
+    expect(prefillFieldEntry({ id: 'a', type: 'Company' }, '   ')).toBeNull()
+    expect(prefillFieldEntry({ id: 'a', type: 'Name' }, 'Nic Madsen')).toBeNull()
+    expect(prefillFieldEntry({ id: 'a', type: 'CheckBox' }, null)).toBeNull()
+  })
+
+  it('ACCEPTANCE: a packet mixing a Company box with locked fields builds a payload BoldSign accepts', () => {
+    const fields = [
+      { id: 'PropertyAddressLabel', type: 'Label' },
+      { id: 'BrokerageCompany',     type: 'Company', roleIndex: 2 },
+      { id: 'AgentTitle',           type: 'Title',   roleIndex: 2 },
+      { id: 'agent_license',        type: 'Textbox', roleIndex: 2 },
+    ]
+    const values = {
+      PropertyAddressLabel: '2212 Okoboji Ave',
+      BrokerageCompany:     'Gateway Real Estate Advisors',
+      AgentTitle:           'Managing Broker',
+      agent_license:        'S-609',
+    }
+    const out = buildPrefillFields({ fields, values, filledRoleIndices: [1, 2] })
+
+    // The Label is still shared and still locked.
+    expect(out.sharedFormFields).toEqual([
+      { id: 'PropertyAddressLabel', value: '2212 Okoboji Ave', isReadOnly: true },
+    ])
+    // The role-scoped ones carry their values; only the two BoldSign refuses to
+    // lock go out unlocked.
+    expect(out.byRole[2]).toEqual([
+      { id: 'BrokerageCompany', value: 'Gateway Real Estate Advisors' },
+      { id: 'AgentTitle',       value: 'Managing Broker' },
+      { id: 'agent_license',    value: 'S-609', isReadOnly: true },
+    ])
+    // Nothing anywhere in the payload carries isReadOnly on an unsupported type.
+    const all = [...out.sharedFormFields, ...Object.values(out.byRole).flat()]
+    const typeOf = (id) => fields.find(f => f.id === id).type
+    for (const entry of all) {
+      if (has(entry, 'isReadOnly')) expect(supportsReadOnly(typeOf(entry.id))).toBe(true)
+    }
   })
 })

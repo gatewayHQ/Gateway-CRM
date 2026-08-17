@@ -740,6 +740,45 @@ So the send modal now offers every **prefillable** field, not just the text ones
   agent decided is what every signer sees, and none of them can change it after the
   send. All three are pure and unit-tested in `src/lib/services/__tests__/boldsign.test.js`.
 
+### Some types refuse to be locked, and say so by failing the whole send
+BoldSign rejects `IsReadOnly` outright on nine field types:
+
+> IsReadOnly property is not supported for the Signature, Initial, Attachment,
+> Date signed, Hyperlink, Title, Formula, Drawing and Company form fields.
+
+It is a hard failure on the **entire send**, not a warning about the one field,
+so a single box takes the whole packet down and names a property the agent never
+set on a field they may not know is there. Seen live on the IA Agency Packet.
+
+Two of the nine are reachable from our own send screen. **Company** and **Title**
+are in `FILLABLE_FIELD_TYPES`, because they are legitimately values an agent
+fills in (the brokerage, the signer's role on the agreement), so both render as
+inputs and both used to be stamped read-only like everything else. Any packet
+with a brokerage box hit this.
+
+`READONLY_UNSUPPORTED_FIELD_TYPES` / `supportsReadOnly()` encode the list, and
+`prefillFieldEntry()` now makes the lock conditional while the value is not.
+The property is **omitted** rather than sent as `false`: the message says it "is
+not supported", which reads as presence rather than value.
+
+So a prefilled Company or Title goes out editable by its signer. That is not a
+choice, it is the only state BoldSign will accept, and a prefilled box the signer
+could retype is worth incomparably more than a packet that refuses to send.
+**Where a value must be both locked and legible to every party, the answer is the
+same as everywhere else on this page: put it in the template as a `Label`**,
+which takes a lock and is common to the document.
+
+Matching ignores spacing and casing, so `DateSigned`, `Date signed` and
+`date_signed` are one type; `initials` is listed beside `initial` because
+BoldSign reads that type back under both spellings.
+
+Not applied to the saved-layout path (`buildLayoutEditPayload`), which sends
+`isReadOnly` on every restored field. It has not been observed failing, its
+errors are swallowed as a `layoutWarning` rather than surfacing, and
+`api/boldsign.js` deliberately imports nothing from `src/`, so the rule would
+have to be duplicated across that boundary to apply there. Worth checking if a
+deal's layout ever stops restoring.
+
 Where each of those values *lands* — one shared copy visible to everyone, or one
 signer's private field — is decided by `buildPrefillFields()`; see "Prefilled data
 every signer must see" below. The modal renders the two groups separately

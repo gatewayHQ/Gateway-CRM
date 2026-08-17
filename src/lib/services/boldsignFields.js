@@ -254,6 +254,42 @@ export function sharedDataOnSignerFields({ fields = [], values = {}, firstSigner
   })
 }
 
+// ── Field types that REFUSE to be locked ─────────────────────────────────────
+// BoldSign rejects `IsReadOnly` outright on some types, with:
+//
+//   "IsReadOnly property is not supported for the Signature, Initial,
+//    Attachment, Date signed, Hyperlink, Title, Formula, Drawing and Company
+//    form fields."
+//
+// It is a hard failure on the WHOLE send, not a warning about the one field. So
+// a single Title or Company box with a value in it takes the entire packet down,
+// and the agent is told about a property they never set on a field they may not
+// know exists.
+//
+// Two of these are reachable from our own send screen: **Company** and **Title**
+// are in FILLABLE_FIELD_TYPES, because they are legitimately values an agent
+// fills in (the brokerage, the signer's role on the agreement), so both are
+// rendered as inputs and both used to be stamped read-only like everything else.
+// Any agency packet with a brokerage box hit this.
+//
+// The value still goes out. Only the lock is dropped, because BoldSign will not
+// grant it on these types under any payload. A prefilled Company the signer
+// could technically retype is worth incomparably more than a packet that refuses
+// to send. Where a value must be BOTH locked and legible to every party, the
+// answer is the one this whole file keeps arriving at: put it in the template as
+// a **Label**, which takes a lock and is common to the document.
+//
+// Listed in BoldSign's own terms, matched with spacing and casing removed, so
+// `DateSigned`, `Date signed` and `date_signed` are one type. `initials` is
+// included alongside `initial` because BoldSign reads that type back under both
+// spellings (the same split normalizeFieldType() handles in api/boldsign.js).
+export const READONLY_UNSUPPORTED_FIELD_TYPES = new Set([
+  'signature', 'initial', 'initials', 'attachment', 'datesigned',
+  'hyperlink', 'title', 'formula', 'drawing', 'company',
+])
+export const supportsReadOnly = (t) =>
+  !READONLY_UNSUPPORTED_FIELD_TYPES.has(String(t || '').toLowerCase().replace(/[^a-z]/g, ''))
+
 // BoldSign wants a checkbox value as the string "true"/"false".
 export const tickValue = (on) => (on ? 'true' : 'false')
 
@@ -272,13 +308,19 @@ export function prefillFieldEntry(field, value) {
   // in the audit log and on the send screen that the document never shows — the
   // silent wrong-name failure described at SIGNER_BOUND_FIELD_TYPES.
   if (isSignerBoundField(field?.type)) return null
+  // The lock is conditional; the value is not. BoldSign refuses `IsReadOnly` on
+  // a handful of types and fails the ENTIRE send when it sees one, so on those
+  // the property is omitted rather than sent as false: the message says the
+  // property "is not supported", which reads as presence rather than value.
+  // See READONLY_UNSUPPORTED_FIELD_TYPES.
+  const lock = supportsReadOnly(field?.type) ? { isReadOnly: true } : {}
   if (isTickableField(field?.type)) {
     if (value !== true && value !== false) return null      // left to the signer
-    return { id, value: tickValue(value), isReadOnly: true }
+    return { id, value: tickValue(value), ...lock }
   }
   const v = String(value ?? '').trim()
   if (!v) return null
-  return { id, value: v, isReadOnly: true }
+  return { id, value: v, ...lock }
 }
 
 // Normalize a state value to a 2-letter code. Accepts existing codes (IA) or
