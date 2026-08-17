@@ -31,6 +31,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
+import { fetchPublicMailing } from '../lib/publicMailing.js'
 import { useReveal, useCountUp, useScrollProgress, useParallax, usePrefersReducedMotion } from '../components/landing/hooks.js'
 
 // Light / dark luxury palettes. Everything else is derived from `accent`.
@@ -93,10 +94,9 @@ export default function LandingMailing({ mailingId }) {
   useEffect(() => {
     let active = true
     ;(async () => {
-      const { data: m } = await supabase
-        .from('mailings')
-        .select('id, name, agent_id, landing_config')
-        .eq('id', mailingId).maybeSingle()
+      // Service-key read, not `supabase.from('mailings')` — this page is
+      // anonymous and 0027 closed that table to anon. See lib/publicMailing.js.
+      const m = await fetchPublicMailing(mailingId)
       if (!active) return
       if (!m) { setError('notfound'); setLoading(false); return }
       setMailing(m)
@@ -116,7 +116,14 @@ export default function LandingMailing({ mailingId }) {
         if (active) setAgents(ordered)
       }
       setLoading(false)
-    })()
+    })().catch(() => {
+      // fetchPublicMailing throws on transport/server failure (the old
+      // supabase.from() call never did). Without this the page would sit on the
+      // loading spinner forever.
+      if (!active) return
+      setError('network')
+      setLoading(false)
+    })
     return () => { active = false }
   }, [mailingId])
 
@@ -189,6 +196,18 @@ export default function LandingMailing({ mailingId }) {
       <div>
         <div style={{ fontFamily: 'Cormorant Garamond, serif', fontSize: 26 }}>Gateway <span style={{ color: accent }}>Real Estate</span></div>
         <div style={{ marginTop: 10, color: theme.mist }}>This list is no longer available.</div>
+      </div>
+    </div>
+  )
+  if (error === 'network' && !mailing) return (
+    <div style={{ ...page, padding: 60, textAlign: 'center', display: 'grid', placeItems: 'center' }}>
+      <div>
+        <div style={{ fontFamily: 'Cormorant Garamond, serif', fontSize: 26 }}>Gateway <span style={{ color: accent }}>Real Estate</span></div>
+        <div style={{ marginTop: 10, color: theme.mist }}>We couldn’t load this page. Please check your connection and try again.</div>
+        <button onClick={() => location.reload()} style={{ marginTop: 16, padding: '10px 18px', borderRadius: 8,
+          background: accent, color: '#12131a', border: 'none', fontFamily: 'inherit', fontSize: 14, cursor: 'pointer' }}>
+          Try again
+        </button>
       </div>
     </div>
   )

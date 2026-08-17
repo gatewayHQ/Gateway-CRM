@@ -40,6 +40,46 @@
 -- The only anonymous table read in the client is `agents`, handled by the
 -- column-limited view in Section 4.
 --
+-- ⚠ CORRECTION (added later — the SAFETY paragraph above was WRONG on two rows,
+--   and both were live breakage. Do not trust it as a description of the app.)
+--
+--   /lp/*  is NOT served by api/campaigns.js for real visitors. vercel.json's
+--          catch-all rewrite serves it as the SPA, and src/main.jsx mounts the
+--          Landing* components, which ran `supabase.from('mailings')` in the
+--          browser on the ANON key. Only the social-crawler rewrite reaches
+--          api/campaigns.js. RLS filters instead of erroring, so after this
+--          migration every QR scan recorded normally and then showed the
+--          scanner "Listing not available" — silent, and invisible in the scan
+--          analytics. Fixed by ?action=landing (a service-key read of the four
+--          rendered columns) behind src/lib/publicMailing.js.
+--
+--   /listing/:id, /share/:id  were broken by this migration too, in two
+--          different ways. PropertyLanding.jsx read `properties` in the browser
+--          on the anon key. api/property-public.js's handleShare() read
+--          `properties` with the ANON key SERVER-SIDE — a serverless function is
+--          not privileged because it runs on a server, only by the key it
+--          presents. Both now go through ?action=listing / the service key, with
+--          an explicit column list and the free-form `details` blob filtered to
+--          the spec keys the page renders (it holds internal `co_agent_ids`).
+--
+--   api/listings.js  the same server-side-anon-key mistake on the public
+--          listings feed that website widgets embed. It began returning
+--          `{ listings: [], count: 0 }` — a 200 with an empty feed, which every
+--          widget renders as "no listings" rather than as an error. Fixed to the
+--          service key; it already emitted an explicit field mapping.
+--
+--   The lesson is that this file's audit was done by reading the api/ directory
+--   and not the SPA router — and that reading api/ is not enough on its own
+--   either, since two handlers in there were presenting the anon key.
+--   src/lib/__tests__/publicPageDataAccess.test.js now checks both claims
+--   mechanically: the pages main.jsx actually mounts, and the key every handler
+--   presents.
+--
+--   To check what any given database actually looks like (this file is not in
+--   the apply-order table in migrations/README.md, so the repo cannot tell you
+--   whether it ran), use the read-only
+--   scripts/db-verify/public_read_posture.sql.
+--
 -- NOT TOUCHED — these genuinely need anon INSERT and are already scoped:
 --     visitor_events, lead_captures  (the website tracking snippet that
 --     Settings.jsx generates posts to them with the anon key)

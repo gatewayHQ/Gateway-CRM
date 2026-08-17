@@ -117,6 +117,61 @@ re-run. A dropped row is gone.
 
 ---
 
+## The half that is not the scan path: rendering the landing page
+
+A scan is only half the job. The 302 above hands the visitor a
+`/lp/{type}/{id}` URL, and **that URL is served by the SPA, not by this
+function** — `vercel.json`'s catch-all rewrite sends it to `index.html`, and
+`src/main.jsx` mounts the matching `Landing*` component. (The only exception is
+the social-crawler rewrite, which routes `/lp/*` to `?action=og` by user-agent.)
+
+So the two halves run in different places on different credentials:
+
+| | where it runs | credential |
+|---|---|---|
+| `/m/{token}` | serverless function | **service key** (bypasses RLS) |
+| `/lp/{type}/{id}` | the visitor's browser | **anon key** (RLS applies) |
+
+That split caused a live outage worth remembering. Migration 0027 closed
+`mailings` to `anon` — correctly; it holds `qr_token`, `description` and the
+denormalized counters — on the stated assumption that `/lp/*` was served by this
+function. It wasn't. All four `Landing*` pages were calling
+`supabase.from('mailings')` from the browser, and **RLS filters rather than
+errors**, so the select came back with zero rows and every scanner saw
+"Listing not available" on a perfectly healthy campaign. Scans kept recording
+the whole time, so the dashboards looked fine and nothing logged an error.
+
+The fix is `?action=landing&id={uuid}` — a service-key read of exactly the four
+fields those pages render (`id, name, agent_id, landing_config`), reached through
+the shared `src/lib/publicMailing.js` helper. Two rules keep it safe:
+
+- **Never widen that projection to `*`.** `qr_token` would then be readable by
+  anyone who can open a landing page — i.e. every scanner of every QR code — and
+  a token is all you need to forge scans against a campaign.
+- **A public page must never read an RLS-closed table with the anon key.**
+  `src/lib/__tests__/publicPageDataAccess.test.js` enforces this by scanning the
+  pages `main.jsx` mounts, so the next table lockdown fails the build instead of
+  silently emptying a public page.
+
+The same 0027 breakage hit three non-QR surfaces, all now fixed the same way:
+`/listing/:id` (read `properties` in the browser), `/share/:id` and
+`/api/listings` (both ran server-side but **presented the anon key** — a
+serverless function is privileged by the key it presents, not by where it runs).
+The listings feed was the sneakiest: it returned `{ listings: [], count: 0 }`, a
+200 that every embedded widget renders as "no listings" rather than as an error.
+That second flavour has its own check in the same test file.
+
+To see what a given database's posture actually is, run the read-only
+`scripts/db-verify/public_read_posture.sql` in the Supabase SQL Editor.
+
+The handoff itself is covered end to end by
+`api/__tests__/campaigns-scan-to-landing.test.js`, which follows the real
+`Location` header through the real route regex into the real landing fetch. The
+bug above survived a green suite precisely because every test covered one half or
+the other and none followed the redirect.
+
+---
+
 ## Attribution with one QR code per campaign
 
 Every mailer in a drop carries the **same** QR code. That is a deliberate

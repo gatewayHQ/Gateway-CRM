@@ -11,6 +11,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
+import { fetchPublicMailing } from '../lib/publicMailing.js'
 import AdvisorDark from '../components/landing/AdvisorDark.jsx'
 
 const PROPERTY_TYPES = [
@@ -68,10 +69,9 @@ export default function LandingValuation({ mailingId }) {
 
   useEffect(() => {
     ;(async () => {
-      const { data: m } = await supabase
-        .from('mailings')
-        .select('id, name, agent_id, landing_config')
-        .eq('id', mailingId).maybeSingle()
+      // Service-key read, not `supabase.from('mailings')` — this page is
+      // anonymous and 0027 closed that table to anon. See lib/publicMailing.js.
+      const m = await fetchPublicMailing(mailingId)
       if (!m) { setError('Mailing not found'); setLoading(false); return }
       setMailing(m)
 
@@ -99,7 +99,13 @@ export default function LandingValuation({ mailingId }) {
         setAgent(ordered[0] || null)
       }
       setLoading(false)
-    })()
+    })().catch(() => {
+      // fetchPublicMailing throws on transport/server failure (the old
+      // supabase.from() call never did). Without this the page would sit on the
+      // loading spinner forever.
+      setError('We couldn’t load this page. Please check your connection and try again.')
+      setLoading(false)
+    })
   }, [mailingId])
 
   const cfg        = mailing?.landing_config || {}

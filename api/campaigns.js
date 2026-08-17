@@ -15,6 +15,7 @@
  *   GET  ?action=live&since=ISO                → near-real-time scan/lead feed
  *   GET  ?action=scan&token=X                  → public QR endpoint, 302 → landing
  *   POST {action:'scan_replay',replay}         → public; re-report an unconfirmed scan
+ *   GET  ?action=landing&id=X                  → public; the 4 fields /lp/* renders
  *   GET  ?action=health                        → uptime probe (no DB)
  *   POST {action:'create',...}                 → new mailing (mints qr_token)
  *   POST {action:'update',id,...}              → patch mailing
@@ -25,8 +26,11 @@
  *   POST {action:'capture_lead',...}           → public landing-page form submit
  *
  * Auth: service role key bypasses RLS for server-side writes. The 'scan',
- *       'scan_replay', 'capture_lead', 'capture_subscriber' and 'unsubscribe'
- *       actions are intentionally unauthenticated (public). 'scan_replay' is
+ *       'scan_replay', 'landing', 'og', 'capture_lead', 'capture_subscriber' and
+ *       'unsubscribe' actions are intentionally unauthenticated (public).
+ *       'landing' returns a fixed four-column projection and nothing else — see
+ *       the comment on the action for why that list is load-bearing.
+ *       'scan_replay' is
  *       safe to expose because it only accepts HMAC-signed payloads this server
  *       issued — see signPayload/verifyPayload.
  *
@@ -624,6 +628,44 @@ export default async function handler(req, res) {
       res.setHeader('Vary', 'User-Agent')
       res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=86400')
       return res.status(200).send(ogHtml({ url: `${baseUrl(req)}${dest}`, title, description, image }))
+    }
+
+    // ── Public: the mailing behind a /lp/{type}/{id} landing page ────────────
+    //
+    // This is the other half of a QR scan. /m/{token} records the scan and 302s
+    // to /lp/{type}/{id}, which vercel.json serves as the SPA — so the landing
+    // page renders in the BROWSER, with the anon key, not on the service key.
+    //
+    // Migration 0027 closed `mailings` to anonymous callers (it holds qr_token,
+    // description and the denormalized recipient/scan/lead counters), on the
+    // stated assumption that "/lp/* → api/campaigns.js (SUPABASE_SERVICE_KEY)".
+    // That was true only for the crawler branch above; every real visitor hit
+    // `supabase.from('mailings')` from the client and, post-0027, RLS filtered
+    // it to zero rows — the scan was counted and the page then rendered
+    // "Listing not available". This action is the service-key read those pages
+    // needed all along.
+    //
+    // The projection is deliberately explicit and minimal — exactly the four
+    // fields the Landing* components render, the same discipline as the
+    // agents_public view. Never widen it to `*`: that would hand qr_token to
+    // anyone who can open a landing page, which is every scanner of every QR
+    // code, and a token is all you need to forge scans against a campaign.
+    if (action === 'landing') {
+      const { id } = req.query
+      // Reject non-UUIDs here rather than letting Postgres 500 on the cast.
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ''))) {
+        return json(res, 400, { error: 'A valid mailing id is required' })
+      }
+
+      const { data: m, error } = await db()
+        .from('mailings')
+        .select('id, name, agent_id, landing_config')
+        .eq('id', id)
+        .maybeSingle()
+      if (error) throw error
+      if (!m) return json(res, 404, { error: 'Mailing not found' })
+
+      return json(res, 200, { mailing: m })
     }
 
     // ── Health check ────────────────────────────────────────────────────────
