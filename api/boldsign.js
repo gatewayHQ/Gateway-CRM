@@ -913,7 +913,8 @@ export function normalizeFieldType(type) {
   return FIELD_TYPE_BY_LOWER.get(key) || FIELD_TYPE_ALIASES[key] || null
 }
 
-// Types BoldSign refuses `IsReadOnly` on, in its own words:
+// Which restored fields may carry a lock. BoldSign refuses `IsReadOnly` on nine
+// types, in its own words:
 //
 //   "IsReadOnly property is not supported for the Signature, Initial,
 //    Attachment, Date signed, Hyperlink, Title, Formula, Drawing and Company
@@ -933,16 +934,28 @@ export function normalizeFieldType(type) {
 // fields", so it was retried as if one field were unplaceable, and the second
 // attempt carried the same property and failed identically.
 //
-// Deliberately a separate list from READONLY_UNSUPPORTED_FIELD_TYPES in
+// ALLOWLIST, NOT A DENYLIST, for the reason that matters here: EDITABLE_FIELD_TYPES
+// grows as BoldSign adds types, and a new one that does not take a lock would pass
+// a denylist silently and fail the whole atomic restore the way Signature did.
+// A type that is not listed simply does not carry the property, which is always
+// safe, since omitting `isReadOnly` cannot produce this error while sending it can.
+//
+// These six are the intersection of EDITABLE_FIELD_TYPES with the types BoldSign
+// does not refuse. The other ten are excluded: the nine named above, plus Image,
+// which BoldSign does not refuse but which we have no reason to lock and no
+// confirmation for. Excluding Image costs nothing and is exactly the caution an
+// allowlist is for.
+//
+// Deliberately a separate list from READONLY_SUPPORTED_FIELD_TYPES in
 // src/lib/services/boldsignFields.js, which governs the SEND payload: this file
 // imports nothing from src/ (it is a Vercel function bundle, and that module
 // pulls in the browser's Supabase client through its sibling). Spelled to match
-// normalizeFieldType()'s output, so comparison is exact rather than fuzzy.
-const READONLY_UNSUPPORTED_TYPES = new Set([
-  'Signature', 'Initial', 'Attachment', 'DateSigned',
-  'Hyperlink', 'Title', 'Formula', 'Drawing', 'Company',
+// normalizeFieldType()'s output, so comparison is exact rather than fuzzy, and a
+// test asserts every entry is a spelling that function can actually produce.
+const READONLY_SUPPORTED_TYPES = new Set([
+  'TextBox', 'Label', 'CheckBox', 'RadioButton', 'Dropdown', 'EditableDate',
 ])
-export const supportsFieldReadOnly = (fieldType) => !READONLY_UNSUPPORTED_TYPES.has(fieldType)
+export const supportsFieldReadOnly = (fieldType) => READONLY_SUPPORTED_TYPES.has(fieldType)
 
 // Fonts are an enum on write; a value outside it fails the request. Anything
 // unrecognized is simply omitted, leaving BoldSign's default.

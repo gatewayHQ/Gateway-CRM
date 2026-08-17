@@ -254,7 +254,7 @@ export function sharedDataOnSignerFields({ fields = [], values = {}, firstSigner
   })
 }
 
-// ── Field types that REFUSE to be locked ─────────────────────────────────────
+// ── Which field types may carry a lock ───────────────────────────────────────
 // BoldSign rejects `IsReadOnly` outright on some types, with:
 //
 //   "IsReadOnly property is not supported for the Signature, Initial,
@@ -279,16 +279,54 @@ export function sharedDataOnSignerFields({ fields = [], values = {}, firstSigner
 // answer is the one this whole file keeps arriving at: put it in the template as
 // a **Label**, which takes a lock and is common to the document.
 //
-// Listed in BoldSign's own terms, matched with spacing and casing removed, so
-// `DateSigned`, `Date signed` and `date_signed` are one type. `initials` is
-// included alongside `initial` because BoldSign reads that type back under both
-// spellings (the same split normalizeFieldType() handles in api/boldsign.js).
-export const READONLY_UNSUPPORTED_FIELD_TYPES = new Set([
-  'signature', 'initial', 'initials', 'attachment', 'datesigned',
-  'hyperlink', 'title', 'formula', 'drawing', 'company',
+// ALLOWLIST, NOT A DENYLIST. This was first written as the nine refused types,
+// which is the same thing today and the wrong shape for tomorrow: BoldSign adds
+// field types, and a new one that does not take a lock would pass a denylist
+// silently and break the send exactly the way Signature and Company did. An
+// unknown type now defaults to NOT sending the property, which is always safe,
+// because omitting `isReadOnly` cannot produce this error while sending it can.
+//
+// Membership is "we prefill this type AND BoldSign does not refuse a lock on it":
+//   • TextBox / Dropdown / CheckBox / RadioButton — confirmed supported.
+//   • EditableDate and Email — in FILLABLE_FIELD_TYPES, so an agent can fill
+//     them and expects the value to stay put. Neither appears in BoldSign's
+//     refusal list, and note that the refused "Date signed" (DateSigned) is a
+//     DIFFERENT type: it is stamped by BoldSign at signing and is not one we
+//     ever prefill. Dropping these two would quietly unlock a date or an email
+//     the agent had set, which is a regression rather than a fix.
+//   • Label — see below.
+//
+// Company and Title are absent on purpose. Both ARE in FILLABLE_FIELD_TYPES (an
+// agent legitimately fills in a brokerage or a signer's role, and both render as
+// inputs on the send screen), so both used to be stamped read-only like
+// everything else, and any agency packet with a brokerage box was refused.
+//
+// The value still goes out for a type that is not here. Only the lock is
+// dropped, since BoldSign will not grant it under any payload. A prefilled
+// Company the signer could retype is worth incomparably more than a packet that
+// refuses to send. Where a value must be BOTH locked and legible to every party,
+// the answer is the one this whole file keeps arriving at: put it in the
+// template as a Label, which takes a lock and is common to the document.
+//
+// LABEL is included, on evidence rather than assumption. It is absent from
+// BoldSign's refusal list, which enumerated nine types precisely, and
+// mergeSharedFormFields() has been stamping every shared Label read-only in
+// production since the shared-field work shipped. Were Label refused, every send
+// carrying shared data would fail with this same message rather than one packet.
+// If a Label-only template ever does produce it, omitting the property for Label
+// is the next thing to try and costs nothing: a Label is read-only by
+// construction, so the flag is belt-and-braces rather than load-bearing.
+//
+// Matched with spacing and casing removed, so `RadioButton`, `radio button` and
+// `radio_button` are one type. `radio` is listed separately because
+// TICKABLE_FIELD_TYPES accepts that spelling too.
+export const READONLY_SUPPORTED_FIELD_TYPES = new Set([
+  'textbox', 'text', 'label', 'dropdown',
+  'checkbox', 'radiobutton', 'radio',
+  'editabledate', 'email',
 ])
 export const supportsReadOnly = (t) =>
-  !READONLY_UNSUPPORTED_FIELD_TYPES.has(String(t || '').toLowerCase().replace(/[^a-z]/g, ''))
+  READONLY_SUPPORTED_FIELD_TYPES.has(String(t || '').toLowerCase().replace(/[^a-z]/g, ''))
 
 // BoldSign wants a checkbox value as the string "true"/"false".
 export const tickValue = (on) => (on ? 'true' : 'false')
