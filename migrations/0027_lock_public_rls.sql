@@ -40,6 +40,31 @@
 -- The only anonymous table read in the client is `agents`, handled by the
 -- column-limited view in Section 4.
 --
+-- ⚠ CORRECTION (added later — the SAFETY paragraph above was WRONG on two rows,
+--   and both were live breakage. Do not trust it as a description of the app.)
+--
+--   /lp/*  is NOT served by api/campaigns.js for real visitors. vercel.json's
+--          catch-all rewrite serves it as the SPA, and src/main.jsx mounts the
+--          Landing* components, which ran `supabase.from('mailings')` in the
+--          browser on the ANON key. Only the social-crawler rewrite reaches
+--          api/campaigns.js. RLS filters instead of erroring, so after this
+--          migration every QR scan recorded normally and then showed the
+--          scanner "Listing not available" — silent, and invisible in the scan
+--          analytics. Fixed by ?action=landing (a service-key read of the four
+--          rendered columns) behind src/lib/publicMailing.js.
+--
+--   /listing/:id, /share/:id  are STILL BROKEN by this migration as of writing.
+--          PropertyLanding.jsx reads `properties` in the browser on the anon
+--          key, and api/property-public.js's handleShare() reads `properties`
+--          with the ANON key server-side — not the service key this paragraph
+--          claims. Both need an explicit-column service-key read; `properties`
+--          carries internal columns (notably `notes`) that must not be
+--          published, so it needs a projection decision, not a key swap.
+--
+--   The lesson is that this file's audit was done by reading the api/ directory
+--   and not the SPA router. src/lib/__tests__/publicPageDataAccess.test.js now
+--   checks the claim mechanically, against the pages main.jsx actually mounts.
+--
 -- NOT TOUCHED — these genuinely need anon INSERT and are already scoped:
 --     visitor_events, lead_captures  (the website tracking snippet that
 --     Settings.jsx generates posts to them with the anon key)

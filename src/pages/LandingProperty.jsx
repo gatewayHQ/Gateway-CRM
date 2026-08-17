@@ -13,6 +13,7 @@
 import React, { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
+import { fetchPublicMailing } from '../lib/publicMailing.js'
 import '../components/landing/landing.css'
 import {
   LandingShell, Hero, Section, DetailGrid, Gallery, Lightbox,
@@ -49,12 +50,10 @@ export default function LandingProperty({ mailingId, preview = null }) {
     let active = true
     ;(async () => {
       try {
-        const { data: m, error: mErr } = await supabase
-          .from('mailings')
-          .select('id, name, agent_id, landing_config')
-          .eq('id', mailingId).maybeSingle()
+        // Service-key read, not `supabase.from('mailings')` — this page is
+        // anonymous and 0027 closed that table to anon. See lib/publicMailing.js.
+        const m = await fetchPublicMailing(mailingId)
         if (!active) return
-        if (mErr) throw mErr
         if (!m) { setError('notfound'); setLoading(false); return }
         setMailing(m)
 
