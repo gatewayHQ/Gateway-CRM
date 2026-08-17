@@ -503,12 +503,26 @@ export function appointedAgent({ activeAgent = null, dealAgents = [] } = {}) {
 // output. `agent` (the appointed agent) is kept as its own argument because it
 // is what every existing caller passes; the two never disagree, since
 // appointedAgent() is orderAgentSigners()[0] in each of their branches.
-export function crmTokenValues({ deal, property, contact, additionalContacts = [], agent, agents = [] } = {}) {
+export function crmTokenValues({ deal, property, contact, additionalContacts = [], agent, agents = [], today = '' } = {}) {
   const money = (n) => (n != null && n !== '' ? `$${Number(n).toLocaleString()}` : '')
   const fullAddr = [property?.address, property?.city, property?.state, property?.zip].filter(Boolean).join(', ')
   const dealComm = describeDealCommission(deal)
   const clients  = dealClientList({ contact, additionalContacts })
   const side     = dealClientSide(deal)
+  // Dates reach an agreement as text, and "2026-08-15" on a signature page reads
+  // like a database export. The CRM stores ISO, so the new date tokens below are
+  // formatted on the way out. Parsed by hand rather than through `new Date()`,
+  // which would shift a bare YYYY-MM-DD by the reader's timezone and can print
+  // the day before the one on the deal.
+  const usDate = (v) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(v || '').trim())
+    return m ? `${m[2]}/${m[3]}/${m[1]}` : String(v || '').trim()
+  }
+  // The representation period: how long the broker acts for this client. Held on
+  // the deal as the listing window, which is the same span under a different
+  // name on a buyer agreement.
+  const retainerStart = deal?.comp_data?.listing_start || ''
+  const retainerEnd   = deal?.comp_data?.listing_end || deal?.expected_close_date || ''
   return {
     property_address:   property?.address || deal?.prop_address || '',
     property_full:      fullAddr,
@@ -556,6 +570,35 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
     // gets the blank too rather than a coin flip.
     buyer_1_name:       side === 'buyer' ? (clients[0]?.name || '') : '',
     buyer_2_name:       side === 'buyer' ? (clients[1]?.name || '') : '',
+    // The canonical Label ids address these four. Same values as the two above,
+    // under one consistent family covering both sides, because `seller_2_name`
+    // was already taken by the side-AGNOSTIC alias and could not be reused
+    // without changing what it means for templates already in production.
+    party_buyer_1:      side === 'buyer'  ? (clients[0]?.name || '') : '',
+    party_buyer_2:      side === 'buyer'  ? (clients[1]?.name || '') : '',
+    party_seller_1:     side === 'seller' ? (clients[0]?.name || '') : '',
+    party_seller_2:     side === 'seller' ? (clients[1]?.name || '') : '',
+
+    // ── Property ───────────────────────────────────────────────────────────
+    // `property_city_state_zip` is the second line of an address block, which is
+    // how a Label captioned "City, State ZIP" is laid out on a form. Built from
+    // the parts so a missing zip does not leave a dangling comma.
+    property_city_state_zip: [property?.city, [property?.state, property?.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+    property_county:    property?.county || '',
+    property_mls:       property?.mls_number || '',
+    property_type:      property?.type || '',
+
+    // ── Dates ──────────────────────────────────────────────────────────────
+    // `today` is passed in rather than read here, so this function stays pure
+    // and its output stays testable. A caller that omits it gets a blank, which
+    // is the same "nothing to say" a missing deal field produces.
+    agreement_date:     usDate(deal?.comp_data?.listing_start || today),
+    // How long the broker represents this client. Named for what a buyer
+    // agreement calls it; the deal stores it as the listing window.
+    retainer_start_date: usDate(retainerStart),
+    retainer_end_date:   usDate(retainerEnd),
+    offer_expiration:    usDate(retainerEnd),
+    closing_date_us:     usDate(deal?.expected_close_date),
     close_date:         deal?.expected_close_date || '',
     // The deal's agent, NOT necessarily the sender — see appointedAgent().
     agent_name:         agent?.name || '',
@@ -618,10 +661,43 @@ export const normalizeTokenKey = (s) => String(s || '').trim().toLowerCase()
 // `undefined`, match nothing, and quietly send nothing, so the list grows only
 // when the data does.
 export const CANONICAL_LABEL_TOKENS = {
-  Agent1NameLabel: 'agent_name',
-  Agent2NameLabel: 'agent_2_name',
-  Buyer1NameLabel: 'buyer_1_name',
-  Buyer2NameLabel: 'buyer_2_name',
+  // ── Parties ────────────────────────────────────────────────────────────────
+  Agent1NameLabel:  'agent_name',
+  Agent2NameLabel:  'agent_2_name',
+  Buyer1NameLabel:  'party_buyer_1',
+  Buyer2NameLabel:  'party_buyer_2',
+  Seller1NameLabel: 'party_seller_1',
+  Seller2NameLabel: 'party_seller_2',
+  BrokerageNameLabel: 'broker_name',
+
+  // ── Property ───────────────────────────────────────────────────────────────
+  PropertyAddressLabel:      'property_address',
+  PropertyCityStateZipLabel: 'property_city_state_zip',
+  PropertyNameLabel:         'property_full',
+  PropertyCountyLabel:       'property_county',
+  PropertyTypeLabel:         'property_type',
+  MlsNumberLabel:            'property_mls',
+
+  // ── Money ──────────────────────────────────────────────────────────────────
+  PurchasePriceLabel:    'list_price',
+  ListPriceLabel:        'list_price',
+  CommissionRateLabel:   'commission_pct',
+  CommissionAmountLabel: 'commission_amount',
+
+  // ── Dates ──────────────────────────────────────────────────────────────────
+  AgreementDateLabel:    'agreement_date',
+  ClosingDateLabel:      'closing_date_us',
+  OfferExpirationLabel:  'offer_expiration',
+  // The representation period on a buyer agreement: how long the broker acts
+  // for this client. Both the bare spelling an admin is likely to type and the
+  // `...Label` form are listed, because the convention says every id ends in
+  // `Label` and these two were named without it on the live packet.
+  RetainerDate1:         'retainer_start_date',
+  RetainerDate2:         'retainer_end_date',
+  RetainerDate1Label:    'retainer_start_date',
+  RetainerDate2Label:    'retainer_end_date',
+  RetainerStartLabel:    'retainer_start_date',
+  RetainerEndLabel:      'retainer_end_date',
 }
 
 // Canonical ids are matched with separators removed ENTIRELY, not merely
@@ -701,10 +777,39 @@ const AUTO_FIELD_ID_RE = /^(label|textbox|text|checkbox|radiobutton|radio|name|e
 
 export function isUnconfiguredField(field) {
   if (!field?.id) return true
-  if (fieldTokenKey(field))                  return false
-  if (String(field.name || '').trim())       return false
-  if (String(field.label || '').trim())      return false
-  return AUTO_FIELD_ID_RE.test(String(field.id).trim())
+  if (fieldTokenKey(field)) return false
+  const id = String(field.id).trim()
+  // BoldSign fills `name` with the auto id when nobody typed one, so a bare
+  // `name` is not evidence that anybody named this field. Comparing against the
+  // id is what separates "the admin called this Earnest money" from "BoldSign
+  // called this Label7". Without this the rule matched almost nothing and the
+  // screen stayed as long as it ever was.
+  const named = String(field.name || '').trim()
+  if (named && named.toLowerCase() !== id.toLowerCase()) return false
+  if (String(field.label || '').trim()) return false
+  return AUTO_FIELD_ID_RE.test(id)
+}
+
+// Date-ish fields, which want a date picker rather than a free-text box. Either
+// BoldSign says so by type, or the CRM token behind the field does: a template
+// date is usually a Label (read-only to the signer, filled by us), and a Label
+// is just text as far as BoldSign is concerned.
+const DATE_TOKEN_RE = /(^|_)(date|expiration)($|_)/
+export function isDateField(field) {
+  if (String(field?.type || '').toLowerCase() === 'editabledate') return true
+  return DATE_TOKEN_RE.test(fieldTokenKey(field))
+}
+
+// MM/DD/YYYY (what goes on the document) ⇄ YYYY-MM-DD (what <input type="date">
+// speaks). Both return '' rather than guessing when the input is not a full
+// date, so a half-typed value never becomes a wrong one.
+export function usDateToIso(v) {
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(v || '').trim())
+  return m ? `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}` : ''
+}
+export function isoDateToUs(v) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(v || '').trim())
+  return m ? `${m[2]}/${m[3]}/${m[1]}` : ''
 }
 
 // Role names that should be filled with the deal's client(s) rather than an

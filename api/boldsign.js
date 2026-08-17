@@ -1300,6 +1300,27 @@ export function stripLayoutReadOnly(payload) {
   }
 }
 
+// Does this set of roles actually ask for a sequential signing order?
+//
+// BoldSign treats `signerOrder` as INERT unless `enableSigningOrder` is also
+// true: the property defaults to false, so a payload carrying 1, 2, 3 and
+// nothing else is a parallel send in which every signer is notified at once.
+//
+// That is how the template paths have behaved. `buildTemplateRoles()` has been
+// numbering roles from the modal's "Sign in this order" box since it shipped,
+// the two ad-hoc document paths below send EnableSigningOrder correctly, and the
+// two TEMPLATE paths never sent it at all. So the box was decorative, and the
+// note beside it ("BoldSign only shows a signer's fields to the others once that
+// signer has finished") described a guarantee the send did not request. Anything
+// prefilled on a role other than the first was invisible to everybody else for
+// the life of the document, which is the exact failure Label fields exist to
+// avoid and which the send screen believed it had already avoided.
+//
+// Derived rather than taken from the client, and derived the same way the ad-hoc
+// paths do it, so one rule covers every send: distinct orders mean sequential.
+export const rolesWantSigningOrder = (roles) =>
+  (Array.isArray(roles) ? roles : []).some(r => Number(r?.signerOrder || 1) !== 1)
+
 // POST a template payload, and if BoldSign refuses the locks, post it again
 // without any. Returns { data, unlocked } so the caller can tell the agent that
 // what they filled in went out editable rather than fixed.
@@ -2658,6 +2679,9 @@ async function handler(req, res) {
         title:   documentName || emailSubject || 'Please sign this document',
         message: message || 'Please review and sign.',
         roles:   mergeSharedFormFields(roles, sharedFormFields),
+        // Without this, signerOrder is inert and every signer is notified at
+        // once. See rolesWantSigningOrder.
+        enableSigningOrder: rolesWantSigningOrder(roles),
         ...(Array.isArray(roleRemovalIndices) && roleRemovalIndices.length ? { roleRemovalIndices } : {}),
         ...(cc ? { cc } : {}),
         ...(Array.isArray(labels) && labels.length ? { labels } : {}),   // BoldSign tags
@@ -2711,6 +2735,9 @@ async function handler(req, res) {
         // Label values ride on the first role so every signer sees them from the
         // moment the draft is sent — see mergeSharedFormFields.
         roles:          mergeSharedFormFields(roles, sharedFormFields),
+        // Without this, signerOrder is inert and every signer is notified at
+        // once. See rolesWantSigningOrder.
+        enableSigningOrder: rolesWantSigningOrder(roles),
         sendViewOption: 'PreparePage',   // land on the field-placement editor
         showToolbar:    true,
         redirectUrl:    redirectUrl || '',
@@ -2766,7 +2793,10 @@ async function handler(req, res) {
     // all there and correct, and a signer could now retype one. Silence here
     // would be the agent believing a guarantee they no longer have.
     const readOnlyReport = (unlocked) => (unlocked
-      ? { readOnlyWarning: 'BoldSign would not accept read-only on some of this template\'s fields, so the prefilled values were sent unlocked. Every value is still filled in, but a signer could change one. Check the draft before sending.' }
+      // Leads with the reassurance, because the agent's first question is "did
+      // that work?" and the answer is yes. Read the other way round it looked
+      // like a failure report for a send that had in fact succeeded.
+      ? { readOnlyWarning: 'Saved. Every value was filled in. BoldSign does not allow locking on a few of this template\'s field types, so a signer could edit those ones.' }
       : {})
 
     // Three outcomes, three sentences: restored, restored-but-short, or not at

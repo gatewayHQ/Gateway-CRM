@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS, supportsReadOnly, isUnconfiguredField, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS, supportsReadOnly, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -1015,7 +1015,7 @@ describe('canonical Label ids resolve to CRM tokens', () => {
   it('matches on the field NAME when BoldSign minted the id (Label1, Label2, ...)', () => {
     // The box an admin types into in the template editor is the field's name;
     // the id is auto-assigned and is not a stable identifier.
-    expect(fieldTokenKey({ id: 'Label1', name: 'Buyer1NameLabel' })).toBe('buyer_1_name')
+    expect(fieldTokenKey({ id: 'Label1', name: 'Buyer1NameLabel' })).toBe('party_buyer_1')
     expect(fieldTokenKey({ id: 'Label7', label: 'Agent2NameLabel' })).toBe('agent_2_name')
   })
 
@@ -1357,5 +1357,118 @@ describe('isUnconfiguredField — what the send screen folds away', () => {
     ]
     const kept = fields.filter(f => !isUnconfiguredField(f))
     expect(kept.map(f => f.id)).toEqual(['Agent1NameLabel', 'Agent2NameLabel', 'Buyer1NameLevel'])
+  })
+})
+
+describe('the expanded canonical vocabulary', () => {
+  const ctx = {
+    deal: {
+      comp_data: { transaction_type: 'buyer', listing_start: '2026-08-01', listing_end: '2027-02-01' },
+      expected_close_date: '2026-09-15', value: 450000, commission_pct: 3,
+    },
+    property: { address: '123 Main St', city: 'Ames', state: 'IA', zip: '50010', county: 'Story', mls_number: 'MLS-1', type: 'residential', price: 450000 },
+    contact: { first_name: 'Daniel', last_name: 'Stilson' },
+    agent:  { name: 'Daniel Stillson' },
+    agents: [{ name: 'Daniel Stillson' }],
+    today:  '2026-08-17',
+  }
+  const val = (id) => fieldTokenValue(crmTokenValues(ctx), { id })
+
+  it('every id in the table has a real token behind it', () => {
+    for (const token of Object.values(CANONICAL_LABEL_TOKENS)) {
+      expect(SHARED_PREFILL_TOKENS.has(token)).toBe(true)
+    }
+  })
+
+  it('fills property, money and party ids from the deal', () => {
+    expect(val('PropertyAddressLabel')).toBe('123 Main St')
+    expect(val('PropertyCityStateZipLabel')).toBe('Ames, IA 50010')
+    expect(val('PropertyCountyLabel')).toBe('Story')
+    expect(val('MlsNumberLabel')).toBe('MLS-1')
+    expect(val('PurchasePriceLabel')).toBe('$450,000')
+    expect(val('CommissionRateLabel')).toBe('3%')
+    expect(val('Buyer1NameLabel')).toBe('Daniel Stilson')
+    expect(val('Agent1NameLabel')).toBe('Daniel Stillson')
+  })
+
+  it('the retainer period is the deal representation window, as US dates', () => {
+    expect(val('RetainerDate1')).toBe('08/01/2026')
+    expect(val('RetainerDate2')).toBe('02/01/2027')
+    // Both the bare spelling and the ...Label form, since the live packet used
+    // the bare one.
+    expect(val('RetainerDate1Label')).toBe('08/01/2026')
+    expect(val('RetainerStartLabel')).toBe('08/01/2026')
+    expect(val('ClosingDateLabel')).toBe('09/15/2026')
+  })
+
+  it('formats dates without letting a timezone move the day', () => {
+    // `new Date('2026-08-01')` is midnight UTC, which is 31 July in the US.
+    const vals = crmTokenValues({ deal: { expected_close_date: '2026-01-01' } })
+    expect(vals.closing_date_us).toBe('01/01/2026')
+  })
+
+  it('city/state/zip degrades without a dangling comma when parts are missing', () => {
+    expect(crmTokenValues({ property: { city: 'Ames' } }).property_city_state_zip).toBe('Ames')
+    expect(crmTokenValues({ property: { state: 'IA', zip: '50010' } }).property_city_state_zip).toBe('IA 50010')
+    expect(crmTokenValues({ property: {} }).property_city_state_zip).toBe('')
+  })
+
+  it('seller ids stay blank on a buyer deal, and swap over on a seller deal', () => {
+    expect(val('Seller1NameLabel')).toBe('')
+    const seller = { ...ctx, deal: { ...ctx.deal, comp_data: { ...ctx.deal.comp_data, transaction_type: 'seller' } } }
+    expect(fieldTokenValue(crmTokenValues(seller), { id: 'Seller1NameLabel' })).toBe('Daniel Stilson')
+    expect(fieldTokenValue(crmTokenValues(seller), { id: 'Buyer1NameLabel' })).toBe('')
+  })
+
+  it('agreement_date falls back to today only when the deal has no start date', () => {
+    expect(val('AgreementDateLabel')).toBe('08/01/2026')
+    const noStart = { ...ctx, deal: { ...ctx.deal, comp_data: { transaction_type: 'buyer' } } }
+    expect(fieldTokenValue(crmTokenValues(noStart), { id: 'AgreementDateLabel' })).toBe('08/17/2026')
+    // Pure: omit `today` and it is blank rather than whatever the clock says.
+    expect(crmTokenValues({}).agreement_date).toBe('')
+  })
+})
+
+describe('date fields get a picker, not a text box', () => {
+  it('spots a date by BoldSign type or by the CRM token behind it', () => {
+    expect(isDateField({ id: 'x', type: 'EditableDate' })).toBe(true)
+    expect(isDateField({ id: 'RetainerDate1', type: 'Label' })).toBe(true)
+    expect(isDateField({ id: 'ClosingDateLabel', type: 'Label' })).toBe(true)
+    expect(isDateField({ id: 'OfferExpirationLabel', type: 'Label' })).toBe(true)
+    expect(isDateField({ id: 'Buyer1NameLabel', type: 'Label' })).toBe(false)
+    expect(isDateField({ id: 'Label7', type: 'Label' })).toBe(false)
+  })
+
+  it('round-trips between what the document shows and what the input speaks', () => {
+    expect(usDateToIso('08/01/2026')).toBe('2026-08-01')
+    expect(usDateToIso('8/1/2026')).toBe('2026-08-01')
+    expect(isoDateToUs('2026-08-01')).toBe('08/01/2026')
+    expect(isoDateToUs(usDateToIso('12/31/2027'))).toBe('12/31/2027')
+  })
+
+  it('returns blank rather than guessing at a partial date', () => {
+    for (const bad of ['', '08/2026', 'next Tuesday', undefined, '2026-08-01']) {
+      expect(usDateToIso(bad)).toBe('')
+    }
+    expect(isoDateToUs('not a date')).toBe('')
+  })
+})
+
+describe('isUnconfiguredField — BoldSign echoes the id back as the name', () => {
+  it('REGRESSION: name equal to the id is not somebody naming the field', () => {
+    // BoldSign populates `name` with the auto id when nobody typed one, so
+    // without this the rule matched almost nothing and the screen stayed long.
+    expect(isUnconfiguredField({ id: 'Label7', name: 'Label7', type: 'Label' })).toBe(true)
+    expect(isUnconfiguredField({ id: 'Checkbox2', name: 'checkbox2', type: 'CheckBox' })).toBe(true)
+  })
+
+  it('but a real name still keeps the field on screen', () => {
+    expect(isUnconfiguredField({ id: 'Label7', name: 'Earnest money', type: 'Label' })).toBe(false)
+  })
+
+  it('a field carrying any canonical id is always shown', () => {
+    for (const id of Object.keys(CANONICAL_LABEL_TOKENS)) {
+      expect(isUnconfiguredField({ id, type: 'Label' })).toBe(false)
+    }
   })
 })

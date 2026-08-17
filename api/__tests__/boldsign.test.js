@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -1627,5 +1627,28 @@ describe('stripRoleReadOnly / stripLayoutReadOnly', () => {
   it('leaves a payload with no signers alone', () => {
     expect(stripLayoutReadOnly({})).toEqual({})
     expect(stripLayoutReadOnly(null)).toBeNull()
+  })
+})
+
+describe('signing order is actually requested, not just numbered', () => {
+  it('REGRESSION: distinct signerOrder values mean sequential', () => {
+    // BoldSign treats signerOrder as inert unless enableSigningOrder is true,
+    // and it defaults to false. The template paths never sent it, so the send
+    // modal's "Sign in this order" box was decorative and everything prefilled
+    // on a later role was invisible to everyone else for the document's life.
+    expect(rolesWantSigningOrder([{ signerOrder: 1 }, { signerOrder: 2 }])).toBe(true)
+    expect(rolesWantSigningOrder([{ signerOrder: 1 }, { signerOrder: 2 }, { signerOrder: 3 }])).toBe(true)
+  })
+
+  it('all-equal order means notify everyone at once', () => {
+    expect(rolesWantSigningOrder([{ signerOrder: 1 }, { signerOrder: 1 }])).toBe(false)
+    expect(rolesWantSigningOrder([{ signerOrder: 1 }])).toBe(false)
+  })
+
+  it('treats a missing order as 1, the way the ad-hoc paths do', () => {
+    expect(rolesWantSigningOrder([{ roleIndex: 1 }, { roleIndex: 2 }])).toBe(false)
+    expect(rolesWantSigningOrder([{ roleIndex: 1 }, { signerOrder: 2 }])).toBe(true)
+    expect(rolesWantSigningOrder([])).toBe(false)
+    expect(rolesWantSigningOrder(undefined)).toBe(false)
   })
 })
