@@ -21,6 +21,7 @@ import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
+import AgentMultiSelect from '../components/AgentMultiSelect.jsx'
 
 const DEFAULT_STEPS_RESIDENTIAL = [
   'Title Search Ordered',
@@ -3109,6 +3110,11 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const setCD = (k, v) => setForm(p => ({...p, comp_data: {...(p.comp_data||{}), [k]: v}}))
   const cd = form.comp_data || {}
 
+  // Additional agents — mirrors deals.co_agent_ids, the same column the deal
+  // page's "Agents on deal" card reads via agentIdsOnDeal(), so adding/removing
+  // one here shows up there once saved.
+  const additionalAgentIds = form.co_agent_ids || []
+
   // One unified stage list for every deal. Deals stored with an off-list token
   // (from the brief track-split era) display as the nearest column and are
   // rewritten only when the agent actually changes the stage.
@@ -3129,16 +3135,18 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
     try {
       // Linking a NEW deal to a property is a conversion too, so its co-agents
       // come along exactly as they do from the property's "Start Deal" button.
-      // An existing deal keeps the team it already has — nothing here should
-      // quietly rewrite a split the back office has been working on.
+      // An existing deal only seeds from the property once, at conversion time.
       const linkedProperty = form.property_id
         ? (properties || []).find(p => p.id === form.property_id)
         : null
       const seededCoAgents = deal?.id ? [] : coAgentIdsForNewDeal(linkedProperty, form.agent_id || null)
+      // Manual picks from the Additional Agents field, merged with anything seeded
+      // from the property above — never the primary agent, never duplicated.
+      const finalCoAgentIds = [...new Set([...additionalAgentIds, ...seededCoAgents])].filter(id => id && id !== form.agent_id)
 
       // Explicit whitelist — never spread full form object (prevents unknown-column schema errors)
       let payload = {
-        ...(seededCoAgents.length ? { co_agent_ids: seededCoAgents } : {}),
+        co_agent_ids:        finalCoAgentIds,
         title:               form.title.trim(),
         stage:               form.stage,
         value:               form.value !== '' && form.value !== null ? Number(form.value) : null,
@@ -3314,6 +3322,10 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
             </div>
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
             <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+            <div className="form-group">
+              <label className="form-label">Additional Agents</label>
+              <AgentMultiSelect agents={agents} selectedIds={additionalAgentIds} onChange={v=>set('co_agent_ids',v)} excludeId={form.agent_id} placeholder="Search agents to add…" />
+            </div>
 
             {/* ── Commission ────────────────────────────────────── */}
             <CommissionFields form={form} set={set} />
