@@ -658,24 +658,37 @@ const TICKABLE_TYPES = new Set(['CheckBox', 'RadioButton'])
 // skipped outright — an empty box is exactly what this must not draw.
 export function collectFilledFields(props) {
   const out = []
-  const take = (f) => {
+  // `signerName` is only ever passed for a field on a SIGNER (never a common
+  // field), and only used as a fallback for that signer's own Name field.
+  const take = (f, signerName) => {
+    const rawType = String(f?.type || f?.fieldType || '').toLowerCase()
     const type = normalizeFieldType(f?.type || f?.fieldType) || ''
     const b = f?.bounds || {}
     const x = num(b.x), y = num(b.y), width = num(b.width), height = num(b.height)
     if (x == null || y == null || !width || !height) return
     const ticked = TICKABLE_TYPES.has(type)
-    const raw = f?.value
+    let raw = f?.value
+    // A BoldSign **Name** field always prints the name of the signer it is
+    // assigned to — it ignores any value sent for it (see boldsignFields.js,
+    // SIGNER_BOUND_FIELD_TYPES) — and on a document that hasn't been signed yet
+    // `/document/properties` can report no `value` for it at all, even though
+    // the name it will show is already known: it's the signer's own name from
+    // this same payload. Without this fallback the print copy showed a blank
+    // box for exactly the field an agent most wants to check before sending.
+    if (!ticked && (raw == null || String(raw).trim() === '') && rawType === 'name' && signerName) {
+      raw = signerName
+    }
     if (ticked) {
       if (!isCheckedValue(raw)) return
     } else if (raw == null || String(raw).trim() === '') return
     out.push({
-      page: num(f?.pageNumber, 1), type, x, y, width, height,
+      page: num(f?.pageNumber, 1), type: type || (rawType === 'name' ? 'Name' : type), x, y, width, height,
       value: ticked ? 'X' : String(raw).trim(),
       fontSize: num(f?.fontSize),
       ticked,
     })
   }
-  for (const s of (props?.signerDetails || [])) for (const f of (s?.formFields || [])) take(f)
+  for (const s of (props?.signerDetails || [])) for (const f of (s?.formFields || [])) take(f, s?.signerName)
   for (const f of (props?.commonFields || [])) take(f)
   return out
 }
@@ -726,6 +739,21 @@ export function resolveBoundsScale({ fields = [], pdfPages = [], boldsignSizes =
   return null
 }
 
+// The font size to start fitting a field's value at, before the width-based
+// shrink loop in drawFilledValues() runs. Trusts BoldSign's own stored
+// `fontSize` for the field OUTRIGHT — never clamped against the box's height.
+// A single-line box is routinely drawn shorter than its own configured font
+// (BoldSign renders that fine; the text simply overflows the box's vertical
+// bounds a little), and clamping to `boxH * 0.8` used to override a perfectly
+// correct, equal fontSize down to as little as 5pt on any field whose box
+// happened to be short — producing exactly the one-field-tiny-among-
+// normal-siblings symptom, with nothing wrong in the field's own settings.
+// The height is only consulted as a fallback, for a field with no stored font
+// size at all.
+export function startingFontSize({ fontSize, scale, boxH }) {
+  return fontSize ? fontSize * scale : Math.min(10, Math.max(boxH * 0.8, 5))
+}
+
 // Draw each filled value where BoldSign holds it. Returns how many were drawn —
 // 0 means the scale could not be established and the summary is doing all the
 // work, which the caller says out loud on the summary page.
@@ -757,8 +785,7 @@ export async function drawFilledValues(pdfDoc, props) {
     // bottom-left, so the box's top edge becomes (page height − y).
     const top  = h - (f.y * scale)
 
-    // Fit the text to the box: never taller than the box, never wider either.
-    let size = Math.min(f.fontSize ? f.fontSize * scale : 10, Math.max(boxH * 0.8, 5))
+    let size = startingFontSize({ fontSize: f.fontSize, scale, boxH })
     let text = String(f.value)
     const widthAt = (s) => font.widthOfTextAtSize(text, s)
     while (size > 4.5 && widthAt(size) > boxW) size -= 0.5
@@ -2726,7 +2753,7 @@ async function handler(req, res) {
     // Neither path sends. BoldSign sends only when the agent clicks Send inside
     // the editor, or when `draft-send` is called explicitly.
     const createTemplateDraft = async (svc, {
-      templateId, dealId, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices, sharedFormFields,
+      templateId, dealId, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
     }) => {
       const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
       const payload = {
@@ -2779,6 +2806,33 @@ async function handler(req, res) {
         layout = await applyFieldLayout(svc, {
           documentId: data.documentId, dealId, templateId, onBehalfOf,
         })
+
+        // Fields that only make sense for a co-buyer or an additional agent this
+        // deal doesn't have (see conditionalFieldsToRemove in boldsignFields.js)
+        // are never given a value, but the template still places them — and an
+        // unfilled Label renders as a visible blue "Label" placeholder chip,
+        // which looks like a leftover artifact rather than a term that simply
+        // doesn't apply here. Removed outright, after the layout restore above,
+        // so a saved layout can't re-add one with a stale value from back when
+        // this deal did have a second party. Best-effort: a failure here leaves
+        // the field in place with no value, which is exactly today's behavior.
+        if (Array.isArray(fieldRemovalIds) && fieldRemovalIds.length) {
+          try {
+            const freshProps  = await boldsign(`/document/properties?documentId=${encodeURIComponent(data.documentId)}`)
+            const firstSigner = (freshProps?.signerDetails || [])[0]
+            if (firstSigner?.id) {
+              await editDocumentFields(data.documentId, {
+                signers: [{
+                  editAction: 'Update', id: firstSigner.id,
+                  formFields: fieldRemovalIds.map(id => ({ editAction: 'Remove', id })),
+                }],
+                ...(onBehalfOf ? { onBehalfOf } : {}),
+              })
+            }
+          } catch (err) {
+            console.warn(`[boldsign] could not remove empty conditional field(s) from ${data.documentId}: ${err.message}`)
+          }
+        }
       }
       return {
         url:        data.sendUrl || data.embeddedSendUrl || data.url || null,
@@ -2820,7 +2874,7 @@ async function handler(req, res) {
     // client is happy. `deal_id` is required, unlike the embedded path: a draft
     // nobody can find again is not a draft, it is a leak.
     if (body.action === 'template-draft') {
-      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, roleRemovalIndices, sharedFormFields } = body
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, roleRemovalIndices, sharedFormFields, fieldRemovalIds } = body
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
       if (!deal_id)        return res.status(400).json({ error: 'deal_id required — a draft has to be saved against a deal to be reopened later' })
@@ -2828,7 +2882,7 @@ async function handler(req, res) {
       const svc = getServiceClient()
       const { url, documentId, layout, unlocked } = await createTemplateDraft(svc, {
         templateId, dealId: deal_id, roles, emailSubject, message, cc, documentName, labels,
-        redirectUrl: body.redirectUrl, roleRemovalIndices, sharedFormFields,
+        redirectUrl: body.redirectUrl, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
       })
       if (!documentId) {
         return res.status(502).json({ error: 'BoldSign created the document but did not return its id, so it could not be saved to this deal.' })
@@ -2845,14 +2899,14 @@ async function handler(req, res) {
     // the agent can move/add/remove field placements before clicking Send. The
     // document stays a draft until they send; the Sent webhook flips it to 'sent'.
     if (body.action === 'template-embed-url') {
-      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices, sharedFormFields } = body
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices, sharedFormFields, fieldRemovalIds } = body
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
       const svc = getServiceClient()
       const { url, documentId, layout, unlocked } = await createTemplateDraft(svc, {
         templateId, dealId: deal_id, roles, emailSubject, message, cc, documentName, labels,
-        redirectUrl, roleRemovalIndices, sharedFormFields,
+        redirectUrl, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
       })
       return res.json({ url, documentId, ...readOnlyReport(unlocked), ...layoutReport(layout) })
     }

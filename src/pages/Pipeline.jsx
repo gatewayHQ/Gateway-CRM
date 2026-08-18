@@ -16,7 +16,7 @@ import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty } from '../lib/dealPeople.js'
 import { friendlyDbError } from '../lib/dbErrors.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -37,6 +37,16 @@ const DEFAULT_STEPS_RESIDENTIAL = [
   'Closing Documents Signed',
   'Keys & Possession Transferred',
 ]
+
+// Where BoldSign should redirect an embedded iframe on exit — a same-origin
+// STATIC page (public/boldsign-return.html), never the CRM's own live URL.
+// BoldSign can redirect the IFRAME ITSELF to RedirectUrl (see BoldSignFrame's
+// handleLoad), and `window.location.href` names the very page the iframe sits
+// inside — so on that path the whole running CRM (header, sidebar, board and
+// all) loaded a second time, recursively, inside its own small BoldSign
+// iframe. The static return page just posts a marker back and stops; see
+// FormLibrary.jsx's template editor for the same pattern already in place.
+const boldSignReturnUrl = () => `${window.location.origin}/boldsign-return.html`
 
 const DEFAULT_STEPS_COMMERCIAL = [
   'Title Search Ordered',
@@ -1108,7 +1118,7 @@ async function saveBoldSignDocumentPdf(documentId) {
   return { ...res, fieldCount }
 }
 
-function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone, onDraft, onLayoutSaved }) {
+function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone, onDraft, onLayoutSaved, returnUrlMarker = 'boldsign-return' }) {
   const [savingLayout, setSavingLayout] = React.useState(false)
   const [savingPdf,    setSavingPdf]    = React.useState(false)
   const [leaveAsk,     setLeaveAsk]     = React.useState(false)
@@ -1177,7 +1187,19 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
   // that quietly misses the last thing they typed.
   const savePdf = async () => {
     if (!documentId) { pushToast('This document has to exist in BoldSign before it can be saved as a PDF.', 'info'); return }
-    if (unsaved) pushToast('Click Save inside BoldSign first if you have just typed in a field — the PDF is built from BoldSign’s saved copy.', 'info')
+    // The print copy is built from whatever BoldSign has actually SAVED
+    // (/document/properties) — never from what's sitting typed but uncommitted
+    // in the iframe. This used to just warn and build the PDF anyway, so filling
+    // a field and immediately clicking Save PDF (without saving inside BoldSign
+    // first) raced BoldSign's own save and came back with those fields blank —
+    // the exact gap "More Actions → Save & Close" doesn't have, because closing
+    // that way forces the save to complete first. Blocking here instead of just
+    // warning is what makes Save PDF match Save & Close: neither can produce an
+    // incomplete copy once this stands.
+    if (unsaved) {
+      pushToast('Click Save inside BoldSign first — the PDF is built from BoldSign’s saved copy, and it would come back missing whatever you just typed.', 'error')
+      return
+    }
     setSavingPdf(true)
     try {
       const res = await saveBoldSignDocumentPdf(documentId)
@@ -1258,6 +1280,7 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
           // further work in the frame sets the flag again via onInteract.
           onDraft={(e) => { setUnsaved(false); setLastSavedAt(new Date()); saveLayout(); onDraft?.(e) }}
           onError={() => pushToast('BoldSign reported the send was cancelled — the draft is still on this deal.', 'info')}
+          returnUrlMarker={returnUrlMarker}
         />
       </div>
       {/* flexShrink:0 — the body is flex:1 and would otherwise squeeze this hint
@@ -1429,7 +1452,14 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
         documentName: finalDocName,
         deal_id:      deal.id,
         signers:      signerPayload,
-        redirectUrl:  window.location.href,
+        // A same-origin STATIC page, never the CRM's own live URL: BoldSign can
+        // redirect the IFRAME itself to RedirectUrl (see BoldSignFrame's
+        // handleLoad), and pointing that at window.location.href loaded the
+        // whole running CRM — header, sidebar, dashboard and all — inside that
+        // small iframe. public/boldsign-return.html exists exactly to be this
+        // target instead; see FormLibrary.jsx's template editor for the same
+        // pattern.
+        redirectUrl:  boldSignReturnUrl(),
         useTextTags,
       })
     } catch (err) {
@@ -1780,7 +1810,7 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents 
   const openDraft = async (env) => {
     setOpening(p => ({ ...p, [env.id]: true }))
     try {
-      const data = await documentEditUrl({ documentId: env.document_id, redirectUrl: window.location.href })
+      const data = await documentEditUrl({ documentId: env.document_id, redirectUrl: boldSignReturnUrl() })
       if (!data?.url) { pushToast('BoldSign did not return an edit link for this draft', 'error'); return }
       setEditDraft({ url: data.url, env })
     } catch (err) {
@@ -2187,6 +2217,70 @@ create policy "agent_notifications_policy" on agent_notifications
 //    as many times as the client asks, and sends only at the end.
 const prettyLabel = (id) => String(id || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 
+// Presentation only — the field ids and CRM tokens underneath are unchanged.
+// A template author names a field `Buyer1NameLabel` because that's the
+// account-wide convention (see CANONICAL_LABEL_TOKENS in boldsignFields.js),
+// not because it's a caption an agent should have to read and decode on the
+// send screen. This maps the same tokens to a short, human description of
+// where the value actually lands on the document, which group of fields it
+// belongs with, and — for the ones that only apply to some deals — a note
+// saying so, so "why is this blank" isn't a mystery.
+const FIELD_TOKEN_INFO = {
+  party_buyer_1:        { group: 'Buyer names',  text: 'Primary buyer’s name' },
+  party_buyer_2:        { group: 'Buyer names',  text: 'Co-buyer’s name', optional: 'only appears when this deal has a co-buyer' },
+  party_seller_1:       { group: 'Seller names', text: 'Primary seller’s name' },
+  party_seller_2:       { group: 'Seller names', text: 'Co-seller’s name', optional: 'only appears when this deal has a co-seller' },
+  seller_name:          { group: 'Buyer/Seller names', text: 'Your client’s name' },
+  client_name:          { group: 'Buyer/Seller names', text: 'Your client’s name' },
+  client_names:         { group: 'Buyer/Seller names', text: 'Every client, as the "entered into by and between" line reads' },
+  seller_names:         { group: 'Buyer/Seller names', text: 'Every client, as the "entered into by and between" line reads' },
+  client_2_name:        { group: 'Buyer/Seller names', text: 'Co-buyer / co-seller / spouse', optional: 'only appears when there’s a second client on this deal' },
+  seller_2_name:        { group: 'Buyer/Seller names', text: 'Co-buyer / co-seller / spouse', optional: 'only appears when there’s a second client on this deal' },
+  agent_name:           { group: 'Agent names', text: 'This deal’s appointed agent' },
+  agent_2_name:         { group: 'Agent names', text: 'A co-listing agent', optional: 'only appears when a second agent is on this deal' },
+  broker_name:          { group: 'Agent names', text: 'The brokerage name' },
+  property_address:     { group: 'Property', text: 'Street address' },
+  property_full:        { group: 'Property', text: 'Full one-line address' },
+  property_city_state_zip: { group: 'Property', text: 'City, state and ZIP line' },
+  property_county:      { group: 'Property', text: 'County' },
+  property_type:        { group: 'Property', text: 'Property type' },
+  property_mls:         { group: 'Property', text: 'MLS number' },
+  list_price:           { group: 'Money', text: 'Price' },
+  commission_pct:       { group: 'Money', text: 'Commission percentage' },
+  commission_amount:    { group: 'Money', text: 'Commission dollar amount' },
+  broker_compensation_flat: { group: 'Money', text: 'Flat-fee commission amount' },
+  agreement_date:       { group: 'Dates', text: 'Agreement date, written out whole' },
+  agreement_day:        { group: 'Dates', text: '"this ___ day of ______" — the day' },
+  agreement_month:      { group: 'Dates', text: '"day of ______, 20__" — the month' },
+  agreement_year:       { group: 'Dates', text: '"20__" — last two digits of the year' },
+  agreement_year_full:  { group: 'Dates', text: 'Full four-digit year' },
+  agreement_term_months:{ group: 'Dates', text: 'Term of representation, in months' },
+  retainer_start_date:  { group: 'Dates', text: 'Representation start date' },
+  retainer_end_date:    { group: 'Dates', text: 'Representation end date' },
+  closing_date_us:      { group: 'Dates', text: 'Closing date' },
+  listing_start_us:     { group: 'Dates', text: 'Listing start date' },
+  listing_end_us:       { group: 'Dates', text: 'Listing end date' },
+  offer_expiration:     { group: 'Dates', text: 'Offer expiration date' },
+  additional_agent_name:{ group: 'Additional Agent', text: 'Additional appointed agent’s name', optional: 'only appears when this deal has an additional agent' },
+  additional_agent_date:{ group: 'Additional Agent', text: '"this ___ day of ______, 20__" for the additional agent’s appointment', optional: 'only appears when this deal has an additional agent' },
+}
+const fieldInfo        = (f) => FIELD_TOKEN_INFO[fieldTokenKey(f)] || null
+const FIELD_GROUP_ORDER = ['Buyer names', 'Seller names', 'Buyer/Seller names', 'Agent names', 'Additional Agent', 'Property', 'Money', 'Dates', 'Other']
+// Fields in template order, bucketed into the groups above (falling back to
+// "Other" for anything the table doesn't name) and returned in a fixed,
+// sensible reading order rather than however the template happens to list them.
+const groupFields = (list) => {
+  const byGroup = new Map()
+  for (const f of list) {
+    const g = fieldInfo(f)?.group || 'Other'
+    if (!byGroup.has(g)) byGroup.set(g, [])
+    byGroup.get(g).push(f)
+  }
+  return FIELD_GROUP_ORDER
+    .map(g => ({ group: g, fields: byGroup.get(g) || [] }))
+    .filter(g => g.fields.length)
+}
+
 function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], dealAgents = [], templates, activeAgent, onClose, onSent, onSaved }) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
@@ -2329,8 +2423,13 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
     const docName = [tpl?.name || deal?.title, property?.address].filter(Boolean).join(' — ')
     const labels  = [tpl?.state, tpl?.doc_type, `deal:${deal.id}`].filter(Boolean)
+    // Fields that only mean something for a co-buyer or an additional agent this
+    // deal doesn't have — left blank above, and removed from the draft outright
+    // so the template doesn't show them as unfilled "Label" placeholders. See
+    // conditionalFieldsToRemove in boldsignFields.js.
+    const fieldRemovalIds = conditionalFieldsToRemove({ fields: details.fields || [], values })
     return {
-      templateId, deal_id: deal.id, roles, roleRemovalIndices, sharedFormFields,
+      templateId, deal_id: deal.id, roles, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
       emailSubject: subject, documentName: docName, labels,
     }
   }
@@ -2388,7 +2487,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     if (!args) return
     setSending(true)
     try {
-      const data = await templateEmbedUrl({ ...args, redirectUrl: window.location.href })
+      const data = await templateEmbedUrl({ ...args, redirectUrl: boldSignReturnUrl() })
       if (!data?.url) { pushToast('BoldSign did not return a send URL', 'error'); return }
       reportLayout(data)
       setEmbedDocId(data.documentId || null)
@@ -2477,14 +2576,36 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // can read it. Two send-breaking bugs were diagnosed blind for want of it.
   const fieldType = (f) => String(f?.type || 'unknown')
 
-  const renderTextField = (f) => (
+  const renderTextField = (f) => {
+    // The heading an agent actually reads: the canonical token's human name
+    // first (Buyer1NameLabel → "Primary buyer's name"), since that's true for
+    // every template using the account-wide convention regardless of what the
+    // admin happened to type as the field's own name; then whatever the
+    // template author actually captioned it; then, only for a field neither of
+    // those resolves, the raw PascalCase id — which is what every one of these
+    // used to show, unreadable id and all.
+    const info = fieldInfo(f)
+    const heading = info?.text || f.label || f.name || prettyLabel(f.id)
+    return (
     <div key={f.id} style={{ marginBottom:8 }}>
       <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2, display:'flex', gap:8, alignItems:'baseline' }}>
-        <span style={{ flex:1 }}>{f.label || f.name || prettyLabel(f.id)}</span>
+        <span style={{ flex:1 }}>
+          {heading}
+          {info?.optional && (
+            <span style={{ marginLeft:6, fontSize:10, fontWeight:600, color:'#d4a017', border:'1px solid #d4a017', borderRadius:10, padding:'1px 6px' }}>
+              optional
+            </span>
+          )}
+        </span>
         <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7 }} title="The field id BoldSign uses, its type, and the CRM token it matched">
           {fieldOrigin(f)} · {fieldType(f)}
         </span>
       </div>
+      {info?.optional && (
+        <div style={{ fontSize:10, color:'var(--gw-mist)', marginBottom:3 }}>
+          {info.optional.replace(/^./, c => c.toUpperCase())}
+        </div>
+      )}
       {isDateField(f)
         ? (
           <input
@@ -2503,7 +2624,21 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         )
         : <input className="form-control" value={values[f.id] || ''} onChange={e => setValue(f.id, e.target.value)}/>}
     </div>
-  )
+    )
+  }
+
+  // A flat list of 15+ fields is what agents said was hard to read here — this
+  // renders the same fields as small labelled sections instead (Buyer names,
+  // Agent names, Dates, Additional Agent, …), in a fixed reading order, so
+  // "which value goes where" is a sub-heading away rather than a scroll.
+  const renderGroupedFields = (list) => groupFields(list).map(({ group, fields: groupedFields }) => (
+    <div key={group} style={{ marginBottom:10 }}>
+      <div style={{ fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.03em', color:'var(--gw-mist)', marginBottom:4 }}>
+        {group}
+      </div>
+      {groupedFields.map(renderTextField)}
+    </div>
+  ))
 
   // Step 2 — BoldSign's embedded prepare/send UI (replaces our own send popup).
   if (embedUrl) {
@@ -2614,7 +2749,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                     <div style={{ fontSize:12, lineHeight:1.7 }}>
                       {sharedFilled.slice(0, 5).map(f => (
                         <div key={f.id} style={{ display:'flex', gap:8 }}>
-                          <span style={{ color:'var(--gw-mist)', minWidth:130 }}>{prettyLabel(fieldTokenKey(f) || f.id)}</span>
+                          <span style={{ color:'var(--gw-mist)', minWidth:130 }}>{fieldInfo(f)?.text || prettyLabel(fieldTokenKey(f) || f.id)}</span>
                           <strong style={{ flex:1 }}>{values[f.id]}</strong>
                         </div>
                       ))}
@@ -2625,7 +2760,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                       )}
                     </div>
                   )}
-                  {showShared && sharedTextFields.map(renderTextField)}
+                  {showShared && renderGroupedFields(sharedTextFields)}
                   <button
                     type="button"
                     className="btn btn--link btn--sm"
@@ -2649,7 +2784,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 <label className="form-label">
                   Signer details <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— each of these is visible only to the signer it belongs to until they sign</span>
                 </label>
-                {signerTextFields.map(renderTextField)}
+                {renderGroupedFields(signerTextFields)}
               </div>
             )}
 

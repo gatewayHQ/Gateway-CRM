@@ -676,7 +676,16 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
     // The agent a broker appoints IN ADDITION to the primary one. Falls back to
     // the deal's second agent, which is who it usually is.
     additional_agent_name:  term('additional_agent_name') || agents?.[1]?.name || '',
-    additional_agent_date:  usDate(term('additional_agent_date') || agreementIso),
+    // Blank unless an additional agent actually exists. `additional_agent_date`
+    // used to fall back to `agreementIso` (today, or the listing start) whether
+    // or not `additional_agent_name` resolved to anyone — so the "this __ day of
+    // ______, 20__" blanks in the ADDITIONAL APPOINTED AGENT section filled
+    // themselves in on every deal, including ones with no second agent, while the
+    // name beside them correctly stayed blank. The date is only ever meaningful
+    // once there is a name to pair it with.
+    additional_agent_date:  (term('additional_agent_name') || agents?.[1]?.name)
+      ? usDate(term('additional_agent_date') || agreementIso)
+      : '',
 
     // ── Purchase agreement / escrow ────────────────────────────────────────
     earnest_money:          term('earnest_money'),
@@ -928,6 +937,31 @@ export const tokenValueFor = (tokenVals, fieldId) => fieldTokenValue(tokenVals, 
 // Is this field one of ours, however it was spelled? Used to spot shared deal
 // data sitting on a signer-private field.
 export const isCrmToken = (field) => Boolean(fieldTokenKey(field))
+
+// ── Fields that only exist for a party who may not be on this deal ───────────
+// A co-buyer's name, an additional agent's name and appointment date: real on
+// SOME deals and simply absent on others. Leaving the value blank (which
+// crmTokenValues() already does) is correct for what gets FILLED, but BoldSign
+// still shows the field itself — an unfilled Label renders as a visible blue
+// "Label" placeholder chip in the editor, which reads as a leftover artifact
+// rather than a term that doesn't apply to this deal. So beyond leaving these
+// blank, a field naming one of these tokens is dropped from the draft outright
+// (see conditionalFieldsToRemove / editDocumentFields) whenever this deal has
+// nothing to put there.
+export const CONDITIONAL_PARTY_TOKENS = new Set([
+  'party_buyer_2', 'additional_agent_name', 'additional_agent_date',
+])
+
+// Ids of fields to remove from a freshly created draft: they name one of
+// CONDITIONAL_PARTY_TOKENS above, and this deal's resolved value for that
+// token is blank. Never returns a field whose token DID resolve to a value —
+// only ones with nothing to show.
+export function conditionalFieldsToRemove({ fields = [], values = {} } = {}) {
+  return (fields || [])
+    .filter(f => f?.id && CONDITIONAL_PARTY_TOKENS.has(fieldTokenKey(f)))
+    .filter(f => !String(values?.[f.id] ?? '').trim())
+    .map(f => f.id)
+}
 
 // ── Fields nobody configured ─────────────────────────────────────────────────
 // BoldSign auto-names a placed field by type plus a counter: `Label1`,
