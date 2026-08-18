@@ -219,7 +219,7 @@ const STATE_DOC_TEMPLATES = {
   ],
 }
 
-const DEFAULT_KEY_DATE_TYPES = ['Closing','Financing Contingency','Inspection','HUD Approval','Appraisal','Lease Start Date','Possession Date']
+const DEFAULT_KEY_DATE_TYPES = ['Closing','Expiration','Financing Contingency','Inspection','HUD Approval','Appraisal','Lease Start Date','Possession Date']
 
 const STATUS_BADGE_MAP = {
   complete: { label: 'complete',            bg: '#f0fdf4', color: '#16a34a', border: '#bbf7d0' },
