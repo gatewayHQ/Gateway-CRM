@@ -551,17 +551,18 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
     return months > 0 ? String(months) : ''
   }
 
-  // The compensation clause as it reads in the agreement, not as two numbers.
-  // A form says "___% of the gross sales price" or "a service fee of $___", and
-  // an agent pasting "3" into the wrong one of those is a fee dispute. Derived
-  // from the deal's own commission entry so it always agrees with the Details
-  // tab, with a comp_data override for the packets that word it differently.
-  const compensation = () => {
-    if (term('broker_compensation')) return term('broker_compensation')
-    if (!dealComm) return ''
-    return dealComm.type === 'flat'
-      ? `a service fee of ${money(dealComm.flat)}`
-      : `${dealComm.pct}% of the gross sales price`
+  // The FLAT-FEE dollar amount, and blank unless this deal actually IS a flat
+  // fee. Distinct from commission_amount below, which prints a dollar figure
+  // EITHER way — including the computed equivalent on a percentage deal — which
+  // is exactly right for a form with one settled number and exactly wrong for a
+  // form that offers the broker two separate blanks, one for a flat fee and one
+  // for a percentage: that form needs the flat-fee blank to read empty when the
+  // deal is percentage-based, not a dollar figure that was never a flat fee.
+  // comp_data can override for a flat amount the deal's own entry does not carry
+  // (a packet naming a different figure than the Details tab).
+  const brokerFlatFee = () => {
+    if (term('broker_compensation_flat')) return term('broker_compensation_flat')
+    return dealComm && dealComm.type === 'flat' ? money(dealComm.flat) : ''
   }
 
   // "this __ day of ________, 20__" is three blanks on the page, so it is three
@@ -667,7 +668,11 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
     protection_period_days: term('protection_period_days'),
     property_types_sought:  term('property_types_sought'),
     search_area:            term('search_area') || [property?.city, property?.county].filter(Boolean).join(', '),
-    broker_compensation:    compensation(),
+    // The percentage lives on `commission_pct` already, blank on a flat-fee
+    // deal for the identical reason: BrokerCompensationLabelPct is a literal
+    // alias of that same token in CANONICAL_LABEL_TOKENS, not a second value to
+    // keep in sync.
+    broker_compensation_flat: brokerFlatFee(),
     // The agent a broker appoints IN ADDITION to the primary one. Falls back to
     // the deal's second agent, which is who it usually is.
     additional_agent_name:  term('additional_agent_name') || agents?.[1]?.name || '',
@@ -808,7 +813,16 @@ export const CANONICAL_LABEL_TOKENS = {
   ProtectionPeriodDaysLabel: 'protection_period_days',
   PropertyTypesSoughtLabel:  'property_types_sought',
   SearchAreaLabel:           'search_area',
-  BrokerCompensationLabel:   'broker_compensation',
+  // Split in two, one blank per number a Buyer Agency form actually offers:
+  // "a flat fee of $______ OR ______% of the gross sales price". Sending a
+  // combined sentence into a form that already prints its own wording around
+  // the blank duplicates or contradicts the template's own text; two bare
+  // numbers, each blank when it does not apply to this deal, is what the form
+  // needs. BrokerCompensationLabelPct is `commission_pct` under another name —
+  // same value, so the two can never disagree, the same pattern as
+  // AgreementEndDateLabel aliasing retainer_end_date above.
+  BrokerCompensationLabel:    'broker_compensation_flat',
+  BrokerCompensationLabelPct: 'commission_pct',
 
   // ── Purchase agreement / escrow ────────────────────────────────────────────
   EarnestMoneyLabel:        'earnest_money',
