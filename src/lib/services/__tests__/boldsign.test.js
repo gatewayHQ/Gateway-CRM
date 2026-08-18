@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS, supportsReadOnly, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS, supportsReadOnly, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES, conditionalFieldsToRemove } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -1099,6 +1099,65 @@ describe('agent_2_name — the second agent line', () => {
     expect(vals.agent_name).toBe('Dana Co')
     expect(vals.agent_2_name).toBe('Nic Madsen')
     expect(vals.agent_name).not.toBe(vals.agent_2_name)
+  })
+})
+
+describe('additional_agent_date — only meaningful once there is an additional agent', () => {
+  // Regression test: this used to fall back to `today`/the listing start
+  // whether or not an additional agent existed, so the "this __ day of
+  // ______, 20__" blanks in the ADDITIONAL APPOINTED AGENT section filled
+  // themselves in on every deal — including ones with no second agent — while
+  // additional_agent_name correctly stayed blank right beside it.
+  it('is blank when there is no additional agent, name and date alike', () => {
+    const vals = crmTokenValues({ agents: [{ name: 'Nic Madsen' }], today: '2026-08-18' })
+    expect(vals.additional_agent_name).toBe('')
+    expect(vals.additional_agent_date).toBe('')
+  })
+
+  it('is blank with no deal context at all', () => {
+    expect(crmTokenValues({}).additional_agent_date).toBe('')
+  })
+
+  it('fills once a second agent is on the deal', () => {
+    const agents = [{ name: 'Nic Madsen' }, { name: 'Dana Co' }]
+    const vals = crmTokenValues({ agents, today: '2026-08-18' })
+    expect(vals.additional_agent_name).toBe('Dana Co')
+    expect(vals.additional_agent_date).toBe('08/18/2026')
+  })
+
+  it('fills from comp_data even with no second agent, when explicitly named there', () => {
+    const deal = { comp_data: { additional_agent_name: 'Pat Broker', additional_agent_date: '2026-09-01' } }
+    const vals = crmTokenValues({ deal, today: '2026-08-18' })
+    expect(vals.additional_agent_name).toBe('Pat Broker')
+    expect(vals.additional_agent_date).toBe('09/01/2026')
+  })
+})
+
+describe('conditionalFieldsToRemove — fields with no second party to fill them', () => {
+  it('flags Buyer2NameLabel-family and additional-agent fields only when their token is blank', () => {
+    const fields = [
+      { id: 'Buyer2NameLabel_2', type: 'Label' },
+      { id: 'AdditionalAgentNameLabel', type: 'Label' },
+      { id: 'AdditionalAgentDateLabel', type: 'Label' },
+      { id: 'Buyer1NameLabel', type: 'Label' },
+    ]
+    const values = {
+      Buyer2NameLabel_2: '', AdditionalAgentNameLabel: '', AdditionalAgentDateLabel: '',
+      Buyer1NameLabel: 'Jane Doe',
+    }
+    expect(conditionalFieldsToRemove({ fields, values }).sort()).toEqual(
+      ['AdditionalAgentDateLabel', 'AdditionalAgentNameLabel', 'Buyer2NameLabel_2'].sort()
+    )
+  })
+
+  it('leaves a conditional field alone once it actually has a value', () => {
+    const fields = [{ id: 'Buyer2NameLabel_2', type: 'Label' }]
+    expect(conditionalFieldsToRemove({ fields, values: { Buyer2NameLabel_2: 'John Doe' } })).toEqual([])
+  })
+
+  it('never touches a field whose token is not one of the conditional ones', () => {
+    const fields = [{ id: 'Buyer1NameLabel', type: 'Label' }]
+    expect(conditionalFieldsToRemove({ fields, values: { Buyer1NameLabel: '' } })).toEqual([])
   })
 })
 

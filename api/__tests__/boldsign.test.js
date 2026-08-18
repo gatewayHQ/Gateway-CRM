@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -1249,6 +1249,40 @@ describe('collectFilledFields — only what the agent actually entered', () => {
   it('drops a field with no usable geometry rather than stacking it at the corner', () => {
     expect(collectFilledFields({ commonFields: [{ type: 'Textbox', pageNumber: 1, value: 'x' }] })).toEqual([])
   })
+
+  // Regression: a BoldSign **Name** field always prints its assigned signer's
+  // own name and ignores any value sent for it, and on a document that hasn't
+  // been signed yet /document/properties can report no `value` for one at all
+  // — even though the name it will show is already known, from the signer row
+  // right beside it. Without this fallback the "Save PDF" copy of a filled-out
+  // draft printed a blank box for exactly the field an agent most wants to
+  // check (the buyer's/agent's own name) before sending, while a fully
+  // completed document (where BoldSign has since resolved the value) printed
+  // fine — the "Save PDF vs Save & Close" discrepancy this fixes.
+  it('falls back to the signer\'s own name for an unresolved Name field', () => {
+    const out = collectFilledFields({
+      signerDetails: [{ signerName: 'Daniel Stillson', formFields: [
+        { type: 'Name', pageNumber: 1, value: null, bounds },
+      ] }],
+    })
+    expect(out).toEqual([expect.objectContaining({ value: 'Daniel Stillson', type: 'Name' })])
+  })
+
+  it('does not borrow the signer name for a common (sender-filled) field', () => {
+    expect(collectFilledFields({
+      signerDetails: [{ signerName: 'Daniel Stillson', formFields: [] }],
+      commonFields:  [{ type: 'Name', pageNumber: 1, value: '', bounds }],
+    })).toEqual([])
+  })
+
+  it('prefers the field\'s own value over the signer-name fallback', () => {
+    const out = collectFilledFields({
+      signerDetails: [{ signerName: 'Daniel Stillson', formFields: [
+        { type: 'Name', pageNumber: 1, value: 'Explicit Name', bounds },
+      ] }],
+    })
+    expect(out[0].value).toBe('Explicit Name')
+  })
 })
 
 describe('resolveBoundsScale — derived from evidence, never assumed', () => {
@@ -1280,6 +1314,26 @@ describe('resolveBoundsScale — derived from evidence, never assumed', () => {
       expect(sizes.get(1)).toEqual({ width: 816, height: 1056 })
     }
     expect(boldsignPageSizes({}).size).toBe(0)
+  })
+})
+
+describe('startingFontSize — a short box must not shrink a correct fontSize', () => {
+  // Regression: this used to be Math.min(fontSize * scale, boxH * 0.8), so a
+  // field configured with the SAME fontSize as every other label on the
+  // template rendered tiny whenever its own box happened to be drawn short —
+  // the box height silently overrode a perfectly correct, equal font size down
+  // to as little as 5pt, with nothing wrong in the field's own settings.
+  it('trusts the stored fontSize outright, even against a short box', () => {
+    expect(startingFontSize({ fontSize: 11, scale: 1, boxH: 8 })).toBe(11)
+  })
+
+  it('scales the stored fontSize the same way bounds are scaled', () => {
+    expect(startingFontSize({ fontSize: 11, scale: 0.75, boxH: 20 })).toBeCloseTo(8.25)
+  })
+
+  it('falls back to a height-derived size only when no fontSize is stored', () => {
+    expect(startingFontSize({ fontSize: null, scale: 1, boxH: 20 })).toBe(10)
+    expect(startingFontSize({ fontSize: 0, scale: 1, boxH: 4 })).toBe(5)   // floor
   })
 })
 
