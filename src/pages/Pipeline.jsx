@@ -2281,13 +2281,6 @@ const groupFields = (list) => {
     .filter(g => g.fields.length)
 }
 
-// Every CRM token spelling an "expiration" date on a template can carry —
-// Offer Expiration on a purchase agreement, the retainer/listing end date on
-// an agency or listing agreement. All three already resolve to one value
-// (see crmTokenValues' `retainerEnd`); the Expiration input below lets an
-// agent override that single value for one draft without editing the deal.
-const EXPIRATION_FIELD_TOKENS = new Set(['offer_expiration', 'retainer_end_date', 'listing_end_us'])
-
 function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], dealAgents = [], templates, activeAgent, onClose, onSent, onSaved }) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
@@ -2327,12 +2320,6 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // it off for a packet that genuinely has nothing prefilled to share.
   const [inOrder,    setInOrder]    = React.useState(true)
   const [values,     setValues]     = React.useState({})     // fieldId → value
-  // Agency / listing expiration for this draft. Seeded from the same deal
-  // dates crmTokenValues already reads (comp_data.listing_end, else the
-  // expected close date), then editable here for this one document.
-  const [expiration, setExpiration] = React.useState(
-    String(deal?.comp_data?.listing_end || deal?.expected_close_date || '').slice(0, 10)
-  )
 
   const tpl = templates.find(t => t.template_id === templateId)
 
@@ -2405,25 +2392,6 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [showShared, setShowShared] = React.useState(false)
   const setSigner = (idx, k, v) => setSigners(p => ({ ...p, [idx]: { ...(p[idx] || {}), [k]: v } }))
   const setValue  = (id, v)     => setValues(p => ({ ...p, [id]: v }))
-
-  // Push the Expiration input into whichever of this template's fields actually
-  // mean it — re-runs on every edit, and again once the template's fields load,
-  // so it applies whether the agent sets it before or after picking a template.
-  // Values not driven from an expiration-shaped field are left untouched.
-  React.useEffect(() => {
-    if (!details) return
-    const usVal   = isoDateToUs(expiration)
-    const matches = (details.fields || []).filter(f => EXPIRATION_FIELD_TOKENS.has(fieldTokenKey(f)))
-    if (!matches.length) return
-    setValues(prev => {
-      let changed = false
-      const next = { ...prev }
-      for (const f of matches) {
-        if (next[f.id] !== usVal) { next[f.id] = usVal; changed = true }
-      }
-      return changed ? next : prev
-    })
-  }, [expiration, details])
 
   // The payload both actions below send. Returns null (having said why) when the
   // modal isn't ready — the two buttons must agree exactly on what is valid, so
@@ -2743,24 +2711,6 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                   </div>
                 </div>
               ))}
-
-              <div style={{ marginTop:14, marginBottom:10 }}>
-                <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:4 }}>
-                  Expiration
-                </div>
-                <input
-                  className="form-control"
-                  type="date"
-                  style={{ maxWidth:220 }}
-                  value={expiration}
-                  onChange={e => setExpiration(e.target.value)}
-                />
-                <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>
-                  Agency / listing expiration date for this agreement — fills any Offer
-                  Expiration or Retainer/Listing End field on the template.
-                </div>
-              </div>
-
               <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Roles left blank are removed from this send.</div>
 
               <label style={{ display:'flex', alignItems:'center', gap:8, marginTop:10, padding:'8px 10px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)', cursor:'pointer' }}>
