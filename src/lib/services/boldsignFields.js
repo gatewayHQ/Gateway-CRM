@@ -537,6 +537,20 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
   // page input later is then a UI change with no template work behind it.
   const term = (key) => String(deal?.comp_data?.[key] ?? '').trim()
 
+  // Whole months between two ISO dates, as a string, or '' when either is
+  // missing. Counted on the calendar rather than by dividing days, because
+  // "12 months" on an agreement means the same day next year, not 365 days.
+  const monthsBetween = (fromIso, toIso) => {
+    const a = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(fromIso || '').trim())
+    const b = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(toIso || '').trim())
+    if (!a || !b) return ''
+    let months = (Number(b[1]) - Number(a[1])) * 12 + (Number(b[2]) - Number(a[2]))
+    // An end date earlier in the month than the start has not completed that
+    // month yet: 01 Aug to 15 Aug next year is 12 months, 01 Aug to 15 Jul is 11.
+    if (Number(b[3]) < Number(a[3])) months -= 1
+    return months > 0 ? String(months) : ''
+  }
+
   // The compensation clause as it reads in the agreement, not as two numbers.
   // A form says "___% of the gross sales price" or "a service fee of $___", and
   // an agent pasting "3" into the wrong one of those is a fee dispute. Derived
@@ -630,6 +644,12 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
     // agreement calls it; the deal stores it as the listing window.
     retainer_start_date: usDate(retainerStart),
     retainer_end_date:   usDate(retainerEnd),
+    // How long the representation runs, as a NUMBER OF MONTHS, for the
+    // "for a term of ___ months" blank. Derived from the start and end dates
+    // rather than stored beside them, so the sentence and the expiry date on the
+    // same page cannot disagree; comp_data overrides for a term worded in the
+    // agreement as something other than whole months.
+    agreement_term_months: term('agreement_term_months') || monthsBetween(retainerStart, retainerEnd),
     offer_expiration:    usDate(retainerEnd),
     closing_date_us:     usDate(deal?.expected_close_date),
     listing_start_us:    usDate(retainerStart),
@@ -768,6 +788,12 @@ export const CANONICAL_LABEL_TOKENS = {
   RetainerDate2Label:    'retainer_end_date',
   RetainerStartLabel:    'retainer_start_date',
   RetainerEndLabel:      'retainer_end_date',
+  // Preferred spellings for the same two dates on a Buyer Agency Agreement,
+  // which calls the period a term rather than a retainer. Same values; the
+  // wording is whatever the form in front of the admin uses.
+  AgreementStartDateLabel: 'retainer_start_date',
+  AgreementEndDateLabel:   'retainer_end_date',
+  AgreementTermMonthsLabel:'agreement_term_months',
   // "this __ day of ________, 20__" is three blanks on the page, so it is three
   // ids. AgreementDateLabel is the same date as one value, for forms that print
   // it whole.
