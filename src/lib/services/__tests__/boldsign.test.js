@@ -1513,14 +1513,43 @@ describe('per-deal agreement terms, stored in comp_data', () => {
     expect(val('SearchAreaLabel', { search_area: 'Des Moines Metro' })).toBe('Des Moines Metro')
   })
 
-  it('writes the compensation as a clause, not as a bare number', () => {
-    // "3" pasted into the wrong blank of "___% or $___" is a fee dispute.
-    expect(val('BrokerCompensationLabel')).toBe('3% of the gross sales price')
+  it('REGRESSION: compensation is two bare numbers, not a combined sentence', () => {
+    // BrokerCompensationLabel used to write the whole clause ("3% of the gross
+    // sales price"). A Buyer Agency form has its own wording around TWO
+    // separate blanks, so the value now has to be a bare number for each.
+    const pct = withTerms()   // the shared fixture is a 3% percentage deal
+    expect(val('BrokerCompensationLabel')).toBe('')          // flat blank stays a bare blank on a percent deal
+    expect(val('BrokerCompensationLabelPct')).toBe('3%')
+  })
+
+  it('the flat-fee blank stays truly BLANK on a percentage deal, not a computed equivalent', () => {
+    // commission_amount ($13,500) is what 3% comes to in dollars on THIS deal —
+    // exactly the number that must NOT appear on a "flat fee" line for a deal
+    // that isn't one.
+    expect(withTerms().commission_amount).toBe('$13,500')
+    expect(val('BrokerCompensationLabel')).toBe('')
+  })
+
+  it('a flat-fee deal fills the flat blank and leaves the percentage blank', () => {
     const flat = crmTokenValues({ deal: { commission_type: 'flat', commission_flat: 5000 } })
-    expect(flat.broker_compensation).toBe('a service fee of $5,000')
-    // No commission entered means no clause, rather than a misleading 0%.
-    expect(crmTokenValues({ deal: {} }).broker_compensation).toBe('')
-    expect(val('BrokerCompensationLabel', { broker_compensation: '2.5% flat' })).toBe('2.5% flat')
+    expect(flat.broker_compensation_flat).toBe('$5,000')
+    expect(flat.commission_pct).toBe('')
+  })
+
+  it('no commission entered leaves both blank, rather than a misleading value', () => {
+    const vals = crmTokenValues({ deal: {} })
+    expect(vals.broker_compensation_flat).toBe('')
+    expect(vals.commission_pct).toBe('')
+  })
+
+  it('comp_data can override the flat-fee blank for a packet that names a different figure', () => {
+    expect(val('BrokerCompensationLabel', { broker_compensation_flat: '$2,500 processing fee' })).toBe('$2,500 processing fee')
+  })
+
+  it('BrokerCompensationLabelPct is commission_pct under another name, not a second value to keep in sync', () => {
+    const vals = withTerms()
+    expect(fieldTokenValue(vals, { id: 'BrokerCompensationLabelPct' })).toBe(fieldTokenValue(vals, { id: 'CommissionRateLabel' }))
+    expect(fieldTokenValue(vals, { id: 'BrokerCompensationLabelPct' })).toBe('3%')
   })
 
   it('splits the agreement date into the three blanks a form prints', () => {
