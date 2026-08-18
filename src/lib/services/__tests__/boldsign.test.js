@@ -1544,3 +1544,40 @@ describe('per-deal agreement terms, stored in comp_data', () => {
     expect(val('ChangeEffectiveDateLabel', { change_effective_date: '2026-12-25' })).toBe('12/25/2026')
   })
 })
+
+describe('agreement term and end date', () => {
+  const span = (start, end) => crmTokenValues({ deal: { comp_data: { listing_start: start, listing_end: end } } })
+  const val = (id, start = '2026-08-17', end = '2027-08-17') => fieldTokenValue(span(start, end), { id })
+
+  it('AgreementMonthLabel is the MONTH NAME, not a term length', () => {
+    // Named for the "this __ day of ______, 20__" blank. Using it for a term
+    // would print "for a term of August months".
+    expect(val('AgreementMonthLabel')).toBe('August')
+    expect(val('AgreementTermMonthsLabel')).toBe('12')
+  })
+
+  it('the end date has one value under every spelling', () => {
+    for (const id of ['AgreementEndDateLabel', 'RetainerDate2', 'RetainerDate2Label', 'RetainerEndLabel']) {
+      expect(val(id)).toBe('08/17/2027')
+    }
+    expect(val('AgreementStartDateLabel')).toBe('08/17/2026')
+  })
+
+  it('counts whole calendar months, not days divided', () => {
+    expect(val('AgreementTermMonthsLabel', '2026-08-17', '2027-02-17')).toBe('6')
+    expect(val('AgreementTermMonthsLabel', '2026-01-31', '2026-02-28')).toBe('')   // under one month
+    // An end day earlier in the month has not completed that month.
+    expect(val('AgreementTermMonthsLabel', '2026-08-17', '2027-08-15')).toBe('11')
+    expect(val('AgreementTermMonthsLabel', '2026-08-17', '2027-08-18')).toBe('12')
+  })
+
+  it('is blank rather than wrong when a date is missing', () => {
+    expect(crmTokenValues({}).agreement_term_months).toBe('')
+    expect(val('AgreementTermMonthsLabel', '2026-08-17', '')).toBe('')
+  })
+
+  it('an explicitly stored term wins over the derived one', () => {
+    const vals = crmTokenValues({ deal: { comp_data: { listing_start: '2026-08-17', listing_end: '2027-08-17', agreement_term_months: '18' } } })
+    expect(vals.agreement_term_months).toBe('18')
+  })
+})
