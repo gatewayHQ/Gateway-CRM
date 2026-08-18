@@ -845,6 +845,29 @@ const CANONICAL_ALIASES = Object.fromEntries(
   Object.entries(CANONICAL_LABEL_TOKENS).map(([id, token]) => [squashFieldKey(id), token]),
 )
 
+// ── Repeated instances of the same logical field ─────────────────────────────
+// BoldSign form-field IDs are unique per template, so a value that has to print
+// TWICE on one document — the buyer's name in the opening paragraph and again
+// on the signature page, the property address on page 1 and the acknowledgment
+// page — needs a second field with a DIFFERENT id. The convention: append
+// `_2`, `_3`, ... to the primary id. `Buyer1NameLabel_2` is the second instance
+// of `Buyer1NameLabel`; both resolve to the identical value.
+//
+// The suffix is stripped ONLY as a last resort, after the id has already failed
+// to match under its own spelling and through CANONICAL_ALIASES. That ordering
+// is load-bearing: `RetainerDate2` is itself a real, distinct canonical id (the
+// agreement's END date — see CANONICAL_LABEL_TOKENS) and must keep meaning that,
+// never get read as "second instance of RetainerDate1". Because the alias table
+// is tried first and matches `RetainerDate2` outright, stripping never runs for
+// it. A field that is genuinely unrecognized under any spelling only then gets
+// the suffix peeled off and tried again.
+//
+// Underscore + digits only (`_2`, not a bare trailing `2`), so a canonical id
+// that happens to end in a digit — `RetainerDate1`, `Agent2NameLabel` — is never
+// ambiguous with a repeat instance. Bare-digit suffixes are not supported and
+// should not be authored.
+const REPEAT_SUFFIX_RE = /_\d+$/
+
 // Which CRM token this field means, or '' when it is not one of ours. Accepts a
 // field object or a bare id string.
 export function fieldTokenKey(field, tokenKeys = SHARED_PREFILL_TOKENS) {
@@ -858,6 +881,20 @@ export function fieldTokenKey(field, tokenKeys = SHARED_PREFILL_TOKENS) {
     // moving on: a field named `Agent1NameLabel` is correctly authored, it just
     // names its data in the template's vocabulary instead of the CRM's.
     const alias = CANONICAL_ALIASES[squashFieldKey(c)]
+    if (alias && tokenKeys.has(alias)) return alias
+  }
+  // Neither matched under its real spelling. Try again with a trailing repeat
+  // suffix removed, so `Buyer1NameLabel_2` and `Buyer1NameLabel_3` resolve to
+  // whatever `Buyer1NameLabel` itself resolves to, without a second entry in
+  // any table. This runs LAST, after every exact/alias attempt above, so a
+  // canonical id that legitimately ends in digits is never reinterpreted.
+  for (const c of candidates) {
+    const raw = typeof c === 'string' ? c.trim() : ''
+    if (!REPEAT_SUFFIX_RE.test(raw)) continue
+    const base = raw.replace(REPEAT_SUFFIX_RE, '')
+    const key = normalizeTokenKey(base)
+    if (key && tokenKeys.has(key)) return key
+    const alias = CANONICAL_ALIASES[squashFieldKey(base)]
     if (alias && tokenKeys.has(alias)) return alias
   }
   return ''

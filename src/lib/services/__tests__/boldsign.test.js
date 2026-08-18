@@ -1581,3 +1581,42 @@ describe('agreement term and end date', () => {
     expect(vals.agreement_term_months).toBe('18')
   })
 })
+
+describe('repeated instances of the same logical field (_2, _3, ...)', () => {
+  const ctx = {
+    deal: { comp_data: { transaction_type: 'buyer', listing_start: '2026-08-17', listing_end: '2027-08-17' } },
+    contact: { first_name: 'Daniel', last_name: 'Stilson' },
+    property: { address: '123 Main St' },
+    agent: { name: 'Nic Madsen' },
+  }
+  const val = (id) => fieldTokenValue(crmTokenValues(ctx), { id })
+
+  it('a second instance resolves to the same value as the primary', () => {
+    expect(val('Buyer1NameLabel')).toBe('Daniel Stilson')
+    expect(val('Buyer1NameLabel_2')).toBe('Daniel Stilson')
+    expect(val('Buyer1NameLabel_3')).toBe('Daniel Stilson')
+  })
+
+  it('works through the canonical alias table too, not just the CRM spelling', () => {
+    expect(val('PropertyAddressLabel_2')).toBe('123 Main St')
+    expect(val('Agent1NameLabel_2')).toBe('Nic Madsen')
+  })
+
+  it('REGRESSION: RetainerDate2 keeps its OWN meaning — never "instance 2 of RetainerDate1"', () => {
+    // Exact/alias match is attempted before the suffix is ever stripped, so a
+    // canonical id that legitimately ends in digits is never reinterpreted.
+    expect(fieldTokenKey({ id: 'RetainerDate2' })).toBe('retainer_end_date')
+    expect(fieldTokenKey({ id: 'RetainerDate1' })).toBe('retainer_start_date')
+    // Even a repeat of RetainerDate2 itself keeps the same meaning.
+    expect(fieldTokenKey({ id: 'RetainerDate2_2' })).toBe('retainer_end_date')
+  })
+
+  it('only an underscore+digits suffix counts — a bare trailing digit is not a repeat', () => {
+    expect(fieldTokenKey({ id: 'Buyer1NameLabel2' })).toBe('')      // not authored this way
+    expect(fieldTokenKey({ id: 'not_a_real_field_2' })).toBe('')
+  })
+
+  it('matches on name or label too, the same as the primary id does', () => {
+    expect(fieldTokenKey({ id: 'Label14', name: 'Buyer1NameLabel_2' })).toBe('party_buyer_1')
+  })
+})
