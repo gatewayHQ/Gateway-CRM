@@ -34,6 +34,13 @@
  *   POST ?action=outlook-send         (auth) → send via Graph /me/sendMail, logs
  *                                     email_messages + a companion activities row
  *   POST ?action=outlook-disconnect   (auth) → removes the stored connection
+ *   POST ?action=outlook-calendar-sync (auth) → push one deal's key dates to
+ *                                     the ASSIGNED agent's Outlook calendar
+ *                                     (create/update/delete Graph events to
+ *                                     match deals.comp_data.key_dates); fired
+ *                                     right after an edit in Pipeline's Key
+ *                                     Dates tab. api/cron.js?task=calendar-sync
+ *                                     is the nightly sweep over every deal.
  *
  * Auth for the outlook-* actions (except the callback, which cannot carry a
  * Bearer token — it's a bare browser redirect from Microsoft) is the normal
@@ -48,6 +55,7 @@ import {
   resolveRedirectUri, exchangeCodeForTokens, fetchGraphProfile,
   encryptToken, getValidAccessToken, sendGraphMail,
 } from './_lib/msGraph.js'
+import { syncDealCalendar } from './_lib/calendarSync.js'
 
 const SHARED_HEADERS = {
   'Access-Control-Allow-Origin':  '*',
@@ -236,6 +244,36 @@ async function handleOutlookDisconnect(req, res) {
   return res.status(200).json({ ok: true })
 }
 
+// ─── Microsoft Graph: on-demand calendar sync (one deal) ─────────────────────
+// Fired right after an agent edits a key date (src/pages/Pipeline.jsx). Only
+// the deal's ASSIGNED agent may trigger this — it writes to THEIR Outlook
+// calendar, so a co-agent (who can otherwise see/edit the deal) has no
+// business pushing events onto someone else's personal calendar.
+async function handleOutlookCalendarSync(req, res) {
+  const { agent } = await requireAgent(req)
+  const svc = getServiceClient()
+  const { dealId } = req.body || {}
+  if (!dealId) return res.status(400).json({ error: 'Missing dealId' })
+
+  const { data: deal, error } = await svc.from('deals')
+    .select('id, title, agent_id, stage, comp_data, property_id')
+    .eq('id', dealId).maybeSingle()
+  if (error) return errorResponse(res, Object.assign(new Error(error.message), { status: 500 }))
+  if (!deal) return res.status(404).json({ error: 'Deal not found' })
+  if (deal.agent_id !== agent.id) {
+    return res.status(403).json({ error: "Only this deal's assigned agent can sync it to their calendar" })
+  }
+
+  let property = null
+  if (deal.property_id) {
+    const { data: p } = await svc.from('properties').select('address').eq('id', deal.property_id).maybeSingle()
+    property = p
+  }
+
+  const result = await syncDealCalendar(svc, deal, { property })
+  return res.status(200).json({ ok: true, ...result })
+}
+
 // ─── Resend (legacy default path — unchanged) ────────────────────────────────
 async function handleResendSend(req, res) {
   // ── Rate limit ────────────────────────────────────────────────────────────
@@ -374,6 +412,10 @@ async function handler(req, res) {
     if (action === 'outlook-disconnect') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
       return await handleOutlookDisconnect(req, res)
+    }
+    if (action === 'outlook-calendar-sync') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+      return await handleOutlookCalendarSync(req, res)
     }
   } catch (err) {
     return errorResponse(res, err)

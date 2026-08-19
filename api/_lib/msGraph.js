@@ -225,6 +225,74 @@ export async function sendGraphMail(accessToken, { subject, html, to, cc }) {
   throw e
 }
 
+// ─── Calendar events (deal key dates → agent's Outlook calendar) ─────────────
+// Key dates are plain dates (no time), so every event is created ALL-DAY.
+// Graph still requires a timeZone on the start/end even for all-day events —
+// defaults to the brokerage's own (Iowa/Nebraska/South Dakota corridor is
+// Central), overridable per-deployment since this is shared across every agent
+// rather than a per-agent preference (v1 scope).
+const CALENDAR_TIMEZONE = process.env.MS_CALENDAR_TIMEZONE || 'Central Standard Time'
+// Single native Outlook reminder, fired this many minutes before the date
+// (default 3 days — matches the CRM's own 72h reminder threshold). Graph
+// events support exactly one reminder each, unlike the CRM's 72h/24h/today
+// cadence, so this is deliberately the earliest of those three: it gives the
+// agent a heads-up in their calendar app, while the CRM's own email/in-app
+// reminders (api/cron.js ?task=reminders) still fire at 24h and today too.
+const CALENDAR_REMINDER_MINUTES = Number(process.env.MS_CALENDAR_REMINDER_MINUTES || 4320)
+
+function allDayBounds(dateStr) {
+  const start = dateStr
+  const end = new Date(`${dateStr}T00:00:00Z`)
+  end.setUTCDate(end.getUTCDate() + 1)
+  return { start, end: end.toISOString().slice(0, 10) }
+}
+
+function calendarEventBody({ subject, date, bodyHtml }) {
+  const { start, end } = allDayBounds(date)
+  return {
+    subject,
+    body: { contentType: 'HTML', content: bodyHtml || '' },
+    start: { dateTime: `${start}T00:00:00`, timeZone: CALENDAR_TIMEZONE },
+    end:   { dateTime: `${end}T00:00:00`,   timeZone: CALENDAR_TIMEZONE },
+    isAllDay: true,
+    isReminderOn: true,
+    reminderMinutesBeforeStart: CALENDAR_REMINDER_MINUTES,
+    categories: ['Gateway CRM'],
+  }
+}
+
+async function graphEventRequest(method, url, accessToken, body) {
+  const res = await fetch(url, {
+    method,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  })
+  if (res.status === 204) return null                    // DELETE success
+  const data = await res.json().catch(() => ({}))
+  if (res.ok) return data
+  const e = new Error(data?.error?.message || `Graph calendar ${method} failed (HTTP ${res.status})`)
+  e.status = res.status
+  throw e
+}
+
+export async function createCalendarEvent(accessToken, { subject, date, bodyHtml }) {
+  return graphEventRequest('POST', `${GRAPH_BASE}/me/events`, accessToken, calendarEventBody({ subject, date, bodyHtml }))
+}
+
+export async function updateCalendarEvent(accessToken, eventId, { subject, date, bodyHtml }) {
+  return graphEventRequest('PATCH', `${GRAPH_BASE}/me/events/${eventId}`, accessToken, calendarEventBody({ subject, date, bodyHtml }))
+}
+
+// Idempotent — an event already deleted by the agent themselves (in Outlook
+// directly) 404s, which is treated as success by the caller (calendarSync.js),
+// not surfaced as a sync failure.
+export async function deleteCalendarEvent(accessToken, eventId) {
+  return graphEventRequest('DELETE', `${GRAPH_BASE}/me/events/${eventId}`, accessToken)
+}
+
 // ─── Valid-token resolution (refresh-on-demand) ───────────────────────────────
 // Called by every send/sync path. Refreshes when the stored token is within 2
 // minutes of expiry (or already expired), persists the new pair, and marks the
