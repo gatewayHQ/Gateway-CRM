@@ -230,6 +230,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
   const [resendReady, setResendReady] = useState(null)
   const [resendKey, setResendKey]   = useState('')
   const [resendFrom, setResendFrom] = useState('')
+  const [outlookStatus, setOutlookStatus] = useState(null) // null = loading, false = not connected, object = connected
   const [aiPrompt, setAiPrompt]   = useState('')
   const [aiOpen, setAiOpen]       = useState(false)
   const [aiLoading, setAiLoading] = useState(false)
@@ -292,7 +293,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
     setAiLoading(false)
   }
 
-  // Pre-fill resolved body and load Resend key on mount
+  // Pre-fill resolved body, load Resend key, and check Outlook connection on mount
   useEffect(() => {
     setBody(resolve(ctx?.body || ''))
     loadUserKey('resend_key', 'gw_resend_key').then(k => {
@@ -300,13 +301,44 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
       setResendReady(!!k)
     })
     loadUserKey('resend_from', 'gw_resend_from').then(f => setResendFrom(f))
+    supabase.from('ms_graph_connection_status').select('*').maybeSingle()
+      .then(({ data }) => setOutlookStatus(data && data.status === 'connected' ? data : false))
   }, [])
 
   const send = async () => {
     if (!to) { pushToast('Enter a recipient email', 'error'); return }
     setSending(true)
 
-    if (resendKey) {
+    if (outlookStatus) {
+      try {
+        const { data: { session } } = await supabase.auth.getSession()
+        const html = body.split(/\n\n+/).map(p => `<p style="margin:0 0 16px 0">${p.replace(/\n/g, '<br>')}</p>`).join('')
+        const res = await fetch('/api/email-send?action=outlook-send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
+          body: JSON.stringify({
+            to, subject: subject || '(no subject)', html,
+            contactId: contact?.id || null,
+            dealId: ctx?.dealId || null,
+          }),
+        })
+        const result = await res.json()
+        if (!res.ok) {
+          setSending(false)
+          pushToast(`Send failed: ${result.error || 'Unknown error'}`, 'error')
+          return
+        }
+        if (ctx?.templateId) {
+          await supabase.from('templates').update({ usage_count: (ctx.usageCount || 0) + 1 }).eq('id', ctx.templateId)
+        }
+        setSending(false)
+        pushToast(`Email sent to ${to}`)
+        onClose()
+      } catch (err) {
+        setSending(false)
+        pushToast('Send failed: ' + err.message, 'error')
+      }
+    } else if (resendKey) {
       try {
         const fromAddr = resendFrom || (agent.email ? `${agent.name || 'Gateway'} <${agent.email}>` : 'onboarding@resend.dev')
         // Route through our server — keeps the API key off the wire and
@@ -370,9 +402,9 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
         <button className="drawer__close" onClick={onClose}><Icon name="x" size={18} /></button>
       </div>
 
-      {resendReady === false && (
+      {outlookStatus === false && resendReady === false && (
         <div style={{ margin: '0 24px', marginTop: 16, padding: '10px 14px', background: '#fff8ec', border: '1px solid var(--gw-amber)', borderRadius: 'var(--radius)', fontSize: 12, lineHeight: 1.6 }}>
-          <strong>Email sending not configured.</strong> Set up Resend in <strong>Settings → Email Sending</strong> to send directly from the CRM.
+          <strong>Email sending not configured.</strong> Connect Outlook or set up Resend in <strong>Settings → Integrations</strong> to send directly from the CRM.
           Clicking Send will open your local email client instead.
         </div>
       )}
@@ -380,7 +412,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
       <div className="modal__body" style={{ padding:0 }}>
         <div style={{ borderBottom:'1px solid var(--gw-border)' }}>
           <div className="compose-field"><label>To</label><input value={to} onChange={e=>setTo(e.target.value)} placeholder="recipient@email.com" /></div>
-          <div className="compose-field"><label>From</label><input value={resendFrom || agent.email || ''} readOnly style={{ color:'var(--gw-mist)' }} /></div>
+          <div className="compose-field"><label>From</label><input value={(outlookStatus && outlookStatus.email) || resendFrom || agent.email || ''} readOnly style={{ color:'var(--gw-mist)' }} /></div>
           <div className="compose-field"><label>Subject</label><input value={subject} onChange={e=>setSubject(e.target.value)} placeholder="Subject line…" /></div>
         </div>
         <div style={{ padding:'0 24px' }}>
@@ -411,7 +443,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
           ✦ Write with AI
         </button>
         <button className="btn btn--primary" onClick={send} disabled={sending || !to}>
-          <Icon name="send" size={13} />{sending ? 'Sending…' : resendKey ? 'Send Email' : 'Open in Mail App'}
+          <Icon name="send" size={13} />{sending ? 'Sending…' : outlookStatus ? 'Send via Outlook' : resendKey ? 'Send Email' : 'Open in Mail App'}
         </button>
       </div>
     </Modal>

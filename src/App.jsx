@@ -251,6 +251,20 @@ export default function App() {
     }
   }, [route])
 
+  // Land back here after the Microsoft OAuth redirect (api/email-send.js's
+  // outlook-callback 302s to `/?outlook=connected|error`, since this app has
+  // no real URL routing — see the `route` state above). Route to Integrations,
+  // toast the result, then strip the query string so a refresh doesn't repeat it.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const outlook = params.get('outlook')
+    if (!outlook) return
+    setRoute('integrations')
+    if (outlook === 'connected') pushToast('Outlook connected')
+    else pushToast(params.get('message') || 'Could not connect Outlook', 'error')
+    window.history.replaceState(null, '', window.location.pathname)
+  }, [])
+
   // Per-agent hidden nav — loaded from agents table (nav_hidden column)
   const hiddenNav = React.useMemo(() => {
     const agent = db.agents?.find(a => a.id === activeAgentId)

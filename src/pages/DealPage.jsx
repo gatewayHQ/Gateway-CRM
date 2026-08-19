@@ -63,7 +63,7 @@ const drawerLink = (label, onClick) => (
   <button className="btn btn--ghost btn--sm" style={{ fontSize: 11, padding: '2px 8px' }} onClick={onClick}>{label}</button>
 )
 
-export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }) {
+export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, openCompose }) {
   const stageLabels = useStageLabels()
   const deals      = db.deals      || []
   const agents     = db.agents     || []
@@ -506,7 +506,25 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId }
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {contact ? (
               <div>
-                <div style={{ fontWeight: 700, fontSize: 13.5 }}>{contact.first_name} {contact.last_name}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13.5 }}>{contact.first_name} {contact.last_name}</div>
+                  {contact.email && openCompose && (
+                    <button
+                      className="btn btn--ghost btn--icon btn--sm"
+                      title={`Email ${contact.first_name}`}
+                      onClick={() => openCompose({
+                        to: contact.email,
+                        contactName: `${contact.first_name} ${contact.last_name}`,
+                        contactId: contact.id,
+                        dealId,
+                        propertyAddress: property?.address,
+                        dealValue: deal?.value,
+                      })}
+                    >
+                      <Icon name="mail" size={12} />
+                    </button>
+                  )}
+                </div>
                 <div style={{ fontSize: 12, color: 'var(--gw-mist)', display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 2 }}>
                   {contact.phone && <a href={`tel:${contact.phone}`} style={{ color: 'inherit' }}>{formatPhone(contact.phone)}</a>}
                   {contact.email && <a href={`mailto:${contact.email}`} style={{ color: 'inherit' }}>{contact.email}</a>}
