@@ -13,7 +13,8 @@
     { "path": "/api/cron?task=nudges",         "schedule": "0 14 * * *" },
     { "path": "/api/cron?task=boldsign-sync",  "schedule": "0 3 * * *" },
     { "path": "/api/cron?task=scan-reconcile", "schedule": "0 4 * * *" },
-    { "path": "/api/cron?task=calendar-sync",  "schedule": "0 5 * * *" }
+    { "path": "/api/cron?task=calendar-sync",  "schedule": "0 5 * * *" },
+    { "path": "/api/cron?task=inbox-sync",     "schedule": "0 6 * * *" }
   ],
   "rewrites": [
     { "source": "/m/:token",  "destination": "/api/campaigns?action=scan&token=:token" },

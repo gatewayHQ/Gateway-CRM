@@ -42,6 +42,47 @@ export default function ContactDrawer({
   const [dirty, setDirty] = useState(false)
   const [duplicateWarn, setDuplicateWarn] = useState(null)
   const [showSpouse, setShowSpouse] = useState(false)
+  const [outlookConnected, setOutlookConnected] = useState(false)
+  const [enriching, setEnriching] = useState(false)
+
+  useEffect(() => {
+    supabase.from('ms_graph_connection_status').select('status').maybeSingle()
+      .then(({ data }) => setOutlookConnected(data?.status === 'connected'))
+  }, [])
+
+  // Read-only lookup against the agent's own Outlook contacts — fills in ONLY
+  // blank fields, never overwrites something the agent already entered. The
+  // agent still has to click Save; nothing here writes to the database itself.
+  const enrichFromOutlook = async () => {
+    if (!form.email) return
+    setEnriching(true)
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session?.access_token) { pushToast('Please sign in again', 'error'); return }
+      const res = await fetch('/api/email-send?action=outlook-contact-lookup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ email: form.email }),
+      })
+      const data = await res.json()
+      if (!res.ok) { pushToast(data.error || 'Lookup failed', 'error'); return }
+      if (!data.match) { pushToast('No matching Outlook contact found'); return }
+
+      const patch = {}
+      if (data.match.phone && !form.phone) patch.phone = data.match.phone
+      const extra = [data.match.companyName, data.match.jobTitle].filter(Boolean).join(' — ')
+      if (extra && !(form.notes || '').includes(extra)) {
+        patch.notes = form.notes ? `${form.notes}\n${extra}` : extra
+      }
+      if (!Object.keys(patch).length) { pushToast('Found a match, but nothing new to fill in'); return }
+      setForm(p => ({ ...p, ...patch }))
+      pushToast('Filled in from Outlook — review before saving')
+    } catch (err) {
+      pushToast('Lookup failed: ' + err.message, 'error')
+    } finally {
+      setEnriching(false)
+    }
+  }
 
   // Reset on contact change
   useEffect(() => {
@@ -300,13 +341,28 @@ export default function ContactDrawer({
 
             <div className="form-group">
               <label className="form-label">Email</label>
-              <input
-                className={`form-control${errors.email ? ' error' : ''}`}
-                type="email"
-                value={form.email || ''}
-                onChange={(e) => set('email', e.target.value)}
-                placeholder="jane@email.com"
-              />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input
+                  className={`form-control${errors.email ? ' error' : ''}`}
+                  type="email"
+                  style={{ flex: 1 }}
+                  value={form.email || ''}
+                  onChange={(e) => set('email', e.target.value)}
+                  placeholder="jane@email.com"
+                />
+                {outlookConnected && form.email && (
+                  <button
+                    type="button"
+                    className="btn btn--secondary btn--sm"
+                    style={{ whiteSpace: 'nowrap', fontSize: 11 }}
+                    onClick={enrichFromOutlook}
+                    disabled={enriching}
+                    title="Look up this email in your Outlook contacts and fill in any blank fields"
+                  >
+                    {enriching ? 'Looking up…' : 'Enrich from Outlook'}
+                  </button>
+                )}
+              </div>
               {errors.email && <div className="form-hint" style={{ color: 'var(--gw-red)' }}>{errors.email}</div>}
             </div>
 

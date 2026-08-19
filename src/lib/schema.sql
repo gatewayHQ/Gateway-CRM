@@ -652,6 +652,10 @@ create table if not exists ms_graph_connections (
   last_error         text,
   connected_at       timestamptz not null default now(),
   last_synced_at     timestamptz,
+  -- Microsoft Graph delta query cursor (migration 0036) — lets the nightly
+  -- inbox-sync task (api/_lib/inboxSync.js) ask for only what changed since
+  -- the last run instead of re-scanning the whole inbox. Null until first sync.
+  mail_delta_link    text,
   created_at         timestamptz not null default now(),
   updated_at         timestamptz not null default now()
 );
@@ -712,7 +716,9 @@ create table if not exists email_messages (
   body_html          text,
   to_recipients      jsonb not null default '[]',
   cc_recipients      jsonb not null default '[]',
-  status             text not null default 'sent' check (status in ('sent', 'failed', 'draft')),
+  -- 'received' (migration 0036) = an inbound message matched to a contact by
+  -- inbox-sync — never "sent" by this CRM, so reusing 'sent' would mislead.
+  status             text not null default 'sent' check (status in ('sent', 'failed', 'draft', 'received')),
   error_message      text,
   graph_message_id   text,
   conversation_id    text,
