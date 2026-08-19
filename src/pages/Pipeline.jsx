@@ -538,6 +538,27 @@ function KeyDatesTab({ deal }) {
     const comp_data = { ...(deal.comp_data || {}), key_dates: updated }
     await supabase.from('deals').update({ comp_data, updated_at: new Date().toISOString() }).eq('id', deal.id)
     setSaving(false)
+    syncOutlookCalendar(deal.id)
+  }
+
+  // Best-effort, fire-and-forget: push the updated key dates onto the
+  // assigned agent's Outlook calendar (api/email-send.js?action=outlook-calendar-sync).
+  // Silently a no-op if Outlook isn't connected, or if the viewer isn't the
+  // deal's assigned agent (only they may write to their own calendar) — either
+  // way this must never block or interrupt the key-dates save itself, which
+  // already has its own "Saving…"/"Changes auto-saved" feedback above.
+  const syncOutlookCalendar = async (dealId) => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session?.access_token) return
+      await fetch('/api/email-send?action=outlook-calendar-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ dealId }),
+      })
+    } catch {
+      // best-effort — nightly api/cron.js?task=calendar-sync is the safety net
+    }
   }
 
   const updateDate = (i, date) => {

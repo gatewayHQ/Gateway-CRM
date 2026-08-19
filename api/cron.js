@@ -6,6 +6,9 @@
  * GET /api/cron?task=nudges         — transaction-layer agent nudges
  * GET /api/cron?task=boldsign-sync  — nightly Form Library ↔ BoldSign template drift sync
  *                                     + auto-reminders for stale signature requests
+ * GET /api/cron?task=calendar-sync  — nightly deal key dates → agent Outlook calendar
+ *                                     sweep (safety net; the live edit path also
+ *                                     fires this per-deal — see api/email-send.js)
  *
  * These scheduled tasks share one serverless function (Vercel Hobby caps total
  * functions at 12 — this repo is already at that cap). Each is dispatched by
@@ -27,6 +30,7 @@ import { createClient } from '@supabase/supabase-js'
 import { boldsign, listAllTemplates, getRateLimitState } from './boldsign.js'
 import { OPERATING_STATES } from '../src/lib/constants.js'
 import { ALL_DEAL_STAGES, isOpenStage } from '../src/lib/stages.js'
+import { syncAllDealCalendars } from './_lib/calendarSync.js'
 
 // Every stage a deal can sit in while still in flight — derived from the stage
 // registry rather than hand-listed, because the hand-listed version silently
@@ -392,8 +396,10 @@ export default async function handler(req, res) {
     result = await runBoldsignTemplateSync(supabase)
   } else if (task === 'scan-reconcile') {
     result = await runScanReconcile(supabase)
+  } else if (task === 'calendar-sync') {
+    result = await runCalendarSync(supabase)
   } else {
-    return res.status(400).json({ error: `Unknown task "${task}" — use ?task=reminders, ?task=sequence, ?task=nudges, ?task=boldsign-sync, or ?task=scan-reconcile` })
+    return res.status(400).json({ error: `Unknown task "${task}" — use ?task=reminders, ?task=sequence, ?task=nudges, ?task=boldsign-sync, ?task=scan-reconcile, or ?task=calendar-sync` })
   }
 
   return res.status(result.status).json(result.body)
@@ -423,6 +429,22 @@ async function runScanReconcile(supabase) {
     return { status: 500, body: { ok: false, error: error.message } }
   }
   return { status: 200, body: data || { ok: true } }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task: deal key dates → Outlook calendar sync (nightly safety net)
+// The live edit path (Pipeline's Key Dates tab) fires this per-deal already
+// via api/email-send.js?action=outlook-calendar-sync; this sweep catches drift
+// that path can't — a manually deleted calendar event, a deal that closed
+// since its last edit, or a sync that failed mid-request.
+// ─────────────────────────────────────────────────────────────────────────────
+async function runCalendarSync(supabase) {
+  try {
+    const result = await syncAllDealCalendars(supabase)
+    return { status: 200, body: result }
+  } catch (err) {
+    return { status: 500, body: { ok: false, error: err.message } }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -729,6 +729,32 @@ alter table email_messages enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- DEAL CALENDAR EVENTS  (migration 0035 — deal key dates -> agent's Outlook
+-- calendar). Ledger of one Graph event id per (deal, agent, date_type), plus a
+-- hash of the fields that would change the event so a sync run can skip
+-- anything unchanged. Written only by the service key (api/_lib/calendarSync.js,
+-- called from api/cron.js's nightly sweep and api/email-send.js's on-demand
+-- action=outlook-calendar-sync) — never directly by the client.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists deal_calendar_events (
+  id              uuid primary key default uuid_generate_v4(),
+  deal_id         uuid not null references deals(id) on delete cascade,
+  agent_id        uuid not null references agents(id) on delete cascade,
+  date_type       text not null,
+  graph_event_id  text not null,
+  event_hash      text not null,
+  last_synced_at  timestamptz not null default now(),
+  created_at      timestamptz not null default now()
+);
+create unique index if not exists uq_deal_calendar_events_key
+  on deal_calendar_events(deal_id, agent_id, date_type);
+create index if not exists idx_deal_calendar_events_deal  on deal_calendar_events(deal_id);
+create index if not exists idx_deal_calendar_events_agent on deal_calendar_events(agent_id);
+
+alter table deal_calendar_events enable row level security;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- BOLDSIGN TEMPLATES  (reusable documents with fields; CRM prefills by field id)
 -- template_id is the BoldSign template id; field_tokens lists the label/id set
 -- the template expects so the app can prefill (e.g. property_address, list_price).
@@ -1899,6 +1925,13 @@ create policy email_messages_scope on email_messages for all to authenticated
     )
     or email_messages.deal_id in (select app_visible_deal_ids())
   );
+
+-- DEAL CALENDAR EVENTS — follows the deal (writes are service-key only, but
+-- scoped consistently with every other deal-child table).
+drop policy if exists deal_calendar_events_deal_scope on deal_calendar_events;
+create policy deal_calendar_events_deal_scope on deal_calendar_events for all to authenticated
+  using      (app_is_admin() or deal_id in (select app_visible_deal_ids()) or agent_id = app_current_agent_id())
+  with check (app_is_admin() or deal_id in (select app_visible_deal_ids()) or agent_id = app_current_agent_id());
 
 
 -- ═════════════════════════════════════════════════════════════════════════════
