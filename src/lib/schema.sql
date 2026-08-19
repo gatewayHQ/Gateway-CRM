@@ -627,6 +627,108 @@ create policy boldsign_sender_identities_scope on boldsign_sender_identities for
   with check (app_is_admin());
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- MICROSOFT GRAPH (OUTLOOK) INTEGRATION  (migration 0034)
+--
+-- Per-agent "Connect Outlook" via OAuth 2.0 Authorization Code + PKCE against
+-- an Azure App Registration with DELEGATED Graph permissions (User.Read,
+-- Mail.Send, Mail.ReadWrite, Mail.ReadBasic, offline_access, Calendars.Read,
+-- Calendars.ReadWrite, Contacts.Read). Full scope set is requested up front so
+-- calendar/contacts sync can be built later without forcing a reconnect.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists ms_graph_connections (
+  id                 uuid primary key default uuid_generate_v4(),
+  agent_id           uuid not null unique references agents(id) on delete cascade,
+  microsoft_user_id  text not null,
+  email              text not null,
+  display_name       text,
+  -- AES-256-GCM ciphertext (iv || authTag || ciphertext, base64) — see
+  -- api/_lib/msGraph.js. Never selected by a client role; service key only.
+  access_token_enc   text not null,
+  refresh_token_enc  text not null,
+  token_expires_at   timestamptz not null,
+  scopes             text[] not null default '{}',
+  status             text not null default 'connected'
+                       check (status in ('connected', 'disconnected', 'error')),
+  last_error         text,
+  connected_at       timestamptz not null default now(),
+  last_synced_at     timestamptz,
+  created_at         timestamptz not null default now(),
+  updated_at         timestamptz not null default now()
+);
+create unique index if not exists uq_ms_graph_connections_ms_user on ms_graph_connections(microsoft_user_id);
+create index if not exists idx_ms_graph_connections_agent on ms_graph_connections(agent_id);
+
+alter table ms_graph_connections enable row level security;
+-- Deliberately NO policy for `authenticated`/`anon` — deny by default. Every
+-- access is server-side via the service key (api/email-send.js, ?action=outlook-*).
+-- Even AES-256-GCM ciphertext should never reach the browser.
+
+drop trigger if exists ms_graph_connections_updated_at on ms_graph_connections;
+create trigger ms_graph_connections_updated_at
+  before update on ms_graph_connections
+  for each row execute function set_updated_at();
+
+-- Non-secret connection status, readable by the owning agent (or an admin)
+-- directly from the browser. NOT security_invoker — like `agents_public`, the
+-- view runs with the owner's privileges, which bypass the base table's
+-- policy-less RLS, so the row filter below is load-bearing, not decorative.
+create or replace view ms_graph_connection_status as
+  select
+    agent_id, microsoft_user_id, email, display_name, status,
+    scopes, connected_at, last_synced_at, token_expires_at, last_error
+  from ms_graph_connections
+  where agent_id = app_current_agent_id() or app_is_admin();
+grant select on ms_graph_connection_status to authenticated;
+
+-- Short-lived PKCE state, keyed by the OAuth `state` param. Also service-role
+-- only: this is where code_verifier lives between the redirect to Microsoft
+-- and the callback, and it identifies WHICH agent started the flow (the
+-- callback is a bare GET redirect from Microsoft — no Authorization header).
+-- One-time use; the callback deletes it immediately.
+create table if not exists ms_oauth_states (
+  state          text primary key,
+  agent_id       uuid not null references agents(id) on delete cascade,
+  code_verifier  text not null,
+  redirect_uri   text not null,
+  return_path    text,
+  created_at     timestamptz not null default now(),
+  expires_at     timestamptz not null default (now() + interval '10 minutes')
+);
+create index if not exists idx_ms_oauth_states_expires on ms_oauth_states(expires_at);
+alter table ms_oauth_states enable row level security;
+
+-- The CRM's own record of every email sent through the integration, linked to
+-- contacts/deals. A companion `activities` row (type='email') is inserted by
+-- the send handler so sent emails also show up in the existing timeline.
+create table if not exists email_messages (
+  id                 uuid primary key default uuid_generate_v4(),
+  agent_id           uuid references agents(id) on delete set null,
+  contact_id         uuid references contacts(id) on delete set null,
+  deal_id            uuid references deals(id) on delete set null,
+  activity_id        uuid references activities(id) on delete set null,
+  direction          text not null default 'outbound' check (direction in ('outbound', 'inbound')),
+  subject            text,
+  body_preview       text,
+  body_html          text,
+  to_recipients      jsonb not null default '[]',
+  cc_recipients      jsonb not null default '[]',
+  status             text not null default 'sent' check (status in ('sent', 'failed', 'draft')),
+  error_message      text,
+  graph_message_id   text,
+  conversation_id    text,
+  sent_at            timestamptz default now(),
+  created_at         timestamptz default now()
+);
+create index if not exists idx_email_messages_agent   on email_messages(agent_id, sent_at desc);
+create index if not exists idx_email_messages_contact on email_messages(contact_id, sent_at desc);
+create index if not exists idx_email_messages_deal    on email_messages(deal_id, sent_at desc);
+create unique index if not exists uq_email_messages_graph_id
+  on email_messages(graph_message_id) where graph_message_id is not null;
+
+alter table email_messages enable row level security;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- BOLDSIGN TEMPLATES  (reusable documents with fields; CRM prefills by field id)
 -- template_id is the BoldSign template id; field_tokens lists the label/id set
 -- the template expects so the app can prefill (e.g. property_address, list_price).
@@ -1771,6 +1873,32 @@ drop policy if exists agent_nudges_scope on agent_nudges;
 create policy agent_nudges_scope on agent_nudges for all to authenticated
   using      (app_is_admin() or agent_id = app_current_agent_id() or deal_id in (select app_visible_deal_ids()))
   with check (app_is_admin() or agent_id = app_current_agent_id() or deal_id in (select app_visible_deal_ids()));
+
+-- EMAIL MESSAGES — same visibility shape as ACTIVITIES (own + team-shared
+-- contact + visible deal; admins see all), since every send also lands a
+-- companion activities row and the two should never diverge on who can see them.
+drop policy if exists email_messages_scope on email_messages;
+create policy email_messages_scope on email_messages for all to authenticated
+  using (
+    app_is_admin()
+    or agent_id = app_current_agent_id()
+    or exists (
+      select 1 from contacts c
+      where c.id = email_messages.contact_id
+        and c.assigned_agent_id in (select app_visible_agent_ids('contacts'))
+    )
+    or email_messages.deal_id in (select app_visible_deal_ids())
+  )
+  with check (
+    app_is_admin()
+    or agent_id = app_current_agent_id()
+    or exists (
+      select 1 from contacts c
+      where c.id = email_messages.contact_id
+        and c.assigned_agent_id in (select app_visible_agent_ids('contacts'))
+    )
+    or email_messages.deal_id in (select app_visible_deal_ids())
+  );
 
 
 -- ═════════════════════════════════════════════════════════════════════════════

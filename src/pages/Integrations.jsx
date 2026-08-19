@@ -19,6 +19,119 @@ async function geocodeAddress(address) {
   }
 }
 
+// ─── Outlook tab ──────────────────────────────────────────────────────────────
+
+function OutlookSection() {
+  const [status, setStatus]     = useState(null)   // null = loading, {} shape from ms_graph_connection_status, or false = not connected
+  const [connecting, setConnecting] = useState(false)
+  const [disconnecting, setDisconnecting] = useState(false)
+
+  const load = useCallback(async () => {
+    const { data, error } = await supabase.from('ms_graph_connection_status').select('*').maybeSingle()
+    if (error) { pushToast(error.message, 'error'); setStatus(false); return }
+    setStatus(data || false)
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  // Land back here after the Microsoft redirect (App.jsx reads ?outlook= on
+  // load and routes to this page) — refresh status once more in case the
+  // callback's write raced this component's initial load.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.has('outlook')) load()
+  }, [load])
+
+  const connect = async () => {
+    setConnecting(true)
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session?.access_token) { pushToast('Please sign in again', 'error'); setConnecting(false); return }
+      const res = await fetch('/api/email-send?action=outlook-connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ returnPath: '/' }),
+      })
+      const data = await res.json()
+      if (!res.ok || !data.authUrl) { pushToast(data.error || 'Could not start connection', 'error'); setConnecting(false); return }
+      window.location.href = data.authUrl
+    } catch (err) {
+      pushToast(err.message, 'error')
+      setConnecting(false)
+    }
+  }
+
+  const disconnect = async () => {
+    setDisconnecting(true)
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      const res = await fetch('/api/email-send?action=outlook-disconnect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
+      })
+      const data = await res.json()
+      if (!res.ok) { pushToast(data.error || 'Disconnect failed', 'error'); setDisconnecting(false); return }
+      pushToast('Outlook disconnected')
+      setStatus(false)
+    } catch (err) {
+      pushToast(err.message, 'error')
+    }
+    setDisconnecting(false)
+  }
+
+  const connected = !!status
+  const dotColor = status === null ? 'var(--gw-mist)' : status?.status === 'error' ? 'var(--gw-red)' : connected ? 'var(--gw-green)' : 'var(--gw-mist)'
+  const dotLabel = status === null ? 'Checking…' : status?.status === 'error' ? 'Needs reconnect' : connected ? 'Connected' : 'Not connected'
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div className="card" style={{ padding: 24, maxWidth: 560 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Icon name="mail" size={16} />
+              Microsoft Outlook
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 2 }}>
+              Send email from your own Microsoft 365 mailbox — every send is logged to the contact/deal it's for
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600, color: dotColor, whiteSpace: 'nowrap' }}>
+            <div style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor }} />
+            {dotLabel}
+          </div>
+        </div>
+
+        {connected ? (
+          <>
+            <div style={{ fontSize: 13, marginBottom: 4 }}>
+              Signed in as <strong>{status.display_name || status.email}</strong>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 16 }}>{status.email}</div>
+            {status.status === 'error' && (
+              <div style={{ padding: '10px 14px', background: '#fdecea', border: '1px solid var(--gw-red)', borderRadius: 'var(--radius)', fontSize: 12, marginBottom: 16 }}>
+                {status.last_error || 'Microsoft 365 needs you to reconnect.'}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn btn--secondary" onClick={connect} disabled={connecting}>
+                {connecting ? 'Redirecting…' : 'Reconnect'}
+              </button>
+              <button className="btn btn--ghost" onClick={disconnect} disabled={disconnecting} style={{ color: 'var(--gw-red)' }}>
+                {disconnecting ? 'Disconnecting…' : 'Disconnect'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <button className="btn btn--primary" onClick={connect} disabled={connecting || status === null}>
+            <Icon name="mail" size={13} /> {connecting ? 'Redirecting…' : 'Connect Outlook'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ─── Mailchimp tab ────────────────────────────────────────────────────────────
 
 function MailchimpSection() {
@@ -434,7 +547,7 @@ function WebhooksSection() {
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function IntegrationsPage() {
-  const [tab, setTab] = useState('mailchimp')
+  const [tab, setTab] = useState('outlook')
 
   return (
     <div className="page-content">
@@ -447,6 +560,7 @@ export default function IntegrationsPage() {
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 24, flexWrap: 'wrap' }}>
         {[
+          ['outlook',   'Outlook'],
           ['mailchimp', 'Mailchimp'],
           ['webhooks',  'Zapier / Webhooks'],
         ].map(([id, label]) => (
@@ -456,6 +570,7 @@ export default function IntegrationsPage() {
         ))}
       </div>
 
+      {tab === 'outlook'   && <OutlookSection />}
       {tab === 'mailchimp' && <MailchimpSection />}
       {tab === 'webhooks'  && <WebhooksSection />}
     </div>
