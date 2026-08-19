@@ -2485,3 +2485,340 @@ begin
     'ran_at', now()
   );
 end $$;
+
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- WEBSITE LEAD INTAKE  (migration 0037)
+--
+-- POST /api/webhooks/website-lead is the brokerage website's (Manus) feed into
+-- the CRM. Defined here, after the RLS helpers, because its policies call
+-- app_is_admin() / app_visible_agent_ids().
+--
+-- The rotation cursor lives in a table of its own rather than being inferred
+-- from lead history. The previous implementation read the most recent
+-- `lead_captures` row and took the next agent alphabetically, which (a) handed
+-- two simultaneous leads the same agent — the read-modify-write race that cost
+-- ~2 of every 3 concurrent QR scans until 0031 — (b) offered no way to park an
+-- agent, and (c) moved the rotation whenever an admin deleted test leads.
+-- ═════════════════════════════════════════════════════════════════════════════
+
+-- One ring per lane. cursor_agent_id is who took the LAST lead in that lane.
+create table if not exists lead_rotations (
+  lane             text primary key check (lane in ('residential', 'commercial')),
+  cursor_agent_id  uuid references agents(id) on delete set null,
+  last_assigned_at timestamptz,
+  assigned_count   bigint not null default 0,
+  created_at       timestamptz default now()
+);
+
+insert into lead_rotations (lane) values ('residential'), ('commercial')
+  on conflict (lane) do nothing;
+
+-- Ring membership. `active` is the "in lead rotation" toggle (park an agent for
+-- vacation without deleting them); an agent may sit in BOTH rings, which
+-- agents.specialty — a single CHECK-constrained value — cannot express.
+-- sort_order fixes the order; ties fall back to agent name, so the default of
+-- all-zeros reproduces the historical alphabetical rotation exactly.
+create table if not exists lead_rotation_members (
+  lane       text not null check (lane in ('residential', 'commercial')),
+  agent_id   uuid not null references agents(id) on delete cascade,
+  active     boolean not null default true,
+  sort_order int     not null default 0,
+  created_at timestamptz default now(),
+  primary key (lane, agent_id)
+);
+create index if not exists idx_lead_rotation_members_lane
+  on lead_rotation_members(lane, active);
+
+-- Seed the rings from agents.specialty, which is what the pre-0037 round-robin
+-- used as its pool (a null specialty went to residential there, so it does
+-- here). Re-runnable, and a no-op on a fresh install with no agents yet — an
+-- agent added later needs a row here, or leads in their lane go unassigned.
+insert into lead_rotation_members (lane, agent_id)
+select case when a.specialty = 'commercial' then 'commercial' else 'residential' end, a.id
+  from agents a
+ on conflict (lane, agent_id) do nothing;
+
+-- A NEW AGENT IS OTHERWISE INVISIBLE TO THE ROTATION. Ring membership is
+-- explicit, which is the point — but that means hiring an agent and forgetting
+-- this table would silently keep them out of the rotation forever, and nobody
+-- notices a lead they never got. The trigger enrolls them the way the backfill
+-- did, from their specialty.
+--
+-- INSERT only, on purpose: a later specialty change does NOT move them. Once an
+-- admin has curated the rings (an agent parked, or deliberately in both), a
+-- profile edit must not silently rewrite that.
+create or replace function lead_rotation_autoenroll()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into lead_rotation_members (lane, agent_id)
+  values (
+    case when new.specialty = 'commercial' then 'commercial' else 'residential' end,
+    new.id
+  )
+  on conflict (lane, agent_id) do nothing;
+  return new;
+end $$;
+
+drop trigger if exists agents_lead_rotation_autoenroll on agents;
+create trigger agents_lead_rotation_autoenroll
+  after insert on agents
+  for each row execute function lead_rotation_autoenroll();
+
+-- The canonical webhook lead record. Distinct from `lead_captures`, which stays
+-- as the legacy landing-page form's flat, anonymously-insertable capture row.
+create table if not exists leads (
+  id                 uuid primary key default gen_random_uuid(),
+  contact_id         uuid references contacts(id) on delete set null,
+  name               text not null,
+  email              text not null,
+  phone              text,
+  interest_type      text not null default 'residential'
+                       check (interest_type in ('residential', 'commercial', 'both')),
+  -- The ring that actually assigned them. For interest_type 'both' this records
+  -- which side the balancer picked, so the decision stays auditable.
+  lane               text check (lane in ('residential', 'commercial')),
+  -- Exactly one accountable owner. A lead assigned to two agents has none.
+  assigned_agent_id  uuid references agents(id) on delete set null,
+  -- Notified-only courtesy on a 'both' lead: the other lane's next agent.
+  secondary_agent_id uuid references agents(id) on delete set null,
+  source             text not null default 'website',
+  source_detail      text,
+  message            text,
+  raw_payload        jsonb not null default '{}'::jsonb,
+  -- Idempotency: a webhook retry must not create a second lead or burn a second
+  -- rotation turn.
+  dedupe_key         text,
+  status             text not null default 'new'
+                       check (status in ('new', 'contacted', 'qualified', 'converted', 'lost')),
+  drip_status        text not null default 'pending'
+                       check (drip_status in ('pending', 'enrolled', 'skipped')),
+  drip_sequence_id   uuid references sequences(id) on delete set null,
+  assigned_at        timestamptz,
+  created_at         timestamptz default now()
+);
+
+create unique index if not exists idx_leads_dedupe_key
+  on leads(dedupe_key) where dedupe_key is not null;
+create index if not exists idx_leads_agent     on leads(assigned_agent_id, created_at desc);
+create index if not exists idx_leads_email     on leads(lower(email));
+create index if not exists idx_leads_status    on leads(status);
+create index if not exists idx_leads_contact   on leads(contact_id);
+create index if not exists idx_leads_secondary on leads(secondary_agent_id)
+  where secondary_agent_id is not null;
+
+-- What the visitor looked at before reaching out. property_id is filled in when
+-- the posted URL or title resolves to a CRM listing and left null when it does
+-- not — an unmatched address is still the most useful line in the agent's email,
+-- so it is never dropped.
+create table if not exists lead_property_views (
+  id          uuid primary key default gen_random_uuid(),
+  lead_id     uuid not null references leads(id) on delete cascade,
+  property_id uuid references properties(id) on delete set null,
+  url         text,
+  title       text,
+  position    int,
+  viewed_at   timestamptz,
+  created_at  timestamptz default now(),
+  constraint lead_property_views_identifiable check (url is not null or title is not null)
+);
+create index if not exists idx_lead_property_views_lead     on lead_property_views(lead_id, position);
+create index if not exists idx_lead_property_views_property on lead_property_views(property_id)
+  where property_id is not null;
+
+-- Drip hand-off. The machinery already exists (sequences / sequence_steps /
+-- contact_sequences, run daily by /api/cron?task=sequence) — a new lead only
+-- needs enrolling, so ONE sequence per lane is marked as the auto-enroll
+-- target. No second scheduler.
+alter table sequences add column if not exists auto_enroll_lane text;
+alter table sequences drop constraint if exists sequences_auto_enroll_lane_check;
+alter table sequences add  constraint sequences_auto_enroll_lane_check
+  check (auto_enroll_lane is null or auto_enroll_lane in ('residential', 'commercial'));
+create unique index if not exists idx_sequences_auto_enroll_lane
+  on sequences(auto_enroll_lane) where auto_enroll_lane is not null;
+
+-- ── Assignment: one atomic round trip ───────────────────────────────────────
+-- Returns the agent AND the lane that assigned them, which can differ from the
+-- lane asked for: a brokerage that has not staffed commercial must still capture
+-- a commercial lead rather than drop it.
+--
+-- gen_random_uuid() and an explicit search_path: the 0033 outage was a
+-- `security definer ... set search_path = public` function calling
+-- uuid_generate_v4(), which Supabase installs into the `extensions` schema.
+create or replace function assign_lead_round_robin(p_lane text)
+returns table (agent_id uuid, lane text)
+language plpgsql
+security definer
+set search_path = public
+as $$
+-- The OUT parameters are named agent_id and lane so PostgREST returns those
+-- keys. That makes a bare `lane` ambiguous between the out-parameter and the
+-- lead_rotations column — and an ON CONFLICT target must be a bare column name,
+-- so `on conflict (lane)` below fails to parse at RUN TIME with "column
+-- reference lane is ambiguous". This pragma resolves bare names to the column;
+-- every other reference in the body is explicitly qualified regardless.
+#variable_conflict use_column
+declare
+  v_lane   text;
+  v_cursor uuid;
+  v_next   uuid;
+begin
+  if p_lane is null or p_lane not in ('residential', 'commercial') then
+    raise exception 'assign_lead_round_robin: unknown lane %', p_lane
+      using errcode = '22023';
+  end if;
+
+  foreach v_lane in array array[
+    p_lane,
+    case p_lane when 'residential' then 'commercial' else 'residential' end
+  ] loop
+    v_next   := null;
+    v_cursor := null;
+
+    insert into lead_rotations (lane) values (v_lane) on conflict (lane) do nothing;
+
+    -- THE LOCK THAT MAKES THIS CORRECT. Concurrent deliveries for one lane queue
+    -- here, so each reads a cursor that already includes the assignment before
+    -- it. Without it they read the same cursor and every lead in a burst goes to
+    -- the same agent.
+    select r.cursor_agent_id into v_cursor
+      from lead_rotations r
+     where r.lane = v_lane
+       for update;
+
+    with ring as (
+      select m.agent_id                                                   as id,
+             row_number() over (order by m.sort_order, a.name, m.agent_id) as rn,
+             count(*)     over ()                                          as total
+        from lead_rotation_members m
+        join agents a on a.id = m.agent_id
+       where m.lane = v_lane
+         and m.active
+    )
+    select r.id into v_next
+      from ring r
+     where r.rn = (
+       -- Previous assignee's position, wrapped. A null cursor (first lead ever)
+       -- and a cursor whose agent has left the ring both resolve to max(rn), so
+       -- the next pick is rn 1 — the ring restarts at its head rather than
+       -- throwing.
+       coalesce(
+         (select c.rn from ring c where c.id = v_cursor),
+         (select max(c.rn) from ring c)
+       ) % (select max(c.total) from ring c)
+     ) + 1;
+
+    if v_next is not null then
+      update lead_rotations r
+         set cursor_agent_id  = v_next,
+             last_assigned_at = now(),
+             assigned_count   = r.assigned_count + 1
+       where r.lane = v_lane;
+
+      return query select v_next, v_lane;
+      return;
+    end if;
+  end loop;
+
+  -- Both rings empty. The caller stores the lead unassigned: an unassigned lead
+  -- an admin can claim beats a 500 and a lost inquiry.
+  return;
+end $$;
+
+-- Which ring takes an "either specialty" lead: whichever has handed out fewer,
+-- so 'both' traffic does not starve one side.
+create or replace function lead_lane_for_both()
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select r.lane
+    from lead_rotations r
+   where exists (
+     select 1 from lead_rotation_members m
+      where m.lane = r.lane and m.active
+   )
+   order by r.assigned_count asc, r.lane asc
+   limit 1;
+$$;
+
+-- Service role only. These advance shared state and bypass RLS by design; an
+-- authenticated agent must not be able to spin the rotation onto themselves.
+revoke all on function assign_lead_round_robin(text) from public;
+revoke all on function lead_lane_for_both()          from public;
+grant execute on function assign_lead_round_robin(text) to service_role;
+grant execute on function lead_lane_for_both()          to service_role;
+
+-- ── RLS ─────────────────────────────────────────────────────────────────────
+-- Every write comes from the webhook on the SERVICE key, which bypasses RLS. So
+-- unlike `lead_captures` — which carries `public_insert ... to anon` because the
+-- landing-page form posts with the anon key that ships in the browser bundle —
+-- these tables get NO anon policy at all. Nothing in the browser can write a
+-- lead, forge an assignment, or read another agent's pipeline.
+alter table leads                 enable row level security;
+alter table lead_property_views   enable row level security;
+alter table lead_rotations        enable row level security;
+alter table lead_rotation_members enable row level security;
+
+-- LEADS — read-only to agents, and only their own: the owner, the notified
+-- secondary on a 'both' lead, sharing team peers (the `contacts` dimension,
+-- since a lead becomes a contact), and admins. Deliberately SELECT-only: an
+-- agent who could UPDATE could reassign a peer's lead to themselves, and one who
+-- could DELETE could erase the evidence.
+drop policy if exists leads_read_scope on leads;
+create policy leads_read_scope on leads for select to authenticated
+  using (
+    app_is_admin()
+    or assigned_agent_id  in (select app_visible_agent_ids('contacts'))
+    or secondary_agent_id = app_current_agent_id()
+  );
+
+-- Correcting an assignment (an agent quit, a lead landed in the wrong lane) is
+-- an admin action.
+drop policy if exists leads_admin_write on leads;
+create policy leads_admin_write on leads for update to authenticated
+  using (app_is_admin()) with check (app_is_admin());
+
+drop policy if exists leads_admin_delete on leads;
+create policy leads_admin_delete on leads for delete to authenticated
+  using (app_is_admin());
+
+-- Viewed properties: the parent lead's rule, restated rather than relying on
+-- nested RLS — the same shape as activities_scope above.
+drop policy if exists lead_property_views_scope on lead_property_views;
+create policy lead_property_views_scope on lead_property_views for select to authenticated
+  using (exists (
+    select 1 from leads l
+     where l.id = lead_property_views.lead_id
+       and (
+         app_is_admin()
+         or l.assigned_agent_id  in (select app_visible_agent_ids('contacts'))
+         or l.secondary_agent_id = app_current_agent_id()
+       )
+  ));
+
+-- The rings are readable by any authenticated agent — whose turn is next is not
+-- a secret, and hiding it is how a rotation loses trust — and writable by admins
+-- only. An agent who could UPDATE lead_rotations could point the cursor at the
+-- person before them and take every lead.
+drop policy if exists lead_rotations_read on lead_rotations;
+create policy lead_rotations_read on lead_rotations for select to authenticated
+  using (true);
+
+drop policy if exists lead_rotations_admin_write on lead_rotations;
+create policy lead_rotations_admin_write on lead_rotations for all to authenticated
+  using (app_is_admin()) with check (app_is_admin());
+
+drop policy if exists lead_rotation_members_read on lead_rotation_members;
+create policy lead_rotation_members_read on lead_rotation_members for select to authenticated
+  using (true);
+
+drop policy if exists lead_rotation_members_admin_write on lead_rotation_members;
+create policy lead_rotation_members_admin_write on lead_rotation_members for all to authenticated
+  using (app_is_admin()) with check (app_is_admin());

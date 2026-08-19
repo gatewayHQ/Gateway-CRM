@@ -371,45 +371,34 @@ async function handleGate(req, res) {
   return res.json({ ok: true, contactId, isNew, assignedAgentId })
 }
 
-// Round-robin: pull agents by specialty, find the most recently assigned agent
-// in that pool, and return the next one in alphabetical rotation. Falls back to
-// the other specialty, then any agent, then null if none are configured.
+// Round-robin for the browser-callable form. Delegates to the SAME rotation the
+// website webhook uses (migrations/0037: one atomic step against a locked
+// cursor), because two intake paths running two independent rotations would each
+// think they were being fair while together handing one agent twice their share.
+//
+// The pre-0037 picker it replaced read the latest lead_captures row and took the
+// next agent alphabetically — a read-modify-write that gives two simultaneous
+// leads the same agent. api/_lib/leadIntake.js keeps that implementation as the
+// fallback for a database where 0037 has not been applied yet, so this file and
+// the SQL can deploy in either order.
 async function pickRoundRobinAgent(supabaseUrl, headers, propertyType) {
-  const specialty = propertyType === 'commercial' ? 'commercial' : 'residential'
-  const pools = [
-    `specialty=eq.${specialty}`,
-    `specialty=eq.${specialty === 'residential' ? 'commercial' : 'residential'}`,
-    '',  // all agents
-  ]
-
-  for (const filter of pools) {
-    const qs = filter ? `${filter}&` : ''
-    const agentsRes = await fetch(
-      `${supabaseUrl}/rest/v1/agents?${qs}select=id,name&order=name.asc`,
-      { headers }
-    )
-    if (!agentsRes.ok) continue
-    const agents = await agentsRes.json()
-    if (!agents.length) continue
-    if (agents.length === 1) return agents[0].id
-
-    const idList = agents.map(a => a.id).join(',')
-    const lastRes = await fetch(
-      `${supabaseUrl}/rest/v1/lead_captures?agent_id=in.(${idList})&select=agent_id&order=created_at.desc&limit=1`,
-      { headers }
-    )
-    const last = lastRes.ok ? await lastRes.json() : []
-    if (!last.length) return agents[0].id
-
-    const lastIdx = agents.findIndex(a => a.id === last[0].agent_id)
-    const nextIdx = (lastIdx === -1 ? 0 : lastIdx + 1) % agents.length
-    return agents[nextIdx].id
-  }
-
-  return null  // no agents configured at all
+  const { assignAgents } = await import('./_lib/leadIntake.js')
+  const lane = propertyType === 'commercial' ? 'commercial' : 'residential'
+  const { primary } = await assignAgents({ url: supabaseUrl, headers }, lane)
+  return primary?.agentId ?? null
 }
 
 export default async function handler(req, res) {
+  // The website webhook is routed FIRST, before the permissive CORS headers
+  // below are set. It authenticates with a shared secret, so it must not be
+  // callable from a browser: `Access-Control-Allow-Origin: *` on a
+  // secret-bearing endpoint invites someone to put that secret in page source.
+  // Reached as POST /api/webhooks/website-lead via the vercel.json rewrite.
+  if (req.query?.action === 'website-lead') {
+    const { default: handleWebsiteLead } = await import('./_handlers/website-lead.js')
+    return handleWebsiteLead(req, res)
+  }
+
   // CORS for the lead-capture POST (landing pages may be embedded externally)
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
