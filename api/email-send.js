@@ -32,7 +32,10 @@
  *                                     code, stores the encrypted token pair, 302s
  *                                     back into the app
  *   POST ?action=outlook-send         (auth) → send via Graph /me/sendMail, logs
- *                                     email_messages + a companion activities row
+ *                                     email_messages + a companion activities row.
+ *                                     Body { draft: true } creates a DRAFT in the
+ *                                     agent's own mailbox instead of sending —
+ *                                     for review/personalization in Outlook itself.
  *   POST ?action=outlook-disconnect   (auth) → removes the stored connection
  *   POST ?action=outlook-calendar-sync (auth) → push one deal's key dates to
  *                                     the ASSIGNED agent's Outlook calendar
@@ -41,6 +44,14 @@
  *                                     right after an edit in Pipeline's Key
  *                                     Dates tab. api/cron.js?task=calendar-sync
  *                                     is the nightly sweep over every deal.
+ *   POST ?action=outlook-contact-lookup (auth) → { email } -> matching contact
+ *                                     from the agent's OWN Outlook contacts
+ *                                     (name/phone/company), or null. Read-only;
+ *                                     never written back to the CRM automatically.
+ *   POST ?action=outlook-freebusy     (auth) → { date } -> the agent's OWN
+ *                                     busy blocks that day (self-check only —
+ *                                     see api/_lib/msGraph.js#getFreeBusy for
+ *                                     why this doesn't check OTHER agents).
  *
  * Auth for the outlook-* actions (except the callback, which cannot carry a
  * Bearer token — it's a bare browser redirect from Microsoft) is the normal
@@ -54,6 +65,7 @@ import {
   generateState, generateCodeVerifier, codeChallengeFor, buildAuthorizeUrl,
   resolveRedirectUri, exchangeCodeForTokens, fetchGraphProfile,
   encryptToken, getValidAccessToken, sendGraphMail,
+  lookupGraphContact, createDraftMessage, getFreeBusy,
 } from './_lib/msGraph.js'
 import { syncDealCalendar } from './_lib/calendarSync.js'
 
@@ -175,7 +187,7 @@ async function handleOutlookCallback(req, res) {
 async function handleOutlookSend(req, res) {
   const { agent } = await requireAgent(req)
   const svc = getServiceClient()
-  const { to, cc, subject, html, text, contactId, dealId } = req.body || {}
+  const { to, cc, subject, html, text, contactId, dealId, draft } = req.body || {}
 
   if (!to || (Array.isArray(to) && to.length === 0)) {
     return res.status(400).json({ error: 'Missing "to" recipient' })
@@ -188,20 +200,31 @@ async function handleOutlookSend(req, res) {
   const toList = Array.isArray(to) ? to : [to]
   const ccList = cc ? (Array.isArray(cc) ? cc : [cc]) : []
 
+  // draft: true creates the message in the agent's own Outlook drafts instead
+  // of sending — for an agent who wants to review/personalize before it goes
+  // out. Not logged as an activity (nothing was actually sent to the contact
+  // yet), but still recorded in email_messages so it isn't lost from the CRM's
+  // own view of what's in flight.
   let sendError = null
+  let draftWebLink = null
   try {
-    await sendGraphMail(accessToken, { subject, html: bodyHtml, to: toList, cc: ccList })
+    if (draft) {
+      const created = await createDraftMessage(accessToken, { subject, html: bodyHtml, to: toList, cc: ccList })
+      draftWebLink = created?.webLink || null
+    } else {
+      await sendGraphMail(accessToken, { subject, html: bodyHtml, to: toList, cc: ccList })
+    }
   } catch (err) {
     sendError = err.message
   }
 
   const preview = String(text || html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 280)
 
-  // Companion activities row so a sent email shows up in the existing
+  // Companion activities row so a SENT email shows up in the existing
   // contact/deal timeline (src/pages/Contacts/ActivityTab.jsx, DealPage.jsx).
   // Best-effort — never let a logging failure look like the send itself failed.
   let activityId = null
-  if (!sendError && (contactId || dealId)) {
+  if (!sendError && !draft && (contactId || dealId)) {
     const { data: activity } = await svc.from('activities').insert([{
       contact_id: contactId || null,
       deal_id:    dealId || null,
@@ -222,7 +245,7 @@ async function handleOutlookSend(req, res) {
     body_html:     bodyHtml,
     to_recipients: toList.map(email => ({ email })),
     cc_recipients: ccList.map(email => ({ email })),
-    status:        sendError ? 'failed' : 'sent',
+    status:        sendError ? 'failed' : draft ? 'draft' : 'sent',
     error_message: sendError,
   }]).select('id').single()
 
@@ -232,7 +255,7 @@ async function handleOutlookSend(req, res) {
   if (sendError) {
     return res.status(502).json({ error: sendError, emailId: emailRow?.id })
   }
-  return res.status(200).json({ ok: true, from: connection.email, emailId: emailRow?.id })
+  return res.status(200).json({ ok: true, from: connection.email, emailId: emailRow?.id, draftWebLink })
 }
 
 // ─── Microsoft Graph: disconnect ─────────────────────────────────────────────
@@ -271,6 +294,41 @@ async function handleOutlookCalendarSync(req, res) {
   }
 
   const result = await syncDealCalendar(svc, deal, { property })
+  return res.status(200).json({ ok: true, ...result })
+}
+
+// ─── Microsoft Graph: contact enrichment ─────────────────────────────────────
+// Read-only lookup against the AGENT'S OWN Outlook contacts — never written
+// back to the CRM automatically. The caller (ContactDrawer.jsx) decides
+// what, if anything, to fill in, and never overwrites a field that already
+// has a value.
+async function handleOutlookContactLookup(req, res) {
+  const { agent } = await requireAgent(req)
+  const svc = getServiceClient()
+  const { email } = req.body || {}
+  if (!email) return res.status(400).json({ error: 'Missing email' })
+
+  const { accessToken } = await getValidAccessToken(svc, agent.id)
+  const match = await lookupGraphContact(accessToken, email)
+  return res.status(200).json({ ok: true, match })
+}
+
+// ─── Microsoft Graph: free/busy (self-check) ─────────────────────────────────
+async function handleOutlookFreeBusy(req, res) {
+  const { agent } = await requireAgent(req)
+  const svc = getServiceClient()
+  const { date } = req.body || {}
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: 'Missing or invalid "date" (expected YYYY-MM-DD)' })
+  }
+
+  const { accessToken, connection } = await getValidAccessToken(svc, agent.id)
+  const result = await getFreeBusy(accessToken, {
+    email: connection.email,
+    startISO: `${date}T00:00:00Z`,
+    endISO:   `${date}T23:59:59Z`,
+    intervalMinutes: 30,
+  })
   return res.status(200).json({ ok: true, ...result })
 }
 
@@ -416,6 +474,14 @@ async function handler(req, res) {
     if (action === 'outlook-calendar-sync') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
       return await handleOutlookCalendarSync(req, res)
+    }
+    if (action === 'outlook-contact-lookup') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+      return await handleOutlookContactLookup(req, res)
+    }
+    if (action === 'outlook-freebusy') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+      return await handleOutlookFreeBusy(req, res)
     }
   } catch (err) {
     return errorResponse(res, err)

@@ -3,17 +3,53 @@ import { supabase } from '../lib/supabase.js'
 import { formatDate } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
-function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave }) {
+function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave, activeAgent }) {
   const blank = { title:'', type:'follow-up', priority:'medium', due_date:'', contact_id:'', deal_id:'', agent_id:'', notes:'', completed:false }
   const [form, setForm] = useState(blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
+  const [outlookConnected, setOutlookConnected] = useState(false)
+  const [availability, setAvailability] = useState(null)   // null | 'loading' | { busyBlocks }
 
   React.useEffect(() => {
     setForm(task ? { ...task, due_date: task.due_date ? task.due_date.slice(0,16) : '' } : blank)
     setErrors({})
   }, [task, open])
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
+
+  React.useEffect(() => {
+    if (!open) return
+    supabase.from('ms_graph_connection_status').select('status').maybeSingle()
+      .then(({ data }) => setOutlookConnected(data?.status === 'connected'))
+  }, [open])
+
+  // Self-check only (see api/_lib/msGraph.js#getFreeBusy) — only meaningful
+  // when the task is assigned to the agent currently viewing it, or
+  // unassigned. A quick heads-up before booking a showing, not a hard block.
+  const showAvailability = form.type === 'showing' && outlookConnected
+    && (!form.agent_id || form.agent_id === activeAgent?.id)
+  React.useEffect(() => {
+    setAvailability(null)
+    if (!showAvailability || !form.due_date) return
+    let cancelled = false
+    setAvailability('loading')
+    ;(async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession()
+        if (!session?.access_token) return
+        const res = await fetch('/api/email-send?action=outlook-freebusy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+          body: JSON.stringify({ date: form.due_date.slice(0, 10) }),
+        })
+        const data = await res.json()
+        if (!cancelled) setAvailability(res.ok ? data : null)
+      } catch {
+        if (!cancelled) setAvailability(null)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [showAvailability, form.due_date])
 
   const save = async () => {
     const e = {}
@@ -60,7 +96,18 @@ function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave }) {
           <div className="form-group"><label className="form-label">Type</label><select className="form-control" value={form.type} onChange={e=>set('type',e.target.value)}>{['call','email','showing','follow-up','document','other'].map(t=><option key={t} value={t}>{t.charAt(0).toUpperCase()+t.slice(1)}</option>)}</select></div>
           <div className="form-group"><label className="form-label">Priority</label><select className="form-control" value={form.priority} onChange={e=>set('priority',e.target.value)}>{['high','medium','low'].map(p=><option key={p} value={p}>{p.charAt(0).toUpperCase()+p.slice(1)}</option>)}</select></div>
         </div>
-        <div className="form-group"><label className="form-label">Due Date</label><input className="form-control" type="datetime-local" value={form.due_date||''} onChange={e=>set('due_date',e.target.value)} /></div>
+        <div className="form-group">
+          <label className="form-label">Due Date</label>
+          <input className="form-control" type="datetime-local" value={form.due_date||''} onChange={e=>set('due_date',e.target.value)} />
+          {showAvailability && form.due_date && (
+            <div className="form-hint">
+              {availability === 'loading' ? 'Checking your Outlook calendar…'
+                : availability?.busyBlocks?.length ? `⚠️ You have ${availability.busyBlocks.length} other event(s) on your calendar that day`
+                : availability ? '✓ Your calendar is clear that day'
+                : null}
+            </div>
+          )}
+        </div>
         <div className="form-group"><label className="form-label">Contact</label><SearchDropdown items={contacts} value={form.contact_id} onSelect={v=>set('contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
         <div className="form-group"><label className="form-label">Deal</label><SearchDropdown items={deals} value={form.deal_id} onSelect={v=>set('deal_id',v)} placeholder="Search deals…" labelKey="title" /></div>
         <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
@@ -218,7 +265,7 @@ export default function TasksPage({ db, setDb, activeAgent }) {
         </>
       )}
 
-      <TaskDrawer open={drawer} onClose={() => setDrawer(false)} task={editing} agents={agents} contacts={contacts} deals={deals} onSave={reload} />
+      <TaskDrawer open={drawer} onClose={() => setDrawer(false)} task={editing} agents={agents} contacts={contacts} deals={deals} onSave={reload} activeAgent={activeAgent} />
       {confirm && <ConfirmDialog message="Delete this task?" onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
     </div>
   )

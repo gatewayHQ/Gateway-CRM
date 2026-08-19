@@ -293,6 +293,117 @@ export async function deleteCalendarEvent(accessToken, eventId) {
   return graphEventRequest('DELETE', `${GRAPH_BASE}/me/events/${eventId}`, accessToken)
 }
 
+// ─── Inbound mail (delta query) ───────────────────────────────────────────────
+// One page of the inbox delta feed. Pass the previous response's
+// `@odata.nextLink` to page through a large batch, or its `@odata.deltaLink`
+// (stored as ms_graph_connections.mail_delta_link) on the next sync run to
+// get only what changed since. With neither (an agent's first sync), starts
+// a fresh delta session bounded to the last `sinceDays` — otherwise the very
+// first sync would try to enumerate an agent's entire mail history.
+export async function fetchInboxDelta(accessToken, { link, sinceDays = 30 } = {}) {
+  let url = link
+  if (!url) {
+    const since = new Date(Date.now() - sinceDays * 86400000).toISOString()
+    const params = new URLSearchParams({
+      '$select': 'id,subject,from,receivedDateTime,bodyPreview,conversationId',
+      '$filter': `receivedDateTime ge ${since}`,
+    })
+    url = `${GRAPH_BASE}/me/mailFolders/inbox/messages/delta?${params.toString()}`
+  }
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    const e = new Error(data?.error?.message || `Graph inbox delta failed (HTTP ${res.status})`)
+    e.status = res.status
+    throw e
+  }
+  return data   // { value: [...], '@odata.nextLink'?, '@odata.deltaLink'? }
+}
+
+// ─── Contact enrichment (agent's own Outlook contacts) ────────────────────────
+// Delegated /me/contacts only — never another agent's contacts, and never
+// written back to Outlook, just read to help fill in blank CRM fields.
+export async function lookupGraphContact(accessToken, email) {
+  const filter = `emailAddresses/any(a:a/address eq '${String(email).replace(/'/g, "''")}')`
+  const params = new URLSearchParams({
+    '$filter': filter,
+    '$select': 'displayName,mobilePhone,businessPhones,companyName,jobTitle',
+    '$top': '1',
+  })
+  const res = await fetch(`${GRAPH_BASE}/me/contacts?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    const e = new Error(data?.error?.message || `Graph contact lookup failed (HTTP ${res.status})`)
+    e.status = res.status
+    throw e
+  }
+  const match = data?.value?.[0]
+  if (!match) return null
+  return {
+    displayName: match.displayName || null,
+    phone:       match.mobilePhone || match.businessPhones?.[0] || null,
+    companyName: match.companyName || null,
+    jobTitle:    match.jobTitle || null,
+  }
+}
+
+// ─── Draft-mode send ──────────────────────────────────────────────────────────
+// POST /me/messages creates the message as a DRAFT in the agent's own
+// mailbox (never sent) — for an agent who wants to review/personalize in
+// Outlook itself before sending, rather than sending immediately from the CRM.
+export async function createDraftMessage(accessToken, { subject, html, to, cc }) {
+  const res = await fetch(`${GRAPH_BASE}/me/messages`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      subject: subject || '(no subject)',
+      body: { contentType: 'HTML', content: html || '' },
+      toRecipients: toRecipientList(to),
+      ...(cc && cc.length ? { ccRecipients: toRecipientList(cc) } : {}),
+    }),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    const e = new Error(data?.error?.message || `Graph draft create failed (HTTP ${res.status})`)
+    e.status = res.status === 401 ? 401 : 502
+    throw e
+  }
+  return data   // includes the new draft's `id`, `webLink`
+}
+
+// ─── Free/busy (agent's own calendar only) ────────────────────────────────────
+// Delegated Calendars.Read covers checking the AGENT'S OWN schedule — checking
+// a COLLEAGUE's free/busy through the same delegated grant depends on the
+// org's Exchange sharing policy and isn't guaranteed, so v1 deliberately scopes
+// this to self-check only (e.g. "am I free to book this showing on my own
+// calendar?") rather than assuming cross-agent visibility that may not exist.
+export async function getFreeBusy(accessToken, { email, startISO, endISO, intervalMinutes = 30 }) {
+  const res = await fetch(`${GRAPH_BASE}/me/calendar/getSchedule`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      schedules: [email],
+      startTime: { dateTime: startISO, timeZone: 'UTC' },
+      endTime:   { dateTime: endISO,   timeZone: 'UTC' },
+      availabilityViewInterval: intervalMinutes,
+    }),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    const e = new Error(data?.error?.message || `Graph getSchedule failed (HTTP ${res.status})`)
+    e.status = res.status
+    throw e
+  }
+  const schedule = data?.value?.[0]
+  return {
+    // availabilityView: one char per interval — '0' free, '1' tentative, '2' busy, '3' oof
+    availabilityView: schedule?.availabilityView || '',
+    busyBlocks: (schedule?.scheduleItems || []).filter(i => i.status !== 'free'),
+  }
+}
+
 // ─── Valid-token resolution (refresh-on-demand) ───────────────────────────────
 // Called by every send/sync path. Refreshes when the stored token is within 2
 // minutes of expiry (or already expired), persists the new pair, and marks the

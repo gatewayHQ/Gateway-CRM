@@ -305,7 +305,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
       .then(({ data }) => setOutlookStatus(data && data.status === 'connected' ? data : false))
   }, [])
 
-  const send = async () => {
+  const send = async (asDraft = false) => {
     if (!to) { pushToast('Enter a recipient email', 'error'); return }
     setSending(true)
 
@@ -320,23 +320,24 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
             to, subject: subject || '(no subject)', html,
             contactId: contact?.id || null,
             dealId: ctx?.dealId || null,
+            draft: asDraft,
           }),
         })
         const result = await res.json()
         if (!res.ok) {
           setSending(false)
-          pushToast(`Send failed: ${result.error || 'Unknown error'}`, 'error')
+          pushToast(`${asDraft ? 'Save' : 'Send'} failed: ${result.error || 'Unknown error'}`, 'error')
           return
         }
         if (ctx?.templateId) {
           await supabase.from('templates').update({ usage_count: (ctx.usageCount || 0) + 1 }).eq('id', ctx.templateId)
         }
         setSending(false)
-        pushToast(`Email sent to ${to}`)
+        pushToast(asDraft ? 'Saved to your Outlook drafts' : `Email sent to ${to}`)
         onClose()
       } catch (err) {
         setSending(false)
-        pushToast('Send failed: ' + err.message, 'error')
+        pushToast(`${asDraft ? 'Save' : 'Send'} failed: ` + err.message, 'error')
       }
     } else if (resendKey) {
       try {
@@ -442,7 +443,12 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
         <button className="btn btn--ghost" onClick={()=>setAiOpen(o=>!o)} style={{ marginRight:'auto' }}>
           ✦ Write with AI
         </button>
-        <button className="btn btn--primary" onClick={send} disabled={sending || !to}>
+        {outlookStatus && (
+          <button className="btn btn--secondary" onClick={() => send(true)} disabled={sending || !to} title="Save to your Outlook drafts instead of sending now">
+            {sending ? '…' : 'Save as Draft'}
+          </button>
+        )}
+        <button className="btn btn--primary" onClick={() => send(false)} disabled={sending || !to}>
           <Icon name="send" size={13} />{sending ? 'Sending…' : outlookStatus ? 'Send via Outlook' : resendKey ? 'Send Email' : 'Open in Mail App'}
         </button>
       </div>

@@ -9,6 +9,8 @@
  * GET /api/cron?task=calendar-sync  — nightly deal key dates → agent Outlook calendar
  *                                     sweep (safety net; the live edit path also
  *                                     fires this per-deal — see api/email-send.js)
+ * GET /api/cron?task=inbox-sync     — nightly inbound-mail matching (Graph delta
+ *                                     query per connected agent; see api/_lib/inboxSync.js)
  *
  * These scheduled tasks share one serverless function (Vercel Hobby caps total
  * functions at 12 — this repo is already at that cap). Each is dispatched by
@@ -31,6 +33,7 @@ import { boldsign, listAllTemplates, getRateLimitState } from './boldsign.js'
 import { OPERATING_STATES } from '../src/lib/constants.js'
 import { ALL_DEAL_STAGES, isOpenStage } from '../src/lib/stages.js'
 import { syncAllDealCalendars } from './_lib/calendarSync.js'
+import { syncAllInboxes } from './_lib/inboxSync.js'
 
 // Every stage a deal can sit in while still in flight — derived from the stage
 // registry rather than hand-listed, because the hand-listed version silently
@@ -398,8 +401,10 @@ export default async function handler(req, res) {
     result = await runScanReconcile(supabase)
   } else if (task === 'calendar-sync') {
     result = await runCalendarSync(supabase)
+  } else if (task === 'inbox-sync') {
+    result = await runInboxSync(supabase)
   } else {
-    return res.status(400).json({ error: `Unknown task "${task}" — use ?task=reminders, ?task=sequence, ?task=nudges, ?task=boldsign-sync, ?task=scan-reconcile, or ?task=calendar-sync` })
+    return res.status(400).json({ error: `Unknown task "${task}" — use ?task=reminders, ?task=sequence, ?task=nudges, ?task=boldsign-sync, ?task=scan-reconcile, ?task=calendar-sync, or ?task=inbox-sync` })
   }
 
   return res.status(result.status).json(result.body)
@@ -441,6 +446,18 @@ async function runScanReconcile(supabase) {
 async function runCalendarSync(supabase) {
   try {
     const result = await syncAllDealCalendars(supabase)
+    return { status: 200, body: result }
+  } catch (err) {
+    return { status: 500, body: { ok: false, error: err.message } }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task: inbound mail matching (nightly)
+// ─────────────────────────────────────────────────────────────────────────────
+async function runInboxSync(supabase) {
+  try {
+    const result = await syncAllInboxes(supabase)
     return { status: 200, body: result }
   } catch (err) {
     return { status: 500, body: { ok: false, error: err.message } }
