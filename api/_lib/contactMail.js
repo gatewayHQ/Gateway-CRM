@@ -67,12 +67,20 @@ export async function readMirroredThread(userClient, contactId, { limit = 50 } =
 }
 
 // ─── Mirroring one page of Graph results ──────────────────────────────────────
-// Returns { inserted, adopted }. Never throws on a per-row conflict: a message
-// already mirrored (by another agent's request, or a re-pulled page) is the
-// expected case, not an error.
+// Returns { inserted, adopted, failed, firstError }. Never throws on a per-row
+// conflict: a message already mirrored (by another agent's request, or a
+// re-pulled page) is the expected case, not an error.
+//
+// `failed` + `firstError` exist because a mirror write that fails for a
+// SYSTEMATIC reason — a check constraint that predates migration 0036, a column
+// that predates 0038 — used to be indistinguishable from an empty mailbox: the
+// rows were dropped, the count stayed zero, and the panel rendered "no
+// correspondence yet" over a mailbox full of mail. A per-row conflict is still
+// expected and ignored; a page where NOTHING could be written is a defect the
+// caller has to be able to see.
 export async function mirrorMessages(svc, { agentId, contactId, messages }) {
   const usable = messages.filter(m => m.graphMessageId && !m.isDraft)
-  if (!usable.length) return { inserted: 0, adopted: 0 }
+  if (!usable.length) return { inserted: 0, adopted: 0, failed: 0, firstError: null }
 
   // Which of these do we already hold? Asked by id rather than by scanning the
   // contact's whole history, so the cost doesn't grow with the mirror.
@@ -84,7 +92,7 @@ export async function mirrorMessages(svc, { agentId, contactId, messages }) {
   const known = new Set((existing || []).map(r => r.graph_message_id))
 
   let fresh = usable.filter(m => !known.has(m.graphMessageId))
-  if (!fresh.length) return { inserted: 0, adopted: 0 }
+  if (!fresh.length) return { inserted: 0, adopted: 0, failed: 0, firstError: null }
 
   // Adopt, rather than duplicate, the rows this CRM created at send time. Those
   // carry no Graph id (POST /me/sendMail returns 202 with no body), so their
@@ -121,7 +129,7 @@ export async function mirrorMessages(svc, { agentId, contactId, messages }) {
   }
   fresh = fresh.filter(m => !known.has(m.graphMessageId))
 
-  let inserted = 0
+  let inserted = 0, failed = 0, firstError = null
   if (fresh.length) {
     const rows = fresh.map(m => ({
       agent_id:         agentId,
@@ -149,11 +157,19 @@ export async function mirrorMessages(svc, { agentId, contactId, messages }) {
     // rest of the page down with it.
     for (const row of rows) {
       const { error } = await svc.from('email_messages').insert([row])
-      if (!error) inserted++
+      if (error) {
+        failed++
+        if (!firstError) firstError = error.message
+        continue
+      }
+      inserted++
+    }
+    if (failed) {
+      console.error(`[contactMail] ${failed}/${rows.length} mirror insert(s) failed for contact ${contactId}: ${firstError}`)
     }
   }
 
-  return { inserted, adopted }
+  return { inserted, adopted, failed, firstError }
 }
 
 // ─── Sync state ───────────────────────────────────────────────────────────────
@@ -237,7 +253,7 @@ export async function syncContactMail(svc, {
   // landed) falls through to a normal first page rather than doing nothing.
   let link = intent === 'more' ? (sync?.next_link || null) : null
 
-  let inserted = 0, adopted = 0, pages = 0
+  let inserted = 0, adopted = 0, pages = 0, failed = 0, mirrorError = null
   let mode = sync?.mode || null
   let nextLink = intent === 'more' ? null : (sync?.next_link || null)
   let reachedEnd = false
@@ -252,6 +268,8 @@ export async function syncContactMail(svc, {
       const r = await mirrorMessages(svc, { agentId, contactId, messages: normalized })
       inserted += r.inserted
       adopted  += r.adopted
+      failed   += r.failed
+      if (!mirrorError) mirrorError = r.firstError
       pages++
 
       if (intent === 'more') {
@@ -286,6 +304,23 @@ export async function syncContactMail(svc, {
     .select('id', { count: 'exact', head: true })
     .eq('contact_id', contactId)
     .neq('status', 'draft')
+
+  // Graph answered, but nothing could be stored: the mirror is broken, not the
+  // mailbox empty. Reported as an error so the panel says so rather than
+  // claiming there is no correspondence — and last_synced_at is deliberately
+  // NOT advanced, so the next open retries instead of trusting a failed cache.
+  if (failed > 0 && inserted === 0 && adopted === 0) {
+    const message = `Could not cache this mailbox's messages: ${mirrorError}`
+    await writeSyncState(svc, { contactId, agentId, email: contactEmail }, {
+      email: contactEmail, mode, last_error: message,
+    })
+    return {
+      synced: false,
+      sync: await readSyncState(svc, { contactId, agentId }),
+      error: { message, status: 500 },
+      inserted, adopted,
+    }
+  }
 
   const updated = await writeSyncState(svc, { contactId, agentId, email: contactEmail }, {
     email:             contactEmail,

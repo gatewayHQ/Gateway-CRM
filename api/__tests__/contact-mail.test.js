@@ -320,7 +320,7 @@ describe('mirrorMessages', () => {
   it('inserts an unseen inbound message as status=received, source=graph', async () => {
     const svc = fakeSvc({ 'email_messages.select': { data: [], error: null }, 'email_messages.insert': { error: null } })
     const r = await mirrorMessages(svc, { agentId: AGENT_ID, contactId: CONTACT_ID, messages: [gmsg()] })
-    expect(r).toEqual({ inserted: 1, adopted: 0 })
+    expect(r).toMatchObject({ inserted: 1, adopted: 0, failed: 0 })
     const insert = svc.calls.find(c => c.verb === 'insert')
     expect(insert.payload[0]).toMatchObject({
       contact_id: CONTACT_ID, direction: 'inbound', status: 'received',
@@ -343,7 +343,7 @@ describe('mirrorMessages', () => {
       'email_messages.insert': { error: null },
     })
     const r = await mirrorMessages(svc, { agentId: AGENT_ID, contactId: CONTACT_ID, messages: [gmsg()] })
-    expect(r).toEqual({ inserted: 0, adopted: 0 })
+    expect(r).toMatchObject({ inserted: 0, adopted: 0, failed: 0 })
     expect(svc.calls.some(c => c.verb === 'insert')).toBe(false)
   })
 
@@ -352,7 +352,7 @@ describe('mirrorMessages', () => {
     const r = await mirrorMessages(svc, {
       agentId: AGENT_ID, contactId: CONTACT_ID, messages: [gmsg({ isDraft: true })],
     })
-    expect(r).toEqual({ inserted: 0, adopted: 0 })
+    expect(r).toMatchObject({ inserted: 0, adopted: 0, failed: 0 })
   })
 
   it('ADOPTS the row the CRM wrote at send time instead of inserting a twin', async () => {
@@ -373,7 +373,7 @@ describe('mirrorMessages', () => {
         sentAt: '2026-08-02T09:04:30Z',       // 90s off — same email, clocks differ
       })],
     })
-    expect(r).toEqual({ inserted: 0, adopted: 1 })
+    expect(r).toMatchObject({ inserted: 0, adopted: 1, failed: 0 })
     const update = svc.calls.find(c => c.verb === 'update')
     expect(update.payload).toMatchObject({ graph_message_id: 'M1', web_link: 'https://outlook/x' })
     expect(update.filters.id).toBe('row-1')
@@ -391,7 +391,21 @@ describe('mirrorMessages', () => {
       agentId: AGENT_ID, contactId: CONTACT_ID,
       messages: [gmsg({ direction: 'outbound', fromAddress: MAILBOX, sentAt: '2026-08-02T09:00:00Z' })],
     })
-    expect(r).toEqual({ inserted: 1, adopted: 0 })
+    expect(r).toMatchObject({ inserted: 1, adopted: 0, failed: 0 })
+  })
+
+  it('reports the error when EVERY insert fails — a broken mirror is not an empty mailbox', async () => {
+    // The failure mode this exists for: a check constraint predating migration
+    // 0036 rejects status='received', every row is dropped, and the panel would
+    // otherwise render "no correspondence yet" over a full mailbox.
+    const svc = fakeSvc({
+      'email_messages.select': { data: [], error: null },
+      'email_messages.insert': { error: { message: 'violates check constraint "email_messages_status_check"' } },
+    })
+    const r = await mirrorMessages(svc, { agentId: AGENT_ID, contactId: CONTACT_ID, messages: [gmsg()] })
+    expect(r.inserted).toBe(0)
+    expect(r.failed).toBe(1)
+    expect(r.firstError).toContain('email_messages_status_check')
   })
 
   it('lets one losing insert fail without dropping the rest of the page', async () => {
