@@ -69,6 +69,11 @@ create table if not exists contacts (
   size_min          numeric,
   size_max          numeric,
   size_unit         text default 'sqft',  -- sqft | acres | units
+  -- Bulk-email suppression. A contact who has asked not to be included in mass
+  -- sends is filtered out of every audience (src/lib/audience.js) and skipped by
+  -- the send loop even if they were on the list when it was built. Distinct from
+  -- mailing_subscribers.status, which opts out of one QR/landing mailing list.
+  email_opt_out     boolean not null default false,
   created_at        timestamptz default now()
 );
 
@@ -212,7 +217,9 @@ create table if not exists templates (
   name        text not null,
   subject     text not null,
   body        text not null,
-  category    text check (category in ('intro','follow-up','offer','closing','nurture')) default 'follow-up',
+  -- Mirrored by TEMPLATE_CATEGORIES in src/lib/enums.js; scripts/check-enums.mjs
+  -- fails the build if the form offers a value this constraint would reject.
+  category    text check (category in ('intro','follow-up','offer','closing','nurture','deal-announcement')) default 'follow-up',
   agent_id    uuid references agents(id) on delete set null,
   usage_count integer default 0,
   created_at  timestamptz default now()
@@ -808,6 +815,97 @@ create index if not exists idx_deal_calendar_events_agent on deal_calendar_event
 
 alter table deal_calendar_events enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- MASS EMAIL / DEAL ANNOUNCEMENTS  (migration 0039)
+--
+-- A one-time bulk send through the agent's OWN connected Microsoft 365 mailbox
+-- (ms_graph_connections). Not a drip sequence — that is `sequences` — and not a
+-- third-party bulk mail service: every message is a personalised /me/sendMail
+-- from the agent, logged into email_messages + activities like any other send.
+--
+-- WHY A ROW PER RECIPIENT (email_blast_recipients). A blast is N independent
+-- Graph calls, and the Graph write paths deliberately do not retry
+-- (api/_lib/msGraph.js) because a resent email is worse than a surfaced error.
+-- Per-recipient status is therefore the send cursor: a batch that dies halfway
+-- leaves 'sent' rows sent and 'pending' rows pending, so resuming continues
+-- exactly where it stopped and no contact is mailed twice. It is also the audit
+-- trail — who received which announcement about which property, and when.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists email_blasts (
+  id               uuid primary key default gen_random_uuid(),
+  agent_id         uuid not null references agents(id)     on delete cascade,
+  property_id      uuid          references properties(id) on delete set null,
+  template_id      uuid          references templates(id)  on delete set null,
+  -- The announcement headline ('closed', 'under-contract', …) — its own
+  -- vocabulary, not properties.status or deals.stage. Free text (no CHECK) so a
+  -- new announcement type needs no migration; the app offers the fixed list in
+  -- DEAL_ANNOUNCEMENT_STATUSES (src/lib/dealAnnouncement.js).
+  deal_status      text,
+  subject          text not null,
+  -- The body WITH its {{tokens}} intact: the reproducible source of the send.
+  -- The rendered, per-recipient HTML lands on each email_messages row instead.
+  body             text not null default '',
+  photo_url        text,                       -- hero image (property default or per-send override)
+  terms            text,                       -- free-text price/terms note
+  custom_message   text,                       -- the agent's free-text block
+  -- { assetTypes: [...], sides: [...], manual: { added: [], removed: [] } }
+  audience         jsonb not null default '{}',
+  status           text not null default 'draft'
+                     check (status in ('draft','sending','sent','failed','cancelled')),
+  recipient_count  integer not null default 0,
+  sent_count       integer not null default 0,
+  failed_count     integer not null default 0,
+  skipped_count    integer not null default 0,
+  last_error       text,
+  started_at       timestamptz,
+  completed_at     timestamptz,
+  created_at       timestamptz default now()
+);
+create index if not exists idx_email_blasts_agent    on email_blasts(agent_id, created_at desc);
+create index if not exists idx_email_blasts_property on email_blasts(property_id, created_at desc);
+create index if not exists idx_email_blasts_status   on email_blasts(status) where status in ('draft','sending');
+
+alter table email_blasts enable row level security;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+create table if not exists email_blast_recipients (
+  id               uuid primary key default gen_random_uuid(),
+  blast_id         uuid not null references email_blasts(id) on delete cascade,
+  contact_id       uuid          references contacts(id)     on delete set null,
+  -- Snapshotted rather than joined: the address this send actually went to,
+  -- even if the contact's email is edited (or the contact deleted) later.
+  email            text not null,
+  first_name       text,
+  last_name        text,
+  status           text not null default 'pending'
+                     check (status in ('pending','sent','failed','skipped')),
+  error_message    text,
+  skip_reason      text,
+  email_message_id uuid references email_messages(id) on delete set null,
+  sent_at          timestamptz,
+  created_at       timestamptz default now()
+);
+-- The double-send guard: one row per (blast, contact) and per (blast, address),
+-- so a retried batch cannot add a second copy of a recipient.
+create unique index if not exists uq_blast_recipient_contact
+  on email_blast_recipients(blast_id, contact_id) where contact_id is not null;
+-- Excludes 'skipped' rows: two contacts sharing one address both get a row (one
+-- mailed, one skipped as a duplicate), and the skipped one keeps the real
+-- address for the audit trail rather than a mangled unique variant.
+create unique index if not exists uq_blast_recipient_email
+  on email_blast_recipients(blast_id, lower(email)) where status <> 'skipped';
+create index if not exists idx_blast_recipients_blast   on email_blast_recipients(blast_id, status);
+create index if not exists idx_blast_recipients_contact on email_blast_recipients(contact_id, sent_at desc);
+
+alter table email_blast_recipients enable row level security;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+-- Which blast produced a logged message (null for one-off sends). Added here
+-- rather than in the email_messages definition above because the FK target is
+-- defined in this block.
+alter table email_messages add column if not exists blast_id uuid references email_blasts(id) on delete set null;
+create index if not exists idx_email_messages_blast on email_messages(blast_id) where blast_id is not null;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- BOLDSIGN TEMPLATES  (reusable documents with fields; CRM prefills by field id)
@@ -2871,3 +2969,29 @@ create policy lead_rotation_members_read on lead_rotation_members for select to 
 drop policy if exists lead_rotation_members_admin_write on lead_rotation_members;
 create policy lead_rotation_members_admin_write on lead_rotation_members for all to authenticated
   using (app_is_admin()) with check (app_is_admin());
+
+-- MASS EMAIL — a blast is the sending agent's own record, visible to sharing
+-- team peers and admins under the same model as the rest of the CRM. Writes
+-- belong to the service key (api/email-send.js): an agent must not be able to
+-- hand-edit sent_count or repoint a recipient row after the fact.
+drop policy if exists email_blasts_scope on email_blasts;
+create policy email_blasts_scope on email_blasts for select to authenticated
+  using (
+    app_is_admin()
+    or agent_id = app_current_agent_id()
+    or agent_id in (select app_visible_agent_ids('contacts'))
+  );
+
+-- Recipients follow the parent blast, restated rather than relying on nested
+-- RLS — the same shape as activities_scope above.
+drop policy if exists email_blast_recipients_scope on email_blast_recipients;
+create policy email_blast_recipients_scope on email_blast_recipients for select to authenticated
+  using (exists (
+    select 1 from email_blasts b
+     where b.id = email_blast_recipients.blast_id
+       and (
+         app_is_admin()
+         or b.agent_id = app_current_agent_id()
+         or b.agent_id in (select app_visible_agent_ids('contacts'))
+       )
+  ));

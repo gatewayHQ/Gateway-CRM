@@ -24,6 +24,7 @@ const LeadsPage        = React.lazy(() => import('./pages/Leads.jsx'))
 const DataManagementPage = React.lazy(() => import('./pages/DataManagement.jsx'))
 const ReportsPage      = React.lazy(() => import('./pages/Reports.jsx'))
 const SequencesPage    = React.lazy(() => import('./pages/Sequences.jsx'))
+const MassEmailPage    = React.lazy(() => import('./pages/MassEmail.jsx'))
 const ColdCallsPage    = React.lazy(() => import('./pages/ColdCalls.jsx'))
 const IntegrationsPage = React.lazy(() => import('./pages/Integrations.jsx'))
 const CampaignsPage    = React.lazy(() => import('./pages/Campaigns.jsx'))
@@ -62,6 +63,7 @@ const NAV_OFFICE = [
 const NAV_TOOLS = [
   { id: 'templates',    label: 'Email Templates', icon: 'mail'      },
   { id: 'sequences',    label: 'Drip Sequences',  icon: 'sequences' },
+  { id: 'mass-email',   label: 'Mass Email',      icon: 'mail'      },
   { id: 'form-library', label: 'Form Library',    icon: 'document'  },
   { id: 'toolkit',      label: 'Toolkit',         icon: 'sparkles'  },
   { id: 'leads',        label: 'Website Leads',   icon: 'leads'     },
@@ -80,6 +82,7 @@ const HIDEABLE_NAV = [
   { id: 'team',         label: 'Team',             group: 'Office' },
   { id: 'templates',    label: 'Email Templates',  group: 'Tools'  },
   { id: 'sequences',    label: 'Drip Sequences',   group: 'Tools'  },
+  { id: 'mass-email',   label: 'Mass Email',       group: 'Tools'  },
   { id: 'form-library', label: 'Form Library',     group: 'Tools'  },
   { id: 'toolkit',      label: 'Toolkit',          group: 'Tools'  },
   { id: 'leads',        label: 'Website Leads',    group: 'Tools'  },
@@ -108,6 +111,7 @@ const TITLES = {
   team:       { title: 'Team',             crumb: 'Agents · Roster' },
   templates:  { title: 'Email Templates',  crumb: 'Communications · Library' },
   sequences:  { title: 'Drip Sequences',   crumb: 'Marketing · Automation' },
+  'mass-email': { title: 'Mass Email',     crumb: 'Marketing · Deal Announcements' },
   reports:    { title: 'Reports',          crumb: 'Analytics · ROI' },
   review:     { title: 'Review Queue',     crumb: 'Admin · Closing Approvals' },
   'form-library': { title: 'Form Library',  crumb: 'Documents · State Forms' },
@@ -236,6 +240,11 @@ export default function App() {
   const [notifOpen,       setNotifOpen]       = useState(false)
   // Set by a global-search hit so the destination page opens that record.
   const [focusRecord,     setFocusRecord]     = useState(null)
+  // The property an agent chose to announce from the Properties page. Carried
+  // as state rather than a URL param because this app has no real router (see
+  // the `route` state above); cleared once Mass Email has consumed it so a
+  // later visit to the page starts blank instead of re-seeding a stale listing.
+  const [announceProperty, setAnnounceProperty] = useState(null)
   const [websiteEnabled, setWebsiteEnabled] = useState(
     () => localStorage.getItem('gw_website_enabled') === 'true'
   )
@@ -520,7 +529,12 @@ export default function App() {
   // enough to recompute (one spread over ~16 keys) that memoizing it after the
   // early returns above would only buy a rules-of-hooks violation.
   const stageLabels = resolveStageLabels(activeAgent?.stage_labels)
-  const props = { db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin, visibleAgentIds, propertyAgentIds, dealAgentIds }
+  const props = {
+    db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin,
+    visibleAgentIds, propertyAgentIds, dealAgentIds,
+    // Properties → "Announce" → the mass-email wizard, with the property preselected.
+    announce: (propertyId) => { setAnnounceProperty(propertyId); setRoute('mass-email') },
+  }
 
   if (loading) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', flexDirection: 'column', gap: 16 }}>
@@ -753,6 +767,10 @@ export default function App() {
           {route === 'team'       && <TeamPage {...props} onSwitchAgent={id => setActiveAgentId(id)} />}
           {route === 'templates'  && <TemplatesPage {...props} />}
           {route === 'sequences'  && <SequencesPage {...props} />}
+          {route === 'mass-email' && (
+            <MassEmailPage {...props} focusProperty={announceProperty}
+              onFocusHandled={() => setAnnounceProperty(null)} />
+          )}
           {route === 'reports'    && <ReportsPage {...props} />}
           {route === 'review'     && <AdminReviewPage {...props} />}
           {route === 'form-library' && <FormLibraryPage isAdmin={isAdmin} />}

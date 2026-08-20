@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
   CONTACT_TYPES, CONTACT_STATUSES, CONTACT_SOURCES,
-  PROPERTY_TYPES, PROPERTY_STATUSES,
+  PROPERTY_TYPES, PROPERTY_STATUSES, TEMPLATE_CATEGORIES,
 } from '../src/lib/enums.js'
 import { ALL_DEAL_STAGES } from '../src/lib/stages.js'
 
@@ -56,6 +56,7 @@ const checks = [
   ['properties.type',   PROPERTY_TYPES,    checkValues(tableBody('properties'), 'type')],
   ['properties.status', PROPERTY_STATUSES, checkValues(tableBody('properties'), 'status')],
   ['deals.stage',       ALL_DEAL_STAGES,   checkValues(tableBody('deals'), 'stage')],
+  ['templates.category', TEMPLATE_CATEGORIES, checkValues(tableBody('templates'), 'category')],
 ]
 
 let failed = false

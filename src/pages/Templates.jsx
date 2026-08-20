@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Badge, Drawer, EmptyState, ConfirmDialog, Modal, pushToast } from '../components/UI.jsx'
+import { TEMPLATE_CATEGORIES, TEMPLATE_CATEGORY_LABELS } from '../lib/enums.js'
 
 // Load from Supabase auth metadata first (cross-device), fall back to localStorage
 async function loadUserKey(metaField, localKey) {
@@ -89,7 +90,7 @@ Rules:
       <div className="drawer__body">
         <div className="form-group"><label className="form-label required">Template Name</label><input className={`form-control${errors.name?' error':''}`} value={form.name} onChange={e=>set('name',e.target.value)} placeholder="e.g. Initial Buyer Introduction" /></div>
         <div className="form-row">
-          <div className="form-group"><label className="form-label">Category</label><select className="form-control" value={form.category} onChange={e=>set('category',e.target.value)}>{['intro','follow-up','offer','closing','nurture'].map(c=><option key={c} value={c}>{c.charAt(0).toUpperCase()+c.slice(1)}</option>)}</select></div>
+          <div className="form-group"><label className="form-label">Category</label><select className="form-control" value={form.category} onChange={e=>set('category',e.target.value)}>{TEMPLATE_CATEGORIES.map(c=><option key={c} value={c}>{TEMPLATE_CATEGORY_LABELS[c]}</option>)}</select></div>
           <div className="form-group"><label className="form-label">Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Any Agent</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
         </div>
         <div className="form-group"><label className="form-label required">Subject Line</label><input className={`form-control${errors.subject?' error':''}`} value={form.subject} onChange={e=>set('subject',e.target.value)} placeholder="e.g. Welcome to Gateway — Next Steps" /></div>
@@ -496,7 +497,7 @@ export default function TemplatesPage({ db, setDb, activeAgent, openCompose }) {
       </div>
 
       <div className="filters-bar">
-        <select className="filter-select" value={filterCat} onChange={e=>setFilterCat(e.target.value)}><option value="">All Categories</option>{['intro','follow-up','offer','closing','nurture'].map(c=><option key={c} value={c}>{c.charAt(0).toUpperCase()+c.slice(1)}</option>)}</select>
+        <select className="filter-select" value={filterCat} onChange={e=>setFilterCat(e.target.value)}><option value="">All Categories</option>{TEMPLATE_CATEGORIES.map(c=><option key={c} value={c}>{TEMPLATE_CATEGORY_LABELS[c]}</option>)}</select>
       </div>
 
       {filtered.length === 0 ? (
@@ -506,7 +507,7 @@ export default function TemplatesPage({ db, setDb, activeAgent, openCompose }) {
           {filtered.map(t => (
             <div key={t.id} className="template-card">
               <div style={{ display:'flex', justifyContent:'space-between', marginBottom:8 }}>
-                <Badge variant={t.category}>{t.category}</Badge>
+                <Badge variant={t.category}>{TEMPLATE_CATEGORY_LABELS[t.category] || t.category}</Badge>
                 <span style={{ fontSize:11, color:'var(--gw-mist)' }}>{t.usage_count||0} uses</span>
               </div>
               <div className="template-card__name">{t.name}</div>

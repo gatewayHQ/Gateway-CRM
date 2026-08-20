@@ -55,6 +55,20 @@
  *                                     from the agent's OWN Outlook contacts
  *                                     (name/phone/company), or null. Read-only;
  *                                     never written back to the CRM automatically.
+ *   POST ?action=blast-create         (auth) → create a mass send (deal
+ *                                     announcement) plus one row per recipient,
+ *                                     then return it. Does NOT send.
+ *   POST ?action=blast-send           (auth) → send ONE BATCH of a blast and
+ *                                     report progress. The client calls this in
+ *                                     a loop until { done: true } — a send of a
+ *                                     few hundred recipients is paced far past
+ *                                     any single function's time limit. See
+ *                                     api/_lib/massEmail.js for why the batch
+ *                                     cursor lives in the recipient rows.
+ *   POST ?action=blast-status         (auth) → progress for one blast
+ *   POST ?action=blast-cancel         (auth) → stop a running blast; already
+ *                                     sent messages are already gone, the rest
+ *                                     are left unsent
  *   POST ?action=outlook-freebusy     (auth) → { date } -> the agent's OWN
  *                                     busy blocks that day (self-check only —
  *                                     see api/_lib/msGraph.js#getFreeBusy for
@@ -77,6 +91,9 @@ import {
 } from './_lib/msGraph.js'
 import { syncDealCalendar } from './_lib/calendarSync.js'
 import { syncContactMail, readMirroredThread, readSyncState } from './_lib/contactMail.js'
+import {
+  createBlast, loadSendableBlast, sendBlastBatch, blastProgress,
+} from './_lib/massEmail.js'
 
 const SHARED_HEADERS = {
   'Access-Control-Allow-Origin':  '*',
@@ -466,6 +483,97 @@ async function handleOutlookFreeBusy(req, res) {
   return res.status(200).json({ ok: true, ...result })
 }
 
+// ─── Mass email: create a blast ──────────────────────────────────────────────
+// Builds the send record and its recipient rows. Nothing is mailed here — the
+// agent still has to start it — so an accidental double-click on "Send" creates
+// at most a second draft rather than a second delivery.
+async function handleBlastCreate(req, res) {
+  const { agent } = await requireAgent(req)
+  const svc  = getServiceClient()
+  const user = getUserClient(req)
+  const { contactIds, ...blast } = req.body || {}
+
+  if (!blast.subject || !String(blast.subject).trim()) {
+    return res.status(400).json({ error: 'A subject line is required' })
+  }
+  if (!blast.body || !String(blast.body).trim()) {
+    return res.status(400).json({ error: 'The message body is empty' })
+  }
+
+  const created = await createBlast(svc, user, { agentId: agent.id, blast, contactIds })
+  return res.status(200).json({ ok: true, blast: created })
+}
+
+// ─── Mass email: send one batch ──────────────────────────────────────────────
+// Returns after a bounded slice of work rather than running to completion: the
+// per-mailbox pacing Microsoft expects (~30/min) puts a 200-recipient send well
+// past any serverless time limit. The client loops on { done: false }, so a
+// batch that times out or is killed simply resumes from the pending rows.
+async function handleBlastSend(req, res) {
+  const { agent } = await requireAgent(req)
+  const svc  = getServiceClient()
+  const user = getUserClient(req)
+  const { blastId } = req.body || {}
+  if (!blastId) return res.status(400).json({ error: 'Missing blastId' })
+
+  const blast = await loadSendableBlast(svc, { blastId, agentId: agent.id })
+
+  // Property and contacts are read through the CALLER'S client so RLS still
+  // decides what this agent may see; the send itself needs the service key to
+  // write counters and log rows the agent must not be able to forge.
+  let property = null
+  if (blast.property_id) {
+    const { data } = await user.from('properties')
+      .select('id, address, city, state, zip, type, list_price, details')
+      .eq('id', blast.property_id).maybeSingle()
+    property = data
+  }
+
+  const { data: pendingRows } = await svc.from('email_blast_recipients')
+    .select('contact_id').eq('blast_id', blast.id).eq('status', 'pending')
+  const ids = [...new Set((pendingRows || []).map(r => r.contact_id).filter(Boolean))]
+  const contactsById = {}
+  if (ids.length) {
+    const { data: contacts } = await user.from('contacts')
+      .select('id, first_name, last_name, email').in('id', ids)
+    for (const c of (contacts || [])) contactsById[c.id] = c
+  }
+
+  const progress = await sendBlastBatch(svc, { blast, agent, contactsById, property })
+  return res.status(200).json({ ok: true, ...progress })
+}
+
+// ─── Mass email: progress ────────────────────────────────────────────────────
+async function handleBlastStatus(req, res) {
+  const { agent } = await requireAgent(req)
+  const svc = getServiceClient()
+  const { blastId } = req.body || {}
+  if (!blastId) return res.status(400).json({ error: 'Missing blastId' })
+
+  const { data: blast } = await svc.from('email_blasts').select('agent_id').eq('id', blastId).maybeSingle()
+  if (!blast) return res.status(404).json({ error: 'Blast not found' })
+  if (blast.agent_id !== agent.id) return res.status(403).json({ error: 'Not your send' })
+
+  return res.status(200).json({ ok: true, ...(await blastProgress(svc, blastId)) })
+}
+
+// ─── Mass email: cancel ──────────────────────────────────────────────────────
+// Stops the remaining recipients. Messages already accepted by Graph are gone
+// and are NOT touched — the counts keep saying so, because a cancelled send that
+// reported zero deliveries would be a lie to the agent who has to follow up.
+async function handleBlastCancel(req, res) {
+  const { agent } = await requireAgent(req)
+  const svc = getServiceClient()
+  const { blastId } = req.body || {}
+  if (!blastId) return res.status(400).json({ error: 'Missing blastId' })
+
+  const blast = await loadSendableBlast(svc, { blastId, agentId: agent.id })
+  await svc.from('email_blasts')
+    .update({ status: 'cancelled', completed_at: new Date().toISOString() })
+    .eq('id', blast.id)
+  return res.status(200).json({ ok: true, ...(await blastProgress(svc, blast.id)) })
+}
+
 // ─── Resend (legacy default path — unchanged) ────────────────────────────────
 async function handleResendSend(req, res) {
   // ── Rate limit ────────────────────────────────────────────────────────────
@@ -616,6 +724,22 @@ async function handler(req, res) {
     if (action === 'outlook-contact-lookup') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
       return await handleOutlookContactLookup(req, res)
+    }
+    if (action === 'blast-create') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+      return await handleBlastCreate(req, res)
+    }
+    if (action === 'blast-send') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+      return await handleBlastSend(req, res)
+    }
+    if (action === 'blast-status') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+      return await handleBlastStatus(req, res)
+    }
+    if (action === 'blast-cancel') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+      return await handleBlastCancel(req, res)
     }
     if (action === 'outlook-freebusy') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })

@@ -24,6 +24,22 @@ export const CONTACT_TYPES    = ['buyer', 'seller', 'landlord', 'tenant', 'inves
 export const CONTACT_STATUSES = ['lead', 'opportunity', 'active', 'pending', 'cold', 'closed']
 export const CONTACT_SOURCES  = ['referral', 'website', 'open house', 'social', 'cold call', 'team', 'paid service', 'other']
 
+// ── Templates ────────────────────────────────────────────────────────────────
+// Mirror of the templates.category CHECK constraint. 'deal-announcement' is the
+// property-backed mass-email template (migration 0039) — it renders through
+// src/lib/dealAnnouncement.js rather than the plain subject/body editor, which
+// is why it is a category rather than a naming convention.
+export const TEMPLATE_CATEGORIES = ['intro', 'follow-up', 'offer', 'closing', 'nurture', 'deal-announcement']
+
+export const TEMPLATE_CATEGORY_LABELS = {
+  intro:                'Intro',
+  'follow-up':          'Follow-Up',
+  offer:                'Offer',
+  closing:              'Closing',
+  nurture:              'Nurture',
+  'deal-announcement':  'Deal Announcement',
+}
+
 // ── Properties ───────────────────────────────────────────────────────────────
 // Property type is presented grouped (Residential vs Commercial) and a couple of
 // labels are customised, so the labels live in an explicit map alongside the
