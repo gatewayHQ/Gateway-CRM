@@ -44,6 +44,13 @@
  *                                     right after an edit in Pipeline's Key
  *                                     Dates tab. api/cron.js?task=calendar-sync
  *                                     is the nightly sweep over every deal.
+ *   POST ?action=outlook-messages     (auth) → { contactId } -> the email
+ *                                     correspondence between the agent's mailbox
+ *                                     and that contact's address, newest first,
+ *                                     BOTH directions. Queries Graph's message
+ *                                     store, NOT Outlook Contacts — see
+ *                                     api/_lib/contactMail.js for why that
+ *                                     distinction is the whole point.
  *   POST ?action=outlook-contact-lookup (auth) → { email } -> matching contact
  *                                     from the agent's OWN Outlook contacts
  *                                     (name/phone/company), or null. Read-only;
@@ -59,15 +66,17 @@
  * resolves identity from the one-time ms_oauth_states row created at connect time.
  */
 
-import { requireAgent, getServiceClient, errorResponse } from './_lib/auth.js'
+import { requireAgent, getServiceClient, getUserClient, errorResponse } from './_lib/auth.js'
 import { wrap } from './_lib/observability.js'
 import {
   generateState, generateCodeVerifier, codeChallengeFor, buildAuthorizeUrl,
   resolveRedirectUri, exchangeCodeForTokens, fetchGraphProfile,
   encryptToken, getValidAccessToken, sendGraphMail,
   lookupGraphContact, createDraftMessage, getFreeBusy,
+  mailReadLevel, canSendMail,
 } from './_lib/msGraph.js'
 import { syncDealCalendar } from './_lib/calendarSync.js'
+import { syncContactMail, readMirroredThread, readSyncState } from './_lib/contactMail.js'
 
 const SHARED_HEADERS = {
   'Access-Control-Allow-Origin':  '*',
@@ -297,6 +306,131 @@ async function handleOutlookCalendarSync(req, res) {
   return res.status(200).json({ ok: true, ...result })
 }
 
+// ─── Microsoft Graph: contact email correspondence ───────────────────────────
+// The contact panel's "Emails" tab. Answers "what mail has passed between my
+// mailbox and this contact's address" by querying Graph's MESSAGE store
+// (/me/messages), in contrast to ?action=outlook-contact-lookup below, which
+// searches the agent's Outlook CONTACTS address book for an entry to copy
+// fields from. Conflating the two is what made this panel report "No matching
+// Outlook contact found" for contacts the agent emails regularly.
+//
+// Always answers 200 with whatever is known, and says why anything is missing.
+// "This contact has no email correspondence" and "Outlook could not be reached"
+// are different facts, and an agent about to follow up needs to be able to tell
+// them apart — so a Graph failure downgrades to a cached read plus an explicit
+// `error`, rather than becoming an HTTP error with no content.
+async function handleOutlookMessages(req, res) {
+  const { agent } = await requireAgent(req)
+  const svc = getServiceClient()
+  const { contactId, intent = 'auto', limit = 50 } = req.body || {}
+  if (!contactId) return res.status(400).json({ error: 'Missing contactId' })
+  if (!['auto', 'refresh', 'more'].includes(intent)) {
+    return res.status(400).json({ error: 'intent must be one of: auto, refresh, more' })
+  }
+
+  // Read the contact through the CALLER'S OWN client, not the service key: RLS
+  // is what decides whether this agent may see this contact at all, and a
+  // contact's correspondence is exactly as private as the contact.
+  const user = getUserClient(req)
+  const { data: contact, error: contactErr } = await user
+    .from('contacts').select('id, first_name, last_name, email').eq('id', contactId).maybeSingle()
+  if (contactErr) return errorResponse(res, Object.assign(new Error(contactErr.message), { status: 500 }))
+  if (!contact) return res.status(404).json({ error: 'Contact not found' })
+
+  if (!contact.email) {
+    return res.status(200).json({
+      ok: true, state: 'no-contact-email', messages: [], hasMore: false,
+    })
+  }
+
+  const { data: conn } = await svc
+    .from('ms_graph_connections')
+    .select('agent_id, email, display_name, status, scopes, last_error')
+    .eq('agent_id', agent.id)
+    .maybeSingle()
+
+  // Everything already mirrored is worth showing even when Graph is out of
+  // reach — a disconnected mailbox doesn't erase the history the CRM logged.
+  const cached = async () => readMirroredThread(user, contactId, { limit })
+  const syncFacts = async () => {
+    const st = await readSyncState(svc, { contactId, agentId: agent.id })
+    return {
+      lastSyncedAt: st?.last_synced_at || null,
+      hasMore:      st ? !st.backfill_complete : false,
+      // 'filter' = this mailbox refused $search, so only mail FROM the contact
+      // could be found. Surfaced so the UI can say the list is one-directional
+      // instead of quietly implying the agent never wrote back.
+      partial:      st?.mode === 'filter',
+    }
+  }
+
+  if (!conn) {
+    return res.status(200).json({
+      ok: true, state: 'not-connected', contactEmail: contact.email,
+      messages: await cached(), ...(await syncFacts()),
+    })
+  }
+  if (conn.status !== 'connected') {
+    return res.status(200).json({
+      ok: true, state: 'needs-reconnect', contactEmail: contact.email,
+      mailbox: conn.email, error: { message: conn.last_error || 'Microsoft 365 needs you to reconnect' },
+      messages: await cached(), ...(await syncFacts()),
+    })
+  }
+
+  const level = mailReadLevel(conn)
+  if (!level) {
+    // Connected, but this grant carries no mail-read permission — a mailbox
+    // connected under an older scope set. Nothing to retry; the agent has to
+    // re-consent, so say that instead of showing an empty list.
+    return res.status(200).json({
+      ok: true, state: 'missing-mail-scope', contactEmail: contact.email, mailbox: conn.email,
+      requiredScopes: ['Mail.Read', 'Mail.Send'],
+      messages: await cached(), ...(await syncFacts()),
+    })
+  }
+
+  let accessToken
+  try {
+    ({ accessToken } = await getValidAccessToken(svc, agent.id))
+  } catch (err) {
+    return res.status(200).json({
+      ok: true, state: 'needs-reconnect', contactEmail: contact.email, mailbox: conn.email,
+      error: { message: err.message },
+      messages: await cached(), ...(await syncFacts()),
+    })
+  }
+
+  const result = await syncContactMail(svc, {
+    agentId:      agent.id,
+    contactId,
+    contactEmail: contact.email,
+    mailboxEmail: conn.email,
+    accessToken,
+    level,
+    intent,
+  })
+
+  const messages = await readMirroredThread(user, contactId, { limit })
+  return res.status(200).json({
+    ok:    true,
+    state: result.error ? 'graph-error' : 'ok',
+    contactEmail:  contact.email,
+    mailbox:       conn.email,
+    canSend:       canSendMail(conn),
+    // 'basic' = Mail.ReadBasic only, which withholds message bodies — the list
+    // is real, the snippets are legitimately absent.
+    snippets:      level === 'full',
+    messages,
+    synced:        result.synced,
+    fetched:       result.inserted + result.adopted,
+    lastSyncedAt:  result.sync?.last_synced_at || null,
+    hasMore:       result.sync ? !result.sync.backfill_complete : true,
+    partial:       result.sync?.mode === 'filter',
+    ...(result.error ? { error: result.error } : {}),
+  })
+}
+
 // ─── Microsoft Graph: contact enrichment ─────────────────────────────────────
 // Read-only lookup against the AGENT'S OWN Outlook contacts — never written
 // back to the CRM automatically. The caller (ContactDrawer.jsx) decides
@@ -474,6 +608,10 @@ async function handler(req, res) {
     if (action === 'outlook-calendar-sync') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
       return await handleOutlookCalendarSync(req, res)
+    }
+    if (action === 'outlook-messages') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+      return await handleOutlookMessages(req, res)
     }
     if (action === 'outlook-contact-lookup') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })

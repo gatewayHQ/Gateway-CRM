@@ -173,6 +173,42 @@ export async function refreshTokens(refreshToken) {
 
 // ─── Graph calls ──────────────────────────────────────────────────────────────
 
+// Throttle-aware Graph request. Microsoft Graph throttles per-mailbox and
+// answers 429 with a Retry-After header; a lifetime-history pull is the one
+// call in this integration that can realistically walk into that wall, since
+// it pages until the mailbox runs out of matches. Honoring Retry-After (rather
+// than a fixed backoff) is what Microsoft asks for, and 503/504 get the same
+// treatment because both mean "not processed".
+//
+// GET-only by design: every retry here is on a read. The write paths above
+// (sendMail, event create/update) deliberately do NOT retry — a resent mail or
+// a duplicate calendar event is worse than a surfaced error.
+const GRAPH_RETRY_STATUS = new Set([429, 503, 504])
+const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+
+export function graphBackoffMs(attempt, retryAfterSec) {
+  if (retryAfterSec > 0) return Math.min(retryAfterSec * 1000, 20000)
+  return 500 * (2 ** attempt) + Math.floor(Math.random() * 250)   // 500/1000/2000ms (+jitter)
+}
+
+export async function graphFetch(url, { accessToken, maxRetries = 3 } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
+    if (!res.ok && GRAPH_RETRY_STATUS.has(res.status) && attempt < maxRetries) {
+      const delay = graphBackoffMs(attempt, Number(res.headers.get('retry-after')) || 0)
+      console.warn(`[msGraph] ${res.status} on GET — retry ${attempt + 1}/${maxRetries} in ${delay}ms`)
+      await sleep(delay)
+      continue
+    }
+    const data = await res.json().catch(() => ({}))
+    if (res.ok) return data
+    const e = new Error(data?.error?.message || `Graph GET failed (HTTP ${res.status})`)
+    e.status = res.status
+    e.graphCode = data?.error?.code || null
+    throw e
+  }
+}
+
 export async function fetchGraphProfile(accessToken) {
   const res = await fetch(`${GRAPH_BASE}/me?$select=id,displayName,mail,userPrincipalName`, {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -455,4 +491,130 @@ export async function getValidAccessToken(svc, agentId) {
     .single()
 
   return { accessToken: refreshed.access_token, connection: updated || { ...conn, ...update } }
+}
+
+// ─── Mail correspondence (contact email panel) ────────────────────────────────
+// Distinct from fetchInboxDelta() above, which is the nightly "did anyone in
+// the CRM email me" sweep over the INBOX only. This is the on-demand,
+// per-contact question: "show me everything I've ever exchanged with this
+// address" — which has to cover Sent Items too, and has to work whether or not
+// the address is a saved Outlook Contact.
+//
+// WHY $search AND NOT $filter. Graph does not support a lambda $filter over
+// toRecipients/ccRecipients on /me/messages, so "emails where the contact is a
+// recipient" is not expressible as a filter. The KQL `participants:` property
+// covers from + to + cc + bcc in one query across every folder, which is
+// exactly the mailbox-wide, both-directions view the panel needs. $search and
+// $orderby are mutually exclusive on Graph, so callers sort by date themselves
+// (normalizeGraphMessage() surfaces sentAt for that).
+
+// Mail.ReadBasic deliberately withholds body/bodyPreview, so asking for
+// bodyPreview under that scope alone 403s the whole request. Two select lists,
+// picked by what the connection actually granted.
+const MAIL_SELECT_FULL  = 'id,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,conversationId,webLink,hasAttachments,isDraft'
+const MAIL_SELECT_BASIC = 'id,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,conversationId,webLink,hasAttachments,isDraft'
+
+// Graph caps a $search page at 25 regardless of a larger $top, so this is the
+// real page size, not an arbitrary choice.
+export const MAIL_PAGE_SIZE = 25
+
+// Which mail-read capability a stored connection has. Scope strings come back
+// from Microsoft either bare ('Mail.ReadWrite') or fully qualified
+// ('https://graph.microsoft.com/Mail.ReadWrite'), so match on the suffix.
+//   'full'  — Mail.Read / Mail.ReadWrite: subject + snippet + body
+//   'basic' — Mail.ReadBasic only: metadata, no snippet
+//   null    — no mail-read scope at all; the agent must reconnect
+export function mailReadLevel(connection) {
+  const scopes = (connection?.scopes || []).map(s => String(s).split('/').pop().toLowerCase())
+  if (scopes.includes('mail.read') || scopes.includes('mail.readwrite')) return 'full'
+  if (scopes.includes('mail.readbasic')) return 'basic'
+  return null
+}
+
+export function canSendMail(connection) {
+  const scopes = (connection?.scopes || []).map(s => String(s).split('/').pop().toLowerCase())
+  return scopes.includes('mail.send') || scopes.includes('mail.readwrite')
+}
+
+export function buildMailSearchUrl(email, { level = 'full', top = MAIL_PAGE_SIZE } = {}) {
+  // KQL string inside a quoted $search value — a double quote in an address
+  // would break out of it, so drop them (they are not legal in an address).
+  const term = String(email).replace(/"/g, '')
+  const params = new URLSearchParams({
+    '$search': `"participants:${term}"`,
+    '$select': level === 'basic' ? MAIL_SELECT_BASIC : MAIL_SELECT_FULL,
+    '$top': String(top),
+  })
+  return `${GRAPH_BASE}/me/messages?${params.toString()}`
+}
+
+// Fallback for a mailbox where $search is unavailable (search unindexed, or a
+// tenant that blocks it). Only expressible direction is "from the contact", so
+// a caller using this must tell the UI the result is partial.
+export function buildMailFilterUrl(email, { level = 'full', top = MAIL_PAGE_SIZE } = {}) {
+  const addr = String(email).replace(/'/g, "''")
+  const params = new URLSearchParams({
+    '$filter': `from/emailAddress/address eq '${addr}'`,
+    '$orderby': 'receivedDateTime desc',
+    '$select': level === 'basic' ? MAIL_SELECT_BASIC : MAIL_SELECT_FULL,
+    '$top': String(top),
+  })
+  return `${GRAPH_BASE}/me/messages?${params.toString()}`
+}
+
+// One page of correspondence with `email`. Pass the previous page's `nextLink`
+// to continue; the link already carries the search/select/skip state, so no
+// other option matters on a continuation call.
+//
+// `mode` reports which query actually answered:
+//   'search' — both directions (sent + received), mailbox-wide
+//   'filter' — received only, because $search was refused for this mailbox
+export async function fetchMailWithParticipant(accessToken, { email, link, level = 'full', top = MAIL_PAGE_SIZE } = {}) {
+  if (link) {
+    const data = await graphFetch(link, { accessToken })
+    return { messages: data.value || [], nextLink: data['@odata.nextLink'] || null, mode: 'continued' }
+  }
+  try {
+    const data = await graphFetch(buildMailSearchUrl(email, { level, top }), { accessToken })
+    return { messages: data.value || [], nextLink: data['@odata.nextLink'] || null, mode: 'search' }
+  } catch (err) {
+    // 400/501 from Graph here means "this mailbox can't answer a $search",
+    // not "no results" — fall back rather than showing the agent an error for
+    // a question that has a partial answer available. Auth/throttle failures
+    // (401/403/429) are real and must surface.
+    if (err.status !== 400 && err.status !== 501) throw err
+    console.warn(`[msGraph] $search refused for this mailbox (${err.message}) — falling back to from-address filter`)
+    const data = await graphFetch(buildMailFilterUrl(email, { level, top }), { accessToken })
+    return { messages: data.value || [], nextLink: data['@odata.nextLink'] || null, mode: 'filter' }
+  }
+}
+
+// Graph message → the shape the CRM stores and the panel renders. Direction is
+// decided by comparing the sender to the connected mailbox rather than by which
+// folder the message came from: a $search result set spans every folder and
+// carries no folder hint.
+export function normalizeGraphMessage(m, mailboxEmail) {
+  const fromAddress = m.from?.emailAddress?.address || null
+  const mine = fromAddress && mailboxEmail &&
+    fromAddress.toLowerCase() === String(mailboxEmail).toLowerCase()
+  const people = list => (list || [])
+    .map(r => ({ name: r.emailAddress?.name || null, email: r.emailAddress?.address || null }))
+    .filter(p => p.email)
+  return {
+    graphMessageId: m.id,
+    subject:        m.subject || null,
+    preview:        (m.bodyPreview || '').replace(/\s+/g, ' ').trim().slice(0, 280) || null,
+    direction:      mine ? 'outbound' : 'inbound',
+    fromAddress,
+    fromName:       m.from?.emailAddress?.name || null,
+    to:             people(m.toRecipients),
+    cc:             people(m.ccRecipients),
+    // Sent Items entries carry sentDateTime; received mail is ordered by when
+    // it arrived. Prefer whichever describes the message's own moment.
+    sentAt:         m.sentDateTime || m.receivedDateTime || null,
+    conversationId: m.conversationId || null,
+    webLink:        m.webLink || null,
+    hasAttachments: Boolean(m.hasAttachments),
+    isDraft:        Boolean(m.isDraft),
+  }
 }

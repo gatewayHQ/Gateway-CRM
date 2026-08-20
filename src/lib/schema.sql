@@ -722,6 +722,19 @@ create table if not exists email_messages (
   error_message      text,
   graph_message_id   text,
   conversation_id    text,
+  -- Mirrored-message columns (migration 0038). An outbound CRM send always came
+  -- from the connected mailbox, so it never needed a FROM; a message mirrored
+  -- out of the mailbox for the contact Emails panel does.
+  from_address       text,
+  from_name          text,
+  web_link           text,             -- deep link to open the message in Outlook
+  has_attachments    boolean not null default false,
+  -- 'crm'   — this CRM sent (or attempted) the message; it owns the outcome.
+  -- 'graph' — a copy of a message merely OBSERVED in the mailbox, mirrored for
+  --           the contact's correspondence history. Keeping the two apart is
+  --           what lets the panel show lifetime history without the CRM
+  --           claiming credit for mail it had nothing to do with.
+  source             text not null default 'crm' check (source in ('crm', 'graph')),
   sent_at            timestamptz default now(),
   created_at         timestamptz default now()
 );
@@ -733,6 +746,42 @@ create unique index if not exists uq_email_messages_graph_id
 
 alter table email_messages enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CONTACT EMAIL SYNC  (migration 0038 — the contact panel's Outlook "Emails"
+-- tab). One row per (contact, agent): the history is drawn from THAT agent's
+-- mailbox, so two agents corresponding with the same contact have different
+-- correspondence, cursors, and refresh clocks.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists contact_email_sync (
+  id                uuid primary key default uuid_generate_v4(),
+  contact_id        uuid not null references contacts(id) on delete cascade,
+  agent_id          uuid not null references agents(id)   on delete cascade,
+  -- The address the history was pulled for — editing a contact's email
+  -- invalidates the cursor instead of silently paging the old address.
+  email             text not null,
+  next_link         text,              -- Graph @odata.nextLink for the next OLDER page
+  backfill_complete boolean not null default false,
+  mode              text,              -- 'search' (both directions) | 'filter' (received-only fallback)
+  message_count     integer not null default 0,
+  last_synced_at    timestamptz,
+  last_error        text,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
+);
+create unique index if not exists uq_contact_email_sync_pair
+  on contact_email_sync(contact_id, agent_id);
+
+alter table contact_email_sync enable row level security;
+-- Deliberately NO policy for `authenticated`/`anon` — deny by default, same as
+-- ms_graph_connections. A Graph nextLink encodes the mailbox query and has no
+-- business reaching a browser; api/email-send.js (?action=outlook-messages)
+-- returns only the sync facts the panel needs, never the cursor.
+
+drop trigger if exists contact_email_sync_updated_at on contact_email_sync;
+create trigger contact_email_sync_updated_at
+  before update on contact_email_sync
+  for each row execute function set_updated_at();
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- DEAL CALENDAR EVENTS  (migration 0035 — deal key dates -> agent's Outlook
