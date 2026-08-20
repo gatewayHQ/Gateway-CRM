@@ -847,7 +847,7 @@ async function reloadPropertyContacts(setDb, propertyId) {
   }))
 }
 
-function PropertyDrawer({ open, onClose, property, agents, contacts, propertyContacts = [], activeAgent, onSave, go, setDb }) {
+function PropertyDrawer({ open, onClose, property, agents, contacts, propertyContacts = [], activeAgent, onSave, go, setDb, announce }) {
   const blank = { address:'', city:'', state:'', zip:'', county:'', submarket:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{}, listing_expiry_date:'', price_history:[], comps:[] }
   const [form, setForm]             = useState(property || blank)
   const [errors, setErrors]         = useState({})
@@ -1170,6 +1170,14 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
               {startingDeal ? 'Creating…' : 'Start Deal'}
             </button>
             <button
+              className="btn btn--secondary"
+              title="Email a Just Closed / New Listing announcement about this property"
+              onClick={() => { onClose(); announce?.(property.id) }}
+            >
+              <Icon name="mail" size={13} />
+              Announce
+            </button>
+            <button
               className="btn btn--ghost"
               title="Copy share link — works on social media, email, and text"
               onClick={() => {
@@ -1479,7 +1487,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
 
 // ─── Properties page ──────────────────────────────────────────────────────────
 
-export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAgentIds, isAdmin, focusRecord, onFocusHandled }) {
+export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAgentIds, isAdmin, focusRecord, onFocusHandled, announce }) {
   const [view, setView]               = useState('grid')
   const [search, setSearch]           = useState('')
   const [filterType, setFilterType]   = useState('')
@@ -1667,7 +1675,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAge
         </div>
       )}
 
-      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} propertyContacts={propertyContacts} activeAgent={activeAgent} onSave={handleSave} go={go} setDb={setDb} />
+      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} propertyContacts={propertyContacts} activeAgent={activeAgent} onSave={handleSave} go={go} setDb={setDb} announce={announce} />
       {confirm && <ConfirmDialog message="This will permanently delete this property." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {radiusProp && (
         <RadiusMailingModal

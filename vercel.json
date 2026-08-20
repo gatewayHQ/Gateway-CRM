@@ -5,6 +5,7 @@
   "framework": "vite",
   "functions": {
     "api/boldsign.js": { "maxDuration": 60 },
+    "api/email-send.js": { "maxDuration": 60 },
     "api/cron.js":     { "maxDuration": 60 }
   },
   "crons": [

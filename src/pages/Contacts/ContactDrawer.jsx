@@ -15,7 +15,7 @@ import { formatCurrency } from '../../lib/helpers.js'
 const BLANK = {
   first_name: '', last_name: '', email: '', phone: '',
   type: 'buyer', status: 'active', source: 'other',
-  assigned_agent_id: '', notes: '', tags: [],
+  assigned_agent_id: '', notes: '', tags: [], email_opt_out: false,
   owner_address: '', owner_city: '', owner_state: '', owner_zip: '',
   birthday: '', anniversary_date: '',
   spouse_name: '', spouse_phone: '', spouse_notes: '',
@@ -227,8 +227,9 @@ export default function ContactDrawer({
     // Migration-pending fallback: drop columns an older DB may not have yet, then retry.
     let criteriaDropped = false
     if (error?.message?.includes('schema cache')) {
-      // Spouse columns are newest — strip them regardless of contact type.
-      const { spouse_name: _sn, spouse_phone: _sp, spouse_notes: _snt, ...retryPayload } = payload
+      // Newest columns first — spouse fields (0021-era) and email_opt_out
+      // (migration 0039). A database that predates either still saves the rest.
+      const { spouse_name: _sn, spouse_phone: _sp, spouse_notes: _snt, email_opt_out: _eo, ...retryPayload } = payload
       let next = retryPayload
       if (isBuyer) {
         const { submarket: _s, submarkets: _ss, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u, ...payloadNoCriteria } = next
@@ -545,6 +546,20 @@ export default function ContactDrawer({
             <div className="form-group">
               <label className="form-label">Notes</label>
               <textarea className="form-control form-control--textarea" value={form.notes || ''} onChange={(e) => set('notes', e.target.value)} placeholder="Add notes…" />
+            </div>
+
+            {/* Bulk-email suppression. One-to-one email from the compose box is
+                unaffected — this is about announcements and other mass sends,
+                which is the only thing a contact ever asks to be left out of. */}
+            <div className="form-group">
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                <input type="checkbox" checked={Boolean(form.email_opt_out)}
+                  onChange={(e) => set('email_opt_out', e.target.checked)} />
+                Exclude from mass emails
+              </label>
+              <div style={{ fontSize: 11.5, color: 'var(--gw-mist)', marginTop: 4 }}>
+                They stay reachable one-to-one — announcements and other bulk sends skip them.
+              </div>
             </div>
           </div>
           <div className="drawer__foot">
