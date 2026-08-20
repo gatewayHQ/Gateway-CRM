@@ -4,6 +4,7 @@ import { Icon, pushToast, EmptyState, Modal } from '../components/UI.jsx'
 import { OPERATING_STATES } from '../lib/constants.js'
 import { templateEditorUrl } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
+import { buildPacketZip, downloadBlob, packetZipName } from '../lib/packetDownload.js'
 
 const TRANSACTION_TYPES = [
   { value: 'buyer',   label: 'Buyer Contract' },
@@ -553,21 +554,43 @@ export default function FormLibraryPage({ isAdmin }) {
     if (!items.length) { pushToast('No file uploaded for this packet', 'error'); return }
     setDownloading(p => ({ ...p, [packet.id]: true }))
     try {
-      // Trigger a real download per file (Content-Disposition via the `download`
-      // option) instead of window.open — multiple window.open calls get killed by
-      // the popup blocker, which is why only the first file used to open.
-      for (let i = 0; i < items.length; i++) {
-        const it = items[i]
+      // ONE file: link straight at the signed URL, exactly as before.
+      if (items.length === 1) {
+        const it = items[0]
         const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(it.path, 300, { download: it.name || true })
-        if (error) { pushToast(`Couldn't fetch ${it.name || 'a file'}: ${error.message}`, 'error'); continue }
+        if (error) { pushToast(`Couldn't fetch ${it.name || 'the file'}: ${error.message}`, 'error'); return }
         const a = document.createElement('a')
         a.href = data.signedUrl
         a.download = it.name || ''
         document.body.appendChild(a)
         a.click()
         a.remove()
-        if (i < items.length - 1) await new Promise(r => setTimeout(r, 500))  // stagger so the browser doesn't drop rapid downloads
+        return
       }
+
+      // SEVERAL files: one zip, one download. Clicking a link per file only ever
+      // delivered the first — after the first await the clicks are no longer inside
+      // the button's user gesture, and browsers block those downloads silently.
+      const { data: signed, error: signErr } = await supabase.storage.from(BUCKET)
+        .createSignedUrls(items.map(it => it.path), 300)
+      if (signErr) { pushToast(`Couldn't prepare this packet: ${signErr.message}`, 'error'); return }
+      // Keyed by path, not by index: the batch endpoint reports a per-file error
+      // and there is nothing promising it answers in the order it was asked.
+      const byPath = new Map((signed || []).filter(r => r?.path).map(r => [r.path, r.signedUrl]))
+      const urls = items.map((it, i) => ({
+        name: it.name || it.path.split('/').pop(),
+        url: byPath.get(it.path) || (byPath.size ? '' : (signed || [])[i]?.signedUrl || ''),
+      }))
+      const unsigned = urls.filter(u => !u.url)
+      if (unsigned.length) {
+        pushToast(`Couldn't prepare ${unsigned.length} of ${items.length} forms, so nothing was saved: ${unsigned.map(u => u.name).join(', ')}`, 'error')
+        return
+      }
+      const blob = await buildPacketZip(urls)
+      downloadBlob(blob, packetZipName(packet))
+      pushToast(`Downloaded ${items.length} forms as a zip`, 'success')
+    } catch (e) {
+      pushToast(e.message, 'error')
     } finally {
       setDownloading(p => ({ ...p, [packet.id]: false }))
     }
