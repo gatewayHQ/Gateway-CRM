@@ -8,6 +8,7 @@ import { withRetry, mutationErrorMessage } from '../../lib/services/db.js'
 import OptionMultiSelect from '../../components/OptionMultiSelect.jsx'
 import ChipToggleGroup from '../../components/ChipToggleGroup.jsx'
 import ActivityTab from './ActivityTab.jsx'
+import EmailsTab from './EmailsTab.jsx'
 import { findMatchingProperties } from '../../lib/matching.js'
 import { formatCurrency } from '../../lib/helpers.js'
 
@@ -50,9 +51,18 @@ export default function ContactDrawer({
       .then(({ data }) => setOutlookConnected(data?.status === 'connected'))
   }, [])
 
-  // Read-only lookup against the agent's own Outlook contacts — fills in ONLY
-  // blank fields, never overwrites something the agent already entered. The
-  // agent still has to click Save; nothing here writes to the database itself.
+  // Read-only lookup against the agent's own Outlook ADDRESS BOOK (/me/contacts)
+  // — fills in ONLY blank fields, never overwrites something the agent already
+  // entered. The agent still has to click Save; nothing here writes to the
+  // database itself.
+  //
+  // This is deliberately NOT how the contact's email correspondence is found.
+  // Most people an agent emails were never saved as an Outlook Contact, so a
+  // miss here says nothing about whether mail has been exchanged with them —
+  // that question belongs to the Emails tab, which queries the mailbox itself
+  // (EmailsTab.jsx / api/_lib/contactMail.js). Keeping this around is still
+  // worthwhile for its actual job: pulling a phone number or company off an
+  // address-book entry the agent already maintains.
   const enrichFromOutlook = async () => {
     if (!form.email) return
     setEnriching(true)
@@ -66,7 +76,14 @@ export default function ContactDrawer({
       })
       const data = await res.json()
       if (!res.ok) { pushToast(data.error || 'Lookup failed', 'error'); return }
-      if (!data.match) { pushToast('No matching Outlook contact found'); return }
+      if (!data.match) {
+        // Say which thing was searched. The old wording ("No matching Outlook
+        // contact found") read as "there's nothing in Outlook for this person",
+        // which sent agents looking for a bug when the address book simply had
+        // no entry to copy.
+        pushToast(`${form.email} isn't in your Outlook address book — check the Emails tab for correspondence`)
+        return
+      }
 
       const patch = {}
       if (data.match.phone && !form.phone) patch.phone = data.match.phone
@@ -287,6 +304,10 @@ export default function ContactDrawer({
           tabs={[
             { id: 'details',  label: 'Details',  count: 0 },
             { id: 'activity', label: 'Activity', count: activityCount },
+            // Only offered when there's an address to correspond with — the tab
+            // has nothing to show without one, and the Details tab is where
+            // that gets fixed.
+            ...(form.email ? [{ id: 'emails', label: 'Emails', count: 0 }] : []),
             ...(isBuyer ? [{ id: 'matches', label: 'Matches', count: matchingProperties.length }] : []),
           ]}
         />
@@ -357,9 +378,9 @@ export default function ContactDrawer({
                     style={{ whiteSpace: 'nowrap', fontSize: 11 }}
                     onClick={enrichFromOutlook}
                     disabled={enriching}
-                    title="Look up this email in your Outlook contacts and fill in any blank fields"
+                    title="Look this address up in your Outlook ADDRESS BOOK and fill in any blank fields. For email correspondence with this contact, use the Emails tab."
                   >
-                    {enriching ? 'Looking up…' : 'Enrich from Outlook'}
+                    {enriching ? 'Looking up…' : 'Fill from address book'}
                   </button>
                 )}
               </div>
@@ -544,6 +565,15 @@ export default function ContactDrawer({
             activities={activities}
             activeAgent={activeAgent}
             onActivityAdded={onActivityAdded}
+          />
+        </div>
+      )}
+
+      {tab === 'emails' && (
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <EmailsTab
+            contact={contact}
+            onEmailSent={onActivityAdded}
           />
         </div>
       )}
