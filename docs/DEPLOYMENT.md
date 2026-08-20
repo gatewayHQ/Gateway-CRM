@@ -259,7 +259,7 @@ All secrets live in Vercel **Project → Settings → Environment Variables**:
 | `SUPABASE_URL` | All | Server-side Supabase client |
 | `SUPABASE_SERVICE_KEY` | Server-side only | Service role; bypasses RLS — **never** expose to frontend |
 | `VITE_SUPABASE_URL` | Build-time | Frontend Supabase URL |
-| `VITE_SUPABASE_ANON_KEY` | Build-time | Frontend anon key (safe to expose) |
+| `VITE_SUPABASE_ANON_KEY` | **All** (build **and** function runtime) | Anon key (safe to expose). Vite inlines it into the bundle at build time, but `getUserClient()` in `api/_lib/auth.js` also reads it from `process.env` at RUNTIME to make RLS-scoped reads as the calling agent. Tick Production **and** Preview, and redeploy after changing it — an env change does not apply to deployments already built. `SUPABASE_ANON_KEY` is accepted as an unprefixed alias |
 | `RESEND_API_KEY` | All | Email delivery |
 | `RESEND_FROM` | All | Verified sender domain |
 | `TWILIO_ACCOUNT_SID` | All | SMS |

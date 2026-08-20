@@ -66,7 +66,16 @@ export function getUserClient(req) {
   const jwt = extractBearer(req)
   if (!jwt) { const e = new Error('Sign in required'); e.status = 401; throw e }
   if (!ANON_KEY) {
-    const e = new Error('Server misconfigured: VITE_SUPABASE_ANON_KEY missing')
+    // Names the remedy, because this one is genuinely confusing to hit: the
+    // FRONTEND has a hardcoded anon-key fallback (src/lib/supabase.js), so the
+    // app works whether or not this var is set, and docs/DEPLOYMENT.md long
+    // described it as build-time-only. Any route calling getUserClient() needs
+    // it at FUNCTION RUNTIME too, which is a separate Vercel setting.
+    const e = new Error(
+      'Server misconfigured: VITE_SUPABASE_ANON_KEY (or SUPABASE_ANON_KEY) is not set for the '
+      + 'function runtime. Add it in Vercel → Settings → Environment Variables for Production '
+      + 'and Preview, then redeploy — env changes do not apply to existing deployments.'
+    )
     e.status = 500; throw e
   }
   return createClient(SUPABASE_URL, ANON_KEY, {
