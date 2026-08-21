@@ -14,7 +14,14 @@ import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
 import { describeDealCommission } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
-import { propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty } from '../lib/dealPeople.js'
+import {
+  propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty,
+  REPRESENTING_OPTIONS, SIDE_LABELS, representingFor, sidesFor,
+  primaryContactIdFor, dealContactIdsForSide, propertyContactSide, isMissingSideColumn,
+} from '../lib/dealPeople.js'
+import { priceChanged } from '../lib/pricing.js'
+import { syncPriceChange } from '../lib/services/pricing.js'
+import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
@@ -3034,19 +3041,47 @@ function PortalTab({ deal }) {
 }
 
 // Reconcile a deal's additional-contact link rows (deal_contacts) to match the
-// chosen id list — inserts new links, deletes removed ones. Best-effort.
+// chosen ids PER SIDE — inserts new links, deletes removed ones, and moves
+// anyone whose side changed. Best-effort.
+//
+// `bySide` is { buyer: [id], seller: [id] }. The side matters as much as the
+// membership: on a deal representing both parties, the same list without sides
+// cannot say which names belong to the buyer, so a form captioned "Seller"
+// would print whoever happened to be first.
+//
 // Returns true when rows actually changed, so the caller only refreshes state
 // (which re-runs the drawer's seeding effect) when there is something new.
-async function syncDealContacts(dealId, contactIds) {
+async function syncDealContacts(dealId, bySide) {
+  const wanted = new Map()
+  for (const side of ['buyer', 'seller']) {
+    for (const id of (bySide?.[side] || [])) if (id && !wanted.has(id)) wanted.set(id, side)
+  }
   try {
-    const { data: existing } = await supabase.from('deal_contacts').select('contact_id').eq('deal_id', dealId)
-    const have = new Set((existing || []).map(r => r.contact_id))
-    const want = new Set(contactIds)
-    const toAdd    = contactIds.filter(id => !have.has(id))
-    const toRemove = [...have].filter(id => !want.has(id))
-    if (toAdd.length)    await supabase.from('deal_contacts').insert(toAdd.map(contact_id => ({ deal_id: dealId, contact_id })))
+    const { data: existing } = await supabase.from('deal_contacts').select('contact_id, side').eq('deal_id', dealId)
+    const have = new Map((existing || []).map(r => [r.contact_id, r.side || null]))
+    const toAdd    = [...wanted.keys()].filter(id => !have.has(id))
+    const toRemove = [...have.keys()].filter(id => !wanted.has(id))
+    // A row whose side is wrong (or was never set, on a legacy link) is updated
+    // in place rather than deleted and re-inserted, so its created_at — the row
+    // order the picker and the signer list read — survives.
+    const toMove   = [...wanted.entries()].filter(([id, side]) => have.has(id) && have.get(id) !== side)
+
+    if (toAdd.length) {
+      const rows = toAdd.map(contact_id => ({ deal_id: dealId, contact_id, side: wanted.get(contact_id) }))
+      const { error } = await supabase.from('deal_contacts').insert(rows)
+      // deal_contacts.side arrives with migration 0040. Until it is applied the
+      // links are written without a side and read back as the deal's
+      // represented side — the pre-0040 behavior, not a lost contact.
+      if (error && isMissingSideColumn(error)) {
+        await supabase.from('deal_contacts').insert(rows.map(({ side, ...rest }) => rest))
+      }
+    }
     if (toRemove.length) await supabase.from('deal_contacts').delete().eq('deal_id', dealId).in('contact_id', toRemove)
-    return toAdd.length + toRemove.length > 0
+    for (const [contact_id, side] of toMove) {
+      const { error } = await supabase.from('deal_contacts').update({ side }).eq('deal_id', dealId).eq('contact_id', contact_id)
+      if (error && isMissingSideColumn(error)) break
+    }
+    return toAdd.length + toRemove.length + toMove.length > 0
   } catch (e) { console.error('[syncDealContacts]', e); return false }
 }
 
@@ -3155,8 +3190,20 @@ export function dealContactIdsFor(dealContacts, dealId) {
     .sort()
 }
 
-export function DealDrawer({ open, onClose, deal, agents, contacts, properties, dealContacts = [], propertyContacts = [], activeAgent, onSave, setDb, initialTab = 'details' }) {
-  const blank = { title:'', contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, commission_type:'percent', commission_pct:'', commission_flat:'' }
+// The same stable key, but including each link's SIDE — so moving someone from
+// the buyer side to the seller side re-seeds the drawer, which a plain id list
+// would read as "nothing changed".
+export function dealContactKeyFor(dealContacts, dealId) {
+  if (!dealId) return ''
+  return (dealContacts || [])
+    .filter(dc => dc?.deal_id === dealId && dc?.contact_id)
+    .map(dc => `${dc.contact_id}:${dc.side || ''}`)
+    .sort()
+    .join(',')
+}
+
+export function DealDrawer({ open, onClose, deal, agents, contacts, properties, deals = [], dealContacts = [], propertyContacts = [], activeAgent, onSave, setDb, initialTab = 'details' }) {
+  const blank = { title:'', contact_id:'', buyer_contact_id:'', seller_contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, commission_type:'percent', commission_pct:'', commission_flat:'' }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
@@ -3164,8 +3211,11 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   // Stage picker reads the agent's own column names, so the drawer and the
   // board they dragged the card from agree.
   const stageLabels         = useStageLabels()
-  // Additional contacts (husband & wife, co-buyers) — the primary stays contact_id.
-  const [additionalContactIds, setAdditionalContactIds] = useState([])
+  // Additional contacts (husband & wife, co-buyers, co-owners), kept PER SIDE —
+  // the primaries are form.buyer_contact_id / form.seller_contact_id. Both sides
+  // are held in state even when only one is shown, so flipping Representing to
+  // 'both' and back never discards the other side's people.
+  const [additionalBySide, setAdditionalBySide] = useState({ buyer: [], seller: [] })
 
   // WHY THE DEPS ARE CONTENT, NOT OBJECTS — this is the "the modal closed when I
   // switched tabs" bug.
@@ -3184,7 +3234,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   // contacts rather than the array they came in. A refetch that changes nothing now
   // changes nothing. It also means an agent's half-typed edits are no longer wiped
   // by a background refetch — the same bug wearing different clothes.
-  const dealContactKey = dealContactIdsFor(dealContacts, deal?.id).join(',')
+  const dealContactKey = dealContactKeyFor(dealContacts, deal?.id)
 
   React.useEffect(() => {
     setForm(deal ? {
@@ -3196,10 +3246,18 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       commission_type:  deal.commission_type === 'flat' ? 'flat' : 'percent',
       commission_pct:   deal.commission_pct  ?? '',
       commission_flat:  deal.commission_flat ?? '',
+      // A deal saved before the per-side columns existed has its single contact
+      // read onto the side it represents (src/lib/dealPeople.js), so opening the
+      // drawer shows that person where they belong instead of an empty field.
+      buyer_contact_id:  primaryContactIdFor(deal, 'buyer')  || '',
+      seller_contact_id: primaryContactIdFor(deal, 'seller') || '',
     } : blank)
     setErrors({})
     setTab(deal?.id ? initialTab : 'details')
-    setAdditionalContactIds(dealContactIdsFor(dealContacts, deal?.id))
+    setAdditionalBySide(deal?.id ? {
+      buyer:  dealContactIdsForSide(dealContacts, deal, 'buyer'),
+      seller: dealContactIdsForSide(dealContacts, deal, 'seller'),
+    } : { buyer: [], seller: [] })
     // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately keyed on
     // the deal's IDENTITY and its contacts' CONTENT; see the comment above.
   }, [deal?.id, open, initialTab, dealContactKey])
@@ -3219,52 +3277,98 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const propertyContactKey = propertyContactIds(propertyContacts, form.property_id).slice().sort().join(',')
   const propertySeedRef = useRef('')
 
+  // ── Which side(s) this deal represents ────────────────────────────────────
+  // Buyer, Seller, or Both, read from comp_data.transaction_type — the same
+  // field the old two-way toggle wrote, so no deal changes meaning here. 'Both'
+  // is what makes the two contact sections appear.
+  const representing  = representingFor(form)
+  const visibleSides  = sidesFor(representing)
+  const primaryFor    = (side) => (side === 'seller' ? form.seller_contact_id : form.buyer_contact_id) || ''
+
   // People the agent has taken off this deal. Removing the LAST extra empties
   // the picker, which reads exactly like "this deal never had one" — without
   // this, the property would seed them back on the next open and the removal
   // would never stick. Kept for the session; they remain one click away below.
-  const removedRef = useRef({ dealKey: '', ids: [] })
-  const changeAdditionalContacts = (next) => {
+  // Kept PER SIDE, because a removal only sticks on the side it was made on.
+  const removedRef = useRef({ dealKey: '', ids: { buyer: [], seller: [] } })
+  const changeAdditionalContacts = (side, next) => {
     const dealKey = deal?.id || 'new'
-    const known = removedRef.current.dealKey === dealKey ? removedRef.current.ids : []
+    const known = removedRef.current.dealKey === dealKey ? removedRef.current.ids : { buyer: [], seller: [] }
     // Anyone previously removed or currently picked, who isn't in the new list.
     // Re-adding someone drops them from the memory by the same rule.
     removedRef.current = {
       dealKey,
-      ids: [...new Set([...known, ...additionalContactIds])].filter(id => !next.includes(id)),
+      ids: {
+        ...known,
+        [side]: [...new Set([...(known[side] || []), ...(additionalBySide[side] || [])])].filter(id => !next.includes(id)),
+      },
     }
-    setAdditionalContactIds(next)
+    setAdditionalBySide(prev => ({ ...prev, [side]: next }))
   }
+
+  // Which side the property's co-owners belong to: the seller side when the deal
+  // has one, otherwise the single client set they have always sat in.
+  const ownerSide = propertyContactSide(form)
+
   React.useEffect(() => {
     if (!open) { propertySeedRef.current = ''; return }
     // The key includes the property's link CONTENT, so rows that arrive after
     // the drawer opened can still seed an empty picker. Nothing is ever
-    // overwritten — `prev.length` below is what protects a curated list.
-    const seedKey = `${deal?.id || 'new'}:${form.property_id || ''}:${propertyContactKey}`
+    // overwritten — `prev.length` inside seedPickerFromProperty is what
+    // protects a curated list.
+    const seedKey = `${deal?.id || 'new'}:${form.property_id || ''}:${ownerSide}:${propertyContactKey}`
     if (propertySeedRef.current === seedKey) return
     propertySeedRef.current = seedKey
-    setAdditionalContactIds(prev => seedPickerFromProperty({
-      selectedIds: prev, propertyId: form.property_id, propertyContacts, primaryContactId: form.contact_id,
-      excludeIds: removedRef.current.dealKey === (deal?.id || 'new') ? removedRef.current.ids : [],
+    const excludeIds = removedRef.current.dealKey === (deal?.id || 'new') ? (removedRef.current.ids[ownerSide] || []) : []
+    setAdditionalBySide(prev => ({
+      ...prev,
+      [ownerSide]: seedPickerFromProperty({
+        selectedIds: prev[ownerSide] || [], propertyId: form.property_id, propertyContacts,
+        primaryContactId: primaryFor(ownerSide), excludeIds,
+      }),
     }))
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the deal's
     // IDENTITY and the property links' CONTENT, like the seeding effect above.
-  }, [open, deal?.id, form.property_id, form.contact_id, propertyContactKey])
+  }, [open, deal?.id, form.property_id, form.buyer_contact_id, form.seller_contact_id, ownerSide, propertyContactKey])
 
   // Anyone left on the property who isn't on the deal — offered, never forced.
   const propertyOnlyIds = propertyExtrasNotOnDeal({
     propertyId: form.property_id, propertyContacts,
-    selectedIds: additionalContactIds, primaryContactId: form.contact_id,
+    selectedIds: [...(additionalBySide.buyer || []), ...(additionalBySide.seller || [])],
+    primaryContactId: primaryFor(ownerSide),
+    excludeIds: [primaryFor(ownerSide === 'buyer' ? 'seller' : 'buyer')].filter(Boolean),
   })
   const propertyOnlyContacts = propertyOnlyIds.map(id => contacts.find(c => c.id === id)).filter(Boolean)
 
   // Resolved additional-contact objects — used for the "Send from Template"
-  // signer prefill on the Signatures tab (co-signers get their own rows).
-  const extraContacts = additionalContactIds.map(id => contacts.find(c => c.id === id)).filter(Boolean)
+  // signer prefill on the Signatures tab (co-signers get their own rows). Both
+  // sides go in: on a deal representing both parties, everyone signs something.
+  const extraContacts = [...(additionalBySide.buyer || []), ...(additionalBySide.seller || [])]
+    .map(id => contacts.find(c => c.id === id)).filter(Boolean)
 
   const set  = (k, v) => setForm(p => ({...p, [k]: v}))
   const setCD = (k, v) => setForm(p => ({...p, comp_data: {...(p.comp_data||{}), [k]: v}}))
   const cd = form.comp_data || {}
+  const setPrimaryFor = (side, id) => set(side === 'seller' ? 'seller_contact_id' : 'buyer_contact_id', id || '')
+
+  const linkedProperty = form.property_id ? (properties || []).find(p => p.id === form.property_id) || null : null
+
+  // Linking a property fills in what the listing already knows, but only where
+  // the deal is BLANK — an agent who typed a negotiated number or a deal title
+  // of their own keeps it. This is what stops a fresh deal from sitting at "no
+  // value" next to a priced listing, which is the state the two-way sync then
+  // has to reconcile forever.
+  const linkProperty = (propertyId) => {
+    const picked = propertyId ? (properties || []).find(p => p.id === propertyId) : null
+    setForm(prev => ({
+      ...prev,
+      property_id: propertyId,
+      value: (prev.value === '' || prev.value === null || prev.value === undefined) && picked?.list_price != null
+        ? picked.list_price
+        : prev.value,
+      title: !prev.title.trim() && picked?.address ? picked.address : prev.title,
+    }))
+  }
 
   // Additional agents — mirrors deals.co_agent_ids, the same column the deal
   // page's "Agents on deal" card reads via agentIdsOnDeal(), so adding/removing
@@ -3292,13 +3396,30 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       // Linking a NEW deal to a property is a conversion too, so its co-agents
       // come along exactly as they do from the property's "Start Deal" button.
       // An existing deal only seeds from the property once, at conversion time.
-      const linkedProperty = form.property_id
-        ? (properties || []).find(p => p.id === form.property_id)
-        : null
       const seededCoAgents = deal?.id ? [] : coAgentIdsForNewDeal(linkedProperty, form.agent_id || null)
       // Manual picks from the Additional Agents field, merged with anything seeded
       // from the property above — never the primary agent, never duplicated.
       const finalCoAgentIds = [...new Set([...additionalAgentIds, ...seededCoAgents])].filter(id => id && id !== form.agent_id)
+
+      // Only the sides this deal actually represents are saved: flipping Both →
+      // Buyer must not leave a seller contact on the row for a form to print.
+      // The picked people stay in drawer state, so flipping back restores them.
+      const savedSides = { buyer: null, seller: null }
+      for (const side of visibleSides) savedSides[side] = primaryFor(side) || null
+      const savedExtras = {
+        buyer:  visibleSides.includes('buyer')  ? (additionalBySide.buyer  || []) : [],
+        seller: visibleSides.includes('seller') ? (additionalBySide.seller || []) : [],
+      }
+      // On a both-sided deal either primary is a defensible mirror, so the rule
+      // is "don't change it": a deal already pointing at one of the two keeps
+      // pointing there, and only a deal with no usable mirror picks one — the
+      // seller, the party this deal's property, title and price belong to.
+      // Without this, switching an existing buyer-side deal to Both would
+      // silently repoint the portal, the mass-email token and the BoldSign
+      // prefill at a different person.
+      const mirrorPrimaryId = representing === 'both'
+        ? ([savedSides.buyer, savedSides.seller].includes(form.contact_id) ? form.contact_id : (savedSides.seller || savedSides.buyer))
+        : savedSides[visibleSides[0]]
 
       // Explicit whitelist — never spread full form object (prevents unknown-column schema errors)
       let payload = {
@@ -3308,7 +3429,13 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         value:               form.value !== '' && form.value !== null ? Number(form.value) : null,
         probability:         Number(form.probability) || 0,
         expected_close_date: form.expected_close_date || null,
-        contact_id:          form.contact_id   || null,
+        // `contact_id` stays the single primary contact of the side we represent —
+        // the BoldSign prefill, the client portal, mass email and every deal card
+        // read it, and none of them know about sides. See mirrorPrimaryId above
+        // for what a both-sided deal points it at.
+        contact_id:          mirrorPrimaryId       || null,
+        buyer_contact_id:    savedSides.buyer,
+        seller_contact_id:   savedSides.seller,
         property_id:         form.property_id  || null,
         agent_id:            form.agent_id     || null,
         notes:               form.notes        || null,
@@ -3345,6 +3472,17 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         ;({ error, savedId } = await write(payload))
       }
 
+      // deals.buyer_contact_id / seller_contact_id arrive with migration 0040.
+      // Until it's applied the deal saves with `contact_id` alone — the
+      // pre-0040 single-contact behavior — rather than failing the save.
+      let sidesDropped = false
+      if (error && isMissingSideColumn(error)) {
+        const { buyer_contact_id, seller_contact_id, ...rest } = payload
+        payload = rest
+        sidesDropped = true
+        ;({ error, savedId } = await write(payload))
+      }
+
       // The commission columns arrive with migration 0024. Until it's applied,
       // drop them and save the rest rather than blocking the whole deal — the
       // agent gets an actionable pointer instead of an opaque schema error.
@@ -3361,19 +3499,44 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       // Sync additional contacts (best-effort — the deal itself is already saved),
       // then mirror the result into global state so the picker and the deal page's
       // People card read the rows that now exist.
-      if (savedId && await syncDealContacts(savedId, additionalContactIds)) {
+      if (savedId && await syncDealContacts(savedId, savedExtras)) {
         await reloadDealContacts(setDb, savedId)
+      }
+
+      // ── Price round-trip ───────────────────────────────────────────────────
+      // The deal's value and the listing's price are one number
+      // (src/lib/pricing.js): a change here reaches the property, its other open
+      // deals, and the shared Pricing History both tabs read. Best-effort — the
+      // deal is already saved, so a failure warns rather than losing the edit.
+      let priceWarning = null
+      if (savedId && priceChanged(deal?.value, form.value)) {
+        const sync = await syncPriceChange({
+          price: form.value, previousPrice: deal?.value, origin: 'deal',
+          property: linkedProperty, dealId: savedId, deals, actor: activeAgent,
+        })
+        priceWarning = sync.warning
+        if ((sync.propertyPatch || sync.repricedDealIds.length) && setDb) {
+          const nextValue = payload.value
+          setDb(prev => ({
+            ...prev,
+            properties: sync.propertyPatch
+              ? (prev.properties || []).map(p => p.id === form.property_id ? { ...p, ...sync.propertyPatch } : p)
+              : prev.properties,
+            deals: (prev.deals || []).map(d => sync.repricedDealIds.includes(d.id) ? { ...d, value: nextValue } : d),
+          }))
+        }
       }
 
       const coAgentWarning = coAgentsDropped && seededCoAgents.length
         ? 'Deal saved, but its co-agents were not — ask an admin to apply database migration 0025.'
         : null
-      pushToast(
-        degraded
-          ? 'Deal saved, but the commission was not — ask an admin to apply database migration 0024.'
-          : coAgentWarning || (deal?.id ? 'Deal updated' : 'Deal added'),
-        degraded || coAgentWarning ? 'error' : undefined,
-      )
+      const sidesWarning = sidesDropped
+        ? 'Deal saved, but the buyer/seller split was not — ask an admin to apply database migration 0040.'
+        : null
+      const warning = degraded
+        ? 'Deal saved, but the commission was not — ask an admin to apply database migration 0024.'
+        : sidesWarning || coAgentWarning || priceWarning
+      pushToast(warning || (deal?.id ? 'Deal updated' : 'Deal added'), warning ? 'error' : undefined)
       await onSave()
       onClose()
     } catch(err) {
@@ -3391,7 +3554,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       {/* Tab bar — only for existing deals */}
       {isExisting && (
         <div className="drawer-tabs">
-          {[['details','Details'],['dates','Key Dates'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
+          {[['details','Details'],['dates','Key Dates'],['pricing','Pricing History'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
             <button key={id} className={`drawer-tab${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}>
               {label}
             </button>
@@ -3420,27 +3583,35 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
               </div>
             </div>
 
-            {/* Residential: which side of the deal we represent — decides the
-                buyer/seller board and stage track. Shares the Forms tab's
-                comp_data.transaction_type field. */}
-            {form.prop_category !== 'commercial' && (
-              <div className="form-group">
-                <label className="form-label">Representing</label>
-                <div style={{ display:'flex', gap:0, border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
-                  {[['buyer','Buyer'],['seller','Seller']].map(([side, label]) => {
-                    const selected = (cd.transaction_type === 'seller') === (side === 'seller')
-                    return (
-                      <button key={side} type="button" onClick={() => applyTrackChange({ comp_data: { transaction_type: side } })}
-                        style={{ flex:1, padding:'7px 0', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, transition:'all 150ms',
-                          background: selected ? 'var(--gw-slate)' : '#fff',
-                          color:      selected ? '#fff'            : 'var(--gw-mist)' }}>
-                        {label}
-                      </button>
-                    )
-                  })}
-                </div>
+            {/* Which side(s) of the table we represent. Decides which contact
+                sections appear below, and which Form Library packets the deal's
+                forms come from. Shares the Forms tab's
+                comp_data.transaction_type field.
+
+                Commercial deals get it too: an agent representing both parties
+                on a multifamily sale has the same two client sets to keep
+                apart, and nothing on the board depends on this value. */}
+            <div className="form-group">
+              <label className="form-label">Representing</label>
+              <div style={{ display:'flex', gap:0, border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
+                {REPRESENTING_OPTIONS.map(([side, label]) => {
+                  const selected = representing === side
+                  return (
+                    <button key={side} type="button" onClick={() => applyTrackChange({ comp_data: { transaction_type: side } })}
+                      style={{ flex:1, padding:'7px 0', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, transition:'all 150ms',
+                        background: selected ? 'var(--gw-slate)' : '#fff',
+                        color:      selected ? '#fff'            : 'var(--gw-mist)' }}>
+                      {label}
+                    </button>
+                  )
+                })}
               </div>
-            )}
+              {representing === 'both' && (
+                <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>
+                  Representing both parties — each side keeps its own contacts below.
+                </div>
+              )}
+            </div>
 
             {/* Commercial subtype */}
             {form.prop_category === 'commercial' && (
@@ -3455,28 +3626,74 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
             <div className="form-group"><label className="form-label">Stage</label><select className="form-control" value={formStages.includes(form.stage) ? form.stage : boardStageFor(form, formTrack)} onChange={e=>set('stage',e.target.value)}>{formStages.map(s=><option key={s} value={s}>{stageLabels[s]}</option>)}</select></div>
             <div className="form-row">
-              <div className="form-group"><label className="form-label">Sale / Deal Value</label><input className="form-control" type="number" value={form.value||''} onChange={e=>set('value',e.target.value)} placeholder="0" /></div>
+              <div className="form-group">
+                <label className="form-label">Sale / Deal Value</label>
+                <input className="form-control" type="number" value={form.value||''} onChange={e=>set('value',e.target.value)} placeholder="0" />
+                {/* The deal's value and the listing's price are one number
+                    (src/lib/pricing.js) — this says so out loud before the
+                    agent saves, rather than letting the two drift silently. */}
+                {linkedProperty && priceChanged(linkedProperty.list_price, form.value) && (
+                  <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>
+                    Listing price is {linkedProperty.list_price ? formatCurrency(linkedProperty.list_price) : 'not set'} — saving updates the property and logs the change to Pricing History.
+                  </div>
+                )}
+              </div>
               <div className="form-group"><label className="form-label">Probability %</label><input className="form-control" type="number" min="0" max="100" value={form.probability||0} onChange={e=>set('probability',e.target.value)} /></div>
             </div>
             <div className="form-group"><label className="form-label">Expected Close Date</label><input className="form-control" type="date" value={form.expected_close_date||''} onChange={e=>set('expected_close_date',e.target.value)} /></div>
-            <div className="form-group"><label className="form-label">Contact</label><SearchDropdown items={contacts} value={form.contact_id} onSelect={v=>set('contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
-            <div className="form-group">
-              <label className="form-label">Additional Contacts</label>
-              <ContactMultiSelect contacts={contacts} selectedIds={additionalContactIds} onChange={changeAdditionalContacts} excludeId={form.contact_id} placeholder="Add co-buyer, spouse, co-owner…" />
-              <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Husband &amp; wife, co-buyers, co-owners — these also pre-fill as signers when you Send from Template.</div>
-              {propertyOnlyContacts.length > 0 && (
-                <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 6, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  <span>Also on this property:</span>
-                  {propertyOnlyContacts.map(c => (
-                    <button key={c.id} type="button" className="btn btn--ghost btn--sm" style={{ fontSize: 11, padding: '1px 7px' }}
-                      onClick={() => changeAdditionalContacts([...additionalContactIds, c.id])}>
-                      + {c.first_name} {c.last_name}
-                    </button>
-                  ))}
+            {/* One contact section per side we represent. On a 'both' deal that
+                is two, each with its own primary and its own extras, because a
+                buyer and a seller are not interchangeable people and editing one
+                must never touch the other. On a one-sided deal it reads exactly
+                like the single Contact field it replaces, just labelled with the
+                side it belongs to. */}
+            {visibleSides.map(side => {
+              const otherSide   = side === 'buyer' ? 'seller' : 'buyer'
+              const extras      = additionalBySide[side] || []
+              const showOwners  = side === ownerSide && propertyOnlyContacts.length > 0
+              // Anyone on the other side can't also be picked here.
+              const takenOnOtherSide = new Set([
+                primaryFor(otherSide),
+                ...(visibleSides.includes(otherSide) ? (additionalBySide[otherSide] || []) : []),
+              ].filter(Boolean))
+              const pickable = contacts.filter(c => !takenOnOtherSide.has(c.id))
+              return (
+                <div key={side} style={representing === 'both' ? {
+                  border:'1px solid var(--gw-border)', borderRadius:'var(--radius)',
+                  padding:'12px 12px 4px', marginBottom:12, background:'var(--gw-bone)',
+                } : undefined}>
+                  {representing === 'both' && (
+                    <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:10 }}>
+                      {SIDE_LABELS[side]} side
+                    </div>
+                  )}
+                  <div className="form-group">
+                    <label className="form-label">{SIDE_LABELS[side]} Contact</label>
+                    <SearchDropdown items={pickable} value={primaryFor(side)} onSelect={v=>setPrimaryFor(side, v)}
+                      placeholder={`Search ${side === 'buyer' ? 'buyers' : 'sellers'}…`} labelKey={c=>`${c.first_name} ${c.last_name}`} />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Additional {SIDE_LABELS[side]} Contacts</label>
+                    <ContactMultiSelect contacts={pickable} selectedIds={extras} onChange={next=>changeAdditionalContacts(side, next)}
+                      excludeId={primaryFor(side)}
+                      placeholder={side === 'buyer' ? 'Add co-buyer, spouse…' : 'Add co-owner, spouse…'} />
+                    <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>Husband &amp; wife, co-buyers, co-owners — these also pre-fill as signers when you Send from Template.</div>
+                    {showOwners && (
+                      <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 6, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <span>Also on this property:</span>
+                        {propertyOnlyContacts.map(c => (
+                          <button key={c.id} type="button" className="btn btn--ghost btn--sm" style={{ fontSize: 11, padding: '1px 7px' }}
+                            onClick={() => changeAdditionalContacts(side, [...extras, c.id])}>
+                            + {c.first_name} {c.last_name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              )}
-            </div>
-            <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={v=>set('property_id',v)} placeholder="Search properties…" labelKey="address" /></div>
+              )
+            })}
+            <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={linkProperty} placeholder="Search properties…" labelKey="address" /></div>
             <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
             <div className="form-group">
               <label className="form-label">Additional Agents</label>
@@ -3598,6 +3815,16 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       {/* Key Dates tab */}
       {tab === 'dates' && isExisting && (
         <KeyDatesTab deal={deal} />
+      )}
+
+      {/* Pricing History tab — the LINKED PROPERTY's price log, which is the
+          same log the property drawer's own tab shows. The price belongs to the
+          building, so a reduction made on either surface appears on both. */}
+      {tab === 'pricing' && isExisting && (
+        <DealPricingHistoryTab
+          deal={deal}
+          property={form.property_id ? (properties || []).find(p => p.id === form.property_id) : null}
+        />
       )}
 
       {/* Checklist tab */}
@@ -4382,7 +4609,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
       <DealDrawer open={drawer} onClose={() => setDrawer(false)}
         deal={editing ? editing : { stage: defaultStage }}
-        agents={agents} contacts={contacts} properties={properties} dealContacts={dealContacts} propertyContacts={db.propertyContacts || []} activeAgent={activeAgent} onSave={reload} setDb={setDb} />
+        agents={agents} contacts={contacts} properties={properties} deals={deals} dealContacts={dealContacts} propertyContacts={db.propertyContacts || []} activeAgent={activeAgent} onSave={reload} setDb={setDb} />
       {confirm && <ConfirmDialog message="This will permanently delete this deal." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {confirmProp && <ConfirmDialog message="Remove this listing from the pipeline? Any linked deals are kept but will be unlinked from the property." onConfirm={() => delProperty(confirmProp)} onCancel={() => setConfirmProp(null)} />}
     </div>

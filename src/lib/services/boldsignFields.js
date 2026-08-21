@@ -463,6 +463,13 @@ export function dealClientList({ contact, additionalContacts = [] } = {}) {
 // lease has a lessor and a lessee, not a buyer and a seller, and 'general' means
 // nobody recorded it. See the side-aware tokens in crmTokenValues() for what a
 // null does, and why a blank is the right answer rather than a guess.
+//
+// 'both' (migration 0040) also resolves to null, for a different reason: the
+// deal now DOES record both parties, but the token values below are built from
+// one flat `clients` list with no side on it, so this function cannot say which
+// of those names is the buyer. A blank the agent can fill in on the send screen
+// beats a coin flip; wiring the per-side contacts through to the party tokens is
+// the real fix and belongs with whoever next touches the prefill.
 export function dealClientSide(deal) {
   const t = String(deal?.comp_data?.transaction_type || '').trim().toLowerCase()
   return (t === 'buyer' || t === 'seller') ? t : null

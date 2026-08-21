@@ -7,7 +7,7 @@ import { useStageLabels } from '../lib/stageLabelContext.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
 import { agentIdsOnDeal } from '../lib/coAgents.js'
-import { additionalContactsForDeal } from '../lib/dealPeople.js'
+import { dealSideBreakdown, representingFor } from '../lib/dealPeople.js'
 import { DealDrawer } from './Pipeline.jsx'
 import { getClosingGate, gateBadge } from '../lib/compliance.js'
 import { listRequiredForms } from '../lib/services/requiredForms.js'
@@ -37,6 +37,9 @@ const timeAgo = (iso) => {
 
 const ACTIVITY_ICONS = { note: 'edit', call: 'phone', email: 'mail', meeting: 'contacts', showing: 'eye' }
 
+// How the header badge names the side(s) we represent.
+const REPRESENTING_LABELS = { buyer: 'Buyer side', seller: 'Seller side', both: 'Both sides' }
+
 const dateUrgency = (dateStr) => {
   if (!dateStr) return null
   const days = Math.ceil((new Date(dateStr + 'T12:00:00') - new Date()) / 86400000)
@@ -55,6 +58,44 @@ function SectionCard({ title, action, children, style }) {
         {action}
       </div>
       {children}
+    </div>
+  )
+}
+
+// One person on the deal: name, the phone/email links, and (for a primary, when
+// the composer is available) the one-click email button. Lifted out of the
+// People card when it grew a block per side — the buyer's primary and the
+// seller's primary have to render identically or the card reads as two designs.
+function ContactLine({ contact, note = null, primary = false, property = null, deal = null, dealId = null, openCompose = null }) {
+  if (!contact) return null
+  const canEmail = primary && contact.email && openCompose
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: primary ? 'center' : 'baseline', gap: primary ? 8 : 6, flexWrap: 'wrap' }}>
+        <span style={{ fontWeight: 700, fontSize: primary ? 13.5 : 13 }}>{contact.first_name} {contact.last_name}</span>
+        {note && <span style={{ fontSize: 10.5, color: 'var(--gw-mist)' }}>{note}</span>}
+        {canEmail && (
+          <button
+            className="btn btn--ghost btn--icon btn--sm"
+            title={`Email ${contact.first_name}`}
+            onClick={() => openCompose({
+              to: contact.email,
+              contactName: `${contact.first_name} ${contact.last_name}`,
+              contactId: contact.id,
+              dealId,
+              propertyAddress: property?.address,
+              dealValue: deal?.value,
+            })}
+          >
+            <Icon name="mail" size={12} />
+          </button>
+        )}
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--gw-mist)', display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 2 }}>
+        {contact.phone && <a href={`tel:${contact.phone}`} style={{ color: 'inherit' }}>{formatPhone(contact.phone)}</a>}
+        {contact.email && <a href={`mailto:${contact.email}`} style={{ color: 'inherit' }}>{contact.email}</a>}
+      </div>
+      {primary && contact.spouse_name && <div style={{ fontSize: 11.5, color: 'var(--gw-mist)', marginTop: 2 }}>Spouse: {contact.spouse_name}</div>}
     </div>
   )
 }
@@ -122,10 +163,12 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
   const track    = deal ? TRACKS[UNIFIED] : null
   const cd       = deal?.comp_data || {}
 
-  // Co-buyers / co-owners / spouses — picked on the deal OR carried by the
-  // linked property, so a co-owner entered on the property shows up here too.
-  const extraContacts = useMemo(
-    () => additionalContactsForDeal({
+  // Buyer side, seller side, or both — with each side's own primary contact and
+  // extras (migration 0040). On a one-sided deal this is the same single client
+  // set the People card has always shown, just labelled with its side.
+  const representing = representingFor(deal)
+  const sideBreakdown = useMemo(
+    () => dealSideBreakdown({
       deal, contacts,
       dealContacts:     db.dealContacts     || [],
       propertyContacts: db.propertyContacts || [],
@@ -398,7 +441,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
               <Badge variant={deal.prop_category === 'commercial' ? 'commercial' : 'residential'}>
                 {deal.prop_category === 'commercial'
                   ? `Commercial${deal.prop_subtype ? ` · ${deal.prop_subtype}` : ''}`
-                  : `Residential · ${cd.transaction_type === 'seller' ? 'Seller' : 'Buyer'} side`}
+                  : `Residential · ${REPRESENTING_LABELS[representing]}`}
               </Badge>
               {!isOpenStage(deal.stage) && (
                 <Badge variant={deal.stage === 'closed' ? 'closed' : 'lost'}>{stageLabels[deal.stage]}</Badge>
@@ -504,50 +547,29 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
         {/* People */}
         <SectionCard title="People">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {contact ? (
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <div style={{ fontWeight: 700, fontSize: 13.5 }}>{contact.first_name} {contact.last_name}</div>
-                  {contact.email && openCompose && (
-                    <button
-                      className="btn btn--ghost btn--icon btn--sm"
-                      title={`Email ${contact.first_name}`}
-                      onClick={() => openCompose({
-                        to: contact.email,
-                        contactName: `${contact.first_name} ${contact.last_name}`,
-                        contactId: contact.id,
-                        dealId,
-                        propertyAddress: property?.address,
-                        dealValue: deal?.value,
-                      })}
-                    >
-                      <Icon name="mail" size={12} />
-                    </button>
-                  )}
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--gw-mist)', display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 2 }}>
-                  {contact.phone && <a href={`tel:${contact.phone}`} style={{ color: 'inherit' }}>{formatPhone(contact.phone)}</a>}
-                  {contact.email && <a href={`mailto:${contact.email}`} style={{ color: 'inherit' }}>{contact.email}</a>}
-                </div>
-                {contact.spouse_name && <div style={{ fontSize: 11.5, color: 'var(--gw-mist)', marginTop: 2 }}>Spouse: {contact.spouse_name}</div>}
-              </div>
-            ) : (
-              <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>No contact linked.</div>
-            )}
-            {/* Additional contacts — co-buyers, co-owners, husband & wife. Some
-                are picked on the deal, some ride along from the property. */}
-            {extraContacts.map(({ contact: c, source }) => (
-              <div key={c.id}>
-                <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
-                  <span style={{ fontWeight: 700, fontSize: 13 }}>{c.first_name} {c.last_name}</span>
-                  <span style={{ fontSize: 10.5, color: 'var(--gw-mist)' }}>
-                    {source === 'property' ? 'also on property' : 'additional contact'}
-                  </span>
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--gw-mist)', display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 2 }}>
-                  {c.phone && <a href={`tel:${c.phone}`} style={{ color: 'inherit' }}>{formatPhone(c.phone)}</a>}
-                  {c.email && <a href={`mailto:${c.email}`} style={{ color: 'inherit' }}>{c.email}</a>}
-                </div>
+            {/* One block per side we represent. On a both-sided deal that is two,
+                headed "Buyer" and "Seller", so it is never ambiguous which party
+                a name is. On a one-sided deal there is a single block and the
+                heading is dropped — the card reads as it always has. */}
+            {sideBreakdown.sides.map(({ side, label, primary, extras }) => (
+              <div key={side} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {representing === 'both' && (
+                  <div style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    {label}
+                  </div>
+                )}
+                {primary ? (
+                  <ContactLine contact={primary} property={property} deal={deal} dealId={dealId} openCompose={openCompose} primary />
+                ) : (
+                  <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>
+                    No {representing === 'both' ? `${label.toLowerCase()} ` : ''}contact linked.
+                  </div>
+                )}
+                {/* Additional contacts — co-buyers, co-owners, husband & wife. Some
+                    are picked on the deal, some ride along from the property. */}
+                {extras.map(({ contact: c, source }) => (
+                  <ContactLine key={c.id} contact={c} note={source === 'property' ? 'also on property' : 'additional contact'} />
+                ))}
               </div>
             ))}
             <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8 }}>
@@ -815,7 +837,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
       </div>
 
       <DealDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} deal={deal} initialTab={drawerTab}
-        agents={agents} contacts={contacts} properties={properties} dealContacts={db.dealContacts || []} propertyContacts={db.propertyContacts || []} activeAgent={activeAgent} onSave={refreshDeal} setDb={setDb} />
+        agents={agents} contacts={contacts} properties={properties} deals={deals} dealContacts={db.dealContacts || []} propertyContacts={db.propertyContacts || []} activeAgent={activeAgent} onSave={refreshDeal} setDb={setDb} />
     </div>
   )
 }

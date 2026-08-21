@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { dealContactIdsFor } from '../../pages/Pipeline.jsx'
+import { dealContactIdsFor, dealContactKeyFor } from '../../pages/Pipeline.jsx'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The tab-switch bug, in one sentence: a re-fetch that changed nothing handed the
@@ -59,5 +59,35 @@ describe('dealContactIdsFor', () => {
   it('tolerates missing rows and malformed entries', () => {
     expect(dealContactIdsFor(null, 'deal-1')).toEqual([])
     expect(dealContactIdsFor([{ deal_id: 'deal-1' }, null, { contact_id: 'x' }], 'deal-1')).toEqual([])
+  })
+})
+
+// The drawer keys its seeding on dealContactKeyFor, not dealContactIdsFor, once
+// a link row also carries a SIDE (migration 0040): moving someone from the buyer
+// side to the seller side changes nothing about the id list, so the drawer would
+// have kept showing them on the side they left.
+describe('dealContactKeyFor', () => {
+  it('changes when a contact moves between sides', () => {
+    const before = [{ deal_id: 'deal-1', contact_id: 'c-a', side: 'buyer' }]
+    const after  = [{ deal_id: 'deal-1', contact_id: 'c-a', side: 'seller' }]
+    expect(dealContactIdsFor(before, 'deal-1')).toEqual(dealContactIdsFor(after, 'deal-1'))
+    expect(dealContactKeyFor(before, 'deal-1')).not.toBe(dealContactKeyFor(after, 'deal-1'))
+  })
+
+  it('is stable across a refetch that returns the same rows in another order', () => {
+    const a = [
+      { deal_id: 'deal-1', contact_id: 'c-z', side: 'seller' },
+      { deal_id: 'deal-1', contact_id: 'c-a', side: 'buyer' },
+    ]
+    const b = [a[1], a[0]]
+    expect(dealContactKeyFor(a, 'deal-1')).toBe(dealContactKeyFor(b, 'deal-1'))
+  })
+
+  it('treats a legacy row with no side as its own state, and tolerates junk', () => {
+    expect(dealContactKeyFor([{ deal_id: 'deal-1', contact_id: 'c-a' }], 'deal-1')).toBe('c-a:')
+    expect(dealContactKeyFor([{ deal_id: 'deal-2', contact_id: 'c-a' }], 'deal-1')).toBe('')
+    expect(dealContactKeyFor(null, 'deal-1')).toBe('')
+    expect(dealContactKeyFor([{ deal_id: 'deal-1' }, null], 'deal-1')).toBe('')
+    expect(dealContactKeyFor([{ deal_id: 'deal-1', contact_id: 'c-a' }], null)).toBe('')
   })
 })
