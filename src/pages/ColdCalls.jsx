@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { upsertContact } from '../lib/services/contacts.js'
 import { supabase } from '../lib/supabase.js'
+import { syncTaskCalendar } from '../lib/services/tasks.js'
+import { fromDateTimeLocalInput } from '../lib/helpers.js'
 import { Icon, Modal, pushToast } from '../components/UI.jsx'
 import { CONTACT_TYPES, PROPERTY_TYPES, titleCase } from '../lib/enums.js'
 
@@ -477,14 +479,17 @@ function PowerDialer({ leads, startIndex, agents, activeAgent, onClose, onUpdate
     if (status === 'called') patch.call_count = (lead.call_count || 0) + 1
     await supabase.from('cold_call_leads').update(patch).eq('id', lead.id)
     if (status === 'callback' && extra.callback_date) {
-      await supabase.from('tasks').insert([{
+      const { data: callbackTask } = await supabase.from('tasks').insert([{
         title: `Callback: ${lead.contact_name || lead.property_address || 'Cold Call Lead'}`,
         type: 'call', priority: 'high',
-        due_date: `${extra.callback_date}T09:00`,
+        // 9am in the agent's own zone, not 9am UTC — the callback task's date
+        // now becomes a calendar event, so the offset would be visible.
+        due_date: fromDateTimeLocalInput(`${extra.callback_date}T09:00`),
         agent_id: activeAgent?.id || null,
         notes: notes || null,
         completed: false,
-      }])
+      }]).select().single()
+      syncTaskCalendar(callbackTask?.id)
       pushToast('Callback task created')
     }
     onUpdate(lead.id, patch)

@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { formatDate } from '../lib/helpers.js'
+import { syncTaskCalendar, deleteTask } from '../lib/services/tasks.js'
+import { formatDate, toDateTimeLocalInput, fromDateTimeLocalInput } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
 function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave, activeAgent }) {
@@ -12,7 +13,7 @@ function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave, acti
   const [availability, setAvailability] = useState(null)   // null | 'loading' | { busyBlocks }
 
   React.useEffect(() => {
-    setForm(task ? { ...task, due_date: task.due_date ? task.due_date.slice(0,16) : '' } : blank)
+    setForm(task ? { ...task, due_date: toDateTimeLocalInput(task.due_date) } : blank)
     setErrors({})
   }, [task, open])
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
@@ -22,6 +23,13 @@ function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave, acti
     supabase.from('ms_graph_connection_status').select('status').maybeSingle()
       .then(({ data }) => setOutlookConnected(data?.status === 'connected'))
   }, [open])
+
+  // A due date on a task assigned to the viewer becomes an event on their own
+  // Outlook calendar (api/_lib/calendarSync.js#syncTaskCalendar). Saying so
+  // here is the difference between "the CRM took my note" and "Thursday at 2 is
+  // handled". Completing the task removes the event again.
+  const calendarBound = outlookConnected && Boolean(form.due_date) && !form.completed
+    && (form.agent_id || activeAgent?.id) === activeAgent?.id
 
   // Self-check only (see api/_lib/msGraph.js#getFreeBusy) — only meaningful
   // when the task is assigned to the agent currently viewing it, or
@@ -63,20 +71,25 @@ function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave, acti
         title:      form.title.trim(),
         type:       form.type,
         priority:   form.priority,
-        due_date:   form.due_date   || null,
+        due_date:   fromDateTimeLocalInput(form.due_date),
         contact_id: form.contact_id || null,
         deal_id:    form.deal_id    || null,
         agent_id:   form.agent_id   || null,
         notes:      form.notes      || null,
         completed:  form.completed,
       }
-      let error
+      let error, savedId = task?.id || null
       if (task?.id) {
         ;({ error } = await supabase.from('tasks').update(payload).eq('id', task.id))
       } else {
-        ;({ error } = await supabase.from('tasks').insert([payload]))
+        let data
+        ;({ data, error } = await supabase.from('tasks').insert([payload]).select().single())
+        savedId = data?.id || null
       }
       if (error) { pushToast(error.message, 'error'); return }
+      // A due date belongs on the assignee's calendar too — best-effort, never
+      // blocks the save (src/lib/services/tasks.js).
+      syncTaskCalendar(savedId)
       pushToast(task?.id ? 'Task updated' : 'Task added')
       await onSave()
       onClose()
@@ -99,6 +112,9 @@ function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave, acti
         <div className="form-group">
           <label className="form-label">Due Date</label>
           <input className="form-control" type="datetime-local" value={form.due_date||''} onChange={e=>set('due_date',e.target.value)} />
+          {calendarBound && (
+            <div className="form-hint">📅 Added to your Outlook calendar with a reminder</div>
+          )}
           {showAvailability && form.due_date && (
             <div className="form-hint">
               {availability === 'loading' ? 'Checking your Outlook calendar…'
@@ -224,12 +240,14 @@ export default function TasksPage({ db, setDb, activeAgent }) {
   const toggle = useCallback(async (task) => {
     const completed = !task.completed
     await supabase.from('tasks').update({ completed }).eq('id', task.id)
+    // Completing a task takes its calendar event down; reopening puts it back.
+    syncTaskCalendar(task.id)
     setDb(p => ({ ...p, tasks: p.tasks.map(t => t.id === task.id ? { ...t, completed } : t) }))
     pushToast(completed ? 'Task completed! ✓' : 'Task reopened')
   }, [setDb])
 
   const del = useCallback(async (id) => {
-    await supabase.from('tasks').delete().eq('id', id)
+    await deleteTask(id)
     pushToast('Task deleted', 'info')
     setConfirm(null); reload()
   }, [reload])

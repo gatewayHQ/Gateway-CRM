@@ -44,6 +44,16 @@
  *                                     right after an edit in Pipeline's Key
  *                                     Dates tab. api/cron.js?task=calendar-sync
  *                                     is the nightly sweep over every deal.
+ *   POST ?action=outlook-task-calendar-sync (auth) → push ONE task's due date
+ *                                     to the assigned agent's Outlook calendar
+ *                                     (create/update/delete the single Graph
+ *                                     event that mirrors tasks.due_date); fired
+ *                                     right after a task is created, edited,
+ *                                     completed or (with { purge: true }) just
+ *                                     before it is deleted — see
+ *                                     src/lib/services/tasks.js. The nightly
+ *                                     api/cron.js?task=calendar-sync sweeps
+ *                                     tasks as well as deals.
  *   POST ?action=outlook-messages     (auth) → { contactId } -> the email
  *                                     correspondence between the agent's mailbox
  *                                     and that contact's address, newest first,
@@ -89,7 +99,7 @@ import {
   lookupGraphContact, createDraftMessage, getFreeBusy,
   mailReadLevel, canSendMail,
 } from './_lib/msGraph.js'
-import { syncDealCalendar } from './_lib/calendarSync.js'
+import { syncDealCalendar, syncTaskCalendar } from './_lib/calendarSync.js'
 import { syncContactMail, readMirroredThread, readSyncState } from './_lib/contactMail.js'
 import {
   createBlast, loadSendableBlast, sendBlastBatch, blastProgress,
@@ -320,6 +330,53 @@ async function handleOutlookCalendarSync(req, res) {
   }
 
   const result = await syncDealCalendar(svc, deal, { property })
+  return res.status(200).json({ ok: true, ...result })
+}
+
+// ─── Microsoft Graph: task due date → the assigned agent's calendar ─────────
+// The task-side twin of handleOutlookCalendarSync above. Called right after a
+// task is saved, ticked off, or (with { purge: true }) immediately BEFORE it is
+// deleted — the ledger row cascades away with the task, so the Graph event has
+// to be removed while the row still points at it.
+//
+// Tasks are strictly personal under RLS (tasks_agent_scope — admins included),
+// so the caller can only ever sync their own task, and the event only ever
+// lands on their own calendar. Every field of the event comes from the stored
+// row, never from the request body.
+async function handleOutlookTaskCalendarSync(req, res) {
+  const { agent } = await requireAgent(req)
+  const svc = getServiceClient()
+  const { taskId, purge = false } = req.body || {}
+  if (!taskId) return res.status(400).json({ error: 'Missing taskId' })
+
+  const { data: task, error } = await svc.from('tasks')
+    .select('id, title, type, priority, due_date, completed, notes, agent_id, contact_id, deal_id')
+    .eq('id', taskId).maybeSingle()
+  if (error) return errorResponse(res, Object.assign(new Error(error.message), { status: 500 }))
+
+  // A missing task is the normal case for a delete whose purge call lost the
+  // race with the row itself — clean up anything the ledger still holds for
+  // the caller rather than 404ing.
+  if (!task) {
+    const result = await syncTaskCalendar(svc, { id: taskId }, { purge: true, onlyAgentId: agent.id })
+    return res.status(200).json({ ok: true, ...result })
+  }
+  if (task.agent_id && task.agent_id !== agent.id) {
+    return res.status(403).json({ error: "Only this task's assigned agent can sync it to their calendar" })
+  }
+
+  let contact = null
+  if (task.contact_id) {
+    const { data: c } = await svc.from('contacts').select('first_name, last_name').eq('id', task.contact_id).maybeSingle()
+    contact = c
+  }
+  let deal = null
+  if (task.deal_id) {
+    const { data: d } = await svc.from('deals').select('title').eq('id', task.deal_id).maybeSingle()
+    deal = d
+  }
+
+  const result = await syncTaskCalendar(svc, task, { contact, deal, purge: Boolean(purge) })
   return res.status(200).json({ ok: true, ...result })
 }
 
@@ -716,6 +773,10 @@ async function handler(req, res) {
     if (action === 'outlook-calendar-sync') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
       return await handleOutlookCalendarSync(req, res)
+    }
+    if (action === 'outlook-task-calendar-sync') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+      return await handleOutlookTaskCalendarSync(req, res)
     }
     if (action === 'outlook-messages') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })

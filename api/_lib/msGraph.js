@@ -261,12 +261,14 @@ export async function sendGraphMail(accessToken, { subject, html, to, cc }) {
   throw e
 }
 
-// ─── Calendar events (deal key dates → agent's Outlook calendar) ─────────────
-// Key dates are plain dates (no time), so every event is created ALL-DAY.
-// Graph still requires a timeZone on the start/end even for all-day events —
-// defaults to the brokerage's own (Iowa/Nebraska/South Dakota corridor is
-// Central), overridable per-deployment since this is shared across every agent
-// rather than a per-agent preference (v1 scope).
+// ─── Calendar events (deal key dates / task due dates → agent's calendar) ────
+// Deal key dates are plain dates (no time), so those events are ALL-DAY, as is
+// a task due "on the 14th" with no time of day. Graph still requires a timeZone
+// on the start/end for an all-day event: it defaults to the brokerage's own
+// (the Iowa/Nebraska/South Dakota corridor is Central), overridable
+// per-deployment since this is shared across every agent rather than being a
+// per-agent preference (v1 scope). A task WITH a time of day becomes a timed
+// event pinned in UTC instead — see calendarEventBody below.
 const CALENDAR_TIMEZONE = process.env.MS_CALENDAR_TIMEZONE || 'Central Standard Time'
 // Single native Outlook reminder, fired this many minutes before the date
 // (default 3 days — matches the CRM's own 72h reminder threshold). Graph
@@ -283,17 +285,47 @@ function allDayBounds(dateStr) {
   return { start, end: end.toISOString().slice(0, 10) }
 }
 
-function calendarEventBody({ subject, date, bodyHtml }) {
-  const { start, end } = allDayBounds(date)
-  return {
+// Two shapes of Gateway calendar event, both written here so the two callers
+// (deal key dates, task due dates — api/_lib/calendarSync.js) produce events
+// that look and behave the same in Outlook:
+//
+//   • ALL-DAY  — pass `date` as a plain 'YYYY-MM-DD'. A deal key date has no
+//     time of day, and neither does a task whose due date landed on midnight.
+//   • TIMED    — pass `startsAt` as an ISO instant (tasks.due_date is a
+//     timestamptz, and the Add Task drawer collects an actual time). Sent in
+//     UTC so Outlook renders it in whatever zone the agent's client is in,
+//     rather than being re-floated into MS_CALENDAR_TIMEZONE and drifting.
+//     `durationMinutes` defaults to 30 — long enough to be visible in a day
+//     view, short enough not to look like it blocks the afternoon.
+//
+// `reminderMinutes` overrides the default lead time: a deal key date wants
+// three days' warning, a task due at 2pm wants thirty minutes.
+export function calendarEventBody({ subject, date, startsAt, durationMinutes = 30, bodyHtml, reminderMinutes }) {
+  const common = {
     subject,
     body: { contentType: 'HTML', content: bodyHtml || '' },
+    isReminderOn: true,
+    reminderMinutesBeforeStart: Number.isFinite(reminderMinutes) ? reminderMinutes : CALENDAR_REMINDER_MINUTES,
+    categories: ['Gateway CRM'],
+  }
+
+  if (startsAt) {
+    const startMs = new Date(startsAt).getTime()
+    const iso = ms => new Date(ms).toISOString().slice(0, 19)   // drop the trailing 'Z' — Graph wants a naive dateTime + timeZone
+    return {
+      ...common,
+      start: { dateTime: iso(startMs), timeZone: 'UTC' },
+      end:   { dateTime: iso(startMs + durationMinutes * 60000), timeZone: 'UTC' },
+      isAllDay: false,
+    }
+  }
+
+  const { start, end } = allDayBounds(date)
+  return {
+    ...common,
     start: { dateTime: `${start}T00:00:00`, timeZone: CALENDAR_TIMEZONE },
     end:   { dateTime: `${end}T00:00:00`,   timeZone: CALENDAR_TIMEZONE },
     isAllDay: true,
-    isReminderOn: true,
-    reminderMinutesBeforeStart: CALENDAR_REMINDER_MINUTES,
-    categories: ['Gateway CRM'],
   }
 }
 
@@ -314,12 +346,12 @@ async function graphEventRequest(method, url, accessToken, body) {
   throw e
 }
 
-export async function createCalendarEvent(accessToken, { subject, date, bodyHtml }) {
-  return graphEventRequest('POST', `${GRAPH_BASE}/me/events`, accessToken, calendarEventBody({ subject, date, bodyHtml }))
+export async function createCalendarEvent(accessToken, fields) {
+  return graphEventRequest('POST', `${GRAPH_BASE}/me/events`, accessToken, calendarEventBody(fields))
 }
 
-export async function updateCalendarEvent(accessToken, eventId, { subject, date, bodyHtml }) {
-  return graphEventRequest('PATCH', `${GRAPH_BASE}/me/events/${eventId}`, accessToken, calendarEventBody({ subject, date, bodyHtml }))
+export async function updateCalendarEvent(accessToken, eventId, fields) {
+  return graphEventRequest('PATCH', `${GRAPH_BASE}/me/events/${eventId}`, accessToken, calendarEventBody(fields))
 }
 
 // Idempotent — an event already deleted by the agent themselves (in Outlook

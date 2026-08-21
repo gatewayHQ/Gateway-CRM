@@ -1,7 +1,8 @@
 import React, { useState } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { syncTaskCalendar } from '../lib/services/tasks.js'
 import { Icon, Drawer, pushToast } from '../components/UI.jsx'
-import { STAGE_ORDER } from '../lib/helpers.js'
+import { STAGE_ORDER, toDateTimeLocalInput, fromDateTimeLocalInput } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
 import { upsertContact } from '../lib/services/contacts.js'
 import { CONTACT_SOURCES } from '../lib/enums.js'
@@ -145,7 +146,9 @@ function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
 }
 
 function QuickTaskDrawer({ open, onClose, agents, activeAgent, onSaved }) {
-  const defaultDue = () => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); return d.toISOString().slice(0, 16) }
+  // Tomorrow at 9am in the AGENT's own zone — `toDateTimeLocalInput` keeps the
+  // input showing 09:00 instead of the UTC-shifted 14:00 the ISO slice showed.
+  const defaultDue = () => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); return toDateTimeLocalInput(d) }
   const blank = () => ({ title: '', type: 'follow-up', priority: 'medium', due_date: defaultDue(), agent_id: activeAgent?.id || '' })
   const [form, setForm] = useState(blank())
   const [saving, setSaving] = useState(false)
@@ -156,9 +159,15 @@ function QuickTaskDrawer({ open, onClose, agents, activeAgent, onSaved }) {
   const save = async () => {
     if (!form.title.trim()) { pushToast('Task title required', 'error'); return }
     setSaving(true)
-    const { error } = await supabase.from('tasks').insert([{ ...form, completed: false, agent_id: form.agent_id || null }])
+    const { data, error } = await supabase.from('tasks').insert([{
+      ...form,
+      due_date: fromDateTimeLocalInput(form.due_date),
+      completed: false,
+      agent_id: form.agent_id || null,
+    }]).select().single()
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
+    syncTaskCalendar(data?.id)
     pushToast('Task added')
     onSaved(); onClose()
   }

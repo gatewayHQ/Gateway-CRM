@@ -15,6 +15,33 @@ export const formatDate = (val) => {
   return new Date(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
+// ─── <input type="datetime-local"> ↔ a stored timestamptz ────────────────────
+// A datetime-local input speaks the AGENT's wall clock with no zone attached;
+// `tasks.due_date` is a timestamptz, i.e. an instant. The two need converting
+// in both directions, and slicing the ISO string (which is what the task drawer
+// used to do) is not that: it hands Postgres "2026-09-10T14:00" with no offset,
+// which is read as 14:00 UTC — so a task set for 2pm was stored as 9am Central
+// and, now that due dates reach the agent's calendar, showed up there at 9am.
+//
+// These two are exact inverses in the browser's own zone: what you type is what
+// comes back when you reopen the drawer, and what lands on the calendar.
+
+/** Stored instant → the 'YYYY-MM-DDTHH:mm' a datetime-local input expects. */
+export const toDateTimeLocalInput = (val) => {
+  if (!val) return ''
+  const d = new Date(val)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/** A datetime-local input's value → an ISO instant, or null when empty. */
+export const fromDateTimeLocalInput = (val) => {
+  if (!val) return null
+  const d = new Date(val)          // no offset in the string → parsed as LOCAL
+  return Number.isNaN(d.getTime()) ? null : d.toISOString()
+}
+
 export const formatPhone = (val) => {
   if (!val) return '—'
   const d = val.replace(/\D/g, '')

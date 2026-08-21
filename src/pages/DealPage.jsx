@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { syncTaskCalendar } from '../lib/services/tasks.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatCurrency, formatDate, formatPhone } from '../lib/helpers.js'
@@ -281,6 +282,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
       contact_id: deal.contact_id || null, deal_id: deal.id, completed: false,
     }]).select().single()
     if (newTask) {
+      syncTaskCalendar(newTask.id)
       setDb(p => ({ ...p, tasks: [newTask, ...(p.tasks || [])] }))
       pushToast(`Task auto-created: ${newTask.title}`, 'info')
     }
@@ -366,11 +368,13 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
       deal_id: deal.id, completed: false,
     }]).select().single())
     if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
+    syncTaskCalendar(data?.id)
     setDb(p => ({ ...p, tasks: [data, ...(p.tasks || [])] }))
     setNewTask('')
   }
   const completeTask = async (task) => {
     await supabase.from('tasks').update({ completed: true }).eq('id', task.id)
+    syncTaskCalendar(task.id)
     setDb(p => ({ ...p, tasks: (p.tasks || []).map(t => t.id === task.id ? { ...t, completed: true } : t) }))
     pushToast('Task completed')
   }

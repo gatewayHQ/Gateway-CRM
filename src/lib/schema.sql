@@ -876,6 +876,34 @@ alter table deal_calendar_events enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- TASK CALENDAR EVENTS  (migration 0041 — task due dates -> assigned agent's
+-- Outlook calendar). The task-side companion to deal_calendar_events above:
+-- one Graph event id per (task, agent) — a task has a single due_date, so one
+-- row per task, keyed with the agent too so a reassignment can delete the old
+-- event off the previous assignee's calendar. Row and event go away when the
+-- task is completed, loses its due date, is unassigned or is deleted. Written
+-- only by the service key (api/_lib/calendarSync.js, called from api/cron.js's
+-- nightly sweep and api/email-send.js's on-demand
+-- action=outlook-task-calendar-sync) — never directly by the client.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists task_calendar_events (
+  id              uuid primary key default uuid_generate_v4(),
+  task_id         uuid not null references tasks(id) on delete cascade,
+  agent_id        uuid not null references agents(id) on delete cascade,
+  graph_event_id  text not null,
+  event_hash      text not null,
+  last_synced_at  timestamptz not null default now(),
+  created_at      timestamptz not null default now()
+);
+create unique index if not exists uq_task_calendar_events_key
+  on task_calendar_events(task_id, agent_id);
+create index if not exists idx_task_calendar_events_task  on task_calendar_events(task_id);
+create index if not exists idx_task_calendar_events_agent on task_calendar_events(agent_id);
+
+alter table task_calendar_events enable row level security;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- MASS EMAIL / DEAL ANNOUNCEMENTS  (migration 0039)
 --
 -- A one-time bulk send through the agent's OWN connected Microsoft 365 mailbox
@@ -2144,6 +2172,14 @@ drop policy if exists deal_calendar_events_deal_scope on deal_calendar_events;
 create policy deal_calendar_events_deal_scope on deal_calendar_events for all to authenticated
   using      (app_is_admin() or deal_id in (select app_visible_deal_ids()) or agent_id = app_current_agent_id())
   with check (app_is_admin() or deal_id in (select app_visible_deal_ids()) or agent_id = app_current_agent_id());
+
+-- TASK CALENDAR EVENTS — mirrors tasks_agent_scope: strictly personal, admins
+-- included (a to-do list isn't oversight data, and neither is which to-dos
+-- reached someone's calendar). Writes are service-key only.
+drop policy if exists task_calendar_events_agent_scope on task_calendar_events;
+create policy task_calendar_events_agent_scope on task_calendar_events for all to authenticated
+  using      (agent_id = app_current_agent_id())
+  with check (agent_id = app_current_agent_id());
 
 
 -- ═════════════════════════════════════════════════════════════════════════════

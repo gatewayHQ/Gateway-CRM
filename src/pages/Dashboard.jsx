@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { syncTaskCalendar } from '../lib/services/tasks.js'
 import { formatCurrency, formatDate, STAGE_ORDER, upcomingReminders } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
 import { Icon, Badge, Avatar, Loading, pushToast } from '../components/UI.jsx'
@@ -49,6 +50,7 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
     }
     const { data, error } = await supabase.from('tasks').insert([payload]).select().single()
     if (error) { pushToast(error.message, 'error'); return }
+    syncTaskCalendar(data?.id)
     setDb(p => ({ ...p, tasks: [data, ...p.tasks] }))
     pushToast(`Task created for ${contact.first_name}'s ${type}`)
   }
