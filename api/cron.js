@@ -6,9 +6,10 @@
  * GET /api/cron?task=nudges         — transaction-layer agent nudges
  * GET /api/cron?task=boldsign-sync  — nightly Form Library ↔ BoldSign template drift sync
  *                                     + auto-reminders for stale signature requests
- * GET /api/cron?task=calendar-sync  — nightly deal key dates → agent Outlook calendar
- *                                     sweep (safety net; the live edit path also
- *                                     fires this per-deal — see api/email-send.js)
+ * GET /api/cron?task=calendar-sync  — nightly deal key dates AND task due dates →
+ *                                     agent Outlook calendar sweep (safety net;
+ *                                     the live edit paths also fire this per-deal
+ *                                     and per-task — see api/email-send.js)
  * GET /api/cron?task=inbox-sync     — nightly inbound-mail matching (Graph delta
  *                                     query per connected agent; see api/_lib/inboxSync.js)
  *
@@ -32,7 +33,7 @@ import { createClient } from '@supabase/supabase-js'
 import { boldsign, listAllTemplates, getRateLimitState } from './boldsign.js'
 import { OPERATING_STATES } from '../src/lib/constants.js'
 import { ALL_DEAL_STAGES, isOpenStage } from '../src/lib/stages.js'
-import { syncAllDealCalendars } from './_lib/calendarSync.js'
+import { syncAllDealCalendars, syncAllTaskCalendars } from './_lib/calendarSync.js'
 import { syncAllInboxes } from './_lib/inboxSync.js'
 
 // Every stage a deal can sit in while still in flight — derived from the stage
@@ -437,19 +438,34 @@ async function runScanReconcile(supabase) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Task: deal key dates → Outlook calendar sync (nightly safety net)
-// The live edit path (Pipeline's Key Dates tab) fires this per-deal already
-// via api/email-send.js?action=outlook-calendar-sync; this sweep catches drift
-// that path can't — a manually deleted calendar event, a deal that closed
-// since its last edit, or a sync that failed mid-request.
+// Task: deal key dates + task due dates → Outlook calendar sync (nightly net)
+//
+// Both live edit paths already fire their own sync — Pipeline's Key Dates tab
+// via ?action=outlook-calendar-sync, and every task save/complete/delete via
+// ?action=outlook-task-calendar-sync (src/lib/services/tasks.js). This sweep
+// catches the drift those paths can't: a calendar event deleted by hand, a deal
+// that closed or a task that was completed since its last edit, a task row
+// changed outside the app, or a sync that failed mid-request.
+//
+// The two halves are independent: a Graph failure while sweeping deals must not
+// cost the task sweep its run, so each is reported on its own.
 // ─────────────────────────────────────────────────────────────────────────────
 async function runCalendarSync(supabase) {
+  const body = {}
+  let failed = false
   try {
-    const result = await syncAllDealCalendars(supabase)
-    return { status: 200, body: result }
+    body.deals = await syncAllDealCalendars(supabase)
   } catch (err) {
-    return { status: 500, body: { ok: false, error: err.message } }
+    body.deals = { ok: false, error: err.message }
+    failed = true
   }
+  try {
+    body.tasks = await syncAllTaskCalendars(supabase)
+  } catch (err) {
+    body.tasks = { ok: false, error: err.message }
+    failed = true
+  }
+  return { status: failed ? 500 : 200, body: { ok: !failed, ...body } }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

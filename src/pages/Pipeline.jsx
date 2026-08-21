@@ -1,5 +1,6 @@
 import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { syncTaskCalendar } from '../lib/services/tasks.js'
 import { fetchVisibleDeals } from '../lib/services/deals.js'
 import { formatCurrency, formatDate, STAGE_LABELS, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
@@ -4291,6 +4292,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
       completed: false,
     }]).select().single()
     if (newTask) {
+      syncTaskCalendar(newTask.id)
       setDb(p => ({ ...p, tasks: [newTask, ...(p.tasks || [])] }))
       pushToast(`Task auto-created: ${newTask.title}`, 'info')
     }
