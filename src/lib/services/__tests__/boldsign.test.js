@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, CANONICAL_LABEL_TOKENS, supportsReadOnly, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES, conditionalFieldsToRemove } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, dealClientSides, CANONICAL_LABEL_TOKENS, supportsReadOnly, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES, conditionalFieldsToRemove } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -1706,5 +1706,148 @@ describe('repeated instances of the same logical field (_2, _3, ...)', () => {
 
   it('matches on name or label too, the same as the primary id does', () => {
     expect(fieldTokenKey({ id: 'Label14', name: 'Buyer1NameLabel_2' })).toBe('party_buyer_1')
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// BOTH SIDES OF THE TABLE (migration 0040)
+//
+// The bug this guards, and it is the worst kind — pre-filled, plausible, and the
+// wrong party on a signature line. A deal representing BOTH the buyer and the
+// seller keeps two client sets, but the prefill drew from one flat list built
+// from `deals.contact_id` plus the additional contacts. The other side's PRIMARY
+// was not in that list at all, so a template whose roles read [Seller, Buyer]
+// filled the Buyer row with whatever came next: a co-buyer if there was one, a
+// co-OWNER if there wasn't. Same class of failure NON_CLIENT_ROLE_RE exists to
+// stop in the agent slots, and a blank is always safer.
+// ═════════════════════════════════════════════════════════════════════════════
+
+const HOPE   = { first_name: 'Hope',   last_name: 'Cerda', email: 'hope@x.com' }      // buyer
+const NATHAN = { first_name: 'Nathan', last_name: 'Miss',  email: 'nathan@x.com' }    // co-buyer
+const JANET  = { first_name: 'Janet',  last_name: 'Hala',  email: 'janet@x.com' }     // seller
+const JASON  = { first_name: 'Jason',  last_name: 'Beck',  email: 'jason@x.com' }     // co-owner
+const BOTH   = { buyerClients: [HOPE, NATHAN], sellerClients: [JANET, JASON] }
+
+describe('dealClientSides — two client sets, kept apart', () => {
+  it('keeps each side in its own list, primary first', () => {
+    const { buyer, seller } = dealClientSides(BOTH)
+    expect(buyer.map(p => p.name)).toEqual(['Hope Cerda', 'Nathan Miss'])
+    expect(seller.map(p => p.name)).toEqual(['Janet Hala', 'Jason Beck'])
+  })
+
+  it('puts the seller side first in the side-agnostic pool', () => {
+    // The seller is the party the listing, title and price belong to — the same
+    // rule the deal drawer uses to pick what `deals.contact_id` mirrors.
+    expect(dealClientSides(BOTH).all.map(p => p.name))
+      .toEqual(['Janet Hala', 'Jason Beck', 'Hope Cerda', 'Nathan Miss'])
+  })
+
+  it('never lists the same person twice, even filed on both sides', () => {
+    const { all } = dealClientSides({ buyerClients: [JANET], sellerClients: [JANET] })
+    expect(all.map(p => p.name)).toEqual(['Janet Hala'])
+  })
+
+  it('still honours a stored spouse name on a side with no co-party', () => {
+    const { seller } = dealClientSides({ sellerClients: [{ ...JANET, spouse_name: 'Mr Hala' }] })
+    expect(seller.map(p => p.name)).toEqual(['Janet Hala', 'Mr Hala'])
+  })
+
+  it('degrades to empty lists', () => {
+    expect(dealClientSides()).toEqual({ buyer: [], seller: [], all: [] })
+    expect(dealClientSides({ buyerClients: null, sellerClients: undefined })).toEqual({ buyer: [], seller: [], all: [] })
+  })
+})
+
+describe('seedSignersFromDeal — a named side takes only that side', () => {
+  const seed = (roles, extra = {}) => seedSignersFromDeal({ roles, ...BOTH, ...extra })
+
+  it('REGRESSION: the Buyer row gets the buyer, not the next name in a flat list', () => {
+    const out = seed([{ index: 1, name: 'Seller' }, { index: 2, name: 'Buyer' }])
+    expect(out[1]).toEqual({ name: 'Janet Hala', email: 'janet@x.com' })
+    expect(out[2]).toEqual({ name: 'Hope Cerda', email: 'hope@x.com' })
+  })
+
+  it('is not order-dependent — the same roles reversed still name the same parties', () => {
+    // The old positional cursor gave a different (and sometimes correct) answer
+    // depending on role order, which is why it never reproduced reliably.
+    const out = seed([{ index: 1, name: 'Buyer' }, { index: 2, name: 'Seller' }])
+    expect(out[1].name).toBe('Hope Cerda')
+    expect(out[2].name).toBe('Janet Hala')
+  })
+
+  it('fills the co-party rows from their own side', () => {
+    const out = seed([
+      { index: 1, name: 'Seller 1' }, { index: 2, name: 'Seller 2' },
+      { index: 3, name: 'Buyer 1' },  { index: 4, name: 'Buyer 2' },
+    ])
+    expect([out[1].name, out[2].name]).toEqual(['Janet Hala', 'Jason Beck'])
+    expect([out[3].name, out[4].name]).toEqual(['Hope Cerda', 'Nathan Miss'])
+  })
+
+  it('leaves a blank rather than borrowing the other party when a side runs out', () => {
+    const out = seedSignersFromDeal({
+      roles: [{ index: 1, name: 'Seller' }, { index: 2, name: 'Buyer' }, { index: 3, name: 'Buyer 2' }],
+      buyerClients: [HOPE], sellerClients: [JANET],
+    })
+    expect(out[3]).toEqual({ name: '', email: '' })
+  })
+
+  it('still never lets a client into an agent row', () => {
+    // "Buyer's Agent" matches the buyer side AND the non-client veto; the veto wins.
+    const out = seed([
+      { index: 1, name: 'Seller' }, { index: 2, name: 'Listing Agent' }, { index: 3, name: "Buyer's Agent" },
+    ], { activeAgent: { name: 'Daniel Stillson', email: 'daniel@gateway.com' }, dealAgents: [] })
+    expect(out[1].name).toBe('Janet Hala')
+    expect(out[2].name).toBe('Daniel Stillson')
+    expect(out[3]).toEqual({ name: '', email: '' })
+  })
+
+  it('fills a side-agnostic role from whoever is not already signing', () => {
+    const out = seed([{ index: 1, name: 'Seller' }, { index: 2, name: 'Buyer' }, { index: 3, name: 'Signer 3' }])
+    // Janet and Hope are taken above; the next unclaimed person gets the generic row.
+    expect(out[3].name).toBe('Jason Beck')
+  })
+
+  it('a generic-only template still fills from the shared pool, seller side first', () => {
+    const out = seed([{ index: 1, name: 'Client 1' }, { index: 2, name: 'Client 2' }])
+    expect([out[1].name, out[2].name]).toEqual(['Janet Hala', 'Jason Beck'])
+  })
+
+  it('leaves a ONE-SIDED deal exactly as it was', () => {
+    // No per-side lists → the original flat, positional behavior, untouched.
+    const roles = [{ index: 1, name: 'Seller' }, { index: 2, name: 'Seller 2' }]
+    expect(seedSignersFromDeal({ roles, contact: JANET, additionalContacts: [JASON] }))
+      .toEqual({
+        1: { name: 'Janet Hala', email: 'janet@x.com' },
+        2: { name: 'Jason Beck', email: 'jason@x.com' },
+      })
+  })
+})
+
+describe('party tokens on a both-sided deal', () => {
+  const deal = { comp_data: { transaction_type: 'both' } }
+
+  it('prints each party on the line that names them', () => {
+    const v = crmTokenValues({ deal, ...BOTH })
+    expect(v.party_seller_1).toBe('Janet Hala')
+    expect(v.party_seller_2).toBe('Jason Beck')
+    expect(v.party_buyer_1).toBe('Hope Cerda')
+    expect(v.party_buyer_2).toBe('Nathan Miss')
+    expect(v.buyer_1_name).toBe('Hope Cerda')
+  })
+
+  it('names every party on the side-agnostic parties line', () => {
+    // The other side's primary used to be missing from this entirely.
+    expect(crmTokenValues({ deal, ...BOTH }).client_names)
+      .toBe('Janet Hala, Jason Beck, Hope Cerda and Nathan Miss')
+  })
+
+  it('still leaves the other side blank on a ONE-SIDED deal', () => {
+    // The CRM stores nothing about the party across the table there, and a blank
+    // the agent can see and fill beats a plausible wrong name.
+    const v = crmTokenValues({ deal: { comp_data: { transaction_type: 'seller' } }, contact: JANET })
+    expect(v.party_seller_1).toBe('Janet Hala')
+    expect(v.party_buyer_1).toBe('')
+    expect(v.buyer_1_name).toBe('')
   })
 })

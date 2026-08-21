@@ -9,9 +9,13 @@ import { findMatchingBuyers } from '../lib/matching.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
 import { fetchVisibleProperties } from '../lib/services/properties.js'
 import { coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
+import { isMissingSideColumn } from '../lib/dealPeople.js'
 import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
 import OptionSelect from '../components/OptionSelect.jsx'
+import { PropertyPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
+import { syncPriceChange } from '../lib/services/pricing.js'
+import { priceChanged } from '../lib/pricing.js'
 
 // Types where commercial fields apply
 const COMMERCIAL_TYPES = COMMERCIAL_PROPERTY_TYPES
@@ -397,44 +401,6 @@ function PossibleBuyers({ form, contacts }) {
 
 // ─── Listing drawer tab components ───────────────────────────────────────────
 
-function PriceHistoryTab({ property }) {
-  const history = Array.isArray(property?.price_history) ? property.price_history : []
-  if (history.length === 0) return (
-    <div style={{ padding:24, textAlign:'center', color:'var(--gw-mist)', fontSize:13 }}>
-      No price changes recorded yet.<br/>
-      <span style={{ fontSize:11 }}>Changes are tracked automatically when you update the list price and save.</span>
-    </div>
-  )
-  return (
-    <div style={{ padding:16, overflowY:'auto', flex:1 }}>
-      <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:12 }}>Price History</div>
-      {[...history].reverse().map((entry, i) => {
-        const reduction = Number(entry.previous_price) - Number(entry.price)
-        const pct = entry.previous_price > 0 ? Math.abs(reduction / entry.previous_price * 100).toFixed(1) : 0
-        return (
-          <div key={i} style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:6, background:'#fff' }}>
-            <div style={{ width:32, height:32, borderRadius:6, background: reduction > 0 ? '#fee2e2' : '#dcfce7', display:'flex', alignItems:'center', justifyContent:'center', fontSize:18, flexShrink:0 }}>
-              {reduction > 0 ? '↓' : '↑'}
-            </div>
-            <div style={{ flex:1 }}>
-              <div style={{ fontSize:13, fontWeight:700, color: reduction > 0 ? '#dc2626' : '#16a34a' }}>
-                {formatCurrency(entry.price)}
-                <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)', marginLeft:8 }}>from {formatCurrency(entry.previous_price)}</span>
-              </div>
-              <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
-                {reduction > 0 ? `↓ ${formatCurrency(Math.abs(reduction))} (${pct}% reduction)` : `↑ ${formatCurrency(Math.abs(reduction))} increase`}
-              </div>
-            </div>
-            <div style={{ fontSize:11, color:'var(--gw-mist)', whiteSpace:'nowrap' }}>
-              {entry.date ? new Date(entry.date).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' }) : ''}
-            </div>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
 function ShowingsTab({ property }) {
   const [showings, setShowings]   = useState([])
   const [loading, setLoading]     = useState(true)
@@ -808,13 +774,18 @@ function CompsTab({ property, onUpdateComps }) {
 // Returns the inserted link rows so the caller can put them in global state —
 // the deal page and the deal drawer both read `db.dealContacts`, and without
 // this the co-owner reads as property-only until the next full reload.
+// A property's extra contacts are its OWNERS, so they arrive on the new deal's
+// seller side (migration 0040). Falls back to writing the links without a side
+// on a database where 0040 hasn't run — they then read as the deal's represented
+// side, which for a deal started from a listing is the seller side anyway.
 async function syncDealContactsFromProperty(dealId, contactIds) {
+  const rows = contactIds.map(contact_id => ({ deal_id: dealId, contact_id, side: 'seller' }))
   try {
-    const { data } = await supabase
-      .from('deal_contacts')
-      .insert(contactIds.map(contact_id => ({ deal_id: dealId, contact_id })))
-      .select()
-    return data || []
+    const { data, error } = await supabase.from('deal_contacts').insert(rows).select()
+    if (!error) return data || []
+    const retry = await supabase.from('deal_contacts')
+      .insert(rows.map(({ side, ...rest }) => rest)).select()
+    return retry.data || []
   } catch (e) { console.error('[syncDealContactsFromProperty]', e); return [] }
 }
 
@@ -847,7 +818,7 @@ async function reloadPropertyContacts(setDb, propertyId) {
   }))
 }
 
-function PropertyDrawer({ open, onClose, property, agents, contacts, propertyContacts = [], activeAgent, onSave, go, setDb, announce }) {
+function PropertyDrawer({ open, onClose, property, agents, contacts, propertyContacts = [], deals = [], activeAgent, onSave, go, setDb, announce }) {
   const blank = { address:'', city:'', state:'', zip:'', county:'', submarket:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{}, listing_expiry_date:'', price_history:[], comps:[] }
   const [form, setForm]             = useState(property || blank)
   const [errors, setErrors]         = useState({})
@@ -890,6 +861,12 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       title:       form.address,
       property_id: property.id,
       contact_id:  form.linked_contact_id || null,
+      // A deal started from our own listing is a SELLER-side deal, and the
+      // property's linked contact is the owner — so they are filed as the seller
+      // rather than landing on the buyer side by default (migration 0040). This
+      // is also what points the deal's required forms at the listing packets.
+      seller_contact_id: form.linked_contact_id || null,
+      comp_data:   { transaction_type: 'seller' },
       agent_id:    primaryAgentId,
       stage:       'lead',
       value:       form.list_price ? Number(form.list_price) : null,
@@ -898,15 +875,24 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       // split start out complete — see src/lib/coAgents.js.
       co_agent_ids: coAgentIdsForNewDeal(form, primaryAgentId),
     }
-    let { data, error } = await supabase.from('deals').insert([dealPayload]).select().single()
+    let payload = dealPayload
+    let { data, error } = await supabase.from('deals').insert([payload]).select().single()
     // Migration 0025 adds deals.co_agent_ids. Until it's applied, create the
     // deal without the co-agents rather than blocking the conversion — the
     // deal page still resolves them from the linked property.
     let coAgentsDropped = false
     if (error && isMissingCoAgentColumn(error)) {
-      const { co_agent_ids, ...rest } = dealPayload
-      ;({ data, error } = await supabase.from('deals').insert([rest]).select().single())
-      coAgentsDropped = !error && co_agent_ids.length > 0
+      const { co_agent_ids, ...rest } = payload
+      payload = rest
+      ;({ data, error } = await supabase.from('deals').insert([payload]).select().single())
+      coAgentsDropped = !error && dealPayload.co_agent_ids.length > 0
+    }
+    // Same for deals.seller_contact_id (migration 0040) — the owner still lands
+    // on the deal as `contact_id`, which is the pre-0040 behavior.
+    if (error && isMissingSideColumn(error)) {
+      const { seller_contact_id, ...rest } = payload
+      payload = rest
+      ;({ data, error } = await supabase.from('deals').insert([payload]).select().single())
     }
     setStartingDeal(false)
     if (error) { pushToast(error.message, 'error'); return }
@@ -932,17 +918,12 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     setSaving(true)
     const resolvedId = property?.id || tempId
 
-    // Track price reductions automatically
-    const oldPrice = property?.list_price ? Number(property.list_price) : null
-    const newPrice = form.list_price ? Number(form.list_price) : null
-    let updatedHistory = Array.isArray(form.price_history) ? form.price_history : []
-    if (property?.id && oldPrice && newPrice && oldPrice !== newPrice) {
-      updatedHistory = [...updatedHistory, {
-        price: newPrice,
-        previous_price: oldPrice,
-        date: new Date().toISOString().slice(0, 10),
-      }]
-    }
+    // Price changes are propagated AFTER the save (syncPriceChange below), so
+    // the listing's own write is never held up by the deals it feeds. The
+    // history mirror on this payload is whatever the row already had — the sync
+    // appends to it, which is also what makes the append survive a failed
+    // propagation.
+    const priceMoved = !!property?.id && priceChanged(property?.list_price, form.list_price)
 
     const payload = {
       ...form,
@@ -955,7 +936,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       linked_contact_id:    form.linked_contact_id || null,
       assigned_agent_id:    form.assigned_agent_id || activeAgent?.id || null,
       listing_expiry_date:  form.listing_expiry_date || null,
-      price_history:        updatedHistory,
+      price_history:        Array.isArray(form.price_history) ? form.price_history : [],
       comps:                form.comps || [],
     }
     let error, data, status
@@ -975,6 +956,53 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     if (savedId && await syncPropertyContacts(savedId, additionalContactIds)) {
       await reloadPropertyContacts(setDb, savedId)
     }
+    // ── Price round-trip ─────────────────────────────────────────────────────
+    // The listing price and every open deal's value are the same number
+    // (src/lib/pricing.js). A reduction typed here reaches those deals and the
+    // shared Pricing History; a failure warns instead of undoing the save.
+    if (priceMoved && savedId) {
+      const sync = await syncPriceChange({
+        price: form.list_price, previousPrice: property?.list_price,
+        origin: 'property',
+        property: { ...(data || payload), id: savedId },
+        deals, actor: activeAgent,
+      })
+      if (sync.warning) pushToast(sync.warning, 'error')
+      if (sync.propertyPatch) {
+        // The mirror the sync appended. The drawer's own copy is updated so the
+        // Pricing History tab shows the new entry without a reload, and the row
+        // handed to onSave() carries it so the grid and the deal drawer do too.
+        setForm(f => ({ ...f, price_history: sync.propertyPatch.price_history }))
+        if (data) data = { ...data, ...sync.propertyPatch }
+      }
+      if (sync.repricedDealIds.length && setDb) {
+        const nextValue = Number(form.list_price)
+        setDb(prev => ({
+          ...prev,
+          deals: (prev.deals || []).map(d => sync.repricedDealIds.includes(d.id) ? { ...d, value: nextValue } : d),
+        }))
+        pushToast(`Price synced to ${sync.repricedDealIds.length} open deal${sync.repricedDealIds.length === 1 ? '' : 's'}`)
+      }
+    }
+
+    // ── Address round-trip ───────────────────────────────────────────────────
+    // "Start Deal" titles a new deal with the property's address, so renaming
+    // the property leaves those deals pointing at an address that no longer
+    // exists. Only titles that EXACTLY match the old address are renamed — a
+    // title the agent wrote themselves is theirs, and is never touched.
+    if (property?.id && property.address && form.address.trim() && form.address !== property.address) {
+      const stale = (deals || []).filter(d => d.property_id === property.id && d.title === property.address)
+      if (stale.length) {
+        const { error: renameError } = await supabase
+          .from('deals').update({ title: form.address }).in('id', stale.map(d => d.id))
+        if (renameError) pushToast('Property saved, but its deals kept the old address as their title.', 'error')
+        else if (setDb) setDb(prev => ({
+          ...prev,
+          deals: (prev.deals || []).map(d => stale.some(x => x.id === d.id) ? { ...d, title: form.address } : d),
+        }))
+      }
+    }
+
     const addressChanged = !property?.id || form.address !== property?.address || form.city !== property?.city
     if (savedId && addressChanged && (!form.lat || !form.lng)) {
       const fullAddr = [form.address, form.city, form.state, form.zip].filter(Boolean).join(', ')
@@ -1015,7 +1043,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       )}
 
       {/* Non-details tabs */}
-      {tab === 'history'   && isExisting && <PriceHistoryTab property={{ ...property, price_history: form.price_history }} />}
+      {tab === 'history'   && isExisting && <PropertyPricingHistoryTab property={{ ...property, price_history: form.price_history }} />}
       {tab === 'showings'  && isExisting && <ShowingsTab property={property} />}
       {tab === 'marketing' && isExisting && <MarketingChecklistTab property={property} />}
       {tab === 'comps'     && isExisting && (
@@ -1675,7 +1703,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAge
         </div>
       )}
 
-      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} propertyContacts={propertyContacts} activeAgent={activeAgent} onSave={handleSave} go={go} setDb={setDb} announce={announce} />
+      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} propertyContacts={propertyContacts} deals={db.deals || []} activeAgent={activeAgent} onSave={handleSave} go={go} setDb={setDb} announce={announce} />
       {confirm && <ConfirmDialog message="This will permanently delete this property." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {radiusProp && (
         <RadiusMailingModal

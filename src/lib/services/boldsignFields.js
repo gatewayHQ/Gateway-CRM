@@ -449,6 +449,44 @@ export function dealClientList({ contact, additionalContacts = [] } = {}) {
   return people
 }
 
+/**
+ * The same list, but split by side, for a deal that represents BOTH parties
+ * (migration 0040).
+ *
+ * WHY THIS EXISTS. dealClientList() returns one flat list of "our clients",
+ * which is the right answer while a deal has one client side — the primary, then
+ * the additional contacts. On a both-sided deal it is actively dangerous: the
+ * flat list is drawn from `deals.contact_id` plus the additional contacts, so
+ * the OTHER side's primary is not in it at all, and a template whose roles read
+ * [Seller, Buyer] filled the Buyer row from whatever came next — a co-buyer if
+ * there was one, a co-OWNER if there wasn't. Pre-filled, plausible, and the
+ * wrong party on a signature line, which is the exact failure NON_CLIENT_ROLE_RE
+ * below was written to stop in the agent slots.
+ *
+ * @param {Array} buyerClients   contact rows on the buyer side, primary first
+ * @param {Array} sellerClients  contact rows on the seller side, primary first
+ * @returns {{ buyer: Array, seller: Array, all: Array }} people ({name, email}),
+ *   `all` being the side-agnostic pool: seller side first (the party the
+ *   listing, title and price belong to), then buyer, deduped by name+email.
+ */
+export function dealClientSides({ buyerClients = [], sellerClients = [] } = {}) {
+  const listFor = (rows) => {
+    const [primary, ...rest] = rows || []
+    return dealClientList({ contact: primary || null, additionalContacts: rest })
+  }
+  const buyer  = listFor(buyerClients)
+  const seller = listFor(sellerClients)
+  const seen = new Set()
+  const all = []
+  for (const p of [...seller, ...buyer]) {
+    const key = `${p.name}|${p.email}`.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    all.push(p)
+  }
+  return { buyer, seller, all }
+}
+
 // Which side of the transaction the deal's own clients sit on, or null when the
 // deal does not say. Read from `comp_data.transaction_type`, the same value the
 // Form Library filters templates by ('buyer' | 'seller' | 'lease' | 'general').
@@ -463,6 +501,13 @@ export function dealClientList({ contact, additionalContacts = [] } = {}) {
 // lease has a lessor and a lessee, not a buyer and a seller, and 'general' means
 // nobody recorded it. See the side-aware tokens in crmTokenValues() for what a
 // null does, and why a blank is the right answer rather than a guess.
+//
+// 'both' (migration 0040) also resolves to null, and that is now the right
+// answer rather than a gap: on a both-sided deal there is no single side "our
+// clients" are on, and the side-aware tokens below no longer need one — they
+// read the per-side lists (`buyerClients` / `sellerClients`) instead, which say
+// exactly who each party is. This function is only consulted when those lists
+// are absent, i.e. a one-sided deal.
 export function dealClientSide(deal) {
   const t = String(deal?.comp_data?.transaction_type || '').trim().toLowerCase()
   return (t === 'buyer' || t === 'seller') ? t : null
@@ -503,12 +548,23 @@ export function appointedAgent({ activeAgent = null, dealAgents = [] } = {}) {
 // output. `agent` (the appointed agent) is kept as its own argument because it
 // is what every existing caller passes; the two never disagree, since
 // appointedAgent() is orderAgentSigners()[0] in each of their branches.
-export function crmTokenValues({ deal, property, contact, additionalContacts = [], agent, agents = [], today = '' } = {}) {
+export function crmTokenValues({ deal, property, contact, additionalContacts = [], buyerClients = null, sellerClients = null, agent, agents = [], today = '' } = {}) {
   const money = (n) => (n != null && n !== '' ? `$${Number(n).toLocaleString()}` : '')
   const fullAddr = [property?.address, property?.city, property?.state, property?.zip].filter(Boolean).join(', ')
   const dealComm = describeDealCommission(deal)
-  const clients  = dealClientList({ contact, additionalContacts })
+  // On a both-sided deal (migration 0040) the per-side lists are passed in and
+  // `clients` is their union — without them the OTHER side's primary is missing
+  // from every side-agnostic token, `client_names` included.
+  const sided    = buyerClients || sellerClients
+  const sides    = sided ? dealClientSides({ buyerClients: buyerClients || [], sellerClients: sellerClients || [] }) : null
+  const clients  = sided ? sides.all : dealClientList({ contact, additionalContacts })
   const side     = dealClientSide(deal)
+  // Who to print on a line captioned BUYER or SELLER. With per-side lists that
+  // is simply that side's people. Without them the CRM knows only which side
+  // "our clients" are on, so the other side's lines stay blank — see the note at
+  // the side-aware tokens below for why a blank beats a guess.
+  const buyerParties  = sided ? sides.buyer  : (side === 'buyer'  ? clients : [])
+  const sellerParties = sided ? sides.seller : (side === 'seller' ? clients : [])
   // Dates reach an agreement as text, and "2026-08-15" on a signature page reads
   // like a database export. The CRM stores ISO, so the new date tokens below are
   // formatted on the way out. Parsed by hand rather than through `new Date()`,
@@ -605,27 +661,30 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
     // a listing and on a buyer representation agreement. That is right for a
     // form with one "Client" line, and wrong for a form that says BUYER.
     //
-    // These two fill only when the deal says our clients ARE the buyers. On a
-    // seller-side deal they stay blank on purpose: our clients are the sellers,
-    // the buyers are the other side of the table, and the CRM stores nothing
-    // about them. Printing our seller's name on a line captioned "Buyer" is the
-    // same silent, plausible, wrong-name failure that SIGNER_BOUND_FIELD_TYPES
-    // exists to prevent, and it is worse than a blank: a blank is visible on the
-    // send screen as an empty box the agent can fill in by hand before sending,
-    // and a Label field stays editable there precisely so they can.
+    // These fill from the side they name. On a ONE-SIDED deal only our own side
+    // can be filled: our clients are the sellers, the buyers are the other side
+    // of the table, and the CRM stores nothing about them. Printing our seller's
+    // name on a line captioned "Buyer" is the same silent, plausible,
+    // wrong-name failure that SIGNER_BOUND_FIELD_TYPES exists to prevent, and it
+    // is worse than a blank: a blank is visible on the send screen as an empty
+    // box the agent can fill in by hand before sending, and a Label field stays
+    // editable there precisely so they can.
     //
     // A deal with no transaction_type recorded reads as "unknown side", so it
     // gets the blank too rather than a coin flip.
-    buyer_1_name:       side === 'buyer' ? (clients[0]?.name || '') : '',
-    buyer_2_name:       side === 'buyer' ? (clients[1]?.name || '') : '',
+    //
+    // On a BOTH-sided deal (migration 0040) the CRM does store the other party,
+    // so both halves fill from their own side's list — no blank, no guess.
+    buyer_1_name:       buyerParties[0]?.name || '',
+    buyer_2_name:       buyerParties[1]?.name || '',
     // The canonical Label ids address these four. Same values as the two above,
     // under one consistent family covering both sides, because `seller_2_name`
     // was already taken by the side-AGNOSTIC alias and could not be reused
     // without changing what it means for templates already in production.
-    party_buyer_1:      side === 'buyer'  ? (clients[0]?.name || '') : '',
-    party_buyer_2:      side === 'buyer'  ? (clients[1]?.name || '') : '',
-    party_seller_1:     side === 'seller' ? (clients[0]?.name || '') : '',
-    party_seller_2:     side === 'seller' ? (clients[1]?.name || '') : '',
+    party_buyer_1:      buyerParties[0]?.name  || '',
+    party_buyer_2:      buyerParties[1]?.name  || '',
+    party_seller_1:     sellerParties[0]?.name || '',
+    party_seller_2:     sellerParties[1]?.name || '',
 
     // ── Property ───────────────────────────────────────────────────────────
     // `property_city_state_zip` is the second line of an address block, which is
@@ -1034,6 +1093,15 @@ const CLIENT_ROLE_RE = /(seller|buyer|client|owner|purchaser|grantor|grantee|lan
 // Roles filled from the AGENTS on the deal.
 const AGENT_ROLE_RE = /(agent|broker|realtor)/
 
+// Which SIDE a client role belongs to, for a deal that represents both parties.
+// Subsets of CLIENT_ROLE_RE, and both still subject to the NON_CLIENT veto below
+// ("Buyer's Agent" matches BUYER_SIDE_ROLE_RE and must never take a client).
+// A client role matching neither — "Client", "Signer 1" — is side-agnostic and
+// draws from whoever is left, because the template is not saying which party it
+// means and guessing is what this whole mechanism exists to avoid.
+const SELLER_SIDE_ROLE_RE = /(seller|owner|grantor|lessor|landlord)/
+const BUYER_SIDE_ROLE_RE  = /(buyer|purchaser|grantee|lessee|tenant|borrower)/
+
 // Roles that must NEVER be seeded with a client, even when CLIENT_ROLE_RE
 // matches them. This exists because CLIENT_ROLE_RE is substring-based and
 // several professional roles contain a client keyword — most importantly
@@ -1100,16 +1168,51 @@ export function orderAgentSigners({ activeAgent = null, dealAgents = [] } = {}) 
 // Returns { [roleIndex]: { name, email } }. Pure — the agent can still edit any
 // field before sending. Requires the deal to have a linked contact; with none,
 // client roles fall back to the template placeholder (usually blank).
-export function seedSignersFromDeal({ roles = [], contact = null, additionalContacts = [], activeAgent = null, dealAgents = [] } = {}) {
+//
+// BOTH SIDES (migration 0040). Pass `buyerClients` / `sellerClients` — contact
+// rows per side, primary first — and a role naming a side takes that side's
+// people: "Seller" gets the seller, "Buyer" gets the buyer, and neither can be
+// filled from the other side's list no matter what order the roles are in. A
+// side-agnostic client role ("Client", "Signer 1") still draws from the shared
+// pool. Omit both and this behaves exactly as it always did, which is what every
+// one-sided deal keeps doing.
+export function seedSignersFromDeal({
+  roles = [], contact = null, additionalContacts = [],
+  buyerClients = null, sellerClients = null,
+  activeAgent = null, dealAgents = [],
+} = {}) {
   // Primary contact, then Additional Contacts (each with their own email), then
   // the stored spouse name as a last resort — see dealClientList, which the
   // printed `client_names` token also uses so the two never disagree.
-  const people = dealClientList({ contact, additionalContacts })
+  const sided  = buyerClients || sellerClients
+  const sides  = sided ? dealClientSides({ buyerClients: buyerClients || [], sellerClients: sellerClients || [] }) : null
+  const people = sided ? sides.all : dealClientList({ contact, additionalContacts })
   const agentSigners = orderAgentSigners({ activeAgent, dealAgents })
+
+  // One cursor per pool. The shared pool skips anyone a side-specific role has
+  // already taken, so [Seller, Buyer, Client] on a deal with one person per side
+  // fills the first two and leaves the third on its placeholder rather than
+  // repeating a name that is already signing above it.
+  const cursors = { buyer: 0, seller: 0 }
+  const taken = new Set()
+  const keyOf = (p) => `${p.name}|${p.email}`.toLowerCase()
+
+  const nextFrom = (pool, side) => {
+    if (side) {
+      while (cursors[side] < pool.length && taken.has(keyOf(pool[cursors[side]]))) cursors[side]++
+      if (cursors[side] >= pool.length) return null
+      const p = pool[cursors[side]++]
+      taken.add(keyOf(p))
+      return p
+    }
+    const p = pool.find(x => !taken.has(keyOf(x)))
+    if (p) taken.add(keyOf(p))
+    return p || null
+  }
 
   const out = {}
   const placeholder = (r) => ({ name: r?.defaultName || '', email: r?.defaultEmail || '' })
-  let personIdx = 0, agentIdx = 0
+  let agentIdx = 0
   for (const r of roles) {
     const n = String(r?.name || '').toLowerCase()
     if (AGENT_ROLE_RE.test(n)) {
@@ -1118,8 +1221,13 @@ export function seedSignersFromDeal({ roles = [], contact = null, additionalCont
       const a = agentSigners[agentIdx]
       out[r.index] = a ? { name: a.name, email: a.email } : placeholder(r)
       if (a) agentIdx++
-    } else if (!NON_CLIENT_ROLE_RE.test(n) && CLIENT_ROLE_RE.test(n) && personIdx < people.length) {
-      out[r.index] = { ...people[personIdx++] }
+    } else if (!NON_CLIENT_ROLE_RE.test(n) && CLIENT_ROLE_RE.test(n)) {
+      // A named side draws from that side ONLY. Its list running out leaves the
+      // template's placeholder — a blank the sender can see and fill — rather
+      // than borrowing the opposite party.
+      const side = sided ? (SELLER_SIDE_ROLE_RE.test(n) ? 'seller' : BUYER_SIDE_ROLE_RE.test(n) ? 'buyer' : null) : null
+      const person = nextFrom(side ? sides[side] : people, side)
+      out[r.index] = person ? { ...person } : placeholder(r)
     } else {
       out[r.index] = placeholder(r)
     }

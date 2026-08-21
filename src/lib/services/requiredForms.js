@@ -32,7 +32,12 @@ export async function listRequiredForms(deal) {
   const { state, transactionType } = formScopeForDeal(deal)
   if (!state) return { forms: [], error: null }
 
-  const types = transactionType ? [transactionType, 'general'] : ['general']
+  // A deal representing BOTH parties (migration 0040) is subject to both sides'
+  // required packets — an agent on both sides of an Iowa sale owes the listing
+  // agreement AND the buyer representation agreement, not one or the other.
+  const types = transactionType === 'both'
+    ? ['buyer', 'seller', 'general']
+    : transactionType ? [transactionType, 'general'] : ['general']
 
   const { data, error } = await supabase
     .from('form_packets')

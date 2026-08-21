@@ -104,6 +104,11 @@ create table if not exists properties (
   assigned_agent_id uuid references agents(id) on delete set null,
   notes             text,
   details           jsonb default '{}',   -- flexible commercial / type-specific fields
+  -- Append-only mirror of this listing's price changes, kept for the public
+  -- landing page and the pipeline card's "price reduced" badge. `pricing_history`
+  -- (below) is the canonical log with an actor on every row — see migration 0040.
+  price_history     jsonb not null default '[]'::jsonb,
+  comps             jsonb not null default '[]'::jsonb,   -- [{address, price, sqft, ...}]
   created_at        timestamptz default now()
 );
 
@@ -113,7 +118,14 @@ create table if not exists properties (
 create table if not exists deals (
   id                  uuid primary key default uuid_generate_v4(),
   title               text not null,
+  -- The primary contact of the side we represent. Unchanged, and still what
+  -- every single-contact reader uses (BoldSign prefill, portal, mass email).
   contact_id          uuid references contacts(id) on delete set null,
+  -- The primary contact PER SIDE (migration 0040). A deal representing both the
+  -- buyer and the seller has two client sets that must not overwrite each other;
+  -- `contact_id` mirrors whichever of these belongs to the represented side.
+  buyer_contact_id    uuid references contacts(id) on delete set null,
+  seller_contact_id   uuid references contacts(id) on delete set null,
   property_id         uuid references properties(id) on delete set null,
   agent_id            uuid references agents(id) on delete set null,
   -- Agents sharing this deal's commission alongside `agent_id` (never includes
@@ -155,6 +167,8 @@ create table if not exists deals (
 );
 create unique index if not exists deals_portal_token_idx
   on deals(portal_token) where portal_token is not null;
+create index if not exists idx_deals_buyer_contact  on deals(buyer_contact_id);
+create index if not exists idx_deals_seller_contact on deals(seller_contact_id);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- ADDITIONAL CONTACTS  (multi-contact deals & properties — husband/wife,
@@ -166,6 +180,12 @@ create table if not exists deal_contacts (
   id         uuid primary key default uuid_generate_v4(),
   deal_id    uuid not null references deals(id)    on delete cascade,
   contact_id uuid not null references contacts(id) on delete cascade,
+  -- Which side of the table this person sits on (migration 0040). Null means
+  -- "recorded before sides existed" and reads as the side the deal represents,
+  -- so a legacy co-signer is never dropped. The unique key deliberately stays
+  -- (deal_id, contact_id): one person, one side of one deal.
+  side       text constraint deal_contacts_side_check
+               check (side is null or side in ('buyer','seller')),
   created_at timestamptz default now(),
   unique (deal_id, contact_id)
 );
@@ -189,6 +209,45 @@ alter table property_contacts enable row level security;
 do $$ begin
   if not exists (select 1 from pg_policies where tablename='property_contacts' and policyname='allow_all') then
     create policy "allow_all" on property_contacts for all to authenticated using (true) with check (true);
+  end if;
+end $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PRICING HISTORY  (migration 0040)
+--
+-- One append-only log behind both the property drawer's Pricing History tab and
+-- the deal drawer's. A price lives on two records — `properties.list_price` and
+-- `deals.value` — and both drawers edit it, so the log is anchored to the
+-- PROPERTY (a price belongs to a building) with `deal_id` recording which deal
+-- the edit was typed on. `properties.price_history` is still written as a jsonb
+-- mirror for the public landing page and the pipeline card's badge.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists pricing_history (
+  id              uuid primary key default gen_random_uuid(),
+  property_id     uuid references properties(id) on delete cascade,
+  -- `set null`, not cascade: the price change is property history and outlives
+  -- the deal it was typed on.
+  deal_id         uuid references deals(id) on delete set null,
+  price           numeric constraint pricing_history_price_nonneg
+                    check (price is null or price >= 0),
+  previous_price  numeric constraint pricing_history_previous_nonneg
+                    check (previous_price is null or previous_price >= 0),
+  source          text not null default 'property' constraint pricing_history_source_check
+                    check (source in ('deal','property','import','system')),
+  changed_by      uuid references agents(id) on delete set null,
+  -- Denormalized so an audit line still reads correctly after the agent leaves.
+  changed_by_name text,
+  note            text,
+  created_at      timestamptz not null default now()
+);
+create index if not exists idx_pricing_history_property on pricing_history(property_id, created_at desc);
+create index if not exists idx_pricing_history_deal     on pricing_history(deal_id, created_at desc);
+-- Matches the allow_all posture of `properties` itself; property scoping lives
+-- in src/lib/services/properties.js.
+alter table pricing_history enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where tablename='pricing_history' and policyname='allow_all') then
+    create policy "allow_all" on pricing_history for all to authenticated using (true) with check (true);
   end if;
 end $$;
 
