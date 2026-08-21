@@ -1615,7 +1615,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   )
 }
 
-function SignaturesTab({ deal, contacts, properties, extraContacts = [], agents = [], activeAgent }) {
+function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideClients = null, agents = [], activeAgent }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
   const [tableReady,  setTableReady]  = React.useState(true)
@@ -2193,7 +2193,7 @@ create policy "agent_notifications_policy" on agent_notifications
 
       {tplOpen && (
         <SendFromTemplateModal
-          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} dealAgents={dealAgents} templates={templates} activeAgent={activeAgent}
+          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} sideClients={sideClients} dealAgents={dealAgents} templates={templates} activeAgent={activeAgent}
           onClose={() => { setTplOpen(false); loadEnvelopes(); loadLayouts() }}
           onSent={() => { setTplOpen(false); loadEnvelopes(); loadLayouts() }}
           onSaved={() => { setTplOpen(false); loadEnvelopes(); loadLayouts() }}
@@ -2309,7 +2309,7 @@ const groupFields = (list) => {
     .filter(g => g.fields.length)
 }
 
-function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], dealAgents = [], templates, activeAgent, onClose, onSent, onSaved }) {
+function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], sideClients = null, dealAgents = [], templates, activeAgent, onClose, onSent, onSaved }) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
 
@@ -2379,11 +2379,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         const tokenVals = crmTokenValues({
           deal, property, contact,
           additionalContacts: extraContacts,
+          ...(sideClients || {}),
           agent:  appointedAgent({ activeAgent, dealAgents }),
           agents: orderAgentSigners({ activeAgent, dealAgents }),
           today:  new Date().toISOString().slice(0, 10),
         })
-        setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, activeAgent, dealAgents }))
+        // On a both-sided deal the per-side lists decide which party fills a row
+        // captioned "Buyer" and which fills "Seller" — see seedSignersFromDeal.
+        setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, ...(sideClients || {}), activeAgent, dealAgents }))
 
         const seededValues = {}
         for (const f of fields) {
@@ -2582,10 +2585,11 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const tokenVals = React.useMemo(() => crmTokenValues({
     deal, property, contact,
     additionalContacts: extraContacts,
+    ...(sideClients || {}),
     agent:  appointedAgent({ activeAgent, dealAgents }),
     agents: orderAgentSigners({ activeAgent, dealAgents }),
     today:  new Date().toISOString().slice(0, 10),
-  }), [deal, property, contact, extraContacts, activeAgent, dealAgents])
+  }), [deal, property, contact, extraContacts, sideClients, activeAgent, dealAgents])
 
   // What BoldSign actually calls this field, and whether it matched a CRM token.
   // A blank box used to be unreadable — "did the deal have no value, or is the
@@ -3346,6 +3350,21 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const extraContacts = [...(additionalBySide.buyer || []), ...(additionalBySide.seller || [])]
     .map(id => contacts.find(c => c.id === id)).filter(Boolean)
 
+  // The same people, kept in their sides and each side's PRIMARY first — what
+  // the signature prefill needs to put the buyer on the Buyer line and the
+  // seller on the Seller line. Only sent for a both-sided deal: a one-sided deal
+  // has one client set and the flat list is the correct, unchanged input.
+  const sideClients = React.useMemo(() => {
+    if (representing !== 'both') return null
+    const resolve = (side) => [primaryFor(side), ...(additionalBySide[side] || [])]
+      .filter(Boolean)
+      .map(id => contacts.find(c => c.id === id))
+      .filter(Boolean)
+    return { buyerClients: resolve('buyer'), sellerClients: resolve('seller') }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- primaryFor reads the
+    // two form fields named here; additionalBySide is the picker's own state.
+  }, [representing, form.buyer_contact_id, form.seller_contact_id, additionalBySide, contacts])
+
   const set  = (k, v) => setForm(p => ({...p, [k]: v}))
   const setCD = (k, v) => setForm(p => ({...p, comp_data: {...(p.comp_data||{}), [k]: v}}))
   const cd = form.comp_data || {}
@@ -3839,7 +3858,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
       {/* Signatures tab */}
       {tab === 'signatures' && isExisting && (
-        <SignaturesTab deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} agents={agents} activeAgent={activeAgent} />
+        <SignaturesTab deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts} sideClients={sideClients} agents={agents} activeAgent={activeAgent} />
       )}
 
       {/* Client Portal tab */}
