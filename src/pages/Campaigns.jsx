@@ -17,6 +17,7 @@ import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { Icon, Modal, pushToast, EmptyState, ConfirmDialog } from '../components/UI.jsx'
 import QrCode from '../components/QrCode.jsx'
 import { shortUrl, downloadQr } from '../lib/qr.js'
+import { streetLine } from '../lib/address.js'
 
 const MAILING_TYPE_OPTS = [
   { value: 'postcard',    label: 'Postcard'    },
@@ -1150,7 +1151,7 @@ function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
     const commercial = COMMERCIAL_TYPES.includes(p.type)
     const d = p.details || {}
 
-    if (!cfg.headline)                   setCfg('headline',    [p.address, p.city, p.state].filter(Boolean).join(', '))
+    if (!cfg.headline)                   setCfg('headline',    [streetLine(p), p.city, p.state].filter(Boolean).join(', '))
     if (!cfg.price      && p.list_price) setCfg('price',       String(p.list_price))
 
     if (commercial) {
@@ -1233,7 +1234,7 @@ function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
               <option value="">— select to auto-fill, or fill manually below —</option>
               {properties.map(p => (
                 <option key={p.id} value={p.id}>
-                  {p.address}{p.city ? `, ${p.city}` : ''}{p.state ? `, ${p.state}` : ''}
+                  {streetLine(p)}{p.city ? `, ${p.city}` : ''}{p.state ? `, ${p.state}` : ''}
                 </option>
               ))}
             </select>
@@ -1876,7 +1877,7 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
           {mailing.description && <div style={{ fontSize:13, color:'var(--gw-mist)', marginTop:4 }}>{mailing.description}</div>}
           <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6, display:'flex', gap:14, flexWrap:'wrap' }}>
             {agent && <span><Icon name="user" size={11} /> {agent.name}</span>}
-            {property && <span><Icon name="building" size={11} /> {property.address}{property.city ? `, ${property.city}` : ''}</span>}
+            {property && <span><Icon name="building" size={11} /> {streetLine(property)}{property.city ? `, ${property.city}` : ''}</span>}
             {mailing.send_date && <span><Icon name="calendar" size={11} /> {mailing.send_date}</span>}
             <span><Icon name="layers" size={11} /> {mailing.mailing_type}</span>
           </div>
@@ -2513,7 +2514,7 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
                   </div>
                   <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4, display:'flex', gap:10, flexWrap:'wrap' }}>
                     {agent && <span>{agent.name}</span>}
-                    {property && <span>· {property.address}</span>}
+                    {property && <span>· {streetLine(property)}</span>}
                     {m.send_date && <span>· {m.send_date}</span>}
                     <span>· {m.mailing_type}</span>
                   </div>

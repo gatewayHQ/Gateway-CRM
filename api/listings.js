@@ -1,3 +1,5 @@
+import { streetLine } from '../src/lib/address.js'
+
 export default async function handler(req, res) {
   // CORS — allow any origin so website widgets work
   res.setHeader('Access-Control-Allow-Origin', '*')
@@ -53,28 +55,39 @@ export default async function handler(req, res) {
   // Filter by status if provided: ?status=active
   const statusFilter = req.query?.status || 'active'
 
-  const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/properties?status=eq.${encodeURIComponent(statusFilter)}&select=id,address,city,state,zip,type,status,list_price,beds,baths,sqft,details,assigned_agent_id&order=created_at.desc`,
+  // `unit` is the suite inside the building (migration 0042). PostgREST 400s the
+  // whole select on an unknown column, so a deploy that lands before the
+  // migration retries without it rather than serving every widget an error.
+  const feedColumns = (withUnit) =>
+    `id,address,${withUnit ? 'unit,' : ''}city,state,zip,type,status,list_price,beds,baths,sqft,details,assigned_agent_id`
+  const fetchFeed = (withUnit) => fetch(
+    `${SUPABASE_URL}/rest/v1/properties?status=eq.${encodeURIComponent(statusFilter)}&select=${feedColumns(withUnit)}&order=created_at.desc`,
     { headers: AUTH }
   )
+  let r = await fetchFeed(true)
+  if (r.status === 400) r = await fetchFeed(false)
   if (!r.ok) return res.status(500).json({ error: 'Failed to fetch listings' })
   const rows = await r.json()
 
   const listings = rows.map(p => ({
-    id:          p.id,
-    address:     p.address,
-    city:        p.city,
-    state:       p.state,
-    zip:         p.zip,
-    type:        p.type,
-    status:      p.status,
-    price:       p.list_price,
-    beds:        p.beds,
-    baths:       p.baths,
-    sqft:        p.sqft,
-    photos:      p.details?.photos || [],
-    listingUrl:  `${base}/listing/${p.id}`,
-    heroPhoto:   (p.details?.photos || [])[0] || null,
+    id:            p.id,
+    // `address` stays the bare street line so existing website widgets read
+    // exactly as before; `unit` and the composed `streetAddress` are additive.
+    address:       p.address,
+    unit:          p.unit || null,
+    streetAddress: streetLine(p),
+    city:          p.city,
+    state:         p.state,
+    zip:           p.zip,
+    type:          p.type,
+    status:        p.status,
+    price:         p.list_price,
+    beds:          p.beds,
+    baths:         p.baths,
+    sqft:          p.sqft,
+    photos:        p.details?.photos || [],
+    listingUrl:    `${base}/listing/${p.id}`,
+    heroPhoto:     (p.details?.photos || [])[0] || null,
   }))
 
   // Cache for 60 seconds on CDN, revalidate in background

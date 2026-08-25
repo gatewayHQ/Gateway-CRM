@@ -18,6 +18,7 @@ import { uploadDealDocument, signDealDocumentUrl } from '../lib/services/documen
 import { submitDealForReview, decideDealReview } from '../lib/services/review.js'
 import { generateClosingPacket, listClosingPackets, openClosingPacket } from '../lib/services/closingPacket.js'
 import { listDealSteps, toggleDealStep } from '../lib/services/steps.js'
+import { streetLine } from '../lib/address.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Deal Page — the whole deal on one screen: stage rail, property, people,
@@ -84,7 +85,7 @@ function ContactLine({ contact, note = null, primary = false, property = null, d
               contactName: `${contact.first_name} ${contact.last_name}`,
               contactId: contact.id,
               dealId,
-              propertyAddress: property?.address,
+              propertyAddress: streetLine(property),
               dealValue: deal?.value,
             })}
           >
@@ -529,7 +530,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
         <SectionCard title="Property" action={drawerLink('Edit', () => openDrawer('details'))}>
           {property ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <div style={{ fontWeight: 700, fontSize: 14 }}>{property.address}</div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{streetLine(property)}</div>
               <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>
                 {[property.city, property.state, property.zip].filter(Boolean).join(', ')}
               </div>

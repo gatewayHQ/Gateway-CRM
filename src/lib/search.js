@@ -5,12 +5,15 @@
 // The component owns fetching and rendering; everything here is deterministic.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { propertyLabel, streetLine } from './address.js'
+
 export const MIN_SEARCH_CHARS = 2
 export const PER_SECTION      = 5
 
 export const contactName  = (c) => `${c?.first_name || ''} ${c?.last_name || ''}`.trim()
-export const propertyLine = (p) =>
-  [p?.address, [p?.city, p?.state].filter(Boolean).join(', ')].filter(Boolean).join(' · ')
+// "123 Main St, Suite 200 · Des Moines, IA" — the suite belongs on the street
+// line, or two spaces in the same building are indistinguishable in the results.
+export const propertyLine = propertyLabel
 
 /** Case-insensitive substring test across a record's searchable fields. */
 export function matches(term, ...fields) {
@@ -36,7 +39,7 @@ export const filterContacts = (rows = [], term) =>
   rows.filter(c => matches(term, contactName(c), c.email, c.phone, c.owner_city)).slice(0, PER_SECTION)
 
 export const filterProperties = (rows = [], term) =>
-  rows.filter(p => matches(term, p.address, p.city, p.mls_number)).slice(0, PER_SECTION)
+  rows.filter(p => matches(term, p.address, p.unit, streetLine(p), p.city, p.mls_number)).slice(0, PER_SECTION)
 
 /** Deals are always filtered in memory — App.jsx already holds every visible one. */
 export const filterDeals = (rows = [], term) =>

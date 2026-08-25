@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { fetchPublicProperty } from '../lib/publicProperty.js'
+import { streetLine, geocodeQuery, fullAddress as composeFullAddress } from '../lib/address.js'
 
 const fmt = (n) => n != null ? `$${Number(n).toLocaleString()}` : null
 const COMMERCIAL = ['multifamily','office','land','retail','industrial','mixed-use','commercial']
@@ -375,7 +376,7 @@ export default function PropertyLandingPage({ propertyId }) {
 
   useEffect(() => {
     if (property) {
-      const title = [property.address, property.city, property.state].filter(Boolean).join(', ')
+      const title = [streetLine(property), property.city, property.state].filter(Boolean).join(', ')
       document.title = `${title} — Gateway Real Estate`
     }
   }, [property])
@@ -385,7 +386,7 @@ export default function PropertyLandingPage({ propertyId }) {
 
   const photos  = property.details?.photos || []
   const commercial = isCommercial(property.type)
-  const fullAddress = [property.address, property.city, property.state, property.zip].filter(Boolean).join(', ')
+  const fullAddress = composeFullAddress(property)
   const statusColor = STATUS_COLORS[property.status] || '#6b7280'
 
   return (
@@ -399,7 +400,7 @@ export default function PropertyLandingPage({ propertyId }) {
       </header>
 
       {/* ── Photo Gallery ── */}
-      <PhotoGallery photos={photos} address={property.address} />
+      <PhotoGallery photos={photos} address={streetLine(property)} />
 
       {/* ── Property Header ── */}
       <div className="lp__header-band">
@@ -410,7 +411,7 @@ export default function PropertyLandingPage({ propertyId }) {
             </span>
             <span className="lp__type-badge">{TYPE_LABELS[property.type] || property.type}</span>
           </div>
-          <h1 className="lp__address">{property.address}</h1>
+          <h1 className="lp__address">{streetLine(property)}</h1>
           {(property.city || property.state) && (
             <p className="lp__subaddress">
               {[property.city, property.state, property.zip].filter(Boolean).join(', ')}
@@ -451,8 +452,10 @@ export default function PropertyLandingPage({ propertyId }) {
                 <section className="lp__card" aria-label="Location">
                   <h2 className="lp__card-title">Location</h2>
                   <p className="lp__location-address">{fullAddress}</p>
+                  {/* The map link points at the BUILDING, not the suite — a query
+                      carrying "Suite 120" can come back with nothing at all. */}
                   <a
-                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(fullAddress)}`}
+                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(geocodeQuery(property))}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="lp__map-link"

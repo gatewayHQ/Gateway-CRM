@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, pushToast } from '../components/UI.jsx'
 import { WEBHOOK_EVENTS } from '../lib/webhooks.js'
+import { geocodeQuery } from '../lib/address.js'
 
 // ─── Geocode helpers (shared with Properties radius tool) ────────────────────
 
@@ -199,7 +200,8 @@ function MailchimpSection() {
     let done = 0
 
     for (const p of props) {
-      const addr = [p.address, p.city, p.state, p.zip].filter(Boolean).join(', ')
+      // Building only — the suite is not a place a geocoder can find.
+      const addr = geocodeQuery(p)
       const coords = await geocodeAddress(addr)
       if (coords) {
         await supabase.from('properties').update({ lat: coords.lat, lng: coords.lng }).eq('id', p.id)

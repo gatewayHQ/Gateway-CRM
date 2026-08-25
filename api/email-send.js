@@ -104,6 +104,7 @@ import { syncContactMail, readMirroredThread, readSyncState } from './_lib/conta
 import {
   createBlast, loadSendableBlast, sendBlastBatch, blastProgress,
 } from './_lib/massEmail.js'
+import { readPropertiesWithUnit } from '../src/lib/address.js'
 
 const SHARED_HEADERS = {
   'Access-Control-Allow-Origin':  '*',
@@ -325,7 +326,8 @@ async function handleOutlookCalendarSync(req, res) {
 
   let property = null
   if (deal.property_id) {
-    const { data: p } = await svc.from('properties').select('address').eq('id', deal.property_id).maybeSingle()
+    const { data: p } = await readPropertiesWithUnit('address', (cols) =>
+      svc.from('properties').select(cols).eq('id', deal.property_id).maybeSingle())
     property = p
   }
 
@@ -580,9 +582,8 @@ async function handleBlastSend(req, res) {
   // write counters and log rows the agent must not be able to forge.
   let property = null
   if (blast.property_id) {
-    const { data } = await user.from('properties')
-      .select('id, address, city, state, zip, type, list_price, details')
-      .eq('id', blast.property_id).maybeSingle()
+    const { data } = await readPropertiesWithUnit('id, address, city, state, zip, type, list_price, details', (cols) =>
+      user.from('properties').select(cols).eq('id', blast.property_id).maybeSingle())
     property = data
   }
 

@@ -15,6 +15,7 @@
 // signer must see".
 // ─────────────────────────────────────────────────────────────────────────────
 import { describeDealCommission } from '../commission.js'
+import { fullAddress, streetLine, propertyUnit } from '../address.js'
 
 // Field types whose value an agent can pre-fill from the CRM (vs signer actions
 // like Signature/Initial). Used to decide which template fields become inputs.
@@ -550,7 +551,10 @@ export function appointedAgent({ activeAgent = null, dealAgents = [] } = {}) {
 // appointedAgent() is orderAgentSigners()[0] in each of their branches.
 export function crmTokenValues({ deal, property, contact, additionalContacts = [], buyerClients = null, sellerClients = null, agent, agents = [], today = '' } = {}) {
   const money = (n) => (n != null && n !== '' ? `$${Number(n).toLocaleString()}` : '')
-  const fullAddr = [property?.address, property?.city, property?.state, property?.zip].filter(Boolean).join(', ')
+  // Composed through src/lib/address.js so a suite (migration 0042) prints on
+  // the agreement exactly as it reads in the CRM — a listing agreement for
+  // "Suite 120" must not describe the whole building.
+  const fullAddr = fullAddress(property)
   const dealComm = describeDealCommission(deal)
   // On a both-sided deal (migration 0040) the per-side lists are passed in and
   // `clients` is their union — without them the OTHER side's primary is missing
@@ -628,7 +632,8 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
   const agParts = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(agreementIso || '').trim())
   const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
   return {
-    property_address:   property?.address || deal?.prop_address || '',
+    property_address:   streetLine(property) || deal?.prop_address || '',
+    property_unit:      propertyUnit(property),
     property_full:      fullAddr,
     property_city:      property?.city || '',
     property_state:     property?.state || '',

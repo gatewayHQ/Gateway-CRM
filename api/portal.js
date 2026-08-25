@@ -141,7 +141,8 @@ export default async function handler(req, res) {
         ? supabase.from('agents').select('name, initials, role, email, color').eq('id', deal.agent_id).maybeSingle()
         : Promise.resolve({ data: null }),
       deal.property_id
-        ? supabase.from('properties').select('address, city, state, zip').eq('id', deal.property_id).maybeSingle()
+        ? readPropertiesWithUnit('address, city, state, zip', (cols) =>
+            supabase.from('properties').select(cols).eq('id', deal.property_id).maybeSingle())
         : Promise.resolve({ data: null }),
       deal.contact_id
         ? supabase.from('contacts').select('first_name').eq('id', deal.contact_id).maybeSingle()
@@ -199,7 +200,7 @@ export default async function handler(req, res) {
 
     const property = propRes.data
     const propertyLabel = property
-      ? [property.address, [property.city, property.state].filter(Boolean).join(', '), property.zip]
+      ? [streetLine(property), [property.city, property.state].filter(Boolean).join(', '), property.zip]
           .filter(Boolean).join(' · ')
       : null
 
@@ -306,6 +307,7 @@ async function handlePortalSignLink(req, res) {
 import { agentSliceForDeal, capWindowStart } from '../src/lib/commission.js'
 import { normalizeStageLabels } from '../src/lib/stageLabels.js'
 import { canHoldOfficeAdmin } from '../src/lib/officeAdmins.js'
+import { streetLine, readPropertiesWithUnit } from '../src/lib/address.js'
 import { requireAuthUser, requireAgent, getServiceClient, errorResponse } from './_lib/auth.js'
 
 // ─────────────────────────────────────────────────────────────────────────────

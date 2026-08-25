@@ -13,6 +13,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { PROPERTY_TYPE_LABELS } from './enums.js'
+import { fullAddress as composeFullAddress } from './address.js'
 
 // ─── Deal statuses ────────────────────────────────────────────────────────────
 // The announcement's headline. Distinct from `properties.status` and from
@@ -111,11 +112,10 @@ export function assetTypeLabel(property) {
   return PROPERTY_TYPE_LABELS[t] || t.charAt(0).toUpperCase() + t.slice(1)
 }
 
-export function fullAddress(property) {
-  if (!property) return ''
-  const cityState = [property.city, property.state].filter(Boolean).join(', ')
-  return [property.address, cityState, property.zip].filter(Boolean).join(', ')
-}
+// Re-exported rather than reimplemented: the suite/unit line (migration 0042)
+// has to read the same in an announcement as it does everywhere else, so this
+// is src/lib/address.js's composer under the name this module already published.
+export const fullAddress = composeFullAddress
 
 /**
  * Token values for one (property, status, recipient) triple.

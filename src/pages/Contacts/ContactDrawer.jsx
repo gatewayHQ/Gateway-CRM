@@ -11,6 +11,7 @@ import ActivityTab from './ActivityTab.jsx'
 import EmailsTab from './EmailsTab.jsx'
 import { findMatchingProperties } from '../../lib/matching.js'
 import { formatCurrency } from '../../lib/helpers.js'
+import { streetLine } from '../../lib/address.js'
 
 const BLANK = {
   first_name: '', last_name: '', email: '', phone: '',
@@ -625,7 +626,7 @@ export default function ContactDrawer({
                 <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--gw-ink)', marginBottom: 2 }}>
-                      {p.address}
+                      {streetLine(p)}
                     </div>
                     <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>
                       {[p.city, p.state].filter(Boolean).join(', ')}
