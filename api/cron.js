@@ -33,6 +33,7 @@ import { createClient } from '@supabase/supabase-js'
 import { boldsign, listAllTemplates, getRateLimitState } from './boldsign.js'
 import { OPERATING_STATES } from '../src/lib/constants.js'
 import { ALL_DEAL_STAGES, isOpenStage } from '../src/lib/stages.js'
+import { streetLine, readPropertiesWithUnit } from '../src/lib/address.js'
 import { syncAllDealCalendars, syncAllTaskCalendars } from './_lib/calendarSync.js'
 import { syncAllInboxes } from './_lib/inboxSync.js'
 
@@ -149,7 +150,7 @@ async function runReminders(supabase) {
   const [agentsRes, contactsRes, propertiesRes] = await Promise.all([
     agentIds.length    ? supabase.from('agents').select('id, name, email').in('id', agentIds)              : Promise.resolve({ data: [] }),
     contactIds.length  ? supabase.from('contacts').select('id, first_name, last_name, phone, email').in('id', contactIds) : Promise.resolve({ data: [] }),
-    propertyIds.length ? supabase.from('properties').select('id, address, city, state').in('id', propertyIds)             : Promise.resolve({ data: [] }),
+    propertyIds.length ? readPropertiesWithUnit('id, address, city, state', (cols) => supabase.from('properties').select(cols).in('id', propertyIds)) : Promise.resolve({ data: [] }),
   ])
 
   const agentMap    = Object.fromEntries((agentsRes.data    || []).map(a => [a.id, a]))
@@ -166,7 +167,7 @@ async function runReminders(supabase) {
     const property = propertyMap[deal.property_id] || null
 
     const propertyAddress = property
-      ? [property.address, [property.city, property.state].filter(Boolean).join(', ')].filter(Boolean).join(' · ')
+      ? [streetLine(property), [property.city, property.state].filter(Boolean).join(', ')].filter(Boolean).join(' · ')
       : null
     const contactName = contact ? `${contact.first_name} ${contact.last_name}`.trim() : null
 

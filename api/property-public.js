@@ -26,6 +26,8 @@
  * despite being a serverless function. It uses the service key now.
  */
 
+import { streetLine } from '../src/lib/address.js'
+
 const TYPE_LABELS = {
   residential: 'Residential', rental: 'Rental', multifamily: 'Multifamily',
   office: 'Office', land: 'Land', retail: 'Retail',
@@ -46,7 +48,9 @@ function esc(str) {
 // always been in the share card's description. That is a product decision this
 // list inherits rather than makes.
 const PUBLIC_PROPERTY_COLUMNS = [
-  'id', 'address', 'city', 'state', 'zip', 'county',
+  // `unit` is the suite/space inside the building (migration 0042) — the
+  // listing is "Suite 120", not the whole strip mall, so the page has to say so.
+  'id', 'address', 'unit', 'city', 'state', 'zip', 'county',
   'type', 'status', 'list_price',
   'beds', 'baths', 'sqft', 'garage', 'mls_number',
   'notes', 'details',
@@ -86,6 +90,22 @@ function serviceCreds() {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+// PostgREST rejects the WHOLE select when one column is unknown, so a deploy
+// that lands before migration 0042 would take every public listing page down
+// with it. One retry without `unit` keeps these pages serving the pre-suite
+// address instead — the same degrade-and-continue the CRM side uses.
+async function fetchProperty(creds, { id, select, extraQuery = '' }) {
+  const request = (sel) => fetch(
+    `${creds.url}/rest/v1/properties?id=eq.${id}&select=${encodeURIComponent(sel)}${extraQuery}`,
+    { headers: creds.headers },
+  )
+  const r = await request(select)
+  if (r.status === 400 && /(^|,)unit(,|$)/.test(select)) {
+    return request(select.replace(/(^|,)unit(,|$)/, (m, a, b) => (a && b ? ',' : '')))
+  }
+  return r
+}
+
 // ── GET ?action=listing: the JSON /listing/:id renders ────────────────────────
 async function handleListing(req, res) {
   const { id } = req.query
@@ -99,10 +119,7 @@ async function handleListing(req, res) {
   // The advisor card is joined here rather than read from `agents_public` in the
   // browser, because it needs `initials`, which that view does not expose.
   const select = `${PUBLIC_PROPERTY_COLUMNS},agent:assigned_agent_id(id,name,email,role,color,initials)`
-  const r = await fetch(
-    `${creds.url}/rest/v1/properties?id=eq.${id}&select=${encodeURIComponent(select)}&limit=1`,
-    { headers: creds.headers }
-  )
+  const r = await fetchProperty(creds, { id, select, extraQuery: '&limit=1' })
   if (!r.ok) return res.status(500).json({ error: 'Database error' })
 
   const [row] = await r.json()
@@ -125,10 +142,11 @@ async function handleShare(req, res) {
   const creds = serviceCreds()
   if (!creds) return res.status(500).send('Server configuration error')
 
-  const r = await fetch(
-    `${creds.url}/rest/v1/properties?id=eq.${id}&select=address,city,state,zip,type,status,list_price,beds,baths,sqft,details,notes&limit=1`,
-    { headers: creds.headers }
-  )
+  const r = await fetchProperty(creds, {
+    id,
+    select: 'address,unit,city,state,zip,type,status,list_price,beds,baths,sqft,details,notes',
+    extraQuery: '&limit=1',
+  })
   if (!r.ok) return res.status(500).send('Database error')
   const rows = await r.json()
   if (!rows?.length) return res.status(404).send('Listing not found')
@@ -139,7 +157,7 @@ async function handleShare(req, res) {
   const listingUrl = `${base}/listing/${id}`
   const heroPhoto  = (p.details?.photos || [])[0] || ''
 
-  const title = [p.address, p.city, p.state].filter(Boolean).join(', ')
+  const title = [streetLine(p), p.city, p.state].filter(Boolean).join(', ')
   const price = p.list_price ? `$${Number(p.list_price).toLocaleString()}` : ''
   const type  = TYPE_LABELS[p.type] || p.type || ''
   const specs = [

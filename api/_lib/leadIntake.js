@@ -20,6 +20,8 @@
  * those degrades one field of one lead. Losing the lead loses a commission.
  */
 
+import { streetLine } from '../../src/lib/address.js'
+
 const LANES = ['residential', 'commercial']
 
 export const INTEREST_TYPES = ['residential', 'commercial', 'both']
@@ -319,6 +321,20 @@ function normalizeForCompare(s) {
 }
 
 /**
+ * A `properties` read that wants the suite column (migration 0042).
+ *
+ * rest() turns any non-2xx into `[]`, so on a pre-0042 database the 400 for an
+ * unknown column would be indistinguishable from "nothing matched" and quietly
+ * stop matching leads to listings altogether. An empty first result is retried
+ * without the column — at most one extra read, only when nothing came back.
+ */
+async function restProperties(creds, { filter, columns }) {
+  const rows = await rest(creds, `properties?${filter}&select=${columns},unit`)
+  if (rows.length) return rows
+  return rest(creds, `properties?${filter}&select=${columns}`)
+}
+
+/**
  * Fill in `property_id` where a posted URL or title resolves to a CRM listing.
  * Two bounded queries, never one per view:
  *   1. every uuid found in the payload, in one `id=in.(…)`
@@ -338,10 +354,10 @@ export async function matchViewedProperties(creds, views) {
   }
 
   if (idHits.length) {
-    const rows = await rest(
-      creds,
-      `properties?id=in.(${[...new Set(idHits)].join(',')})&select=id,address,city,state`
-    )
+    const rows = await restProperties(creds, {
+      filter:  `id=in.(${[...new Set(idHits)].join(',')})`,
+      columns: 'id,address,city,state',
+    })
     for (const row of rows) byId.set(String(row.id).toLowerCase(), row)
   }
 
@@ -360,17 +376,17 @@ export async function matchViewedProperties(creds, views) {
   if (terms.size) {
     const uniq = [...new Set(terms.values())].slice(0, MAX_VIEWED_PROPERTIES)
     const or   = uniq.map(t => `address.ilike.*${t}*`).join(',')
-    candidates = await rest(
-      creds,
-      `properties?or=(${encodeURIComponent(or)})&select=id,address,city,state&limit=100`
-    )
+    candidates = await restProperties(creds, {
+      filter:  `or=(${encodeURIComponent(or)})&limit=100`,
+      columns: 'id,address,city,state',
+    })
   }
 
   for (const v of views) {
     if (v._uuid && byId.has(v._uuid)) {
       const p = byId.get(v._uuid)
       v.property_id = p.id
-      v.title = v.title || [p.address, p.city, p.state].filter(Boolean).join(', ')
+      v.title = v.title || [streetLine(p), p.city, p.state].filter(Boolean).join(', ')
       delete v._uuid
       continue
     }
@@ -380,12 +396,16 @@ export async function matchViewedProperties(creds, views) {
     if (!term || !candidates.length) continue
     const needle = normalizeForCompare(term)
     const hit = candidates.find(p => {
-      const hay = normalizeForCompare(p.address)
-      return hay && (hay.includes(needle) || needle.includes(hay))
+      // The composed street line is checked too: a page titled "2212 Okoboji
+      // Ave Suite 120" should still find the listing whose suite is its own column.
+      const hay      = normalizeForCompare(p.address)
+      const withUnit = normalizeForCompare(streetLine(p))
+      return (hay && (hay.includes(needle) || needle.includes(hay)))
+        || (withUnit && (withUnit.includes(needle) || needle.includes(withUnit)))
     })
     if (hit) {
       v.property_id = hit.id
-      v.title = v.title || [hit.address, hit.city, hit.state].filter(Boolean).join(', ')
+      v.title = v.title || [streetLine(hit), hit.city, hit.state].filter(Boolean).join(', ')
     }
   }
 

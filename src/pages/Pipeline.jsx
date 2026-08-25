@@ -24,6 +24,7 @@ import { priceChanged } from '../lib/pricing.js'
 import { syncPriceChange } from '../lib/services/pricing.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
+import { streetLine, propertyLabel } from '../lib/address.js'
 import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
@@ -2268,7 +2269,8 @@ const FIELD_TOKEN_INFO = {
   agent_name:           { group: 'Agent names', text: 'This deal’s appointed agent' },
   agent_2_name:         { group: 'Agent names', text: 'A co-listing agent', optional: 'only appears when a second agent is on this deal' },
   broker_name:          { group: 'Agent names', text: 'The brokerage name' },
-  property_address:     { group: 'Property', text: 'Street address' },
+  property_address:     { group: 'Property', text: 'Street address, including the suite / unit' },
+  property_unit:        { group: 'Property', text: 'Suite / unit on its own', optional: 'only appears when the listing has one' },
   property_full:        { group: 'Property', text: 'Full one-line address' },
   property_city_state_zip: { group: 'Property', text: 'City, state and ZIP line' },
   property_county:      { group: 'Property', text: 'County' },
@@ -2453,7 +2455,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
       roleList, signers, fieldsByRole: byRole, inOrder,
     })
 
-    const docName = [tpl?.name || deal?.title, property?.address].filter(Boolean).join(' — ')
+    const docName = [tpl?.name || deal?.title, streetLine(property)].filter(Boolean).join(' — ')
     const labels  = [tpl?.state, tpl?.doc_type, `deal:${deal.id}`].filter(Boolean)
     // Fields that only mean something for a co-buyer or an additional agent this
     // deal doesn't have — left blank above, and removed from the draft outright
@@ -3386,7 +3388,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       value: (prev.value === '' || prev.value === null || prev.value === undefined) && picked?.list_price != null
         ? picked.list_price
         : prev.value,
-      title: !prev.title.trim() && picked?.address ? picked.address : prev.title,
+      title: !prev.title.trim() && picked?.address ? streetLine(picked) : prev.title,
     }))
   }
 
@@ -3713,7 +3715,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
                 </div>
               )
             })}
-            <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={linkProperty} placeholder="Search properties…" labelKey="address" /></div>
+            <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={linkProperty} placeholder="Search properties…" labelKey={propertyLabel} /></div>
             <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
             <div className="form-group">
               <label className="form-label">Additional Agents</label>
@@ -3914,7 +3916,7 @@ function ListingCard({ property, agent, deals = [], onClick, onDelete, draggable
         </div>
       )}
       <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:6, marginBottom:4 }}>
-        <div style={{ fontSize:12, fontWeight:600, color:'var(--gw-ink)', lineHeight:1.35 }}>{property.address}</div>
+        <div style={{ fontSize:12, fontWeight:600, color:'var(--gw-ink)', lineHeight:1.35 }}>{streetLine(property)}</div>
         <span style={{ fontSize:10, fontWeight:700, color: statusColor, whiteSpace:'nowrap', flexShrink:0 }}>
           {LISTING_STATUS_LABELS[property.status] || property.status}
         </span>
@@ -4258,7 +4260,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
       setEditing({
         stage: 'lead',
         property_id: property.id,
-        title: property.address || 'New Listing Deal',
+        title: streetLine(property) || 'New Listing Deal',
         agent_id: property.assigned_agent_id || activeAgent?.id || '',
         prop_category: isResidentialPropertyType(property.type) ? 'residential' : 'commercial',
       })

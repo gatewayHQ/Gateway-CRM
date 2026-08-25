@@ -27,6 +27,7 @@
 import crypto from 'node:crypto'
 import { getValidAccessToken, createCalendarEvent, updateCalendarEvent, deleteCalendarEvent } from './msGraph.js'
 import { isOpenStage } from '../../src/lib/stages.js'
+import { streetLine, readPropertiesWithUnit } from '../../src/lib/address.js'
 
 function eventHash(entry, dealTitle, propertyAddress) {
   return crypto.createHash('sha256')
@@ -63,7 +64,9 @@ export async function syncDealCalendar(svc, deal, { property } = {}) {
     return { skipped: true, reason: err.message }
   }
 
-  const propertyAddress = property?.address || null
+  // The suite belongs in the calendar entry — an agent with two spaces in the
+  // same building can't tell the events apart from the street line alone.
+  const propertyAddress = streetLine(property) || null
   const keyDates = resolveKeyDates(deal)
   const seenTypes = new Set()
   const result = { created: 0, updated: 0, deleted: 0, errors: [] }
@@ -141,7 +144,7 @@ export async function syncAllDealCalendars(svc) {
 
   const propertyIds = [...new Set(candidates.map(d => d.property_id).filter(Boolean))]
   const { data: properties } = propertyIds.length
-    ? await svc.from('properties').select('id, address').in('id', propertyIds)
+    ? await readPropertiesWithUnit('id, address', (cols) => svc.from('properties').select(cols).in('id', propertyIds))
     : { data: [] }
   const propertyMap = Object.fromEntries((properties || []).map(p => [p.id, p]))
 

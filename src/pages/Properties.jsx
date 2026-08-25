@@ -16,6 +16,7 @@ import OptionSelect from '../components/OptionSelect.jsx'
 import { PropertyPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { syncPriceChange } from '../lib/services/pricing.js'
 import { priceChanged } from '../lib/pricing.js'
+import { streetLine, geocodeQuery, normalizeUnit, isMissingUnitColumn } from '../lib/address.js'
 
 // Types where commercial fields apply
 const COMMERCIAL_TYPES = COMMERCIAL_PROPERTY_TYPES
@@ -819,7 +820,7 @@ async function reloadPropertyContacts(setDb, propertyId) {
 }
 
 function PropertyDrawer({ open, onClose, property, agents, contacts, propertyContacts = [], deals = [], activeAgent, onSave, go, setDb, announce }) {
-  const blank = { address:'', city:'', state:'', zip:'', county:'', submarket:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{}, listing_expiry_date:'', price_history:[], comps:[] }
+  const blank = { address:'', unit:'', city:'', state:'', zip:'', county:'', submarket:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{}, listing_expiry_date:'', price_history:[], comps:[] }
   const [form, setForm]             = useState(property || blank)
   const [errors, setErrors]         = useState({})
   const [saving, setSaving]         = useState(false)
@@ -858,7 +859,9 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     setStartingDeal(true)
     const primaryAgentId = activeAgent?.id || form.assigned_agent_id || null
     const dealPayload = {
-      title:       form.address,
+      // The suite is part of the address, so it is part of the deal's title —
+      // two spaces in the same strip mall must not both open as "2212 Okoboji Ave".
+      title:       streetLine(form),
       property_id: property.id,
       contact_id:  form.linked_contact_id || null,
       // A deal started from our own listing is a SELLER-side deal, and the
@@ -928,6 +931,10 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     const payload = {
       ...form,
       id:                   resolvedId,
+      // 'Suite 200' / '#4' / '' — a bare "200" becomes "Suite 200", and an
+      // empty field is stored as null rather than an empty string so the
+      // address composes to the plain street line. See src/lib/address.js.
+      unit:                 normalizeUnit(form.unit) || null,
       list_price:           form.list_price ? Number(form.list_price) : null,
       sqft:                 form.sqft       ? Number(form.sqft)       : null,
       beds:                 form.beds       ? Number(form.beds)       : null,
@@ -940,13 +947,22 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       comps:                form.comps || [],
     }
     let error, data, status
-    if (property?.id) {
-      ({ error, data, status } = await supabase.from('properties').update(payload).eq('id', property.id).select().single())
-    } else {
-      ({ error, data, status } = await supabase.from('properties').insert([payload]).select().single())
+    let unitDropped = false
+    const write = (body) => property?.id
+      ? supabase.from('properties').update(body).eq('id', property.id).select().single()
+      : supabase.from('properties').insert([body]).select().single()
+    ;({ error, data, status } = await write(payload))
+    // Migration 0042 adds properties.unit. Until it is applied, save the
+    // listing without the suite rather than refusing the save — same
+    // degrade-and-continue pattern as co_agent_ids (0025) and the deal sides (0040).
+    if (error && isMissingUnitColumn(error)) {
+      const { unit, ...withoutUnit } = payload
+      ;({ error, data, status } = await write(withoutUnit))
+      unitDropped = !error && !!payload.unit
     }
     setSaving(false)
     if (error) { pushToast(mutationErrorMessage(error, status, 'Could not save property — please try again.'), 'error'); return }
+    if (unitDropped) pushToast('Suite / unit not saved — ask an admin to apply database migration 0042.', 'error')
 
     // Geocode on save if address changed or not yet geocoded
     const savedId = data?.id || resolvedId
@@ -990,22 +1006,28 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     // the property leaves those deals pointing at an address that no longer
     // exists. Only titles that EXACTLY match the old address are renamed — a
     // title the agent wrote themselves is theirs, and is never touched.
-    if (property?.id && property.address && form.address.trim() && form.address !== property.address) {
-      const stale = (deals || []).filter(d => d.property_id === property.id && d.title === property.address)
+    const oldTitle = streetLine(property)
+    const newTitle = streetLine({ ...form, unit: normalizeUnit(form.unit) })
+    if (property?.id && oldTitle && newTitle && newTitle !== oldTitle) {
+      // Both the pre-suite title (the bare street line) and the composed one
+      // count as "the address we gave this deal" — a listing that gains a suite
+      // was titled without one.
+      const stale = (deals || []).filter(d => d.property_id === property.id && (d.title === oldTitle || d.title === property.address))
       if (stale.length) {
         const { error: renameError } = await supabase
-          .from('deals').update({ title: form.address }).in('id', stale.map(d => d.id))
+          .from('deals').update({ title: newTitle }).in('id', stale.map(d => d.id))
         if (renameError) pushToast('Property saved, but its deals kept the old address as their title.', 'error')
         else if (setDb) setDb(prev => ({
           ...prev,
-          deals: (prev.deals || []).map(d => stale.some(x => x.id === d.id) ? { ...d, title: form.address } : d),
+          deals: (prev.deals || []).map(d => stale.some(x => x.id === d.id) ? { ...d, title: newTitle } : d),
         }))
       }
     }
 
     const addressChanged = !property?.id || form.address !== property?.address || form.city !== property?.city
     if (savedId && addressChanged && (!form.lat || !form.lng)) {
-      const fullAddr = [form.address, form.city, form.state, form.zip].filter(Boolean).join(', ')
+      // No suite: geocoders resolve buildings, not the spaces inside them.
+      const fullAddr = geocodeQuery(form)
       try {
         const geoRes = await fetch(
           `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(fullAddr)}`,
@@ -1018,7 +1040,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       } catch { /* geocoding failure is non-fatal */ }
     }
 
-    if (!property?.id) fireWebhooks('property.added', { id: savedId, address: form.address, city: form.city, type: form.type, status: form.status })
+    if (!property?.id) fireWebhooks('property.added', { id: savedId, address: form.address, unit: normalizeUnit(form.unit) || null, city: form.city, type: form.type, status: form.status })
 
     pushToast(property?.id ? 'Property updated' : 'Property added')
     onSave(data || payload)
@@ -1070,6 +1092,18 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
         </div>
         {/* Address */}
         <div className="form-group"><label className="form-label required">Address</label><input className={`form-control${errors.address?' error':''}`} value={form.address} onChange={e=>set('address',e.target.value)} placeholder="123 Main Street" /></div>
+        {/* Suite / unit — the space inside the building, for a strip-mall or
+            office listing. Optional, and left out of the map query below. */}
+        <div className="form-group">
+          <label className="form-label">Suite / Unit #</label>
+          <input
+            className="form-control"
+            value={form.unit || ''}
+            onChange={e=>set('unit', e.target.value)}
+            onBlur={e=>set('unit', normalizeUnit(e.target.value))}
+            placeholder="Suite 200 (optional)"
+          />
+        </div>
         <div className="form-row">
           <div className="form-group"><label className="form-label">City</label><input className="form-control" value={form.city||''} onChange={e=>set('city',e.target.value)} /></div>
           <div className="form-group"><label className="form-label">State</label>
@@ -1102,7 +1136,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
           <div className="form-group">
             <iframe
               title="Property Map"
-              src={`https://maps.google.com/maps?q=${encodeURIComponent([form.address, form.city, form.state, form.zip].filter(Boolean).join(', '))}&output=embed`}
+              src={`https://maps.google.com/maps?q=${encodeURIComponent(geocodeQuery(form))}&output=embed`}
               width="100%" height="200"
               style={{ border:0, borderRadius:'var(--radius)', display:'block' }}
               loading="lazy"
@@ -1289,7 +1323,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
     // 1. Geocode source property (use stored coords if available)
     let src = property.lat && property.lng ? { lat: property.lat, lng: property.lng } : null
     if (!src) {
-      const addr = [property.address, property.city, property.state, property.zip].filter(Boolean).join(', ')
+      const addr = geocodeQuery(property)
       src = await geocodeAddress(addr)
       if (src) await supabase.from('properties').update({ lat: src.lat, lng: src.lng }).eq('id', property.id)
     }
@@ -1305,7 +1339,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
       setGeoProgress({ done: 0, total: needsGeo.length })
       for (let i = 0; i < needsGeo.length; i++) {
         const p = needsGeo[i]
-        const addr = [p.address, p.city, p.state, p.zip].filter(Boolean).join(', ')
+        const addr = geocodeQuery(p)
         const coords = await geocodeAddress(addr)
         if (coords) {
           await supabase.from('properties').update({ lat: coords.lat, lng: coords.lng }).eq('id', p.id)
@@ -1353,7 +1387,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
     try {
       const toSync = results.filter(r => selected.has(r.contact.id))
       const label  = campaignType === 'Custom' ? customName : campaignType
-      const tag    = `${label} — ${property.address}`
+      const tag    = `${label} — ${streetLine(property)}`
 
       const res = await fetch('/api/mailchimp', {
         method: 'POST',
@@ -1370,7 +1404,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
       if (!res.ok) { pushToast(data.error || 'Mailchimp sync failed', 'error'); return }
 
       await fireWebhooks('radius_sync', {
-        property: property.address, campaign: label,
+        property: streetLine(property), campaign: label,
         radius_miles: radius, contacts_synced: toSync.length, tag,
       })
 
@@ -1384,7 +1418,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
   }
 
   const campaignLabel = campaignType === 'Custom' ? (customName || 'Custom') : campaignType
-  const tag = `${campaignLabel} — ${property.address}`
+  const tag = `${campaignLabel} — ${streetLine(property)}`
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.48)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
@@ -1396,7 +1430,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
             <div>
               <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 18 }}>Radius Mailing</div>
               <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 3 }}>
-                {property.address}{property.city ? `, ${property.city}` : ''}
+                {streetLine(property)}{property.city ? `, ${property.city}` : ''}
               </div>
             </div>
             <button className="drawer__close" onClick={onClose}><Icon name="x" size={18} /></button>
@@ -1472,7 +1506,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
                       <input type="checkbox" checked={selected.has(contact.id)} readOnly style={{ flexShrink: 0 }} />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontWeight: 600, fontSize: 13 }}>{contact.first_name} {contact.last_name}</div>
-                        <div style={{ fontSize: 11, color: 'var(--gw-mist)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{contact.email} · {p.address}</div>
+                        <div style={{ fontSize: 11, color: 'var(--gw-mist)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{contact.email} · {streetLine(p)}</div>
                       </div>
                       <div style={{ fontSize: 11, color: 'var(--gw-mist)', flexShrink: 0 }}>{distance.toFixed(2)} mi</div>
                     </label>
@@ -1543,7 +1577,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAge
 
   const filtered = properties.filter(p => {
     const q = search.toLowerCase()
-    if (q && !(p.address||'').toLowerCase().includes(q) && !(p.city||'').toLowerCase().includes(q) && !(p.county||'').toLowerCase().includes(q) && !(p.mls_number||'').toLowerCase().includes(q)) return false
+    if (q && !streetLine(p).toLowerCase().includes(q) && !(p.city||'').toLowerCase().includes(q) && !(p.county||'').toLowerCase().includes(q) && !(p.mls_number||'').toLowerCase().includes(q)) return false
     if (filterType   && p.type   !== filterType)   return false
     if (filterStatus && p.status !== filterStatus) return false
     if (filterCounty && p.county !== filterCounty) return false
@@ -1636,7 +1670,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAge
                     </div>
                     <Badge variant={p.status}>{p.status}</Badge>
                   </div>
-                  <div className="property-card__address">{p.address}</div>
+                  <div className="property-card__address">{streetLine(p)}</div>
                   <div className="property-card__city">{[p.city, p.state, p.zip].filter(Boolean).join(', ')}</div>
                 </div>
                 <div className="property-card__body">
@@ -1685,7 +1719,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAge
                   const agent = agents.find(a => a.id === p.assigned_agent_id)
                   return (
                     <tr key={p.id} onClick={() => { setEditing(p); setDrawer(true) }}>
-                      <td><div style={{ fontWeight:600 }}>{p.address}</div><div style={{ fontSize:11, color:'var(--gw-mist)' }}>{[p.city,p.state].filter(Boolean).join(', ')}</div></td>
+                      <td><div style={{ fontWeight:600 }}>{streetLine(p)}</div><div style={{ fontSize:11, color:'var(--gw-mist)' }}>{[p.city,p.state].filter(Boolean).join(', ')}</div></td>
                       <td style={{ fontSize:12, color:'var(--gw-mist)' }}>{p.county||'—'}</td>
                       <td><span style={{ fontSize:11, fontWeight:700, textTransform:'capitalize', padding:'2px 7px', borderRadius:10, background: isCommercial(p.type)?'#f0ebff':'var(--gw-sky)', color: isCommercial(p.type)?'var(--gw-purple)':'var(--gw-azure)' }}>{TYPE_LABELS[p.type]||p.type}</span></td>
                       <td><Badge variant={p.status}>{p.status}</Badge></td>

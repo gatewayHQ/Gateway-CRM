@@ -25,7 +25,7 @@ process.env.SUPABASE_SERVICE_KEY = 'test-service-key'
 // must not reach a visitor.
 const ROW = {
   id: PROPERTY_ID,
-  address: '1240 Grand Ave', city: 'Des Moines', state: 'IA', zip: '50309',
+  address: '1240 Grand Ave', unit: 'Suite 120', city: 'Des Moines', state: 'IA', zip: '50309',
   county: 'Polk', type: 'multifamily', status: 'active',
   list_price: 2750000, beds: null, baths: null, sqft: 28400,
   garage: 0, mls_number: 'DM-99213',
@@ -92,7 +92,7 @@ describe('?action=listing — the read PropertyLanding could not do itself', () 
     await handler(listingReq(), res)
     const url = decodeURIComponent(fetchCalls.find(c => c.url.includes('/rest/v1/properties')).url)
 
-    expect(url).toContain('select=id,address,city')
+    expect(url).toContain('select=id,address,unit,city')
     expect(url).not.toContain('select=*')
     // Columns a visitor has no business seeing. `select=` is checked rather than
     // the whole URL because `id=eq.` is legitimately in the query string.
@@ -107,6 +107,34 @@ describe('?action=listing — the read PropertyLanding could not do itself', () 
     // `agent`. So assert on the RESPONSE: no bare agent id at the top level.
     expect(select).toContain('agent:assigned_agent_id(')
     expect(res.body.property).not.toHaveProperty('assigned_agent_id')
+  })
+
+  it('publishes the suite / unit, so a strip-mall space is not the whole building', async () => {
+    const res = mockRes()
+    await handler(listingReq(), res)
+    const url = decodeURIComponent(fetchCalls.find(c => c.url.includes('/rest/v1/properties')).url)
+    expect(url).toContain('unit')
+    expect(res.body.property.unit).toBe('Suite 120')
+  })
+
+  it('serves the listing anyway on a database without migration 0042', async () => {
+    // PostgREST rejects the whole select on an unknown column. Without the
+    // retry, a deploy landing before the migration takes every public listing
+    // page down; with it, the page serves the pre-suite address.
+    globalThis.fetch = vi.fn(async (url, opts) => {
+      fetchCalls.push({ url: String(url), opts })
+      if (decodeURIComponent(String(url)).includes('address,unit,')) {
+        return { ok: false, status: 400, json: async () => ({ code: '42703', message: 'column properties.unit does not exist' }) }
+      }
+      const { unit, ...withoutUnit } = ROW
+      return { ok: true, json: async () => [withoutUnit] }
+    })
+    const res = mockRes()
+    await handler(listingReq(), res)
+    expect(res.statusCode).toBe(200)
+    expect(res.body.property.address).toBe('1240 Grand Ave')
+    expect(res.body.property.unit).toBeUndefined()
+    expect(fetchCalls.filter(c => c.url.includes('/rest/v1/properties'))).toHaveLength(2)
   })
 
   it('filters the details blob to the keys the page renders', async () => {

@@ -83,6 +83,12 @@ create table if not exists contacts (
 create table if not exists properties (
   id                uuid primary key default uuid_generate_v4(),
   address           text not null,
+  -- Suite / unit / space inside the building at `address` ('Suite 120', '#4',
+  -- 'Bldg C') — a space for lease in a strip mall is its own listing, not the
+  -- whole building (migration 0042). Free text, because that is what leases and
+  -- signage read. Composed for display as "address, unit", and deliberately
+  -- LEFT OUT of geocoding queries — see src/lib/address.js.
+  unit              text,
   city              text,
   state             text,
   zip               text,
@@ -1131,6 +1137,7 @@ alter table agent_nudges enable row level security;
 -- alter table contacts    add column if not exists spouse_name      text;
 -- alter table contacts    add column if not exists spouse_phone     text;
 -- alter table contacts    add column if not exists spouse_notes     text;
+-- alter table properties  add column if not exists unit    text;
 -- alter table properties  add column if not exists county  text;
 -- alter table properties  add column if not exists garage  integer default 0;
 -- alter table properties  add column if not exists details jsonb   default '{}';
@@ -1273,6 +1280,10 @@ as $$
   where assigned_agent_id = any(agent_ids)
     and (
       lower(address) like '%' || lower(search_term) || '%'
+      -- The suite is part of how an agent looks a listing up, both on its own
+      -- ("120") and as they'd say it out loud ("okoboji 120") — migration 0042.
+      or lower(coalesce(unit, '')) like '%' || lower(search_term) || '%'
+      or lower(coalesce(address, '') || ' ' || coalesce(unit, '')) like '%' || lower(search_term) || '%'
       or lower(city)  like '%' || lower(search_term) || '%'
       or lower(mls_number) like '%' || lower(search_term) || '%'
     )
