@@ -22,6 +22,7 @@ import {
 } from '../lib/dealPeople.js'
 import { priceChanged } from '../lib/pricing.js'
 import { syncPriceChange } from '../lib/services/pricing.js'
+import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
@@ -701,13 +702,21 @@ function RequiredFormsPanel() {
     setSearching(false)
   }
 
+  // Delivers EVERY file in the packet. This used to sign `storage_path` alone —
+  // the packet's first file — so a multi-file packet (purchase agreement + bill
+  // of sale + disclosures) handed the agent one PDF and said nothing about the
+  // rest. deliverPacket is the same code the Form Library's button runs.
   const downloadPacket = async (packet) => {
-    if (!packet.storage_path) { pushToast('No file uploaded for this packet yet', 'error'); return }
+    if (!packetFiles(packet).length) { pushToast('No file uploaded for this packet yet', 'error'); return }
     setDownloading(p => ({ ...p, [packet.id]: true }))
-    const { data, error } = await supabase.storage.from(FORM_PACKET_BUCKET).createSignedUrl(packet.storage_path, 300)
-    setDownloading(p => ({ ...p, [packet.id]: false }))
-    if (error) { pushToast(error.message, 'error'); return }
-    window.open(data.signedUrl, '_blank')
+    try {
+      const { files, zipped } = await deliverPacket(packet, { storage: supabase.storage.from(FORM_PACKET_BUCKET) })
+      if (zipped) pushToast(`Downloaded ${files} forms as a zip`, 'success')
+    } catch (e) {
+      pushToast(e.message, 'error')
+    } finally {
+      setDownloading(p => ({ ...p, [packet.id]: false }))
+    }
   }
 
   return (
@@ -749,7 +758,7 @@ function RequiredFormsPanel() {
                 <div style={{ fontWeight: 600, fontSize: 13 }}>{p.name}</div>
                 {p.description && <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2 }}>{p.description}</div>}
               </div>
-              <button className="btn btn--primary btn--sm" onClick={() => downloadPacket(p)} disabled={!p.storage_path || downloading[p.id]}>
+              <button className="btn btn--primary btn--sm" onClick={() => downloadPacket(p)} disabled={!packetFiles(p).length || downloading[p.id]}>
                 <Icon name="download" size={12} /> {downloading[p.id] ? 'Opening…' : 'Get Forms'}
               </button>
             </div>
