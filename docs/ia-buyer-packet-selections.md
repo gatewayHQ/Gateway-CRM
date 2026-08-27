@@ -1,40 +1,63 @@
 # Iowa Buyer Agency Packet — BoldSign Selections Spec
 
-Scope: **only** the checkboxes visible in the four screenshots of BoldSign document
-`cb4acb7b-ae0c-430e-8f5c-f1edda312a8d` (Appointed Agency Agreement, Agency/Policy
-Disclosure, Term of Agreement). Every other checkbox already living on the packet PDF is
-out of scope and must not be touched, renamed, or inventoried.
+Scope: **only** the checkboxes visible in the four reviewed screenshots of BoldSign document
+`cb4acb7b-ae0c-430e-8f5c-f1edda312a8d` (Appointed Agency Agreement, Agency/Policy Disclosure,
+Term of Agreement). Every other checkbox on the packet is out of scope and must not be touched,
+renamed, or inventoried.
 
-Meaning below is inferred **only** from the printed text next to each box. The BoldSign
-field IDs (`CheckBox1`…`CheckBox13`) could not be resolved to boxes — see [UNCERTAIN](#4-uncertain).
+Meaning comes only from the printed text next to each box. Field identity comes from the filled
+packet PDF's signing summary joined to the Selections list — see [Method](#method) for what that
+join proves and where it stops.
+
+---
+
+## What the packet actually contains
+
+The template carries **14 checkbox fields**. The Selections list shows 12 without scrolling;
+2 more sit below the fold. Ten of the fourteen are on pages you did not screenshot.
+
+| Doc page | Form | Checkbox fields | In scope? |
+|---|---|---|---|
+| 1 | Appointed Agency Agreement | 3 (Buyer role) | **yes** — screenshot 2 |
+| 2 | Term of Agreement §6 | 2 (one Buyer, one Buyer's Agent) | **yes** — screenshot 4 |
+| 3 | — | 1 (Agent) | no |
+| 4 | Agency/Policy Disclosure p.1 | 4 (Agent role) | **yes** — screenshot 3 |
+| 9 | — | 2 (Buyer) — **both already ON** | no |
+| 10 | — | 2 (Agent) | no |
 
 ---
 
 ## 1. Mapping table
 
-| current BoldSign list text | short_label | helper | owner | default | mutex_group | already_set? |
-|---|---|---|---|---|---|---|
-| *unresolved — see UNCERTAIN* | Exclusive representation | "(exclusive) agency agreement" on the Appointed Agency Agreement | sender locks | **on** (recommended default) | `representation` | no |
-| *unresolved — see UNCERTAIN* | Non-exclusive representation | "(non-exclusive) agency agreement" on the same line | sender locks | off | `representation` | no |
-| *unresolved — see UNCERTAIN* | Party: Buyer | "prospective BUYER" — the client this packet is for | sender locks (locked **on**) | on | `party` | **yes** |
-| *unresolved — see UNCERTAIN* | Party: Seller | "or SELLER" — not used on a buyer packet | sender locks (locked **off**) | off | `party` | no (leave unset) |
-| *unresolved — see UNCERTAIN* | Policy: Single Seller Agency | Disclosure item 1 — Brokerage represents the Seller only | sender locks | off (flag if turned on for a buyer packet) | `policy` (non-exclusive set) | no |
-| *unresolved — see UNCERTAIN* | Policy: Single Buyer Agency | Disclosure item 2 — Brokerage represents the Buyer only | sender locks | off (optional) | `policy` (non-exclusive set) | no |
-| *unresolved — see UNCERTAIN* | Policy: Appointed Agency | Disclosure item 3 — appointed licensee represents the client | locked on | on | `policy` (non-exclusive set) | **yes** |
-| *unresolved — see UNCERTAIN* | Policy: Consensual Dual Agency | Disclosure item 4 — appointed agent may represent both sides | locked on | on | `policy` (non-exclusive set) | **yes** |
-| *unresolved — see UNCERTAIN* | Term A: Until close / completion | §6.A — runs until closing, completion, or earlier termination | sender locks | **on** (recommended default) | `term` | no |
-| *unresolved — see UNCERTAIN* | Term B: Fixed end date | §6.B — ends 11:59 p.m. on a stated date | sender locks | off | `term` | no |
-| "this ___ day of ______" (shared text fields, §6) | Term start date | Day / month / year the agreement begins — same value serves A and B | sender fills | empty | — (not a checkbox) | no |
-| "this ___ day of ______" (shared text fields, §6.B tail) | Term B end date | Day / month / year the agreement ends, 11:59 p.m. | sender fills **only if Term B** | empty | — (not a checkbox) | no |
+`field_id` is the id shown in grey in the Selections list. A `A|B` pair means the two boxes are
+identified as a pair but their order within the page is not resolved — see [UNCERTAIN](#4-uncertain).
+
+| current BoldSign list text | field_id | short_label | helper | owner | default | mutex_group | already_set? |
+|---|---|---|---|---|---|---|---|
+| `Checkbox1 · CheckBox1` / `Checkbox2 · CheckBox11` | `CheckBox1` \| `CheckBox11` | Exclusive representation | "(exclusive)" on the opening line, p.1 | sender locks | **on** (recommended default) | `representation` | no (off) |
+| `Checkbox1 · CheckBox1` / `Checkbox2 · CheckBox11` | `CheckBox11` \| `CheckBox1` | Non-exclusive representation | "(non-exclusive)", same line | sender locks | off | `representation` | no (off) |
+| `Checkbox1 · CheckBox2` | `CheckBox2` | Party: Buyer | "prospective BUYER" — confirmed by the printed X at 95.5pt on p.1 | locked on | on | `party` | **yes** |
+| *(no field — see UNCERTAIN Q1)* | — | Party: Seller | "or SELLER" — printed box, no BoldSign field found | n/a | stays blank | `party` | no |
+| `Checkbox1 · CheckBox4` / `Checkbox1 · CheckBox3` | `CheckBox4` (Buyer) \| `CheckBox3` (Agent) | Term A: Until close / completion | §6.A — runs until closing, completion, or earlier termination | sender locks | **on** (recommended default) | `term` | no (off) |
+| `Checkbox1 · CheckBox4` / `Checkbox1 · CheckBox3` | `CheckBox3` (Agent) \| `CheckBox4` (Buyer) | Term B: Fixed end date | §6.B — ends 11:59 p.m. on a stated date | sender locks | off | `term` | no (off) |
+| `Checkbox1 · CheckBox12` / `Checkbox2 · CheckBox13` | `CheckBox12` \| `CheckBox13` | Policy: Single Seller Agency | Disclosure item 1 | sender locks | off — flag if turned on | `policy` (not exclusive) | no (off) |
+| `Checkbox1 · CheckBox12` / `Checkbox2 · CheckBox13` | `CheckBox13` \| `CheckBox12` | Policy: Single Buyer Agency | Disclosure item 2 | sender locks | off (optional) | `policy` (not exclusive) | no (off) |
+| `Checkbox1 · CheckBox6` / `Checkbox2 · CheckBox7` | `CheckBox6` \| `CheckBox7` | Policy: Appointed Agency | Disclosure item 3 | locked on | on | `policy` (not exclusive) | **yes** |
+| `Checkbox1 · CheckBox6` / `Checkbox2 · CheckBox7` | `CheckBox7` \| `CheckBox6` | Policy: Consensual Dual Agency | Disclosure item 4 | locked on | on | `policy` (not exclusive) | **yes** |
+| "this ___ day of ______" (p.2 Labels) | — | Term start date | Day / month / year the agreement begins — one value serves A and B | sender fills | empty | — | no |
+| "this ___ day of ______" (p.2 Labels, §6.B tail) | — | Term B end date | Day / month / year it ends, 11:59 p.m. | sender fills **only if B** | empty | — | no |
+
+**List rows that are NOT screenshot boxes — leave them alone:** `CheckBox8` and `CheckBox9`
+(p.9, **both already ticked**), `CheckBox5` (p.3), and the two rows below the scroll fold (p.10).
 
 **Mutex rules**
 
 - `representation` — **XOR**: exactly one of Exclusive / Non-exclusive. Never both, never neither.
 - `term` — **XOR**: exactly one of Term A / Term B ("check either A or B").
-- `party` — Buyer on, Seller off, both locked. Not a sender choice on this packet.
-- `policy` — *not* mutually exclusive ("check all boxes that apply"). Grouped only for display.
-  Policies 3 and 4 are already checked on the live PDF and stay checked. Policy 1 on a buyer
-  packet is a contradiction: warn the sender rather than blocking.
+- `party` — Buyer is ticked and stays ticked. Seller appears to have no field at all.
+- `policy` — *not* mutually exclusive ("check all boxes that apply"); grouped only for display.
+  Policies 3 and 4 are ticked and stay ticked. Policy 1 on a buyer packet is a contradiction:
+  warn the sender rather than blocking.
 
 ---
 
@@ -46,7 +69,6 @@ Exact strings to render in place of "CheckboxN · checkbox":
 Exclusive representation          · sender locks
 Non-exclusive representation      · sender locks
 Party: Buyer                      · locked on
-Party: Seller                     · locked off
 Policy: Single Seller Agency      · sender locks (keep off)
 Policy: Single Buyer Agency       · sender locks
 Policy: Appointed Agency          · locked on
@@ -57,12 +79,15 @@ Term start date                   · sender fills
 Term B end date                   · sender fills only if B
 ```
 
-Behavior notes for the panel:
+"Party: Seller · locked off" is **dropped from the panel**: no checkbox field was found on that
+box, so there is nothing to lock. It stays blank on the printed form, which is the desired
+outcome anyway.
 
-- "sender locks" = the sender sets it here and the value travels with the send, locked; the
-  signer cannot change it.
-- "locked on" / "locked off" = shown read-only with the current state; no control.
-- Selecting one member of a XOR group clears the other member of that group.
+Behavior notes:
+
+- "sender locks" — the sender sets it here and the value travels with the send, locked.
+- "locked on" — shown read-only in its current state; no control.
+- Selecting one member of a XOR group clears the other.
 - "Term B end date" is disabled until Term B is selected.
 
 ---
@@ -73,7 +98,7 @@ What I still have to pick before Save / Place Fields:
 
 - Exclusive or Non-exclusive
 - Term A or Term B
-- Dates for the chosen term (start date always; end date only for Term B)
+- Dates for the chosen term (start always; end date only for Term B)
 
 Everything else in these screenshots is already set.
 
@@ -81,28 +106,64 @@ Everything else in these screenshots is already set.
 
 ## 4. UNCERTAIN
 
-The Selections list in screenshot 1 shows only generic text (`Checkbox1 CheckBox1 · checkbox`),
-with no page, position, or nearby-text hint, and the live document could not be read
-(`api.boldsign.com` is blocked by this environment's network policy). **No list row can be
-matched to a box with confidence, so none is named here.** One question per unmatched row:
+Four questions remain. Each is a **pair whose two members are identified but whose order within
+the page is not** — the ordering that survives into the Selections list is BoldSign's field
+creation order, and on page 4 that order is provably *not* the visual top-to-bottom order (the
+two ticked policies, 3 and 4, come first in the list even though 1 and 2 print above them). One
+click on each row in BoldSign settles all four.
 
-1. `CheckBox1` (row 1, "Checkbox1") — which box is this?
-2. `CheckBox2` (row 2, "Checkbox1") — which box is this?
-3. `CheckBox11` (row 3, "Checkbox2") — which box is this?
-4. `CheckBox4` (row 4, "Checkbox1") — which box is this?
-5. `CheckBox8` (row 5, "Checkbox1") — which box is this?
-6. `CheckBox9` (row 6, "Checkbox2") — which box is this?
-7. `CheckBox3` (row 7, "Checkbox1") — which box is this?
-8. `CheckBox5` (row 8, "Checkbox1") — which box is this?
-9. `CheckBox6` (row 9, "Checkbox1") — which box is this?
-10. `CheckBox7` (row 10, "Checkbox2") — which box is this?
-11. `CheckBox12` (row 11, "Checkbox1") — which box is this?
-12. `CheckBox13` (row 12, "Checkbox2") — which box is this?
-13. The list scrolls past row 12 — how many further rows are there, and are any of them among
-    the ten boxes above?
+1. **Page 1 — is `SELLER` a field?** Page 1 has four printed boxes (exclusive, non-exclusive,
+   BUYER, SELLER) but only three checkbox fields. `CheckBox2` is BUYER (confirmed). Are the
+   other two on *exclusive* and *non-exclusive* — or does one of them sit on SELLER, leaving
+   one representation box unfillable?
+2. **Page 1 — `CheckBox1` vs `CheckBox11`:** which is Exclusive and which is Non-exclusive?
+   Consequence of guessing: the packet says the opposite of what the agent picked.
+3. **Page 2 — `CheckBox4` (Buyer) vs `CheckBox3` (Buyer's Agent):** which is Term A and which is
+   Term B?
+4. **Page 4 — `CheckBox12` vs `CheckBox13`:** which is Policy 1 (Single Seller Agency, must stay
+   off) and which is Policy 2 (Single Buyer Agency, optional)?
+   (`CheckBox6` vs `CheckBox7` — Policies 3 and 4 — is the same open pair, but both are locked
+   on, so the order does not change behavior.)
 
-Note: the list shows at least 12 checkbox rows while this spec covers 10 boxes, so **at least
-two visible rows are out of scope** and must keep their current behavior.
+---
 
-Fastest way to resolve: either allowlist `api.boldsign.com` so the field IDs can be read with
-their page coordinates, or click each row in BoldSign and note which box highlights.
+## Two defects found while mapping
+
+Neither is in scope to fix here; both affect whether this packet behaves correctly when sent.
+
+1. **Term A and Term B are assigned to different signers.** `CheckBox4` sits on the Buyer role
+   and `CheckBox3` on the Buyer's Agent role. Per `docs/boldsign-integration.md`, a CheckBox is
+   role-scoped: each signer sees only their own box until the other has signed. Neither party can
+   see both halves of an either/or choice, and the XOR cannot be enforced or even observed by one
+   signer. Both boxes belong on the same role — or, better, both should be Labels set by the
+   sender, since the term of the agreement is not either signer's input.
+2. **The signing summary prints `f.label`, not `f.id`.** `buildSigningSummary()` in
+   `api/boldsign.js` has the field id in hand and drops it, so every unnamed box prints as
+   "CheckBox1" and the printout cannot be joined to the Selections list without the reconstruction
+   in [Method](#method). Adding the id to that line would make this whole exercise self-service.
+
+---
+
+## Method
+
+How the field ids above were established, so the next person can check the work rather than
+trust it:
+
+- The four uploaded packet PDFs are **flattened** — `/AcroForm` present but zero fields and zero
+  annotations — so the form field names are not recoverable from the page objects.
+- The CRM's own print route appends a **signing summary** listing every field by page, type,
+  label, and value. That gave the page, role, and current state of all 14 checkboxes.
+- `buildSigningSummary()` sorts rows by page with a **stable** sort, so relative order *within* a
+  page is the raw BoldSign order. `templateDetails` in `api/boldsign.js` builds its field list by
+  iterating roles and pushing each role's `formFields`, so the Selections list carries that same
+  role-grouped order.
+- The label sequence of the summary's 14 checkboxes matches the Selections list's visible 12
+  exactly, including at position 6, where role-grouped order and raw page order disagree. That
+  match is what licenses the row-by-row join.
+- Page identity was confirmed by rendering pages 1, 2, and 4 and reading them: Appointed Agency
+  Agreement, Term of Agreement §6, Agency/Policy Disclosure p.1 of 3. The printed X marks land on
+  BUYER (p.1, 95.5pt — matching the one ticked field) and on Policies 3 and 4 (p.4).
+
+What this does **not** establish: the order of two same-page fields sharing a state. That is
+exactly the residue in UNCERTAIN, and it is why no id above is asserted where a coin flip would
+decide it.
