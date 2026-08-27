@@ -92,3 +92,81 @@ export function downloadBlob(blob, filename, { doc = document, win = (typeof win
   setTimeout(() => { try { (win?.URL || URL).revokeObjectURL(objUrl) } catch { /* already gone */ } }, REVOKE_MS)
   return { saved: true, bytes: blob.size, filename }
 }
+
+// ---------------------------------------------------------------------------
+// A packet's files, and delivering them.
+//
+// These two live here rather than in a page because there are TWO "Get Forms"
+// buttons — the Form Library and the pipeline's Required Forms panel — and when
+// only the Form Library learned about multi-file packets, the pipeline's copy
+// went on handing out `storage_path` alone. That is the FIRST file of the
+// packet: an agent asking for the Iowa purchase agreement got whichever single
+// PDF happened to be first and no indication the rest existed. One
+// implementation, both buttons.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every file in `packet`, as `[{ path, name }]`, newest scheme first.
+ * `storage_paths` holds the whole package; `storage_path` is the pre-0022
+ * single-file column, kept as the fallback for packets uploaded before it.
+ */
+export function packetFiles(packet) {
+  const many = Array.isArray(packet?.storage_paths) ? packet.storage_paths.filter(f => f?.path) : []
+  if (many.length) return many.map(f => ({ path: f.path, name: f.name || f.path.split('/').pop() }))
+  if (packet?.storage_path) return [{ path: packet.storage_path, name: packet.storage_path.split('/').pop() }]
+  return []
+}
+
+/** Point the browser at `url` as a download named `filename`. */
+function downloadUrl(url, filename, { doc = document } = {}) {
+  const anchor = doc.createElement('a')
+  anchor.href = url
+  anchor.download = filename || ''
+  anchor.rel = 'noopener'
+  anchor.style.display = 'none'
+  doc.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+}
+
+/**
+ * Deliver every file in `packet` from `storage` (a supabase storage bucket
+ * client). One file goes straight down as itself; several arrive as one zip,
+ * because after the first await the clicks are outside the button's user
+ * gesture and browsers block every download but the first.
+ *
+ * Resolves `{ files, zipped }`; throws with a message worth showing an agent.
+ */
+export async function deliverPacket(packet, { storage, expiresIn = 300, doc, win, fetchImpl } = {}) {
+  const items = packetFiles(packet)
+  if (!items.length) throw new Error('No file uploaded for this packet')
+
+  if (items.length === 1) {
+    const it = items[0]
+    const { data, error } = await storage.createSignedUrl(it.path, expiresIn, { download: it.name || true })
+    if (error || !data?.signedUrl) {
+      throw new Error(`Couldn't fetch ${it.name || 'the file'}: ${error?.message || 'storage returned no link'}`)
+    }
+    downloadUrl(data.signedUrl, it.name, { doc })
+    return { files: 1, zipped: false }
+  }
+
+  const { data: signed, error: signErr } = await storage.createSignedUrls(items.map(it => it.path), expiresIn)
+  if (signErr) throw new Error(`Couldn't prepare this packet: ${signErr.message}`)
+  // Keyed by path, not by index: the batch endpoint reports a per-file error and
+  // there is nothing promising it answers in the order it was asked.
+  const byPath = new Map((signed || []).filter(r => r?.path).map(r => [r.path, r.signedUrl]))
+  const urls = items.map((it, i) => ({
+    name: it.name,
+    url: byPath.get(it.path) || (byPath.size ? '' : (signed || [])[i]?.signedUrl || ''),
+  }))
+  const unsigned = urls.filter(u => !u.url)
+  if (unsigned.length) {
+    throw new Error(
+      `Couldn't prepare ${unsigned.length} of ${items.length} forms, so nothing was saved: ${unsigned.map(u => u.name).join(', ')}`,
+    )
+  }
+  const blob = await buildPacketZip(urls, fetchImpl ? { fetchImpl } : {})
+  downloadBlob(blob, packetZipName(packet), { ...(doc ? { doc } : {}), ...(win ? { win } : {}) })
+  return { files: items.length, zipped: true }
+}

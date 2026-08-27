@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildPacketZip, packetZipName, downloadBlob } from '../packetDownload.js'
+import { buildPacketZip, packetZipName, downloadBlob, packetFiles, deliverPacket } from '../packetDownload.js'
 import { crc32, uniqueEntryNames, zipFiles } from '../zipFiles.js'
 
 // Minimal zip reader — enough to prove every file made it into the archive, which
@@ -130,5 +130,162 @@ describe('downloadBlob', () => {
     expect(events).toEqual(['objectUrl', 'append', 'click:IA - Packet.zip', 'remove'])
     expect(anchor.href).toBe('blob:z')
     expect(res).toEqual({ saved: true, bytes: 123, filename: 'IA - Packet.zip' })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regression: the two real packets that came down truncated.
+//
+// The Iowa Purchase Agreement is stored as five PDFs; the pipeline's Required
+// Forms panel signed `storage_path` — the FIRST of them — so the agent got one
+// section and nothing said the other four existed. The Buyer Agency Agreement
+// is stored as its cover pages plus its addenda, and delivered the cover pages
+// alone. Both buttons now run deliverPacket, so both packets arrive whole.
+// ─────────────────────────────────────────────────────────────────────────────
+const IOWA_PURCHASE = {
+  id: 'ia-purchase',
+  state: 'IA',
+  name: 'Iowa Purchase Agreement',
+  storage_path: 'IA/buyer/1-0-Bill of Sale.pdf',   // primary/first — all the old code looked at
+  storage_paths: [
+    { path: 'IA/buyer/1-0-Bill of Sale.pdf',            name: 'Bill of Sale.pdf' },
+    { path: 'IA/buyer/1-1-Purchase Agreement.pdf',      name: 'Purchase Agreement.pdf' },
+    { path: 'IA/buyer/1-2-Groundwater Hazard.pdf',      name: 'Groundwater Hazard.pdf' },
+    { path: 'IA/buyer/1-3-Radon Disclosure.pdf',        name: 'Radon Disclosure.pdf' },
+    { path: 'IA/buyer/1-4-Lead Paint Addendum.pdf',     name: 'Lead Paint Addendum.pdf' },
+  ],
+}
+
+const BUYER_AGENCY = {
+  id: 'ia-buyer-agency',
+  state: 'IA',
+  name: 'Buyer Agency Agreement',
+  storage_path: 'IA/buyer/2-0-Buyer Agency pp1-3.pdf',
+  storage_paths: [
+    { path: 'IA/buyer/2-0-Buyer Agency pp1-3.pdf',   name: 'Buyer Agency pp1-3.pdf' },
+    { path: 'IA/buyer/2-1-Buyer Agency pp4-8.pdf',   name: 'Buyer Agency pp4-8.pdf' },
+    { path: 'IA/buyer/2-2-Agency Disclosure.pdf',    name: 'Agency Disclosure.pdf' },
+  ],
+}
+
+// A stand-in for supabase.storage.from(bucket) that signs whatever it is asked for.
+function fakeStorage() {
+  const signed = []
+  return {
+    signed,
+    createSignedUrl: async (path, _exp, opts) => {
+      signed.push(path)
+      return { data: { signedUrl: `https://s/${encodeURIComponent(path)}` }, error: null, opts }
+    },
+    createSignedUrls: async (paths) => {
+      signed.push(...paths)
+      return { data: paths.map(path => ({ path, signedUrl: `https://s/${encodeURIComponent(path)}` })), error: null }
+    },
+  }
+}
+
+const fakeDom = () => {
+  const clicks = []
+  const anchor = { style: {}, click() { clicks.push(this.download) }, remove() {} }
+  return {
+    clicks,
+    doc: { createElement: () => anchor, body: { appendChild: () => {} } },
+    win: { URL: { createObjectURL: () => 'blob:z', revokeObjectURL: () => {} } },
+  }
+}
+
+describe('packetFiles', () => {
+  it('lists every file of a multi-file packet, not the primary one', () => {
+    expect(packetFiles(IOWA_PURCHASE).map(f => f.name)).toEqual([
+      'Bill of Sale.pdf', 'Purchase Agreement.pdf', 'Groundwater Hazard.pdf',
+      'Radon Disclosure.pdf', 'Lead Paint Addendum.pdf',
+    ])
+    expect(packetFiles(BUYER_AGENCY)).toHaveLength(3)
+  })
+
+  it('falls back to the pre-0022 single-file column', () => {
+    expect(packetFiles({ storage_path: 'IA/seller/9-0-Listing.pdf' }))
+      .toEqual([{ path: 'IA/seller/9-0-Listing.pdf', name: '9-0-Listing.pdf' }])
+    expect(packetFiles({ storage_paths: [] , storage_path: 'IA/seller/9-0-Listing.pdf' })).toHaveLength(1)
+  })
+
+  it('names a file from its path when the row carries no name', () => {
+    expect(packetFiles({ storage_paths: [{ path: 'IA/buyer/1-0-Addendum.pdf' }] })[0].name).toBe('1-0-Addendum.pdf')
+  })
+
+  it('is empty for a packet with nothing uploaded', () => {
+    expect(packetFiles({})).toEqual([])
+    expect(packetFiles(null)).toEqual([])
+  })
+})
+
+describe('deliverPacket', () => {
+  it('delivers the WHOLE Iowa Purchase Agreement, not just the Bill of Sale', async () => {
+    const storage = fakeStorage()
+    const dom = fakeDom()
+    const bodies = Object.fromEntries(
+      IOWA_PURCHASE.storage_paths.map((f, i) => [`https://s/${encodeURIComponent(f.path)}`, `section-${i}`]),
+    )
+    const { impl } = bytesFetch(bodies)
+
+    const res = await deliverPacket(IOWA_PURCHASE, { storage, fetchImpl: impl, ...dom })
+
+    expect(res).toEqual({ files: 5, zipped: true })
+    expect(storage.signed).toEqual(IOWA_PURCHASE.storage_paths.map(f => f.path))
+    expect(dom.clicks).toEqual(['IA - Iowa Purchase Agreement.zip'])
+  })
+
+  it('delivers every page-range file of the Buyer Agency Agreement', async () => {
+    const storage = fakeStorage()
+    const dom = fakeDom()
+    const bodies = Object.fromEntries(
+      BUYER_AGENCY.storage_paths.map((f, i) => [`https://s/${encodeURIComponent(f.path)}`, `pages-${i}`]),
+    )
+    const { impl } = bytesFetch(bodies)
+
+    const res = await deliverPacket(BUYER_AGENCY, { storage, fetchImpl: impl, ...dom })
+
+    expect(res).toEqual({ files: 3, zipped: true })
+    expect(storage.signed).toEqual(BUYER_AGENCY.storage_paths.map(f => f.path))
+  })
+
+  it('still hands a genuinely single-file packet down as the PDF itself', async () => {
+    const storage = fakeStorage()
+    const dom = fakeDom()
+    const res = await deliverPacket(
+      { id: 'x', state: 'IA', name: 'Lead Paint', storage_paths: [{ path: 'IA/buyer/3-0-Lead.pdf', name: 'Lead Paint.pdf' }] },
+      { storage, ...dom },
+    )
+    expect(res).toEqual({ files: 1, zipped: false })
+    expect(dom.clicks).toEqual(['Lead Paint.pdf'])
+  })
+
+  it('refuses to hand over a partial packet when a file cannot be fetched', async () => {
+    const storage = fakeStorage()
+    const dom = fakeDom()
+    // Only the first two of the five sections are readable.
+    const bodies = Object.fromEntries(
+      IOWA_PURCHASE.storage_paths.slice(0, 2).map((f, i) => [`https://s/${encodeURIComponent(f.path)}`, `section-${i}`]),
+    )
+    const { impl } = bytesFetch(bodies)
+
+    await expect(deliverPacket(IOWA_PURCHASE, { storage, fetchImpl: impl, ...dom }))
+      .rejects.toThrow(/3 of 5 forms could not be downloaded, so nothing was saved/)
+    expect(dom.clicks).toEqual([])
+  })
+
+  it('names the forms it could not sign rather than zipping what it got', async () => {
+    const storage = fakeStorage()
+    storage.createSignedUrls = async (paths) => ({
+      data: paths.map((path, i) => (i ? { path, signedUrl: `https://s/${i}` } : { path, error: 'not found' })),
+      error: null,
+    })
+    await expect(deliverPacket(BUYER_AGENCY, { storage, ...fakeDom() }))
+      .rejects.toThrow(/Couldn't prepare 1 of 3 forms.*Buyer Agency pp1-3\.pdf/)
+  })
+
+  it('complains instead of downloading nothing when the packet has no files', async () => {
+    await expect(deliverPacket({ id: 'empty' }, { storage: fakeStorage() }))
+      .rejects.toThrow(/No file uploaded/)
   })
 })

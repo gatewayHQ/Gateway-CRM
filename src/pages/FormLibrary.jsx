@@ -4,7 +4,7 @@ import { Icon, pushToast, EmptyState, Modal } from '../components/UI.jsx'
 import { OPERATING_STATES } from '../lib/constants.js'
 import { templateEditorUrl } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
-import { buildPacketZip, downloadBlob, packetZipName } from '../lib/packetDownload.js'
+import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 
 const TRANSACTION_TYPES = [
   { value: 'buyer',   label: 'Buyer Contract' },
@@ -546,49 +546,15 @@ export default function FormLibraryPage({ isAdmin }) {
   }
 
   const download = async (packet) => {
-    // A packet can hold several files (package templates). Prefer the full list,
-    // falling back to the single primary path.
-    const items = (Array.isArray(packet.storage_paths) && packet.storage_paths.length)
-      ? packet.storage_paths.filter(f => f?.path)
-      : (packet.storage_path ? [{ path: packet.storage_path, name: packet.storage_path.split('/').pop() }] : [])
-    if (!items.length) { pushToast('No file uploaded for this packet', 'error'); return }
+    // Every file in the packet, not just the primary one: one file goes down as
+    // itself, several as one zip. deliverPacket is shared with the pipeline's
+    // Required Forms panel, which had its own copy of this and never learned
+    // about multi-file packets.
+    if (!packetFiles(packet).length) { pushToast('No file uploaded for this packet', 'error'); return }
     setDownloading(p => ({ ...p, [packet.id]: true }))
     try {
-      // ONE file: link straight at the signed URL, exactly as before.
-      if (items.length === 1) {
-        const it = items[0]
-        const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(it.path, 300, { download: it.name || true })
-        if (error) { pushToast(`Couldn't fetch ${it.name || 'the file'}: ${error.message}`, 'error'); return }
-        const a = document.createElement('a')
-        a.href = data.signedUrl
-        a.download = it.name || ''
-        document.body.appendChild(a)
-        a.click()
-        a.remove()
-        return
-      }
-
-      // SEVERAL files: one zip, one download. Clicking a link per file only ever
-      // delivered the first — after the first await the clicks are no longer inside
-      // the button's user gesture, and browsers block those downloads silently.
-      const { data: signed, error: signErr } = await supabase.storage.from(BUCKET)
-        .createSignedUrls(items.map(it => it.path), 300)
-      if (signErr) { pushToast(`Couldn't prepare this packet: ${signErr.message}`, 'error'); return }
-      // Keyed by path, not by index: the batch endpoint reports a per-file error
-      // and there is nothing promising it answers in the order it was asked.
-      const byPath = new Map((signed || []).filter(r => r?.path).map(r => [r.path, r.signedUrl]))
-      const urls = items.map((it, i) => ({
-        name: it.name || it.path.split('/').pop(),
-        url: byPath.get(it.path) || (byPath.size ? '' : (signed || [])[i]?.signedUrl || ''),
-      }))
-      const unsigned = urls.filter(u => !u.url)
-      if (unsigned.length) {
-        pushToast(`Couldn't prepare ${unsigned.length} of ${items.length} forms, so nothing was saved: ${unsigned.map(u => u.name).join(', ')}`, 'error')
-        return
-      }
-      const blob = await buildPacketZip(urls)
-      downloadBlob(blob, packetZipName(packet))
-      pushToast(`Downloaded ${items.length} forms as a zip`, 'success')
+      const { files, zipped } = await deliverPacket(packet, { storage: supabase.storage.from(BUCKET) })
+      if (zipped) pushToast(`Downloaded ${files} forms as a zip`, 'success')
     } catch (e) {
       pushToast(e.message, 'error')
     } finally {
@@ -706,7 +672,7 @@ create unique index if not exists uq_form_packets_boldsign_tid
                   <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 2 }}>
                     {typeLabel}
                     {(() => {
-                      const n = (Array.isArray(packet.storage_paths) && packet.storage_paths.length) || (packet.storage_path ? 1 : 0)
+                      const n = packetFiles(packet).length
                       return n > 1 ? <span> · {n} files</span> : null
                     })()}
                     {packet.description && <span> · {packet.description}</span>}
@@ -714,7 +680,7 @@ create unique index if not exists uq_form_packets_boldsign_tid
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                   {(() => {
-                    const fileCount = (Array.isArray(packet.storage_paths) && packet.storage_paths.length) || (packet.storage_path ? 1 : 0)
+                    const fileCount = packetFiles(packet).length
                     return (
                   <button
                     className="btn btn--primary btn--sm"
