@@ -1069,6 +1069,81 @@ export function isUnconfiguredField(field) {
   return AUTO_FIELD_ID_RE.test(id)
 }
 
+// ── Where a field actually sits on the paper ─────────────────────────────────
+// BoldSign returns a template's fields in CREATION order, not reading order, and
+// that is the order the send screen showed them in. For a named field it doesn't
+// matter. For the tick boxes it is the whole problem: a packet whose boxes are
+// captioned `CheckBox1`, `CheckBox11`, `CheckBox2`, `CheckBox4` tells an agent
+// nothing about which printed box each one is, and the list order is not even the
+// order they appear on the page — on one live agency template the two policy
+// boxes that print LAST come first in the list. The only way to answer "which of
+// these is the exclusive box" was to open BoldSign and click each row.
+//
+// `bounds` answers it directly: BoldSign measures from the TOP-LEFT of the page
+// (see drawFilledValues() in api/boldsign.js, which flips y for pdf-lib), so
+// reading order is page ascending, then y ascending, then x ascending — the same
+// order a person reads the printed form. Listed that way, the boxes line up
+// one-for-one with the paper in front of the agent, and "CheckBox1 or CheckBox11"
+// stops being a coin flip.
+//
+// Two boxes on the SAME printed line (`(exclusive)` and `(non-exclusive)`, `BUYER`
+// and `SELLER`) are rarely placed at pixel-identical y, so a plain y sort can put
+// the right-hand box first. Fields within ROW_BAND of each other's top edge are
+// treated as one line and sorted left to right.
+const ROW_BAND = 8
+
+// x/y/page for a field, or null when the template gave no bounds — an older
+// `template-details` payload, or a field BoldSign returned without geometry.
+// Never guesses: a field with no position is not silently sorted as if at (0,0),
+// it is reported as unpositioned so the caller can say so.
+export function fieldPosition(field) {
+  const b = field?.bounds
+  const x = Number(b?.x), y = Number(b?.y)
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+  return { page: Number(field?.page) || Number(field?.pageNumber) || 1, x, y }
+}
+
+// Fields in reading order: page, then line, then left to right. Fields with no
+// bounds keep their original relative order and go LAST — they can't be placed
+// against the paper, so they must not push a positioned field out of sequence.
+export function orderFieldsByPosition(fields = []) {
+  const placed = []
+  const unplaced = []
+  for (const [i, f] of (fields || []).entries()) {
+    const pos = fieldPosition(f)
+    if (pos) placed.push({ f, pos, i })
+    else unplaced.push({ f, i })
+  }
+  placed.sort((a, b) =>
+    a.pos.page - b.pos.page ||
+    (Math.abs(a.pos.y - b.pos.y) <= ROW_BAND ? a.pos.x - b.pos.x : a.pos.y - b.pos.y) ||
+    a.i - b.i)
+  return [...placed.map(p => p.f), ...unplaced.map(u => u.f)]
+}
+
+// Boxes that print on the SAME LINE of the same page — "(exclusive) …
+// (non-exclusive)", "BUYER or SELLER", "A. … B. …". A form puts alternatives on
+// one line far more often than not, so a row is the strongest mutually-exclusive
+// candidate a template can offer without anybody reading the PDF's text: it is
+// how the paper groups them. Returned in reading order, one array per line, and
+// single-field rows are included — the caller decides what a group means, this
+// only reports what the geometry says.
+export function fieldRows(fields = []) {
+  const rows = []
+  let current = null
+  for (const f of orderFieldsByPosition(fields)) {
+    const pos = fieldPosition(f)
+    if (!pos) continue
+    if (current && current.page === pos.page && Math.abs(pos.y - current.y) <= ROW_BAND) {
+      current.fields.push(f)
+    } else {
+      current = { page: pos.page, y: pos.y, fields: [f] }
+      rows.push(current)
+    }
+  }
+  return rows
+}
+
 // Date-ish fields, which want a date picker rather than a free-text box. Either
 // BoldSign says so by type, or the CRM token behind the field does: a template
 // date is usually a Label (read-only to the signer, filled by us), and a Label
