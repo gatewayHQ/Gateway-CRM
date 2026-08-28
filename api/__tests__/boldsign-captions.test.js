@@ -105,3 +105,202 @@ describe('templateCaptions', () => {
     expect(second).toBe(first)
   })
 })
+
+// ── A saved layout must not carry a checkbox's tick ──────────────────────────
+// A layout remembers WHERE the agent put things. The state of a checkbox is a
+// term of the agreement, decided on the send screen for this packet. BoldSign
+// reports an unticked box as the non-empty string "false", so capturing it put a
+// stale value in the layout that the next /document/edit replayed onto the new
+// draft — clearing the boxes this send had just ticked and the ones the template
+// itself carried. /document/edit runs AFTER the draft is created, so it had the
+// last word.
+describe('layouts carry placement, not tick state', () => {
+  it('does not capture a checkbox value, ticked or unticked', async () => {
+    const { normalizeCapturedField } = await import('../boldsign.js')
+    const box = { id: 'CheckBox3', fieldType: 'CheckBox', pageNumber: 1, bounds: { x: 10, y: 20, width: 10, height: 10 } }
+    expect(normalizeCapturedField({ ...box, value: 'false' })).not.toHaveProperty('value')
+    expect(normalizeCapturedField({ ...box, value: 'true'  })).not.toHaveProperty('value')
+    // A text field's value is still captured — that is the hand-typed label the
+    // layout exists to preserve.
+    expect(normalizeCapturedField({ ...box, fieldType: 'TextBox', value: 'Story County' }))
+      .toMatchObject({ value: 'Story County' })
+  })
+
+  it('drops a tick from a layout already stored with one', async () => {
+    const { buildLayoutEditPayload } = await import('../boldsign.js')
+    const layout = { signers: [{ signerEmail: 'buyer@example.com', formFields: [
+      { id: 'CheckBox3', fieldType: 'CheckBox', pageNumber: 1, bounds: { x: 10, y: 20, width: 10, height: 10 }, value: 'false' },
+    ] }] }
+    const signerDetails = [{ id: 'signer-1', signerEmail: 'buyer@example.com', formFields: [{ id: 'CheckBox3', value: 'true' }] }]
+    const payload = buildLayoutEditPayload({ layout, signerDetails })
+    const field = payload.signers[0].formFields.find(f => f.id === 'CheckBox3')
+    // The live draft's own value wins, and the layout's stale "false" is gone.
+    expect(field.value).toBe('true')
+  })
+
+  it('leaves a checkbox alone when the draft reports no value for it', async () => {
+    const { buildLayoutEditPayload } = await import('../boldsign.js')
+    const layout = { signers: [{ signerEmail: 'buyer@example.com', formFields: [
+      { id: 'CheckBox3', fieldType: 'CheckBox', pageNumber: 1, bounds: { x: 10, y: 20, width: 10, height: 10 }, value: 'false' },
+    ] }] }
+    const signerDetails = [{ id: 'signer-1', signerEmail: 'buyer@example.com', formFields: [{ id: 'CheckBox3' }] }]
+    const payload = buildLayoutEditPayload({ layout, signerDetails })
+    const field = payload.signers[0].formFields.find(f => f.id === 'CheckBox3')
+    // No value at all rather than an explicit "false": BoldSign reads a false as
+    // an instruction to clear the template's own tick.
+    expect(field).not.toHaveProperty('value')
+  })
+})
+
+// ── Ticks reconciled against the finished draft ──────────────────────────────
+// The reported failure: a draft created from a template whose BUYER box was
+// ticked came back with that box empty, and boxes the send screen ticked arrived
+// unticked — while the Labels on the same document filled in correctly. So the
+// create call is not trusted to carry a tick; the finished draft is read back and
+// the difference repaired through /document/edit.
+describe('tickRepairPayload', () => {
+  const props = (formFields) => ({ signerDetails: [{ id: 'signer-1', formFields }] })
+
+  it('repairs a box the draft did not tick', async () => {
+    const { tickRepairPayload } = await import('../boldsign.js')
+    const out = tickRepairPayload({
+      props: props([{ id: 'CheckBox2', fieldType: 'CheckBox', value: 'false' }]),
+      desired: { CheckBox2: true },
+    })
+    expect(out).toEqual({ signers: [{ editAction: 'Update', id: 'signer-1', formFields: [
+      { editAction: 'Update', id: 'CheckBox2', value: 'on' },
+    ] }] })
+  })
+
+  // The wipe, from the other side: the template had it ticked, the draft lost it,
+  // and the CRM puts it back rather than hoping silence preserved it.
+  it('restores a template tick the draft lost', async () => {
+    const { tickRepairPayload } = await import('../boldsign.js')
+    const out = tickRepairPayload({
+      props: props([{ id: 'CheckBox3', fieldType: 'CheckBox' }]),
+      desired: { CheckBox3: true },
+    })
+    expect(out.signers[0].formFields).toEqual([{ editAction: 'Update', id: 'CheckBox3', value: 'on' }])
+  })
+
+  it('touches nothing that already agrees', async () => {
+    const { tickRepairPayload } = await import('../boldsign.js')
+    expect(tickRepairPayload({
+      props: props([
+        { id: 'CheckBox3', fieldType: 'CheckBox', value: 'true' },
+        { id: 'CheckBox1', fieldType: 'CheckBox', value: 'false' },
+      ]),
+      desired: { CheckBox3: true, CheckBox1: false },
+    })).toBeNull()
+  })
+
+  // A box nobody decided is absent from the map. Writing any value to it is
+  // exactly what would clear a tick the template put there.
+  it('never writes a field the caller did not name', async () => {
+    const { tickRepairPayload } = await import('../boldsign.js')
+    const out = tickRepairPayload({
+      props: props([
+        { id: 'CheckBox2', fieldType: 'CheckBox', value: 'false' },
+        { id: 'CheckBox14', fieldType: 'CheckBox', value: 'true' },
+        { id: 'CheckBox15', fieldType: 'CheckBox' },
+      ]),
+      desired: { CheckBox2: true },
+    })
+    expect(out.signers[0].formFields.map(f => f.id)).toEqual(['CheckBox2'])
+  })
+
+  it('leaves non-tickable fields alone', async () => {
+    const { tickRepairPayload } = await import('../boldsign.js')
+    expect(tickRepairPayload({
+      props: props([{ id: 'Label1', fieldType: 'Label', value: '' }]),
+      desired: { Label1: true },
+    })).toBeNull()
+  })
+
+  // The repair addresses the ids the DOCUMENT reports, so casing cannot be wrong
+  // — which is the whole reason it runs against a read-back rather than a guess.
+  it('matches the document’s own casing', async () => {
+    const { tickRepairPayload } = await import('../boldsign.js')
+    const out = tickRepairPayload({
+      props: props([{ id: 'Checkbox2', fieldType: 'CheckBox', value: 'false' }]),
+      desired: { CheckBox2: true },
+    })
+    expect(out.signers[0].formFields[0].id).toBe('Checkbox2')
+  })
+
+  it('reads every spelling BoldSign uses for a ticked box', async () => {
+    const { tickRepairPayload } = await import('../boldsign.js')
+    for (const value of ['true', 'on', 'X', '1', 'checked']) {
+      expect(tickRepairPayload({
+        props: props([{ id: 'CheckBox3', fieldType: 'CheckBox', value }]),
+        desired: { CheckBox3: true },
+      })).toBeNull()
+    }
+  })
+
+  it('spans every signer that holds one of the boxes', async () => {
+    const { tickRepairPayload } = await import('../boldsign.js')
+    const out = tickRepairPayload({
+      props: { signerDetails: [
+        { id: 's1', formFields: [{ id: 'CheckBox1', fieldType: 'CheckBox', value: 'true' }] },
+        { id: 's2', formFields: [{ id: 'CheckBox2', fieldType: 'CheckBox', value: 'false' }] },
+      ] },
+      desired: { CheckBox1: false, CheckBox2: true },
+    })
+    expect(out.signers.map(s => s.id)).toEqual(['s1', 's2'])
+  })
+})
+
+describe('unmetTicks', () => {
+  it('names the boxes that still disagree after the repair', async () => {
+    const { unmetTicks } = await import('../boldsign.js')
+    expect(unmetTicks({
+      props: { signerDetails: [{ id: 's1', formFields: [
+        { id: 'CheckBox2', fieldType: 'CheckBox', value: 'true' },
+        { id: 'CheckBox3', fieldType: 'CheckBox', value: 'false' },
+      ] }] },
+      desired: { CheckBox2: true, CheckBox3: true },
+    })).toEqual(['CheckBox3'])
+  })
+
+  it('is empty when the draft holds what was asked for', async () => {
+    const { unmetTicks } = await import('../boldsign.js')
+    expect(unmetTicks({
+      props: { signerDetails: [{ id: 's1', formFields: [{ id: 'CheckBox2', fieldType: 'CheckBox', value: 'true' }] }] },
+      desired: { CheckBox2: true },
+    })).toEqual([])
+  })
+})
+
+// ── A template that forbids field edits ──────────────────────────────────────
+// BoldSign templates carry a Field Configuration ("allow senders to edit or
+// delete fields"). With it off, every field the template placed is frozen on
+// documents made from it and /document/edit refuses:
+//
+//   "Cannot update form field: 'CheckBox1'. This field is restricted by the
+//    template used and cannot be updated."
+//
+// /document/edit is atomic and the rule applies to ALL of those fields, so the
+// confirmedOnly retry cannot help — it resends a frozen field and fails
+// identically, costing the agent the whole arrangement over a rule no subset of
+// the payload can satisfy.
+describe('isTemplateRestrictedRejection', () => {
+  it('recognizes the refusal, wherever BoldSign puts the text', async () => {
+    const { isTemplateRestrictedRejection } = await import('../boldsign.js')
+    expect(isTemplateRestrictedRejection({
+      status: 400,
+      message: "Cannot update form field: 'CheckBox1'. This field is restricted by the template used and cannot be updated.",
+    })).toBe(true)
+    expect(isTemplateRestrictedRejection({
+      status: 400,
+      data: { message: 'This field is restricted by the template used and cannot be updated.' },
+    })).toBe(true)
+  })
+
+  it('does not swallow an ordinary unplaceable-field rejection', async () => {
+    const { isTemplateRestrictedRejection, isFieldLevelRejection } = await import('../boldsign.js')
+    const err = { status: 400, message: "The document does not have a form field with the ID: 'CheckBox2'." }
+    expect(isTemplateRestrictedRejection(err)).toBe(false)
+    expect(isFieldLevelRejection(err)).toBe(true)
+  })
+})

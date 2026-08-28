@@ -26,7 +26,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, PACKET_FIELD_MAP, isPacketField, seedPacketState, packetTickValues, packetMissing, wantsEndDate, captionConflicts, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, PACKET_FIELD_MAP, seedPacketState, packetMissing, wantsEndDate, captionConflicts, packetPayloadCheck, missingPacketFields, desiredTickState, resolvePacketFields, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2469,13 +2469,54 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     // matter who signs first; `byRole` holds the role-scoped fields, which
     // BoldSign keeps private to their own signer until that signer is done.
     // Keyed by ORIGINAL role index — buildTemplateRoles handles the index shift.
+    // The tick boxes the panel owns, addressed by the ids the TEMPLATE reports
+    // (BoldSign's casing is not ours to assume) and carrying both sides of each
+    // mutex pair. Boxes the panel does not own are absent, never false: BoldSign
+    // reads an explicit false as "clear the template's own tick", which is what
+    // was wiping Party: Buyer.
+    // THE WHOLE TICK STATE GOES IN THE CREATE CALL, not just the decisions.
+    //
+    // BoldSign treats the `existingFormFields` sent for a role as that role's
+    // set: a PARTIAL list resets the role's other checkboxes. That is the wipe.
+    // Sending nothing for any checkbox left them all alone (which is why the
+    // template's BUYER tick survived before this panel existed); sending a few
+    // cleared the rest.
+    //
+    // So the payload states every box that must end up ticked — the panel's
+    // decisions AND every box the template itself carries ticked — rather than
+    // relying on omission to preserve anything. The post-create repair cannot
+    // cover this: a template whose Field Configuration forbids sender edits
+    // refuses /document/edit outright, so the create call is the only channel
+    // that reaches those boxes at all.
+    const packetFields  = details.fields || []
+    const desiredTicks  = desiredTickState({ ...packet, fields: packetFields })
+
+    // The end date belongs to the fixed-date term only. On "until the deal
+    // closes" the field is blanked rather than left carrying whatever the deal
+    // seeded, so the document cannot go out stating a term the sender did not
+    // pick — the two halves of that choice have to agree.
+    const endDateValues = {}
+    if (!wantsEndDate(packet.term)) {
+      for (const f of endDateFields) endDateValues[f.id] = ''
+    }
+
+    // One line, before the call, so a wrong payload is visible at the moment it
+    // is built rather than inferred from an editor that opened with empty boxes.
+    const { rows, problems } = packetPayloadCheck({ ...packet, fields: packetFields })
+    console.log('PLACE_FIELDS decisions =', JSON.stringify(rows))
+    console.log('PLACE_FIELDS every tick sent =', JSON.stringify(desiredTicks))
+    for (const gone of missingPacketFields({ fields: packetFields })) {
+      console.warn(`[boldsign] packet payload: ${gone} is not a field on this template — that decision has nowhere to land`)
+    }
+    for (const problem of problems) console.warn(`[boldsign] packet payload: ${problem}`)
+
     const { sharedFormFields, byRole } = buildPrefillFields({
       fields: details.fields || [],
       // The panel's radios decide the tick boxes it owns; `values` carries
       // everything typed. Merged here, at the one place both buttons build
       // their payload from, so Save as Draft and Place Fields cannot disagree
       // about what the packet says.
-      values: { ...values, ...packetTickValues(packet) },
+      values: { ...values, ...endDateValues, ...desiredTicks },
       filledRoleIndices: filled.map(r => r.index),
     })
     // Roles + removals, with BoldSign's post-removal index shift applied — see
@@ -2496,6 +2537,11 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     return {
       templateId, deal_id: deal.id, roles, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
       emailSubject: subject, documentName: docName, labels,
+      // The tick state the finished draft must hold: the panel's decisions, plus
+      // every box the TEMPLATE already carries ticked. The server reconciles the
+      // created draft against this and repairs the difference — the create call
+      // does not reliably carry a tick, and omitting a box did not preserve it.
+      desiredTicks,
     }
   }
 
@@ -2518,6 +2564,10 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     // it read as a failed send and sent the agent looking for a problem that was
     // not there.
     if (data.layoutWarning) pushToast(data.layoutWarning, 'info')
+    // BoldSign accepted the tick repair but the boxes still disagree. Said out
+    // loud because the packet's terms are what is wrong, and the agent is about
+    // to send it.
+    if (data.tickWarning) pushToast(data.tickWarning, 'error')
   }
 
   // SAVE AS DRAFT — the prepare-and-print path. Creates the document in BoldSign
@@ -2633,14 +2683,25 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     [fields],
   )
 
-  // The map ties each decision to a field id; this re-checks those ids against
-  // the caption actually read off the PDF. It never overrides the map and shows
-  // the sender nothing — it exists so a template edit that moves a box surfaces
-  // here rather than as a wrong term on a signed agreement.
+  // Where each decision actually landed. Captions bind the panel to the document
+  // (see resolvePacketFields), so this reports the two cases worth knowing: an
+  // entry that fell back to matching by id — the fragile path, since BoldSign
+  // assigns ids in placement order — and one the page described twice.
   React.useEffect(() => {
-    const conflicts = captionConflicts({ fields })
-    for (const c of conflicts) {
-      console.warn(`[boldsign] packet panel: ${c.id} is captioned “${c.caption}” on the page, which does not match what the panel writes to it. Check the template's field placement.`)
+    if (!fields.length) return
+    const { ids, by, ambiguous } = resolvePacketFields({ fields })
+    console.log('PACKET_FIELD_BINDING =', JSON.stringify(
+      Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, `${v} (${by[k]})`]))))
+    for (const [canonical, id] of Object.entries(ids)) {
+      if (by[canonical] === 'id') {
+        console.warn(`[boldsign] packet panel: ${canonical} matched ${id} by id, not by the words printed beside it — nothing on the page names that box, so check it is the right one.`)
+      }
+    }
+    for (const [canonical, others] of Object.entries(ambiguous)) {
+      console.warn(`[boldsign] packet panel: ${canonical} matches more than one box on the page (also ${others.join(', ')}); the first in document order was used.`)
+    }
+    for (const c of captionConflicts({ fields })) {
+      console.warn(`[boldsign] packet panel: ${c.id} is captioned “${c.caption}” on the page, which does not match what the panel writes to it.`)
     }
   }, [fields])
 

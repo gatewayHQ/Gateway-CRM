@@ -1027,7 +1027,13 @@ export function normalizeCapturedField(f) {
   // emission too, because layouts captured before this fix are already in the
   // database with it set.
   if (supportsFieldReadOnly(fieldType)) out.isReadOnly = Boolean(f?.isReadOnly)
-  if (f?.value != null && f.value !== '')       out.value = String(f.value)
+  // A TICK IS NOT PLACEMENT. A layout remembers where the agent put things; the
+  // state of a checkbox is a term of the agreement, decided on the send screen
+  // for this packet. BoldSign reports an unticked box as the non-empty string
+  // "false", so storing it here put a stale `value: "false"` in the layout that
+  // the next /document/edit replayed onto the new draft — clearing both the
+  // boxes this send had just ticked and the ones the template itself carried.
+  if (!TICKABLE_TYPES.has(fieldType) && f?.value != null && f.value !== '') out.value = String(f.value)
   // BoldSign's own name for the field. Kept because it is what re-creating a field
   // on a later draft is allowed to set — `id` refers to a field that already exists
   // (see buildLayoutEditPayload), so without a name an added field loses its identity.
@@ -1153,6 +1159,10 @@ export function buildLayoutEditPayload({ layout, signerDetails = [], confirmedOn
       // than only at capture, so those existing rows heal on their next use
       // instead of needing a backfill.
       if (!supportsFieldReadOnly(rest.fieldType)) delete rest.isReadOnly
+      // Layouts captured before the note in normalizeCapturedField() already
+      // hold a tick state, so it is dropped at emission too — otherwise those
+      // rows keep clearing boxes until someone re-captures them.
+      if (TICKABLE_TYPES.has(rest.fieldType)) delete rest.value
       const field = live
         ? { editAction: 'Update', id, ...rest, ...(name ? { name } : {}) }
         // New to this draft: named, never id'd — see the note above.
@@ -1266,6 +1276,27 @@ export function countPayloadFields(payload) {
 // Those are worth retrying without the fields BoldSign cannot place: a field id it
 // does not hold, a type it will not create here. Anything else (auth, the document
 // state, a malformed body) would fail identically the second time.
+// THE TEMPLATE ITSELF FORBIDS THE EDIT. BoldSign templates carry a Field
+// Configuration ("allow senders to edit or delete fields"); with it off, every
+// field the template placed is frozen on documents created from it and
+// /document/edit refuses:
+//
+//   "Cannot update form field: 'CheckBox1'. This field is restricted by the
+//    template used and cannot be updated."
+//
+// This is not one unplaceable field, so the confirmedOnly retry cannot help — it
+// resends the same frozen field and fails identically, and /document/edit is
+// atomic, so the agent loses the WHOLE arrangement over a rule that applies to
+// all of it. Recognized separately so the restore stands down cleanly and says
+// something true instead.
+//
+// It also settles where a tick can come from on such a template: not from
+// /document/edit afterwards, only from the values sent with the create call.
+export function isTemplateRestrictedRejection(err) {
+  const msg = `${err?.message || ''} ${JSON.stringify(err?.data || {})}`
+  return /restricted by the template/i.test(msg)
+}
+
 export function isFieldLevelRejection(err) {
   if (err?.status !== 400) return false
   const msg = `${err?.message || ''} ${JSON.stringify(err?.data || {})}`
@@ -1394,6 +1425,119 @@ async function confirmLayoutApplied(documentId, savedFieldCount, skipped = 0) {
     : { applied: true, fieldCount }
 }
 
+// ─── Ticks, reconciled against the finished draft ────────────────────────────
+// Setting a checkbox through the template-send payload is not reliably enough:
+// a draft created from a template whose BUYER box was ticked came back with that
+// box empty, and boxes the send screen ticked arrived unticked, with a 2xx for
+// both. The Labels on the same document filled in correctly, which is what
+// narrows it to the tickable fields rather than to the payload as a whole.
+//
+// So stop trusting the create call to carry ticks and reconcile afterwards. The
+// CRM states the tick state the document must end up in (desiredTickState in
+// boldsignPacketPanel.js) and this compares that against what the draft actually
+// holds, then fixes the difference through /document/edit — the same endpoint the
+// layout restore already uses.
+//
+// Two properties make this the right place for it:
+//   • The document's OWN field ids come back in the read, so the repair addresses
+//     fields that provably exist. No id is guessed, and casing cannot be wrong.
+//   • It runs LAST, after the layout restore, so nothing downstream can clobber
+//     what it just set.
+//
+// It only ever touches a field whose current value differs from the desired one,
+// and only ids the caller named. A box nobody decided is not in the map and is
+// never written — an explicit value is exactly what would clear it.
+
+const norm = (v) => String(v || '').trim().toLowerCase()
+
+// The /document/edit body that would bring this draft's ticks to `desired`, or
+// null when nothing needs changing. Pure, so the reconciliation logic is tested
+// without a BoldSign account.
+export function tickRepairPayload({ props, desired = {} } = {}) {
+  const want = new Map(Object.entries(desired || {}).map(([id, v]) => [norm(id), Boolean(v)]))
+  if (!want.size) return null
+
+  const signers = []
+  for (const s of (props?.signerDetails || [])) {
+    if (!s?.id) continue
+    const formFields = []
+    for (const f of (s.formFields || [])) {
+      if (!f?.id) continue
+      const type = normalizeFieldType(f.fieldType || f.type)
+      if (!TICKABLE_TYPES.has(type)) continue
+      if (!want.has(norm(f.id))) continue
+      const target = want.get(norm(f.id))
+      if (isCheckedValue(f.value) === target) continue      // already right
+      formFields.push({ editAction: 'Update', id: f.id, value: tickValueString(target) })
+    }
+    if (formFields.length) signers.push({ editAction: 'Update', id: s.id, formFields })
+  }
+  return signers.length ? { signers } : null
+}
+
+// How a tick is written. Kept next to the repair so the two cannot drift.
+export const tickValueString = (on) => (on ? 'on' : 'off')
+
+// Which desired ticks the draft still does not carry. Used to verify the repair
+// landed rather than trusting the 200, the same way confirmLayoutApplied does.
+export function unmetTicks({ props, desired = {} } = {}) {
+  const want = new Map(Object.entries(desired || {}).map(([id, v]) => [norm(id), Boolean(v)]))
+  const out = []
+  for (const s of (props?.signerDetails || [])) {
+    for (const f of (s?.formFields || [])) {
+      if (!f?.id || !want.has(norm(f.id))) continue
+      const type = normalizeFieldType(f.fieldType || f.type)
+      if (!TICKABLE_TYPES.has(type)) continue
+      if (isCheckedValue(f.value) !== want.get(norm(f.id))) out.push(f.id)
+    }
+  }
+  return out
+}
+
+// Never throws: a draft with the wrong boxes is a problem the agent can see and
+// fix in the editor, and failing the whole save over it would lose the document.
+// Returns { repaired, remaining, reason? }.
+export async function reconcileDocumentTicks(documentId, { desired = {}, onBehalfOf } = {}) {
+  if (!documentId || !Object.keys(desired || {}).length) return { repaired: 0, remaining: [] }
+  try {
+    const props   = await boldsign(`/document/properties?documentId=${encodeURIComponent(documentId)}`)
+    const payload = tickRepairPayload({ props, desired })
+    if (!payload) {
+      console.log(`[boldsign] ticks for ${documentId}: the draft already matches the send screen — nothing to repair`)
+      return { repaired: 0, remaining: [] }
+    }
+
+    const count = payload.signers.reduce((t, x) => t + x.formFields.length, 0)
+    console.log(`[boldsign] ticks for ${documentId}: repairing ${count} checkbox(es) — `
+      + payload.signers.flatMap(x => x.formFields.map(f => `${f.id}=${f.value}`)).join(' '))
+    await editDocumentFields(documentId, { ...payload, ...(onBehalfOf ? { onBehalfOf } : {}) })
+
+    // Confirm, because a 200 means the request was accepted, not that the boxes
+    // moved — which is the whole failure mode this exists to close.
+    let remaining = []
+    try {
+      remaining = unmetTicks({ props: await boldsign(`/document/properties?documentId=${encodeURIComponent(documentId)}`), desired })
+    } catch (verifyErr) {
+      console.warn(`[boldsign] ticks for ${documentId}: could not verify the repair (${verifyErr.message})`)
+    }
+    if (remaining.length) {
+      console.error(`[boldsign] ticks for ${documentId}: BoldSign accepted the edit but these boxes still disagree — ${remaining.join(', ')}`)
+    }
+    return { repaired: count, remaining }
+  } catch (err) {
+    // A template that forbids sender field edits cannot be repaired after the
+    // fact at all. The values sent WITH the create call are the only channel,
+    // which is what tickValue() now spells correctly — so this is a note, not a
+    // failure to report to the agent.
+    if (isTemplateRestrictedRejection(err)) {
+      console.warn(`[boldsign] ticks for ${documentId}: this template forbids field edits, so the boxes stand as the create call set them — ${err.message}`)
+      return { repaired: 0, remaining: [], restricted: true }
+    }
+    console.error(`[boldsign] ticks for ${documentId}: repair failed — status=${err?.status || 'n/a'} ${err?.message}`)
+    return { repaired: 0, remaining: [], reason: describeLayoutFailure(err) }
+  }
+}
+
 // Apply a deal's saved layout to a freshly created draft. Also never throws: if
 // this fails the draft simply opens with the template's default placement, which
 // is the behavior that existed before layouts — a degraded send beats no send.
@@ -1436,6 +1580,19 @@ export async function applyFieldLayout(supabase, { documentId, dealId, templateI
         console.warn(`[boldsign] layout apply for ${documentId}: BoldSign refused IsReadOnly, retrying with every lock dropped — ${editErr.message}`)
         await editDocumentFields(documentId, { ...stripLayoutReadOnly(payload), ...(onBehalfOf ? { onBehalfOf } : {}) })
         return await confirmLayoutApplied(documentId, saved.field_count, 0)
+      }
+      // The template forbids sender field edits outright, so no subset of this
+      // payload can succeed. Not an error the agent can act on and not a failed
+      // send: the draft is fine, it simply opens with the template's own
+      // placement, which is what every send did before layouts existed.
+      if (isTemplateRestrictedRejection(editErr)) {
+        console.warn(`[boldsign] layout apply for ${documentId}: this template forbids sender field edits, so no layout can be restored — ${editErr.message}`)
+        return {
+          applied: false,
+          restricted: true,
+          reason: 'This template is set up to forbid changing its fields, so saved placements cannot be restored onto it. '
+            + 'The draft opened with the template\'s own field placement.',
+        }
       }
       if (!isFieldLevelRejection(editErr)) throw editErr
       const confirmed = buildLayoutEditPayload({ layout: saved.layout, signerDetails, confirmedOnly: true })
@@ -2845,6 +3002,7 @@ async function handler(req, res) {
     // the editor, or when `draft-send` is called explicitly.
     const createTemplateDraft = async (svc, {
       templateId, dealId, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
+      desiredTicks = {},
     }) => {
       const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
       const payload = {
@@ -2869,6 +3027,7 @@ async function handler(req, res) {
       // Track it so the agent can find the draft again, and so status updates
       // land when it is eventually sent and BoldSign fires the Sent webhook.
       let layout = null
+      let ticks  = null
       if (dealId && data.documentId) {
         const tracked = await trackDocument(svc, {
           dealId, agentId: actor.agent.id, documentId: data.documentId,
@@ -2924,10 +3083,17 @@ async function handler(req, res) {
             console.warn(`[boldsign] could not remove empty conditional field(s) from ${data.documentId}: ${err.message}`)
           }
         }
+
+        // LAST, deliberately. The template-send payload does not reliably carry a
+        // tick, and both the layout restore and the removal above can move fields
+        // after it — so the boxes are reconciled against the finished draft once
+        // everything else has had its turn. See reconcileDocumentTicks.
+        ticks = await reconcileDocumentTicks(data.documentId, { desired: desiredTicks, onBehalfOf })
       }
       return {
         url:        data.sendUrl || data.embeddedSendUrl || data.url || null,
         documentId: data.documentId || null,
+        ...(ticks?.remaining?.length ? { tickWarning: `BoldSign did not accept ${ticks.remaining.length} checkbox value(s) on this draft — check the boxes in the editor before sending.` } : {}),
         layout,
         unlocked,
       }
@@ -2965,15 +3131,15 @@ async function handler(req, res) {
     // client is happy. `deal_id` is required, unlike the embedded path: a draft
     // nobody can find again is not a draft, it is a leak.
     if (body.action === 'template-draft') {
-      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, roleRemovalIndices, sharedFormFields, fieldRemovalIds } = body
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, roleRemovalIndices, sharedFormFields, fieldRemovalIds, desiredTicks } = body
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
       if (!deal_id)        return res.status(400).json({ error: 'deal_id required — a draft has to be saved against a deal to be reopened later' })
 
       const svc = getServiceClient()
-      const { url, documentId, layout, unlocked } = await createTemplateDraft(svc, {
+      const { url, documentId, layout, unlocked, tickWarning } = await createTemplateDraft(svc, {
         templateId, dealId: deal_id, roles, emailSubject, message, cc, documentName, labels,
-        redirectUrl: body.redirectUrl, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
+        redirectUrl: body.redirectUrl, roleRemovalIndices, sharedFormFields, fieldRemovalIds, desiredTicks,
       })
       if (!documentId) {
         return res.status(502).json({ error: 'BoldSign created the document but did not return its id, so it could not be saved to this deal.' })
@@ -2983,23 +3149,23 @@ async function handler(req, res) {
       // `prepareUrl`, not `editUrl`, because it is BoldSign's create-time send
       // URL; reopening the draft LATER goes through `document-edit-url`, which
       // mints a fresh URL and handles the draft's view-option and edit-lock rules.
-      return res.json({ documentId, status: 'draft', prepareUrl: url, ...readOnlyReport(unlocked), ...layoutReport(layout) })
+      return res.json({ documentId, status: 'draft', prepareUrl: url, ...readOnlyReport(unlocked), ...layoutReport(layout), ...(tickWarning ? { tickWarning } : {}) })
     }
 
     // Like template-send, but returns an embedded BoldSign "prepare" URL where
     // the agent can move/add/remove field placements before clicking Send. The
     // document stays a draft until they send; the Sent webhook flips it to 'sent'.
     if (body.action === 'template-embed-url') {
-      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices, sharedFormFields, fieldRemovalIds } = body
+      const { templateId, deal_id, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices, sharedFormFields, fieldRemovalIds, desiredTicks } = body
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
       const svc = getServiceClient()
-      const { url, documentId, layout, unlocked } = await createTemplateDraft(svc, {
+      const { url, documentId, layout, unlocked, tickWarning } = await createTemplateDraft(svc, {
         templateId, dealId: deal_id, roles, emailSubject, message, cc, documentName, labels,
-        redirectUrl, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
+        redirectUrl, roleRemovalIndices, sharedFormFields, fieldRemovalIds, desiredTicks,
       })
-      return res.json({ url, documentId, ...readOnlyReport(unlocked), ...layoutReport(layout) })
+      return res.json({ url, documentId, ...readOnlyReport(unlocked), ...layoutReport(layout), ...(tickWarning ? { tickWarning } : {}) })
     }
 
     return res.status(400).json({ error: 'Unknown action' })

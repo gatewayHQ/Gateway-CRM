@@ -814,6 +814,54 @@ which.
 field's `id`/`type`/`roleIndex` so those controls can be rendered with the
 template's own wording rather than a prettified field id.
 
+## A tick is spelled "on" — and why no checkbox ever arrived ticked
+
+BoldSign's value for a ticked checkbox is the string **`"on"`** (`"off"` to clear
+it), not `"true"`. Its own reference is explicit: `{"id": "Check_Box", "value":
+"on"}`. This code sent `"true"` for its whole life.
+
+A value BoldSign does not recognize does not fail. The request is accepted, the
+document comes back with the box empty, and nothing in any response explains it.
+So the symptom was: every packet's Selections looked correct on the send screen
+and every box arrived unticked.
+
+The same one string produced the second symptom, the one that looked worse. A box
+the TEMPLATE carried ticked, sent as `"true"`, was not read as on — so it arrived
+empty, exactly as if the send had cleared a term the template was authored with.
+One wrong value, two bugs, no error message.
+
+Nothing caught it from the reading side because `isCheckedValue()` /`isTicked()`
+have always accepted `"on"` among their spellings. Reads were fine; only writes
+were wrong. `tickValue()` in `boldsignFields.js` is the single place it is
+spelled, pinned by a test named for it.
+
+## Templates that forbid field edits
+
+A BoldSign template carries a **Field Configuration** ("allow senders to edit or
+delete fields"). With it off, every field the template placed is frozen on
+documents created from it, and `/document/edit` refuses:
+
+```
+Cannot update form field: 'CheckBox1'. This field is restricted by the
+template used and cannot be updated.
+```
+
+Two consequences, both handled in `api/boldsign.js`:
+
+- **Saved field layouts cannot be restored onto such a template.** The rule
+  applies to every template-placed field and `/document/edit` is atomic, so no
+  subset of the payload can succeed — the `confirmedOnly` retry resends a frozen
+  field and fails identically, costing the agent the whole arrangement.
+  `isTemplateRestrictedRejection()` recognizes it and the restore stands down
+  with a sentence that says what actually happened, instead of the raw API text.
+- **A tick cannot be repaired after the fact.** The values sent WITH the create
+  call are the only channel, which is why the `"on"` fix above is the one that
+  matters. `reconcileDocumentTicks()` treats the refusal as a note, not an error.
+
+**To let layouts and post-hoc repair work**, turn on "allow senders to edit or
+delete fields" in the template's Template Usage Settings → Field Configuration.
+Prefill at create time works either way.
+
 ## Selections is the sender's panel, not the signer's
 
 One row is one checkbox already placed on the template, and the dropdown is the
@@ -823,6 +871,20 @@ locked onto the document before the signer ever sees it. There is no third
 representation, which party, which term length) and leaving one unset left a term
 to whoever opened the document.
 
+- **The panel binds to the document by printed caption, not by field id.** Each
+  decision carries a pattern (`PACKET_FIELD_MAP` in `boldsignPacketPanel.js`) and
+  resolves to the field whose caption it recognizes — so a template this code has
+  never seen, or one whose fields were re-placed yesterday, still gets the right
+  boxes. BoldSign assigns ids in *placement* order, so they differ per template
+  and shift when an admin moves a field; a hardcoded id map wrote the sender's
+  Exclusive choice to a box that was not the exclusive one, and the decision went
+  nowhere with a 2xx and no warning. Resolution runs in **two passes** —
+  every caption first, then the id fallback for boxes the page could not name —
+  because a one-pass version let an id coincidence claim a field that a later
+  entry would have matched by caption, writing a policy choice to the wrong
+  clause. The binding is logged as `PACKET_FIELD_BINDING = {…}` with the
+  provenance of each (`caption` or `id`), and an id-matched or ambiguous entry
+  warns.
 - **Row names come from the printed caption**, never the field id — see the next
   section. `src/lib/services/boldsignSelections.js` maps a caption to a short
   label ("non-exclusive" → *Non-exclusive representation*). Rule order is load
@@ -841,6 +903,16 @@ to whoever opened the document.
   be the panel deciding a term on the sender's behalf. The groups are asserted
   from the packet's rules, not read off the page: page 1 prints "CHECK ALL BOXES
   THAT APPLY" above the representation pair.
+- **The create call states EVERY tick, not just the decisions.** BoldSign treats
+  the `existingFormFields` sent for a role as that role's set, so a *partial*
+  list resets the role's other checkboxes — that is the wipe. Observed across
+  three live sends: sending nothing for any checkbox left the template's BUYER
+  tick alone; sending a few cleared it while the named box ticked correctly. So
+  `desiredTickState()` states the panel's decisions **and** every box the
+  template itself carries ticked, including boxes the panel does not own and the
+  page never captioned. Omission preserves nothing.
+- **The end date belongs to the fixed-date term only.** Choosing "until the deal
+  closes" blanks it, so the document cannot state a term the sender did not pick.
 - **Every row is written on save.** `prefillFieldEntry` turns each `true`/`false`
   into a read-only `"true"`/`"false"` on the matching BoldSign field id, so Save
   as Draft and Place Fields both carry the tick states.
