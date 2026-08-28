@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { readTemplate, isAlreadySet, mutexCandidates, renderSpec } from '../boldsign-selections-spec.mjs'
-import { orderFieldsByPosition, fieldRows, fieldPosition } from '../../src/lib/services/boldsignFields.js'
+import { readTemplateFields, isAlreadySet, mutexCandidates, renderSpec, renderSpecBundle } from '../boldsignSelectionsSpec.js'
+import { orderFieldsByPosition, fieldRows, fieldPosition } from '../boldsignFields.js'
 
 // The packet that started this: page 1 carries "(exclusive) … (non-exclusive)"
 // on one line and "BUYER or SELLER" on the next, and BoldSign hands them back in
@@ -84,9 +84,9 @@ describe('isAlreadySet', () => {
   })
 })
 
-describe('readTemplate', () => {
+describe('readTemplateFields', () => {
   it('collects fields from the top level and from inside roles, deduped', () => {
-    const { roles, fields } = readTemplate({
+    const { roles, fields } = readTemplateFields({
       roles: [
         { roleIndex: 1, roleName: 'Buyer', formFields: [{ id: 'CheckBox2', fieldType: 'CheckBox', pageNumber: 1, bounds: { x: 1, y: 2 } }] },
         { roleIndex: 2, roleName: 'Agent', formFields: [{ id: 'CheckBox2', fieldType: 'CheckBox' }] },
@@ -144,5 +144,44 @@ describe('renderSpec', () => {
   it('calls out the field it could not place', () => {
     expect(md).toContain('**no bounds**')
     expect(md).toMatch(/No bounds:\*\* `CheckBox9`/)
+  })
+})
+
+describe('renderSpecBundle — the whole-account sweep in one document', () => {
+  const entry = (name, fields) => ({ template: { templateId: `id-${name}`, templateName: name }, roles: [], fields })
+  const today = new Date('2026-08-28T00:00:00Z')
+
+  it('includes one spec per template and lists them up front', () => {
+    const md = renderSpecBundle([
+      entry('Buyer Agency', [box('CheckBox1', 1, 120, 150)]),
+      entry('Listing Agreement', [box('CheckBox4', 2, 90, 70)]),
+    ], { today })
+    expect(md).toContain('2 templates with tick boxes')
+    expect(md).toContain('- Buyer Agency')
+    expect(md).toContain('# Buyer Agency — selections spec')
+    expect(md).toContain('# Listing Agreement — selections spec')
+  })
+
+  // A packet with nothing to select is a page an admin scrolls past. Dropping it
+  // is safe in a way that dropping a template with boxes never is.
+  it('drops templates that have no tick box', () => {
+    const md = renderSpecBundle([
+      entry('Buyer Agency', [box('CheckBox1', 1, 120, 150)]),
+      entry('Wire Instructions', [{ id: 'Label1', type: 'Label', page: 1, bounds: { x: 5, y: 5 } }]),
+    ], { today })
+    expect(md).toContain('1 template with tick boxes')
+    expect(md).not.toContain('Wire Instructions')
+  })
+
+  // A sweep that stopped early looks exactly like an account with fewer
+  // templates, and an unlisted packet is one nobody knows to name — so it is
+  // stated at the top rather than inferred from a short list.
+  it('says so at the top when the template walk was cut short', () => {
+    const md = renderSpecBundle([entry('Buyer Agency', [box('CheckBox1', 1, 120, 150)])], { today, incomplete: true })
+    expect(md.indexOf('**Incomplete.**')).toBeLessThan(md.indexOf('# Buyer Agency'))
+  })
+
+  it('survives an account with nothing to spec', () => {
+    expect(renderSpecBundle([], { today })).toContain('0 templates with tick boxes')
   })
 })

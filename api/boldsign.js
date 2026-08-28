@@ -2,6 +2,7 @@ import { applyJsonCors, requireAgent, errorResponse, getServiceClient, getUserCl
 import closingPacketHandler from './_handlers/closing-packet.js'
 import { wrap } from './_lib/observability.js'
 import crypto from 'node:crypto'
+import { readTemplateFields, renderSpec, renderSpecBundle } from '../src/lib/services/boldsignSelectionsSpec.js'
 
 // We verify webhook signatures against the RAW request body, so the automatic
 // body parser must be off — we read the stream and parse it ourselves below.
@@ -2573,6 +2574,61 @@ async function handler(req, res) {
     if (body.action === 'template-list') {
       const { templates, complete } = await listAllTemplates()
       return res.json({ templates, complete })
+    }
+
+    // ─── Selections spec ──────────────────────────────────────────────────────
+    // The tick boxes of one template — or of every template in the account — in
+    // the order they PRINT, as a markdown document an admin can name them from.
+    //
+    // Same output as `npm run selections:spec`, generated HERE because this
+    // process already holds BOLDSIGN_API_KEY. That is the point: naming a
+    // packet's boxes used to require the account key on somebody's laptop, and a
+    // signing key copied around to run a read-only report is a key that ends up
+    // in a shell history. Admin-only, GETs only, and nothing in BoldSign changes.
+    //
+    // `templateId` scopes it to one template — worth using, because the sweep
+    // costs one API call per template and an account with hundreds of them is a
+    // slow request.
+    if (body.action === 'selections-spec') {
+      if (!actor.isAdmin) return res.status(403).json({ error: 'Admin only' })
+
+      const one = String(body.templateId || '').trim()
+      let list = [], incomplete = false
+      if (one) {
+        list = [{ templateId: one }]
+      } else {
+        const { templates, complete } = await listAllTemplates()
+        list = templates
+        incomplete = !complete
+      }
+
+      const entries = []
+      const failed  = []
+      for (const t of list) {
+        const id = t.templateId || t.id
+        if (!id) continue
+        let props
+        try {
+          props = await boldsign(`/template/properties?templateId=${encodeURIComponent(id)}`)
+        } catch (e) {
+          // One unreadable template must not lose the other forty specs. Name it
+          // in the response instead, so an admin knows the sweep has a hole
+          // rather than reading a short list as a complete one.
+          failed.push({ templateId: id, error: e.message })
+          continue
+        }
+        const { roles, fields } = readTemplateFields(props)
+        entries.push({
+          template: { templateId: id, templateName: props.templateName || props.name || t.templateName || id },
+          roles,
+          fields,
+        })
+      }
+
+      const markdown = one && entries.length
+        ? renderSpec(entries[0])
+        : renderSpecBundle(entries, { incomplete })
+      return res.json({ markdown, count: entries.length, incomplete, failed })
     }
 
     // Read a template's roles + form fields so the app can render one signer

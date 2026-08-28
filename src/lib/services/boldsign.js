@@ -166,6 +166,12 @@ export const resendIdentity      = (email) => call({ action: 'identity-resend', 
 // ── Templates ────────────────────────────────────────────────────────────────
 export const templateEditorUrl     = (p) => call({ action: 'template-editor-url', ...p })
 export const templateDetails       = (templateId) => call({ action: 'template-details', templateId })
+// Admin-only. The template's tick boxes in the order they PRINT, as markdown to
+// name them from — one template, or the whole account when templateId is
+// omitted. Generated server-side because the server already holds the BoldSign
+// key; nobody has to copy a signing key onto a laptop to run a read-only report.
+// Resolves { markdown, count, incomplete, failed }.
+export const selectionsSpec        = (templateId) => call({ action: 'selections-spec', ...(templateId ? { templateId } : {}) })
 export const sendFromTemplate      = (p) => call({ action: 'template-send', ...p })
 export const templateEmbedUrl      = (p) => call({ action: 'template-embed-url', ...p })
 // Save-as-Draft: build the document from a template with every CRM value already

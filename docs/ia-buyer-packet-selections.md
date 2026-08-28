@@ -129,7 +129,9 @@ BoldSign's field creation order, and on page 4 that order is provably *not* the 
 top-to-bottom order (the two ticked policies, 3 and 4, come first in the list even though 1 and 2
 print above them).
 
-**How to settle all three in one command**, instead of clicking each row in the BoldSign editor:
+**How to settle all three without clicking each row in the BoldSign editor** — either
+Form Library → edit this packet → **Download selections spec** (admin-only; the server
+holds the key, so nothing is copied anywhere), or from a shell:
 
 ```
 BOLDSIGN_API_KEY=… npm run selections:spec

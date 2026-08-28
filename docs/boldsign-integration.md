@@ -792,14 +792,26 @@ shows its page (`p1 · CheckBox11 · CheckBox`). The printed copy agrees with it
 `buildSigningSummary()` orders each page's fields by position too, and prints the
 field id for any box with no caption.
 
-To name the boxes on a template once and for all:
+To name the boxes on a template once and for all, either:
+
+**From the CRM** (no key anywhere) — Form Library → edit a packet → **Download
+selections spec**, next to the BoldSign Template ID. It calls the admin-only
+`selections-spec` action, which runs the sweep in the API process that already
+holds `BOLDSIGN_API_KEY`; omit `templateId` and it returns one document covering
+every template in the account. Admin-only and read-only (GETs). This exists so
+producing a read-only report never requires the account's signing key to be
+copied onto a laptop, where it outlives the report in a shell history.
+
+**From a shell**, when you already have the key:
 
 ```
 BOLDSIGN_API_KEY=… npm run selections:spec
 ```
 
-`scripts/boldsign-selections-spec.mjs` writes one spec per template into
-`docs/boldsign-selections/`, listing every tick box in printed order with its id,
+Both render the same document — `src/lib/services/boldsignSelectionsSpec.js` is
+the one implementation, pure and unit-tested; the script pages the account and
+writes files, the API action returns markdown. The script writes one spec per
+template into `docs/boldsign-selections/`, listing every tick box in printed order with its id,
 page, coordinates, role, current ticked state, and the boxes sharing its line
 (mutually-exclusive candidates — a form writes alternatives on one line). It leaves
 `short_label` as TODO on purpose: the words printed beside a box are not in the API
