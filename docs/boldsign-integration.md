@@ -814,6 +814,42 @@ which.
 field's `id`/`type`/`roleIndex` so those controls can be rendered with the
 template's own wording rather than a prettified field id.
 
+## Selections is the sender's panel, not the signer's
+
+One row is one checkbox already placed on the template, and the dropdown is the
+**sender** deciding what the packet goes out saying — `Checked` or `Unchecked`,
+locked onto the document before the signer ever sees it. There is no third
+"Signer decides" state: these boxes are terms of the agreement (which
+representation, which party, which term length) and leaving one unset left a term
+to whoever opened the document.
+
+- **Row names come from the printed caption**, never the field id — see the next
+  section. `src/lib/services/boldsignSelections.js` maps a caption to a short
+  label ("non-exclusive" → *Non-exclusive representation*). Rule order is load
+  bearing: `non-exclusive` is tested before `exclusive`, and the policy clauses
+  before the bare party words, or "2. SINGLE BUYER AGENCY" is labelled as the
+  party box. Unrecognized wording keeps its printed caption; only a box the page
+  could not caption at all still shows its id, marked "unnamed on the page".
+- **Rows are ordered as they appear on the paper** (page, then top to bottom).
+  BoldSign returns placement order, which is neither document order nor stable.
+- **Each row defaults to what the template already carries** — a box the packet
+  was authored with stays ticked, so the sender confirms it rather than silently
+  clearing it.
+- **Mutex groups are enforced in the panel**: ticking Exclusive unticks
+  Non-exclusive, ticking Term A unticks Term B. Unticking never ticks anything —
+  clearing both is a valid intermediate state, and choosing the other one would
+  be the panel deciding a term on the sender's behalf. The groups are asserted
+  from the packet's rules, not read off the page: page 1 prints "CHECK ALL BOXES
+  THAT APPLY" above the representation pair.
+- **Every row is written on save.** `prefillFieldEntry` turns each `true`/`false`
+  into a read-only `"true"`/`"false"` on the matching BoldSign field id, so Save
+  as Draft and Place Fields both carry the tick states.
+
+Consequence worth knowing: because no checkbox is left unset any more, a box a
+signer used to be able to tick themselves now goes out locked as the sender left
+it. That is the intent for agreement terms; a template that genuinely wants a
+signer-ticked box needs that box left off the template's field list.
+
 ## Naming a field nobody named — captions read off the PDF
 
 BoldSign auto-names a placed field by type plus a counter, so a template whose

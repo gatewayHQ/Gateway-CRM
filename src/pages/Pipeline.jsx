@@ -26,7 +26,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, isTicked, selectionRows, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2412,7 +2412,12 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           // fieldTokenValue matches on the field's id, name OR label, normalized
           // for case and separators — BoldSign auto-assigns the id (`Label1`), so
           // a hand-typed token usually lives in the name or the label.
-          seededValues[f.id] = isTickableField(f.type) ? null : fieldTokenValue(tokenVals, f)
+          // A tick box is the SENDER's decision, not the signer's: it starts at
+          // whatever the template itself already carries (a box the packet was
+          // authored with stays ticked) and goes out locked either way. It used
+          // to start null — "leave it to the signer" — which is not what this
+          // panel is for: these boxes are terms of the agreement.
+          seededValues[f.id] = isTickableField(f.type) ? isTicked(f.value) : fieldTokenValue(tokenVals, f)
         }
         setValues(seededValues)
       })
@@ -2561,7 +2566,13 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
   const sharedTextFields = shown(textFields.filter(f => isSharedField(f.type)))
   const signerTextFields = shown(textFields.filter(f => !isSharedField(f.type)))
-  const shownTickFields  = shown(tickFields)
+  // Selections rows: one per tick box, named from the words printed beside it on
+  // the page and ordered as they appear on the paper. Never folded away behind
+  // the "unnamed fields" toggle — a term of the agreement is not clutter.
+  const selectionRowList = React.useMemo(
+    () => selectionRows({ fields: tickFields }),
+    [tickFields],
+  )
 
   // Printed instructions that constrain a group of boxes, as found on the page.
   // 'all-apply' cues are dropped: they add no constraint, and one per page would
@@ -2577,9 +2588,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // to show in a summary, and listing it as blank would invite the agent to go
   // hunting for something to type where the template simply has a spare box.
   const sharedFilled = sharedTextFields.filter(f => String(values[f.id] ?? '').trim())
-  const hiddenCount = showAllFields
-    ? 0
-    : [...textFields, ...tickFields].filter(isUnconfiguredField).length
+  const hiddenCount = showAllFields ? 0 : textFields.filter(isUnconfiguredField).length
   // A role-scoped field can name no role at all, in which case it rides on the
   // first signer — either way it is one signer's, which is what the warning below
   // needs to say.
@@ -2910,9 +2919,9 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 here they go out as real, locked values every signer sees; left
                 alone they stay the signer's to fill. Setting one inside
                 BoldSign's editor instead does NOT carry to the signers. */}
-            {shownTickFields.length > 0 && (
+            {selectionRowList.length > 0 && (
               <div className="form-group">
-                <label className="form-label">Selections <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— set these here and they travel with the send, locked. Each is still visible only to its own signer until they sign</span></label>
+                <label className="form-label">Selections <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— you decide these, not the signer. Each goes out locked onto the document exactly as set here</span></label>
                 {/* What the FORM says about these boxes, quoted from the page —
                     "check either A or B", "check only one". Quoted, not enforced:
                     the instruction is the document's, and the packet's own rule
@@ -2926,19 +2935,28 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                     The form says: {selectionRules.map(c => `“${c.text}”`).join(' · ')}
                   </div>
                 )}
-                {shownTickFields.map(f => (
-                  <div key={f.id} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
+                {selectionRowList.map(r => (
+                  <div key={r.id} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
                     <div style={{ flex:1, fontSize:12 }}>
-                      {f.label || f.caption || prettyLabel(f.id)}
-                      <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7, marginLeft:8 }}>{f.id} · {fieldType(f)}</span>
+                      {r.title}
+                      <span style={{ fontSize:11, opacity:0.7, marginLeft:6 }}>· p{r.page}</span>
+                      {/* The id stays available but stops being the row's name:
+                          it is what an admin needs when a box is in the wrong
+                          place, and nothing the sender reads to make a choice. */}
+                      {!r.named && (
+                        <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7, marginLeft:8 }}
+                              title="Nothing is printed beside this box on the page, so it could not be named">
+                          unnamed on the page
+                        </span>
+                      )}
                     </div>
                     <select
                       className="form-control"
                       style={{ width:150, flex:'none' }}
-                      value={values[f.id] === true ? 'yes' : values[f.id] === false ? 'no' : ''}
-                      onChange={e => setValue(f.id, e.target.value === 'yes' ? true : e.target.value === 'no' ? false : null)}
+                      title={r.caption ? `Printed on the page: “${r.caption}” (${r.id})` : r.id}
+                      value={values[r.id] === true ? 'yes' : 'no'}
+                      onChange={e => setValues(prev => applySelection(prev, selectionRowList, r.id, e.target.value === 'yes'))}
                     >
-                      <option value="">Signer decides</option>
                       <option value="yes">Checked</option>
                       <option value="no">Unchecked</option>
                     </select>
