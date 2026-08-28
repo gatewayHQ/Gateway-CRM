@@ -30,14 +30,15 @@ The template carries **14 checkbox fields**. The Selections list shows 12 withou
 ## 1. Mapping table
 
 `field_id` is the id shown in grey in the Selections list. A `A|B` pair means the two boxes are
-identified as a pair but their order within the page is not resolved — see [UNCERTAIN](#4-uncertain).
+identified as a pair but their order within the page is not resolved. That no longer affects what an
+agent sees — captions are read off the PDF at send time; see [section 4](#4-resolved--the-ids-no-longer-need-mapping).
 
 | current BoldSign list text | field_id | short_label | helper | owner | default | mutex_group | already_set? |
 |---|---|---|---|---|---|---|---|
 | `Checkbox1 · CheckBox1` / `Checkbox2 · CheckBox11` | `CheckBox1` \| `CheckBox11` | Exclusive representation | "(exclusive)" on the opening line, p.1 | sender locks | **on** (recommended default) | `representation` | no (off) |
 | `Checkbox1 · CheckBox1` / `Checkbox2 · CheckBox11` | `CheckBox11` \| `CheckBox1` | Non-exclusive representation | "(non-exclusive)", same line | sender locks | off | `representation` | no (off) |
 | `Checkbox1 · CheckBox2` | `CheckBox2` | Party: Buyer | "prospective BUYER" — confirmed by the printed X at 95.5pt on p.1 | locked on | on | `party` | **yes** |
-| *(no field — see UNCERTAIN Q1)* | — | Party: Seller | "or SELLER" — printed box, no BoldSign field found | n/a | stays blank | `party` | no |
+| *(no field found — see section 4)* | — | Party: Seller | "or SELLER" — printed box, no BoldSign field found | n/a | stays blank | `party` | no |
 | *(to be replaced — see Term A/B as Labels)* | new Label, replaces `CheckBox4`/`CheckBox3` | Term A: Until close / completion | §6.A — runs until closing, completion, or earlier termination | sender fills (**Label**) | `X` (recommended default) | `term` | no |
 | *(to be replaced — see Term A/B as Labels)* | new Label, replaces `CheckBox4`/`CheckBox3` | Term B: Fixed end date | §6.B — ends 11:59 p.m. on a stated date | sender fills (**Label**) | empty | `term` | no |
 | `Checkbox1 · CheckBox12` / `Checkbox2 · CheckBox13` | `CheckBox12` \| `CheckBox13` | Policy: Single Seller Agency | Disclosure item 1 | sender locks | off — flag if turned on | `policy` (not exclusive) | no (off) |
@@ -111,27 +112,44 @@ Everything else in these screenshots is already set.
 
 ---
 
-## 4. UNCERTAIN
+## 4. RESOLVED — the ids no longer need mapping
 
-Four questions remain. Each is a **pair whose two members are identified but whose order within
-the page is not** — the ordering that survives into the Selections list is BoldSign's field
-creation order, and on page 4 that order is provably *not* the visual top-to-bottom order (the
-two ticked policies, 3 and 4, come first in the list even though 1 and 2 print above them). One
-click on each row in BoldSign settles all four.
+This section used to hold four open questions, each a pair of BoldSign field ids
+whose *members* were known but whose *order* was not (`CheckBox1` vs `CheckBox11`
+— which is Exclusive and which is Non-exclusive?). Guessing either one wrong
+locks the opposite term onto an agreement a client then signs, so none was
+guessed.
 
-1. **Page 1 — is `SELLER` a field?** Page 1 has four printed boxes (exclusive, non-exclusive,
-   BUYER, SELLER) but only three checkbox fields. `CheckBox2` is BUYER (confirmed). Are the
-   other two on *exclusive* and *non-exclusive* — or does one of them sit on SELLER, leaving
-   one representation box unfillable?
-2. **Page 1 — `CheckBox1` vs `CheckBox11`:** which is Exclusive and which is Non-exclusive?
-   Consequence of guessing: the packet says the opposite of what the agent picked.
-3. ~~**Page 2 — `CheckBox4` vs `CheckBox3`:** which is Term A and which is Term B?~~
-   **Resolved by removal** — both are being replaced by Labels placed directly on the §6.A and
-   §6.B boxes, so their current order stops mattering. Three questions remain, not four.
-4. **Page 4 — `CheckBox12` vs `CheckBox13`:** which is Policy 1 (Single Seller Agency, must stay
-   off) and which is Policy 2 (Single Buyer Agency, optional)?
-   (`CheckBox6` vs `CheckBox7` — Policies 3 and 4 — is the same open pair, but both are locked
-   on, so the order does not change behavior.)
+**They are answered now, and not by anybody transcribing them.** The send screen
+reads each box's caption off the template's own PDF: `api/boldsign.js`
+(`templateCaptions`) downloads the template, `api/_lib/pdfText.js` extracts the
+printed text with coordinates, and
+`src/lib/services/boldsignCaptions.js` matches each field's bounds against the
+words on its line. A box with `exclusive)` printed to its right is captioned
+"exclusive" — whatever its id, on every template, with no table to maintain.
+
+That makes the four questions moot rather than answered: field creation order
+never mattered, only position on the page did, and position is what is now read.
+The id column below is therefore left as it was — **the ids are no longer load
+bearing**, and the captions the agent sees come from the document itself.
+
+Two properties of the engine are worth knowing when reading the table:
+
+- **It never guesses.** A box the page says nothing beside gets no caption and
+  falls back to the old behavior. A caption is only ever the words actually
+  printed next to that box.
+- **It stops at the next field.** The row `[ ] BUYER or [ ] SELLER` would
+  otherwise caption the first box "BUYER or SELLER" — a label that names either
+  choice equally well on a box the sender is about to lock. It is captioned
+  "BUYER". This is covered by a test built from a real generated PDF
+  (`src/lib/services/__tests__/boldsignCaptions.test.js`).
+
+What still belongs in this document is everything the page *cannot* tell anyone:
+which boxes the sender locks, what a buyer packet defaults to, and which pairs
+are one-or-the-other. Page 1 prints "CHECK ALL BOXES THAT APPLY" directly above
+the exclusive / non-exclusive pair — the document does not state the XOR that a
+buyer packet requires, so the engine does not invent it. It quotes the printed
+instruction ("check either A or B") to the agent and leaves the rule here.
 
 ---
 
@@ -202,5 +220,5 @@ trust it:
   BUYER (p.1, 95.5pt — matching the one ticked field) and on Policies 3 and 4 (p.4).
 
 What this does **not** establish: the order of two same-page fields sharing a state. That is
-exactly the residue in UNCERTAIN, and it is why no id above is asserted where a coin flip would
+exactly the residue that section 4 now closes, and it is why no id above was asserted where a coin flip would
 decide it.

@@ -814,6 +814,71 @@ which.
 field's `id`/`type`/`roleIndex` so those controls can be rendered with the
 template's own wording rather than a prettified field id.
 
+## Naming a field nobody named — captions read off the PDF
+
+BoldSign auto-names a placed field by type plus a counter, so a template whose
+fields were never captioned in the editor reaches the send screen as `Checkbox1`,
+`CheckBox11`, `Label7` — in *placement* order, which is neither document order
+nor anything an agent can read. On the live Iowa buyer-agency packet that is 14
+tick boxes with no captions, several of which are terms of the agreement:
+exclusive vs non-exclusive representation, which party the client is, which of
+two term lengths applies. The agent is asked to set them before sending and given
+nothing to set them *by*.
+
+Hand-mapping the ids in a table fixes one template until somebody moves a field,
+and a mis-mapped id locks the **opposite** term onto an agreement a client then
+signs. The document already carries the answer: the words printed beside the box.
+
+**How it works.** On `template-details`:
+
+1. `templateCaptions()` (`api/boldsign.js`) downloads the template PDF once —
+   `GET /template/download` — and caches the result per template for 10 minutes.
+2. `extractPdfWords()` (`api/_lib/pdfText.js`) extracts every text run with
+   coordinates via pdf.js, converted into **BoldSign's frame**: origin at the
+   page's top-left, y growing downward. pdf.js reports the *baseline* in
+   bottom-left space; using it as the top shifts every word down a full line and
+   matches boxes against the line below their label.
+3. `resolveBoundsScale()` decides points-per-bound-unit from evidence — the same
+   helper the print path uses. BoldSign's bounds are not necessarily points, and
+   a caption matched at the wrong scale lands on whatever text sits at 0.75 of
+   the real position: a plausible wrong answer. No scale resolves → no captions.
+4. `captionFields()` (`src/lib/services/boldsignCaptions.js`) matches each
+   field's box against the words on its line and returns a caption.
+
+Fields come back with `page`, `bounds`, and (where the page named them)
+`caption`. A captioned field is no longer folded behind the "unnamed template
+fields" toggle — the page named it, so it belongs in the list.
+
+**The rules that keep a caption honest** (all covered by tests built from
+generated PDFs, in `src/lib/services/__tests__/boldsignCaptions.test.js`):
+
+- **Nothing is guessed.** A box with no words beside it gets no caption at all
+  and the screen falls back to what it showed before. A wrong caption on a box
+  that locks a term is worse than no caption.
+- **A caption stops at the next field box on the line.** `[ ] BUYER or [ ] SELLER`
+  captions the first box "BUYER", not "BUYER or SELLER" — which would name either
+  choice equally well on a box about to be locked.
+- **A caption stops at an unbalanced closing bracket.** The box sits *inside*
+  "(non-exclusive)", so the sentence carrying on past it is not part of the choice.
+- **A caption ends at the first sentence break** long enough to leave something
+  behind, which is what turns a whole policy clause into "3. APPOINTED AGENCY"
+  while keeping the "3." the document refers to it by.
+- **Right beats left.** On every agency form seen, the box precedes its label.
+  A leftward caption is reported as low confidence.
+
+**Printed instructions are quoted, never enforced.** `detectSelectionCues()`
+finds sentences like "check either A or B" and "check only one" and the send
+screen shows them under Selections. It does not turn them into a constraint,
+because the page is evidence about the page and not about the packet: page 1 of
+the buyer packet prints "CHECK ALL BOXES THAT APPLY" directly above the
+exclusive / non-exclusive pair that a buyer packet must nonetheless treat as
+one-or-the-other. That rule lives with the packet
+(`docs/ia-buyer-packet-selections.md`), not in the engine.
+
+**Failure is always silent and total.** No PDF, an unparseable one, no
+resolvable scale, pdf.js missing — every path returns no captions rather than
+bad ones, and the payload is exactly what it was before captions existed.
+
 ## Prefilled data every signer must see — use Label fields
 
 **BoldSign's default hides prefilled data from everyone but the field's own

@@ -1057,6 +1057,11 @@ const AUTO_FIELD_ID_RE = /^(label|textbox|text|checkbox|radiobutton|radio|name|e
 export function isUnconfiguredField(field) {
   if (!field?.id) return true
   if (fieldTokenKey(field)) return false
+  // A caption read off the PDF counts as a name. The page itself says what this
+  // box is ("exclusive", "3. APPOINTED AGENCY"), which is the thing the agent
+  // needed in order to decide it — so a captioned field belongs in the list by
+  // default, not folded away behind the toggle with the genuinely nameless ones.
+  if (String(field.caption || '').trim()) return false
   const id = String(field.id).trim()
   // BoldSign fills `name` with the auto id when nobody typed one, so a bare
   // `name` is not evidence that anybody named this field. Comparing against the

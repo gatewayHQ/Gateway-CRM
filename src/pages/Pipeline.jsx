@@ -2562,6 +2562,17 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const sharedTextFields = shown(textFields.filter(f => isSharedField(f.type)))
   const signerTextFields = shown(textFields.filter(f => !isSharedField(f.type)))
   const shownTickFields  = shown(tickFields)
+
+  // Printed instructions that constrain a group of boxes, as found on the page.
+  // 'all-apply' cues are dropped: they add no constraint, and one per page would
+  // crowd out the ones that do.
+  const selectionRules = React.useMemo(() => {
+    const seen = new Set()
+    return (details?.selectionCues || [])
+      .filter(c => c?.kind === 'either' || c?.kind === 'one')
+      .filter(c => { const k = String(c.text || ''); if (!k || seen.has(k)) return false; seen.add(k); return true })
+      .slice(0, 3)
+  }, [details])
   // Only the shared fields that actually carry a value. An empty one has nothing
   // to show in a summary, and listing it as blank would invite the agent to go
   // hunting for something to type where the template simply has a spare box.
@@ -2629,7 +2640,17 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     // those resolves, the raw PascalCase id — which is what every one of these
     // used to show, unreadable id and all.
     const info = fieldInfo(f)
-    const heading = info?.text || f.label || f.name || prettyLabel(f.id)
+    // …and ahead of that raw id, the caption read off the PDF itself — the words
+    // printed beside the field on the page (see api/_lib/pdfText.js). A template
+    // nobody labelled still names its own fields this way.
+    //
+    // `f.name` only counts as a name when it differs from the id: BoldSign fills
+    // `name` with the auto id when nobody typed one, so trusting it blindly puts
+    // "Label7" ahead of the caption the page itself supplies — the exact thing
+    // the caption exists to replace.
+    const authored = String(f.name || '').trim()
+    const named = authored && authored.toLowerCase() !== String(f.id || '').trim().toLowerCase() ? authored : ''
+    const heading = info?.text || f.label || named || f.caption || prettyLabel(f.id)
     return (
     <div key={f.id} style={{ marginBottom:8 }}>
       <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2, display:'flex', gap:8, alignItems:'baseline' }}>
@@ -2892,10 +2913,23 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
             {shownTickFields.length > 0 && (
               <div className="form-group">
                 <label className="form-label">Selections <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— set these here and they travel with the send, locked. Each is still visible only to its own signer until they sign</span></label>
+                {/* What the FORM says about these boxes, quoted from the page —
+                    "check either A or B", "check only one". Quoted, not enforced:
+                    the instruction is the document's, and the packet's own rule
+                    can differ (one live agency form prints "CHECK ALL BOXES THAT
+                    APPLY" above a pair that a buyer packet must treat as
+                    one-or-the-other). Showing the sentence lets the agent apply
+                    the rule the document actually states, instead of inferring it
+                    from box order. */}
+                {selectionRules.length > 0 && (
+                  <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:6 }}>
+                    The form says: {selectionRules.map(c => `“${c.text}”`).join(' · ')}
+                  </div>
+                )}
                 {shownTickFields.map(f => (
                   <div key={f.id} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
                     <div style={{ flex:1, fontSize:12 }}>
-                      {f.label || prettyLabel(f.id)}
+                      {f.label || f.caption || prettyLabel(f.id)}
                       <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7, marginLeft:8 }}>{f.id} · {fieldType(f)}</span>
                     </div>
                     <select
