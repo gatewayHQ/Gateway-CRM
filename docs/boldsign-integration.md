@@ -903,6 +903,14 @@ to whoever opened the document.
   be the panel deciding a term on the sender's behalf. The groups are asserted
   from the packet's rules, not read off the page: page 1 prints "CHECK ALL BOXES
   THAT APPLY" above the representation pair.
+- **The create call states EVERY tick, not just the decisions.** BoldSign treats
+  the `existingFormFields` sent for a role as that role's set, so a *partial*
+  list resets the role's other checkboxes — that is the wipe. Observed across
+  three live sends: sending nothing for any checkbox left the template's BUYER
+  tick alone; sending a few cleared it while the named box ticked correctly. So
+  `desiredTickState()` states the panel's decisions **and** every box the
+  template itself carries ticked, including boxes the panel does not own and the
+  page never captioned. Omission preserves nothing.
 - **The end date belongs to the fixed-date term only.** Choosing "until the deal
   closes" blanks it, so the document cannot state a term the sender did not pick.
 - **Every row is written on save.** `prefillFieldEntry` turns each `true`/`false`

@@ -387,3 +387,46 @@ describe('binding by printed caption', () => {
     expect(want.Checkbox2).toBe(false)   // Non-exclusive, cleared
   })
 })
+
+// ── The wipe: a partial field list resets the rest of the role ───────────────
+// BoldSign treats the existingFormFields sent for a role as that role's set, so
+// a PARTIAL list clears the role's other checkboxes. Observed across three live
+// sends: nothing sent → the template's BUYER tick survived; a few boxes sent →
+// BUYER and others wiped, while the box we named ticked correctly.
+//
+// The payload therefore has to state every box that must end up ticked. This is
+// what desiredTickState() is for, and it must hold even for boxes the panel does
+// not own and the page never captioned — those are precisely the ones that
+// vanished.
+describe('every tick the document must keep is stated, not assumed', () => {
+  it('re-asserts a template tick the panel neither owns nor can name', () => {
+    const fields = [
+      { id: 'Checkbox7',  page: 1, caption: 'exclusive' },
+      { id: 'Checkbox2',  page: 1, caption: 'non-exclusive' },
+      { id: 'Checkbox11', page: 1, caption: 'BUYER', value: 'on' },   // not a decision
+      { id: 'Checkbox20', page: 2, value: 'on' },                     // no caption at all
+      { id: 'Checkbox21', page: 2 },                                  // unticked, unowned
+    ]
+    const want = desiredTickState({ representation: 'exclusive', term: 'close', fields })
+    expect(want.Checkbox11).toBe(true)   // the box that kept getting wiped
+    expect(want.Checkbox20).toBe(true)   // uncaptioned, still preserved
+    expect(want.Checkbox7).toBe(true)    // the sender's choice
+    expect(want.Checkbox2).toBe(false)   // its sibling, explicitly cleared
+    // An unticked box nobody decided stays out: nothing to preserve, and an
+    // explicit value is what clears things.
+    expect('Checkbox21' in want).toBe(false)
+  })
+
+  it('lets the sender turn off a box the template had on', () => {
+    const fields = [
+      { id: 'Checkbox5', page: 3, caption: '3. APPOINTED AGENCY', value: 'on' },
+      { id: 'Checkbox7', page: 1, caption: 'exclusive' },
+    ]
+    const want = desiredTickState({
+      representation: 'exclusive', term: 'close',
+      policy: { CheckBox6: false },     // Appointed agency, switched off in the panel
+      fields,
+    })
+    expect(want.Checkbox5).toBe(false)
+  })
+})

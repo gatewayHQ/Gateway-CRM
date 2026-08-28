@@ -26,7 +26,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, PACKET_FIELD_MAP, seedPacketState, packetTickValues, packetMissing, wantsEndDate, captionConflicts, packetPayloadCheck, missingPacketFields, desiredTickState, resolvePacketFields, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, PACKET_FIELD_MAP, seedPacketState, packetMissing, wantsEndDate, captionConflicts, packetPayloadCheck, missingPacketFields, desiredTickState, resolvePacketFields, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2474,7 +2474,22 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     // mutex pair. Boxes the panel does not own are absent, never false: BoldSign
     // reads an explicit false as "clear the template's own tick", which is what
     // was wiping Party: Buyer.
-    const packetValues = packetTickValues({ ...packet, fields: details.fields || [] })
+    // THE WHOLE TICK STATE GOES IN THE CREATE CALL, not just the decisions.
+    //
+    // BoldSign treats the `existingFormFields` sent for a role as that role's
+    // set: a PARTIAL list resets the role's other checkboxes. That is the wipe.
+    // Sending nothing for any checkbox left them all alone (which is why the
+    // template's BUYER tick survived before this panel existed); sending a few
+    // cleared the rest.
+    //
+    // So the payload states every box that must end up ticked — the panel's
+    // decisions AND every box the template itself carries ticked — rather than
+    // relying on omission to preserve anything. The post-create repair cannot
+    // cover this: a template whose Field Configuration forbids sender edits
+    // refuses /document/edit outright, so the create call is the only channel
+    // that reaches those boxes at all.
+    const packetFields  = details.fields || []
+    const desiredTicks  = desiredTickState({ ...packet, fields: packetFields })
 
     // The end date belongs to the fixed-date term only. On "until the deal
     // closes" the field is blanked rather than left carrying whatever the deal
@@ -2487,9 +2502,10 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
     // One line, before the call, so a wrong payload is visible at the moment it
     // is built rather than inferred from an editor that opened with empty boxes.
-    const { rows, problems } = packetPayloadCheck({ ...packet, fields: details.fields || [] })
-    console.log('PLACE_FIELDS payload =', JSON.stringify(rows))
-    for (const gone of missingPacketFields({ fields: details.fields || [] })) {
+    const { rows, problems } = packetPayloadCheck({ ...packet, fields: packetFields })
+    console.log('PLACE_FIELDS decisions =', JSON.stringify(rows))
+    console.log('PLACE_FIELDS every tick sent =', JSON.stringify(desiredTicks))
+    for (const gone of missingPacketFields({ fields: packetFields })) {
       console.warn(`[boldsign] packet payload: ${gone} is not a field on this template — that decision has nowhere to land`)
     }
     for (const problem of problems) console.warn(`[boldsign] packet payload: ${problem}`)
@@ -2500,7 +2516,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
       // everything typed. Merged here, at the one place both buttons build
       // their payload from, so Save as Draft and Place Fields cannot disagree
       // about what the packet says.
-      values: { ...values, ...endDateValues, ...packetValues },
+      values: { ...values, ...endDateValues, ...desiredTicks },
       filledRoleIndices: filled.map(r => r.index),
     })
     // Roles + removals, with BoldSign's post-removal index shift applied — see
@@ -2525,7 +2541,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
       // every box the TEMPLATE already carries ticked. The server reconciles the
       // created draft against this and repairs the difference — the create call
       // does not reliably carry a tick, and omitting a box did not preserve it.
-      desiredTicks: desiredTickState({ ...packet, fields: details.fields || [] }),
+      desiredTicks,
     }
   }
 
