@@ -871,6 +871,20 @@ locked onto the document before the signer ever sees it. There is no third
 representation, which party, which term length) and leaving one unset left a term
 to whoever opened the document.
 
+- **The panel binds to the document by printed caption, not by field id.** Each
+  decision carries a pattern (`PACKET_FIELD_MAP` in `boldsignPacketPanel.js`) and
+  resolves to the field whose caption it recognizes — so a template this code has
+  never seen, or one whose fields were re-placed yesterday, still gets the right
+  boxes. BoldSign assigns ids in *placement* order, so they differ per template
+  and shift when an admin moves a field; a hardcoded id map wrote the sender's
+  Exclusive choice to a box that was not the exclusive one, and the decision went
+  nowhere with a 2xx and no warning. Resolution runs in **two passes** —
+  every caption first, then the id fallback for boxes the page could not name —
+  because a one-pass version let an id coincidence claim a field that a later
+  entry would have matched by caption, writing a policy choice to the wrong
+  clause. The binding is logged as `PACKET_FIELD_BINDING = {…}` with the
+  provenance of each (`caption` or `id`), and an id-matched or ambiguous entry
+  warns.
 - **Row names come from the printed caption**, never the field id — see the next
   section. `src/lib/services/boldsignSelections.js` maps a caption to a short
   label ("non-exclusive" → *Non-exclusive representation*). Rule order is load
@@ -889,6 +903,8 @@ to whoever opened the document.
   be the panel deciding a term on the sender's behalf. The groups are asserted
   from the packet's rules, not read off the page: page 1 prints "CHECK ALL BOXES
   THAT APPLY" above the representation pair.
+- **The end date belongs to the fixed-date term only.** Choosing "until the deal
+  closes" blanks it, so the document cannot state a term the sender did not pick.
 - **Every row is written on save.** `prefillFieldEntry` turns each `true`/`false`
   into a read-only `"true"`/`"false"` on the matching BoldSign field id, so Save
   as Draft and Place Fields both carry the tick states.

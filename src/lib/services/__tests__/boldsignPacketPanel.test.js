@@ -4,7 +4,7 @@ import { describe, it, expect } from 'vitest'
 import {
   PACKET_FIELD_MAP, PACKET_FIELD_IDS, isPacketField,
   seedPacketState, packetTickValues, packetMissing, wantsEndDate, captionConflicts,
-  resolvePacketFieldIds, missingPacketFields, packetPayloadCheck, desiredTickState, tickPayloadValue,
+  resolvePacketFieldIds, missingPacketFields, packetPayloadCheck, desiredTickState, tickPayloadValue, resolvePacketFields,
 } from '../boldsignPacketPanel.js'
 import { isTicked } from '../boldsignSelections.js'
 
@@ -284,5 +284,106 @@ describe('a tick is spelled "on", never "true"', () => {
   it('still reads back every spelling a document may report', () => {
     for (const v of ['on', 'true', 'X', '1', 'yes', 'checked']) expect(isTicked(v)).toBe(true)
     for (const v of ['off', 'false', '', null]) expect(isTicked(v)).toBe(false)
+  })
+})
+
+// ── The caption is the binding, not the id ───────────────────────────────────
+// The live failure this fixes: the sender picked Exclusive, the panel resolved it
+// to `CheckBox1` from a fixture-derived map, that id was not the exclusive box on
+// the real template, and the decision went nowhere — an unticked term on an
+// agreement, with a 2xx and no warning.
+//
+// A live-shaped template: ids nothing like the map (BoldSign assigns them in
+// placement order), captions read off the PDF by boldsignCaptions.js.
+const LIVE = [
+  { id: 'Checkbox7',  page: 1, caption: 'exclusive',                     bounds: { y: 130, x: 170 } },
+  { id: 'Checkbox2',  page: 1, caption: 'non-exclusive) agency agreement', bounds: { y: 130, x: 240 } },
+  { id: 'Checkbox11', page: 1, caption: 'BUYER', value: 'on',            bounds: { y: 145, x: 110 } },
+  { id: 'Checkbox4',  page: 1, caption: 'SELLER',                        bounds: { y: 145, x: 175 } },
+  { id: 'Checkbox9',  page: 3, caption: '1. SINGLE SELLER AGENCY',       bounds: { y: 200 } },
+  { id: 'Checkbox13', page: 3, caption: '2. SINGLE BUYER AGENCY',        bounds: { y: 230 } },
+  { id: 'Checkbox5',  page: 3, caption: '3. APPOINTED AGENCY', value: 'on', bounds: { y: 260 } },
+  { id: 'Checkbox6',  page: 3, caption: '4. CONSENSUAL DUAL AGENCY', value: 'on', bounds: { y: 290 } },
+  { id: 'Checkbox14', page: 4, caption: 'A. This Agreement begins this day of and shall continue until closing of the transaction', bounds: { y: 380 } },
+  { id: 'Checkbox15', page: 4, caption: 'B. This Agreement begins this day of and ends at 11:59 p.m. the', bounds: { y: 410 } },
+]
+
+describe('binding by printed caption', () => {
+  it('lands every decision on the box the page names, whatever its id', () => {
+    const { ids, by } = resolvePacketFields({ fields: LIVE })
+    expect(ids).toEqual({
+      CheckBox1: 'Checkbox7',   // Exclusive
+      CheckBox2: 'Checkbox2',   // Non-exclusive
+      CheckBox3: 'Checkbox11',  // Party: Buyer (resolved so it can be kept OUT)
+      CheckBox4: 'Checkbox9',   // Single seller
+      CheckBox5: 'Checkbox13',  // Single buyer
+      CheckBox6: 'Checkbox5',   // Appointed agency
+      CheckBox7: 'Checkbox6',   // Consensual dual
+      CheckBox8: 'Checkbox14',  // Term A
+      CheckBox9: 'Checkbox15',  // Term B
+    })
+    expect(Object.values(by).every(v => v === 'caption')).toBe(true)
+  })
+
+  it('writes the sender’s choice to the real field', () => {
+    const rows = packetPayloadCheck({ representation: 'exclusive', term: 'fixed', fields: LIVE }).rows
+    const byId = Object.fromEntries(rows.map(r => [r.id, r.value]))
+    expect(byId.Checkbox7).toBe('on')      // Exclusive, ticked
+    expect(byId.Checkbox2).toBe('off')     // Non-exclusive, cleared
+    expect(byId.Checkbox15).toBe('on')     // Term B
+    expect(byId.Checkbox14).toBe('off')    // Term A
+    expect('Checkbox11' in byId).toBe(false) // Party: Buyer never written
+  })
+
+  // The one-pass bug: on a template where the box captioned "3. APPOINTED
+  // AGENCY" happens to carry the id `Checkbox5`, the Single-buyer entry
+  // (canonical CheckBox5, uncaptioned here) claimed it by id before Appointed
+  // agency was considered — writing the sender's policy row to the wrong clause.
+  it('never lets an id coincidence outrank the page’s own words', () => {
+    const fields = [
+      { id: 'Checkbox7', page: 1, caption: 'exclusive' },
+      { id: 'Checkbox5', page: 3, caption: '3. APPOINTED AGENCY', value: 'on' },
+    ]
+    const { ids, by } = resolvePacketFields({ fields })
+    expect(ids.CheckBox6).toBe('Checkbox5')
+    expect(by.CheckBox6).toBe('caption')
+    expect(ids.CheckBox5).toBeUndefined()   // Single buyer is not on this template
+  })
+
+  it('falls back to the id only where the page names nothing', () => {
+    const fields = [{ id: 'CheckBox1', page: 1 }, { id: 'CheckBox2', page: 1, caption: 'non-exclusive' }]
+    const { ids, by } = resolvePacketFields({ fields })
+    expect([ids.CheckBox1, by.CheckBox1]).toEqual(['CheckBox1', 'id'])
+    expect([ids.CheckBox2, by.CheckBox2]).toEqual(['CheckBox2', 'caption'])
+  })
+
+  it('takes the first box in document order and names the rest as ambiguous', () => {
+    const fields = [
+      { id: 'B', page: 3, caption: 'exclusive', bounds: { y: 400 } },
+      { id: 'A', page: 1, caption: 'exclusive', bounds: { y: 100 } },
+    ]
+    const { ids, ambiguous } = resolvePacketFields({ fields })
+    expect(ids.CheckBox1).toBe('A')
+    expect(ambiguous.CheckBox1).toEqual(['B'])
+  })
+
+  it('reads the panel’s opening state off the boxes it will write to', () => {
+    // Non-exclusive and Term A are the ones ticked on this template.
+    const fields = LIVE.map(f => (
+      f.id === 'Checkbox2' ? { ...f, value: 'on' }
+      : f.id === 'Checkbox14' ? { ...f, value: 'on' }
+      : f))
+    const state = seedPacketState({ fields })
+    expect(state.representation).toBe('non-exclusive')
+    expect(state.term).toBe('close')
+    expect(state.policy.CheckBox6).toBe(true)   // Appointed agency, from Checkbox5
+    expect(state.policy.CheckBox4).toBe(false)  // Single seller, from Checkbox9
+  })
+
+  it('keeps every tick the template carries, under the real ids', () => {
+    const want = desiredTickState({ representation: 'exclusive', term: 'close', fields: LIVE })
+    expect(want.Checkbox11).toBe(true)   // Party: Buyer, preserved
+    expect(want.Checkbox7).toBe(true)    // Exclusive, the sender's pick
+    expect(want.Checkbox2).toBe(false)   // Non-exclusive, cleared
   })
 })
