@@ -26,7 +26,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, PACKET_FIELD_MAP, isPacketField, seedPacketState, packetTickValues, packetMissing, wantsEndDate, captionConflicts, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, PACKET_FIELD_MAP, seedPacketState, packetTickValues, packetMissing, wantsEndDate, captionConflicts, packetPayloadCheck, missingPacketFields, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2469,13 +2469,29 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     // matter who signs first; `byRole` holds the role-scoped fields, which
     // BoldSign keeps private to their own signer until that signer is done.
     // Keyed by ORIGINAL role index — buildTemplateRoles handles the index shift.
+    // The tick boxes the panel owns, addressed by the ids the TEMPLATE reports
+    // (BoldSign's casing is not ours to assume) and carrying both sides of each
+    // mutex pair. Boxes the panel does not own are absent, never false: BoldSign
+    // reads an explicit false as "clear the template's own tick", which is what
+    // was wiping Party: Buyer.
+    const packetValues = packetTickValues({ ...packet, fields: details.fields || [] })
+
+    // One line, before the call, so a wrong payload is visible at the moment it
+    // is built rather than inferred from an editor that opened with empty boxes.
+    const { rows, problems } = packetPayloadCheck({ ...packet, fields: details.fields || [] })
+    console.log('PLACE_FIELDS payload =', JSON.stringify(rows))
+    for (const gone of missingPacketFields({ fields: details.fields || [] })) {
+      console.warn(`[boldsign] packet payload: ${gone} is not a field on this template — that decision has nowhere to land`)
+    }
+    for (const problem of problems) console.warn(`[boldsign] packet payload: ${problem}`)
+
     const { sharedFormFields, byRole } = buildPrefillFields({
       fields: details.fields || [],
       // The panel's radios decide the tick boxes it owns; `values` carries
       // everything typed. Merged here, at the one place both buttons build
       // their payload from, so Save as Draft and Place Fields cannot disagree
       // about what the packet says.
-      values: { ...values, ...packetTickValues(packet) },
+      values: { ...values, ...packetValues },
       filledRoleIndices: filled.map(r => r.index),
     })
     // Roles + removals, with BoldSign's post-removal index shift applied — see

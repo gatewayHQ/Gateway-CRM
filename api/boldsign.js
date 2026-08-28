@@ -1027,7 +1027,13 @@ export function normalizeCapturedField(f) {
   // emission too, because layouts captured before this fix are already in the
   // database with it set.
   if (supportsFieldReadOnly(fieldType)) out.isReadOnly = Boolean(f?.isReadOnly)
-  if (f?.value != null && f.value !== '')       out.value = String(f.value)
+  // A TICK IS NOT PLACEMENT. A layout remembers where the agent put things; the
+  // state of a checkbox is a term of the agreement, decided on the send screen
+  // for this packet. BoldSign reports an unticked box as the non-empty string
+  // "false", so storing it here put a stale `value: "false"` in the layout that
+  // the next /document/edit replayed onto the new draft — clearing both the
+  // boxes this send had just ticked and the ones the template itself carried.
+  if (!TICKABLE_TYPES.has(fieldType) && f?.value != null && f.value !== '') out.value = String(f.value)
   // BoldSign's own name for the field. Kept because it is what re-creating a field
   // on a later draft is allowed to set — `id` refers to a field that already exists
   // (see buildLayoutEditPayload), so without a name an added field loses its identity.
@@ -1153,6 +1159,10 @@ export function buildLayoutEditPayload({ layout, signerDetails = [], confirmedOn
       // than only at capture, so those existing rows heal on their next use
       // instead of needing a backfill.
       if (!supportsFieldReadOnly(rest.fieldType)) delete rest.isReadOnly
+      // Layouts captured before the note in normalizeCapturedField() already
+      // hold a tick state, so it is dropped at emission too — otherwise those
+      // rows keep clearing boxes until someone re-captures them.
+      if (TICKABLE_TYPES.has(rest.fieldType)) delete rest.value
       const field = live
         ? { editAction: 'Update', id, ...rest, ...(name ? { name } : {}) }
         // New to this draft: named, never id'd — see the note above.

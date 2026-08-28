@@ -4,6 +4,7 @@ import { describe, it, expect } from 'vitest'
 import {
   PACKET_FIELD_MAP, PACKET_FIELD_IDS, isPacketField,
   seedPacketState, packetTickValues, packetMissing, wantsEndDate, captionConflicts,
+  resolvePacketFieldIds, missingPacketFields, packetPayloadCheck,
 } from '../boldsignPacketPanel.js'
 
 describe('the field map (verify table, PR #114)', () => {
@@ -15,13 +16,16 @@ describe('the field map (verify table, PR #114)', () => {
     expect(PACKET_FIELD_MAP.policy.map(p => [p.id, p.default])).toEqual([
       ['CheckBox4', false], ['CheckBox5', false], ['CheckBox6', true], ['CheckBox7', true],
     ])
-    expect(PACKET_FIELD_MAP.locked).toEqual([{ id: 'CheckBox3', value: true, expect: expect.any(RegExp) }])
+    // CheckBox3 is decided by nobody on this screen, so it is listed as
+    // untouched and carries no value to send.
+    expect(PACKET_FIELD_MAP.untouched).toEqual([{ id: 'CheckBox3', expect: expect.any(RegExp) }])
   })
 
-  it('owns exactly the nine boxes it decides', () => {
+  it('writes exactly the eight boxes it decides — CheckBox3 is not one of them', () => {
     expect([...PACKET_FIELD_IDS].sort()).toEqual(
-      ['CheckBox1', 'CheckBox2', 'CheckBox3', 'CheckBox4', 'CheckBox5', 'CheckBox6', 'CheckBox7', 'CheckBox8', 'CheckBox9'],
+      ['CheckBox1', 'CheckBox2', 'CheckBox4', 'CheckBox5', 'CheckBox6', 'CheckBox7', 'CheckBox8', 'CheckBox9'],
     )
+    expect(isPacketField('CheckBox3')).toBe(false)
     expect(isPacketField('CheckBox10')).toBe(false)
     expect(isPacketField('CheckBox15')).toBe(false)
   })
@@ -35,8 +39,11 @@ describe('what gets written', () => {
     expect(non).toMatchObject({ CheckBox1: false, CheckBox2: true, CheckBox8: false, CheckBox9: true })
   })
 
-  it('keeps Party: Buyer ticked without showing it', () => {
-    expect(packetTickValues({}).CheckBox3).toBe(true)
+  // The wipe bug. BoldSign reads an explicit "false" as "clear the box", and it
+  // answers 2xx either way, so a value sent for a box nobody decided is how the
+  // template's own Party: Buyer tick disappeared.
+  it('sends no value at all for Party: Buyer', () => {
+    expect('CheckBox3' in packetTickValues({ representation: 'exclusive', term: 'close' })).toBe(false)
   })
 
   it('carries the authored policy state — 3 and 4 on', () => {
@@ -118,5 +125,95 @@ describe('caption cross-check', () => {
 
   it('says nothing about a box the page could not caption', () => {
     expect(captionConflicts({ fields: [{ id: 'CheckBox1' }] })).toEqual([])
+  })
+})
+
+// ── The payload, which is where both reported bugs lived ─────────────────────
+describe('payload — silent fields stay out of it', () => {
+  // Every box on a real packet, including the ones behind the unnamed-fields
+  // toggle and the already-ticked Party: Buyer.
+  const templateFields = [
+    { id: 'CheckBox1' }, { id: 'CheckBox2' }, { id: 'CheckBox3', value: 'true' },
+    { id: 'CheckBox4' }, { id: 'CheckBox5' }, { id: 'CheckBox6', value: 'true' },
+    { id: 'CheckBox7', value: 'true' }, { id: 'CheckBox8' }, { id: 'CheckBox9' },
+    { id: 'CheckBox10' }, { id: 'CheckBox11' }, { id: 'CheckBox13' },
+    { id: 'CheckBox14' }, { id: 'CheckBox15' },
+  ]
+
+  it('omits every field the panel does not own', () => {
+    const rows = packetPayloadCheck({ representation: 'non-exclusive', term: 'fixed', fields: templateFields }).rows
+    const ids = rows.map(r => r.id)
+    for (const absent of ['CheckBox3', 'CheckBox10', 'CheckBox11', 'CheckBox13', 'CheckBox14', 'CheckBox15']) {
+      expect(ids).not.toContain(absent)
+    }
+    expect(ids.sort()).toEqual(
+      ['CheckBox1', 'CheckBox2', 'CheckBox4', 'CheckBox5', 'CheckBox6', 'CheckBox7', 'CheckBox8', 'CheckBox9'],
+    )
+  })
+
+  // Sending only the "on" side leaves yesterday's tick on the other box, and a
+  // packet claiming both exclusive and non-exclusive representation is worse
+  // than one claiming neither.
+  it('always sends both sides of a mutex pair', () => {
+    for (const [rep, term] of [['exclusive', 'close'], ['non-exclusive', 'fixed']]) {
+      const rows = packetPayloadCheck({ representation: rep, term, fields: templateFields }).rows
+      const byId = Object.fromEntries(rows.map(r => [r.id, r.value]))
+      expect(Object.keys(byId)).toEqual(expect.arrayContaining(['CheckBox1', 'CheckBox2', 'CheckBox8', 'CheckBox9']))
+      expect([byId.CheckBox1, byId.CheckBox2].sort()).toEqual(['false', 'true'])
+      expect([byId.CheckBox8, byId.CheckBox9].sort()).toEqual(['false', 'true'])
+    }
+  })
+
+  it('addresses a ticked box with the value the client already uses', () => {
+    const rows = packetPayloadCheck({ representation: 'exclusive', term: 'close', fields: templateFields }).rows
+    expect(rows.find(r => r.id === 'CheckBox1').value).toBe('true')
+    expect(rows.find(r => r.id === 'CheckBox2').value).toBe('false')
+  })
+
+  it('passes its own assertions on a sound payload', () => {
+    expect(packetPayloadCheck({ representation: 'exclusive', term: 'close', fields: templateFields }).problems).toEqual([])
+  })
+
+  it('complains when a decision has not been made', () => {
+    const { problems } = packetPayloadCheck({ representation: null, term: 'close', fields: templateFields })
+    expect(problems.join(' ')).toMatch(/Representation: 0 of 2/)
+  })
+
+  it('complains when the template has no box for a decision', () => {
+    const { problems } = packetPayloadCheck({
+      representation: 'exclusive', term: 'close',
+      fields: templateFields.filter(f => f.id !== 'CheckBox9'),
+    })
+    expect(problems.join(' ')).toMatch(/CheckBox9 is not on this template/)
+    expect(missingPacketFields({ fields: templateFields.filter(f => f.id !== 'CheckBox9') })).toEqual(['CheckBox9'])
+  })
+})
+
+// A payload addressed to an id the template does not have is accepted with a
+// 2xx and changes nothing — the box just opens empty, with no error to chase.
+describe('payload — ids come from the template, not from the map', () => {
+  const oddCasing = [
+    { id: 'Checkbox1' }, { id: 'checkbox2' }, { id: 'CHECKBOX8' }, { id: 'CheckBox9' },
+    { id: 'CheckBox4' }, { id: 'CheckBox5' }, { id: 'CheckBox6' }, { id: 'CheckBox7' },
+    { id: 'Checkbox3', value: 'true' },
+  ]
+
+  it('adopts whatever casing the template reports', () => {
+    expect(resolvePacketFieldIds({ fields: oddCasing })).toMatchObject({
+      CheckBox1: 'Checkbox1', CheckBox2: 'checkbox2', CheckBox8: 'CHECKBOX8', CheckBox9: 'CheckBox9',
+    })
+    const ids = packetPayloadCheck({ representation: 'exclusive', term: 'close', fields: oddCasing }).rows.map(r => r.id)
+    expect(ids).toEqual(expect.arrayContaining(['Checkbox1', 'checkbox2', 'CHECKBOX8']))
+    expect(ids).not.toContain('CheckBox1')
+  })
+
+  it('still keeps the untouched box out, whatever its casing', () => {
+    const ids = packetPayloadCheck({ representation: 'exclusive', term: 'close', fields: oddCasing }).rows.map(r => r.id)
+    expect(ids).not.toContain('Checkbox3')
+  })
+
+  it('reads the template state through the same casing', () => {
+    expect(seedPacketState({ fields: [{ id: 'checkbox2', value: 'true' }, { id: 'Checkbox1', value: 'false' }] }).representation)
+      .toBe('non-exclusive')
   })
 })

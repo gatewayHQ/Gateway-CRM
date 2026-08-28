@@ -105,3 +105,49 @@ describe('templateCaptions', () => {
     expect(second).toBe(first)
   })
 })
+
+// ── A saved layout must not carry a checkbox's tick ──────────────────────────
+// A layout remembers WHERE the agent put things. The state of a checkbox is a
+// term of the agreement, decided on the send screen for this packet. BoldSign
+// reports an unticked box as the non-empty string "false", so capturing it put a
+// stale value in the layout that the next /document/edit replayed onto the new
+// draft — clearing the boxes this send had just ticked and the ones the template
+// itself carried. /document/edit runs AFTER the draft is created, so it had the
+// last word.
+describe('layouts carry placement, not tick state', () => {
+  it('does not capture a checkbox value, ticked or unticked', async () => {
+    const { normalizeCapturedField } = await import('../boldsign.js')
+    const box = { id: 'CheckBox3', fieldType: 'CheckBox', pageNumber: 1, bounds: { x: 10, y: 20, width: 10, height: 10 } }
+    expect(normalizeCapturedField({ ...box, value: 'false' })).not.toHaveProperty('value')
+    expect(normalizeCapturedField({ ...box, value: 'true'  })).not.toHaveProperty('value')
+    // A text field's value is still captured — that is the hand-typed label the
+    // layout exists to preserve.
+    expect(normalizeCapturedField({ ...box, fieldType: 'TextBox', value: 'Story County' }))
+      .toMatchObject({ value: 'Story County' })
+  })
+
+  it('drops a tick from a layout already stored with one', async () => {
+    const { buildLayoutEditPayload } = await import('../boldsign.js')
+    const layout = { signers: [{ signerEmail: 'buyer@example.com', formFields: [
+      { id: 'CheckBox3', fieldType: 'CheckBox', pageNumber: 1, bounds: { x: 10, y: 20, width: 10, height: 10 }, value: 'false' },
+    ] }] }
+    const signerDetails = [{ id: 'signer-1', signerEmail: 'buyer@example.com', formFields: [{ id: 'CheckBox3', value: 'true' }] }]
+    const payload = buildLayoutEditPayload({ layout, signerDetails })
+    const field = payload.signers[0].formFields.find(f => f.id === 'CheckBox3')
+    // The live draft's own value wins, and the layout's stale "false" is gone.
+    expect(field.value).toBe('true')
+  })
+
+  it('leaves a checkbox alone when the draft reports no value for it', async () => {
+    const { buildLayoutEditPayload } = await import('../boldsign.js')
+    const layout = { signers: [{ signerEmail: 'buyer@example.com', formFields: [
+      { id: 'CheckBox3', fieldType: 'CheckBox', pageNumber: 1, bounds: { x: 10, y: 20, width: 10, height: 10 }, value: 'false' },
+    ] }] }
+    const signerDetails = [{ id: 'signer-1', signerEmail: 'buyer@example.com', formFields: [{ id: 'CheckBox3' }] }]
+    const payload = buildLayoutEditPayload({ layout, signerDetails })
+    const field = payload.signers[0].formFields.find(f => f.id === 'CheckBox3')
+    // No value at all rather than an explicit "false": BoldSign reads a false as
+    // an instruction to clear the template's own tick.
+    expect(field).not.toHaveProperty('value')
+  })
+})
