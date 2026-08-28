@@ -622,13 +622,31 @@ export async function logSignatureAudit(supabase, { dealId, actorId, documentId,
 // black and white); the summary is ordered and labeled instead.
 export function buildSigningSummary(props) {
   const signers = (props?.signerDetails || []).map((s, i) => {
+    // `id` rides along because on a packet full of unnamed boxes it is the ONLY
+    // thing that identifies a row. Without it every tick box printed as
+    // "Page 1 · CheckBox", and the paper copy could not be joined to the
+    // Selections list on the send screen — an agent reading the printout had no
+    // way to tell which line was which box.
+    //
+    // Sorted by page and then by POSITION on that page (BoldSign measures from
+    // the top-left, so y then x is reading order), not alphabetically by type:
+    // the printout is read against the document, so it has to run in the order
+    // the fields appear on it. Sorting by type interleaved a page's checkboxes
+    // with its text boxes and put the order at the mercy of a type name.
     const rows = (s?.formFields || []).map(f => ({
+      id:    f?.id || f?.fieldId || '',
       page:  Number(f?.pageNumber) || 1,
       type:  normalizeFieldType(f?.type || f?.fieldType) || String(f?.type || 'Field'),
       label: f?.label || f?.placeholder || '',
       value: f?.value || '',
       required: Boolean(f?.isRequired),
-    })).sort((a, b) => a.page - b.page || a.type.localeCompare(b.type))
+      y: num(f?.bounds?.y),
+      x: num(f?.bounds?.x),
+    })).sort((a, b) =>
+      a.page - b.page ||
+      (a.y ?? Infinity) - (b.y ?? Infinity) ||
+      (a.x ?? Infinity) - (b.x ?? Infinity) ||
+      a.type.localeCompare(b.type))
     return {
       order: Number(s?.order) || i + 1,
       role:  s?.signerRole || '',
@@ -851,7 +869,9 @@ async function appendSigningSummary(pdfDoc, { summary, documentName, status, val
       continue
     }
     for (const f of s.fields) {
-      const bits = [`Page ${f.page}`, f.type, f.label && `“${f.label}”`, f.value && `= ${f.value}`, !f.required && '(optional)']
+      // The id is printed only when the field has no caption of its own — for a
+      // named field the caption is the better identifier, and both would be noise.
+      const bits = [`Page ${f.page}`, f.type, f.label ? `“${f.label}”` : f.id, f.value && `= ${f.value}`, !f.required && '(optional)']
         .filter(Boolean).join(' · ')
       line(bits, { size: 10, indent: 14, gap: 13 })
     }
@@ -2600,6 +2620,14 @@ async function handler(req, res) {
         label:     f.label || f.placeholder || f.placeHolder || '',
         required:  Boolean(f.isRequired),
         value:     f.value != null ? String(f.value) : '',
+        // WHERE the field sits on the paper. Without this the send screen could
+        // only list fields in BoldSign's creation order, which is not the order
+        // they print in — leaving an agent to guess which of `CheckBox1` and
+        // `CheckBox11` is the "(exclusive)" box. Page + bounds let the screen
+        // list them in reading order instead (orderFieldsByPosition), so the
+        // list matches the form in front of them line for line.
+        page:      Number(f.pageNumber) || 1,
+        ...(f.bounds ? { bounds: f.bounds } : {}),
         ...(Array.isArray(f.dropdownOptions) && f.dropdownOptions.length ? { options: f.dropdownOptions } : {}),
       })).filter(f => {
         if (!f.id || seenFieldIds.has(f.id)) return false

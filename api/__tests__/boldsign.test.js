@@ -1109,6 +1109,37 @@ describe('buildSigningSummary — what the paper copy tells the agent', () => {
     expect(signers[0].fields.map(f => f.page)).toEqual([1, 1, 3])
   })
 
+  // A packet's tick boxes are routinely unnamed, and BoldSign hands fields back
+  // in the order they were placed. Down a page that is not the order they print
+  // in, so the paper copy has to re-sort by position — otherwise the printout an
+  // agent reads against the document lists its boxes in an order the document
+  // does not have, and no row can be matched to a box with confidence.
+  it('orders fields down the page, not by type name', () => {
+    const { signers } = buildSigningSummary({
+      signerDetails: [{ formFields: [
+        { id: 'CheckBox11', type: 'CheckBox', pageNumber: 1, bounds: { x: 300, y: 120 } },
+        { id: 'CheckBox2',  type: 'CheckBox', pageNumber: 1, bounds: { x: 60,  y: 140 } },
+        { id: 'CheckBox1',  type: 'CheckBox', pageNumber: 1, bounds: { x: 150, y: 120 } },
+        { id: 'Label3',     type: 'Label',    pageNumber: 1, bounds: { x: 60,  y: 100 } },
+      ] }],
+    })
+    expect(signers[0].fields.map(f => f.id)).toEqual(['Label3', 'CheckBox1', 'CheckBox11', 'CheckBox2'])
+  })
+
+  // The id is what joins a printed row to a row in the send screen's Selections
+  // list. Dropping it left every unnamed box printing as "Page 1 · CheckBox".
+  it('carries the field id, so an unnamed box is identifiable on paper', () => {
+    const { signers } = buildSigningSummary({
+      signerDetails: [{ formFields: [{ id: 'CheckBox11', type: 'CheckBox', pageNumber: 1 }] }],
+    })
+    expect(signers[0].fields[0].id).toBe('CheckBox11')
+  })
+
+  it('leaves the id empty rather than inventing one when BoldSign sends none', () => {
+    const { signers } = buildSigningSummary({ signerDetails: [{ formFields: [{ type: 'CheckBox', pageNumber: 1 }] }] })
+    expect(signers[0].fields[0].id).toBe('')
+  })
+
   it('normalizes the field type so the printout says TextBox, not Textbox', () => {
     const { signers } = buildSigningSummary(props)
     expect(signers[0].fields.find(f => f.label === 'County').type).toBe('TextBox')

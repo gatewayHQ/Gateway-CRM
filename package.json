@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "check:enums": "node scripts/check-enums.mjs",
     "audit:boldsign": "node scripts/audit-boldsign-templates.mjs",
+    "selections:spec": "node scripts/boldsign-selections-spec.mjs",
     "test": "vitest run"
   },
   "dependencies": {

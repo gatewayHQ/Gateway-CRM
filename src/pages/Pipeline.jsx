@@ -26,7 +26,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, orderFieldsByPosition, fieldPosition, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2543,7 +2543,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   }
 
   const fields     = details?.fields || []
-  const tickFields = fields.filter(f => isTickableField(f.type))
+  // In READING order — page, then line, then left to right — not the order
+  // BoldSign returns them in, which is the order they were placed in the editor.
+  // A packet's tick boxes are routinely captioned `CheckBox1`, `CheckBox11`,
+  // `CheckBox2`, and the caption is all an agent has to go on; listed the way the
+  // paper reads, the row for the "(exclusive)" box is the row above the one for
+  // "(non-exclusive)", because that is where they print. Creation order made that
+  // a guess, and guessing wrong locks the opposite term into a signed agreement.
+  const tickFields = orderFieldsByPosition(fields.filter(f => isTickableField(f.type)))
   const textFields = fields.filter(f => isFillableField(f.type))
 
   // Shared (Label) fields vs signer-specific ones. The difference is not
@@ -2891,12 +2898,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 BoldSign's editor instead does NOT carry to the signers. */}
             {shownTickFields.length > 0 && (
               <div className="form-group">
-                <label className="form-label">Selections <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— set these here and they travel with the send, locked. Each is still visible only to its own signer until they sign</span></label>
+                <label className="form-label">Selections <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— listed in the order they appear on the document, page by page. Set them here and they travel with the send, locked. Each is still visible only to its own signer until they sign</span></label>
                 {shownTickFields.map(f => (
                   <div key={f.id} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
                     <div style={{ flex:1, fontSize:12 }}>
                       {f.label || prettyLabel(f.id)}
-                      <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7, marginLeft:8 }}>{f.id} · {fieldType(f)}</span>
+                      <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7, marginLeft:8 }}>
+                        {fieldPosition(f) ? `p${fieldPosition(f).page} · ` : ''}{f.id} · {fieldType(f)}
+                      </span>
                     </div>
                     <select
                       className="form-control"

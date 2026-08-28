@@ -769,6 +769,44 @@ So the send modal now offers every **prefillable** field, not just the text ones
   agent decided is what every signer sees, and none of them can change it after the
   send. All three are pure and unit-tested in `src/lib/services/__tests__/boldsign.test.js`.
 
+### The Selections list is in reading order, because an unnamed box has nothing else
+BoldSign captions a box nobody named with its own auto id — `CheckBox1`,
+`CheckBox11`, `CheckBox4` — and returns fields in the order they were PLACED in the
+editor, which down a page is not the order they print in. On one live agency packet
+that produced fourteen rows reading "Checkbox1 · CheckBox1", in an order the paper
+does not have. Nothing on the screen said which row was the `(exclusive)` box and
+which was `(non-exclusive)`, and ticking the wrong one locks the opposite term into
+an agreement somebody then signs.
+
+The answer is the field's own geometry. BoldSign measures `bounds` from the
+**top-left** of the page (the same fact `drawFilledValues()` relies on when it flips
+y for pdf-lib), so page → y → x is exactly the order a person reads the form in.
+`template-details` carries `page` and `bounds`, and `orderFieldsByPosition()` in
+`src/lib/services/boldsignFields.js` sorts by them, with boxes within a few units of
+each other treated as one printed line and sorted left to right — that last part is
+what keeps "(exclusive) … (non-exclusive)" and "BUYER or SELLER" in the order they
+print rather than at the mercy of a one-point difference in placement.
+
+Listed that way, the Selections list matches the paper line for line, and each row
+shows its page (`p1 · CheckBox11 · CheckBox`). The printed copy agrees with it:
+`buildSigningSummary()` orders each page's fields by position too, and prints the
+field id for any box with no caption.
+
+To name the boxes on a template once and for all:
+
+```
+BOLDSIGN_API_KEY=… npm run selections:spec
+```
+
+`scripts/boldsign-selections-spec.mjs` writes one spec per template into
+`docs/boldsign-selections/`, listing every tick box in printed order with its id,
+page, coordinates, role, current ticked state, and the boxes sharing its line
+(mutually-exclusive candidates — a form writes alternatives on one line). It leaves
+`short_label` as TODO on purpose: the words printed beside a box are not in the API
+payload, and a generated name that is plausible and wrong is the exact failure being
+designed out. Order comes from the API, meaning comes from the page, a person joins
+them once. Worked example: `docs/ia-buyer-packet-selections.md`.
+
 ### Some types refuse to be locked, and say so by failing the whole send
 BoldSign rejects `IsReadOnly` outright on nine field types:
 

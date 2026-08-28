@@ -9,6 +9,15 @@ Meaning comes only from the printed text next to each box. Field identity comes 
 packet PDF's signing summary joined to the Selections list — see [Method](#method) for what that
 join proves and where it stops.
 
+**Update — the residue this doc left open is now resolvable without guessing.** Every checkbox
+carries `bounds`, and BoldSign measures them from the top-left of the page, so page + y + x is
+reading order. The send screen and `npm run selections:spec` both list tick boxes that way now
+(see [Resolving the pairs](#4-resolving-the-pairs)), which means the two boxes of a pair no longer
+arrive in an unknown order: the one that prints on the left of the line is the one listed first.
+The pairs below are still written as `A|B` because the ordered list has not been run against the
+live template from here — the network policy for this session blocks `api.boldsign.com`. Running
+it is a one-command job for anyone whose machine can reach BoldSign.
+
 ---
 
 ## What the packet actually contains
@@ -30,14 +39,15 @@ The template carries **14 checkbox fields**. The Selections list shows 12 withou
 ## 1. Mapping table
 
 `field_id` is the id shown in grey in the Selections list. A `A|B` pair means the two boxes are
-identified as a pair but their order within the page is not resolved — see [UNCERTAIN](#4-uncertain).
+identified as a pair but their order within the page is not resolved — see
+[Resolving the pairs](#4-resolving-the-pairs).
 
 | current BoldSign list text | field_id | short_label | helper | owner | default | mutex_group | already_set? |
 |---|---|---|---|---|---|---|---|
 | `Checkbox1 · CheckBox1` / `Checkbox2 · CheckBox11` | `CheckBox1` \| `CheckBox11` | Exclusive representation | "(exclusive)" on the opening line, p.1 | sender locks | **on** (recommended default) | `representation` | no (off) |
 | `Checkbox1 · CheckBox1` / `Checkbox2 · CheckBox11` | `CheckBox11` \| `CheckBox1` | Non-exclusive representation | "(non-exclusive)", same line | sender locks | off | `representation` | no (off) |
 | `Checkbox1 · CheckBox2` | `CheckBox2` | Party: Buyer | "prospective BUYER" — confirmed by the printed X at 95.5pt on p.1 | locked on | on | `party` | **yes** |
-| *(no field — see UNCERTAIN Q1)* | — | Party: Seller | "or SELLER" — printed box, no BoldSign field found | n/a | stays blank | `party` | no |
+| *(no field — see question 1)* | — | Party: Seller | "or SELLER" — printed box, no BoldSign field found | n/a | stays blank | `party` | no |
 | *(to be replaced — see Term A/B as Labels)* | new Label, replaces `CheckBox4`/`CheckBox3` | Term A: Until close / completion | §6.A — runs until closing, completion, or earlier termination | sender fills (**Label**) | `X` (recommended default) | `term` | no |
 | *(to be replaced — see Term A/B as Labels)* | new Label, replaces `CheckBox4`/`CheckBox3` | Term B: Fixed end date | §6.B — ends 11:59 p.m. on a stated date | sender fills (**Label**) | empty | `term` | no |
 | `Checkbox1 · CheckBox12` / `Checkbox2 · CheckBox13` | `CheckBox12` \| `CheckBox13` | Policy: Single Seller Agency | Disclosure item 1 | sender locks | off — flag if turned on | `policy` (not exclusive) | no (off) |
@@ -111,13 +121,31 @@ Everything else in these screenshots is already set.
 
 ---
 
-## 4. UNCERTAIN
+## 4. Resolving the pairs
 
-Four questions remain. Each is a **pair whose two members are identified but whose order within
-the page is not** — the ordering that survives into the Selections list is BoldSign's field
-creation order, and on page 4 that order is provably *not* the visual top-to-bottom order (the
-two ticked policies, 3 and 4, come first in the list even though 1 and 2 print above them). One
-click on each row in BoldSign settles all four.
+Three questions remain (see below). Each is a **pair whose two members are identified but whose
+order within the page is not** — the ordering that used to survive into the Selections list was
+BoldSign's field creation order, and on page 4 that order is provably *not* the visual
+top-to-bottom order (the two ticked policies, 3 and 4, come first in the list even though 1 and 2
+print above them).
+
+**How to settle all three in one command**, instead of clicking each row in the BoldSign editor:
+
+```
+BOLDSIGN_API_KEY=… npm run selections:spec
+```
+
+It writes `docs/boldsign-selections/<template>.md` per template, listing every tick box in the
+order it prints — page, then line, then left to right — with its id, role, current ticked state,
+and the boxes that share its line. Read it beside the packet and each question below answers
+itself: the first row of the "(exclusive) … (non-exclusive)" line is the box printed on the left,
+which is `(exclusive)`. The same ordering now drives the send screen's Selections list, so an
+agent who never opens this file still sees the boxes in the order the paper has them.
+
+What the command does **not** do is name a box. The words printed beside a box are not in the API
+payload, so `short_label` comes out as TODO — deliberately, because a generated name that is
+plausible and wrong is the failure this whole exercise exists to prevent. Order comes from the
+API; meaning comes from the printed page; a person joins them once per template.
 
 1. **Page 1 — is `SELLER` a field?** Page 1 has four printed boxes (exclusive, non-exclusive,
    BUYER, SELLER) but only three checkbox fields. `CheckBox2` is BUYER (confirmed). Are the
@@ -174,10 +202,10 @@ Neither is in scope to fix here; both affect whether this packet behaves correct
 
    **Decision: both become Labels.** See [Term A/B as Labels](#term-ab-as-labels) for the
    mechanics.
-2. **The signing summary prints `f.label`, not `f.id`.** `buildSigningSummary()` in
-   `api/boldsign.js` has the field id in hand and drops it, so every unnamed box prints as
-   "CheckBox1" and the printout cannot be joined to the Selections list without the reconstruction
-   in [Method](#method). Adding the id to that line would make this whole exercise self-service.
+2. ~~**The signing summary prints `f.label`, not `f.id`.**~~ **Fixed.** `buildSigningSummary()`
+   in `api/boldsign.js` now carries the field id and prints it for any box with no caption of its
+   own, and orders each page's fields by position rather than by type name. The printed copy and
+   the Selections list can be joined row for row, without the reconstruction in [Method](#method).
 
 ---
 
@@ -202,5 +230,12 @@ trust it:
   BUYER (p.1, 95.5pt — matching the one ticked field) and on Policies 3 and 4 (p.4).
 
 What this does **not** establish: the order of two same-page fields sharing a state. That is
-exactly the residue in UNCERTAIN, and it is why no id above is asserted where a coin flip would
-decide it.
+exactly the residue in [Resolving the pairs](#4-resolving-the-pairs), and it is why no id above is
+asserted where a coin flip would decide it.
+
+**What established it since**: `bounds`. The join above worked from list order, which is placement
+order; the field's own coordinates were there the whole time and were simply not being carried to
+the screen. `template-details` now returns `page` and `bounds`, `orderFieldsByPosition()` in
+`src/lib/services/boldsignFields.js` sorts by them, and both the send screen and the spec
+generator read the packet the way a person does. Everything above stands; the part that needed a
+click no longer does.
