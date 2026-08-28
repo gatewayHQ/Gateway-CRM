@@ -38,8 +38,8 @@ identified as a pair but their order within the page is not resolved — see [UN
 | `Checkbox1 · CheckBox1` / `Checkbox2 · CheckBox11` | `CheckBox11` \| `CheckBox1` | Non-exclusive representation | "(non-exclusive)", same line | sender locks | off | `representation` | no (off) |
 | `Checkbox1 · CheckBox2` | `CheckBox2` | Party: Buyer | "prospective BUYER" — confirmed by the printed X at 95.5pt on p.1 | locked on | on | `party` | **yes** |
 | *(no field — see UNCERTAIN Q1)* | — | Party: Seller | "or SELLER" — printed box, no BoldSign field found | n/a | stays blank | `party` | no |
-| `Checkbox1 · CheckBox4` / `Checkbox1 · CheckBox3` | `CheckBox4` (Buyer) \| `CheckBox3` (Agent) | Term A: Until close / completion | §6.A — runs until closing, completion, or earlier termination | sender locks | **on** (recommended default) | `term` | no (off) |
-| `Checkbox1 · CheckBox4` / `Checkbox1 · CheckBox3` | `CheckBox3` (Agent) \| `CheckBox4` (Buyer) | Term B: Fixed end date | §6.B — ends 11:59 p.m. on a stated date | sender locks | off | `term` | no (off) |
+| *(to be replaced — see Term A/B as Labels)* | new Label, replaces `CheckBox4`/`CheckBox3` | Term A: Until close / completion | §6.A — runs until closing, completion, or earlier termination | sender fills (**Label**) | `X` (recommended default) | `term` | no |
+| *(to be replaced — see Term A/B as Labels)* | new Label, replaces `CheckBox4`/`CheckBox3` | Term B: Fixed end date | §6.B — ends 11:59 p.m. on a stated date | sender fills (**Label**) | empty | `term` | no |
 | `Checkbox1 · CheckBox12` / `Checkbox2 · CheckBox13` | `CheckBox12` \| `CheckBox13` | Policy: Single Seller Agency | Disclosure item 1 | sender locks | off — flag if turned on | `policy` (not exclusive) | no (off) |
 | `Checkbox1 · CheckBox12` / `Checkbox2 · CheckBox13` | `CheckBox13` \| `CheckBox12` | Policy: Single Buyer Agency | Disclosure item 2 | sender locks | off (optional) | `policy` (not exclusive) | no (off) |
 | `Checkbox1 · CheckBox6` / `Checkbox2 · CheckBox7` | `CheckBox6` \| `CheckBox7` | Policy: Appointed Agency | Disclosure item 3 | locked on | on | `policy` (not exclusive) | **yes** |
@@ -53,7 +53,8 @@ identified as a pair but their order within the page is not resolved — see [UN
 **Mutex rules**
 
 - `representation` — **XOR**: exactly one of Exclusive / Non-exclusive. Never both, never neither.
-- `term` — **XOR**: exactly one of Term A / Term B ("check either A or B").
+- `term` — **XOR**: exactly one of Term A / Term B ("check either A or B"). Enforced by the
+  CRM, not by BoldSign: the chosen term's Label carries `X` and the other is sent empty.
 - `party` — Buyer is ticked and stays ticked. Seller appears to have no field at all.
 - `policy` — *not* mutually exclusive ("check all boxes that apply"); grouped only for display.
   Policies 3 and 4 are ticked and stay ticked. Policy 1 on a buyer packet is a contradiction:
@@ -73,10 +74,16 @@ Policy: Single Seller Agency      · sender locks (keep off)
 Policy: Single Buyer Agency       · sender locks
 Policy: Appointed Agency          · locked on
 Policy: Consensual Dual Agency    · locked on
-Term A: Until close / completion  · sender locks
-Term B: Fixed end date            · sender locks
-Term start date                   · sender fills
-Term B end date                   · sender fills only if B
+```
+
+The term choice is **not** in this panel. Once Term A/B become Labels they are shared fields, so
+they belong with the other values every signer reads on arrival:
+
+```
+Term: which one          · A — until close / completion   (default)
+                         · B — fixed end date
+Term start date          · sender fills
+Term B end date          · sender fills only if B
 ```
 
 "Party: Seller · locked off" is **dropped from the panel**: no checkbox field was found on that
@@ -118,12 +125,40 @@ click on each row in BoldSign settles all four.
    one representation box unfillable?
 2. **Page 1 — `CheckBox1` vs `CheckBox11`:** which is Exclusive and which is Non-exclusive?
    Consequence of guessing: the packet says the opposite of what the agent picked.
-3. **Page 2 — `CheckBox4` (Buyer) vs `CheckBox3` (Buyer's Agent):** which is Term A and which is
-   Term B?
+3. ~~**Page 2 — `CheckBox4` vs `CheckBox3`:** which is Term A and which is Term B?~~
+   **Resolved by removal** — both are being replaced by Labels placed directly on the §6.A and
+   §6.B boxes, so their current order stops mattering. Three questions remain, not four.
 4. **Page 4 — `CheckBox12` vs `CheckBox13`:** which is Policy 1 (Single Seller Agency, must stay
    off) and which is Policy 2 (Single Buyer Agency, optional)?
    (`CheckBox6` vs `CheckBox7` — Policies 3 and 4 — is the same open pair, but both are locked
    on, so the order does not change behavior.)
+
+---
+
+## Term A/B as Labels
+
+A Label is not a checkbox — it is read-only text whose value is set at send time and which **every
+signer sees the moment the document arrives**, in any signing order. So "make Term A/B Labels" is
+not a type change on the existing fields; it is:
+
+1. **Delete** `CheckBox4` (Buyer role) and `CheckBox3` (Buyer's Agent role) from the template.
+2. **Place two Labels** in the same spots — one inside the §6.A box, one inside the §6.B box.
+3. **Name them** so the CRM can address them, e.g. `term_a_mark` and `term_b_mark`. A field's
+   *name* is what a CRM token matches; its *id* stays BoldSign's auto-counter.
+4. At send time the CRM writes `X` into the chosen term's Label and an **empty string** into the
+   other. That is what makes the XOR real: one value written, one blank, both decided in one place.
+
+Why this beats simply moving both checkboxes onto one role, which would also fix the visibility bug:
+
+- A Label is read-only **by construction** — no signer can alter the term after the sender sets it.
+  A read-only CheckBox is read-only only for the role it is assigned to.
+- Every party reads the term on arrival, whatever the signing order. This is the exact case the
+  Label field exists for, per `docs/boldsign-integration.md`.
+- A signer cannot tick one box while the other is blank — a state a printed either/or agreement
+  must never reach.
+
+Placement note: size each Label to the printed square so the `X` lands inside it rather than
+beside it. Nothing else on page 2 changes — the three date groups stay as they are.
 
 ---
 
@@ -135,8 +170,10 @@ Neither is in scope to fix here; both affect whether this packet behaves correct
    and `CheckBox3` on the Buyer's Agent role. Per `docs/boldsign-integration.md`, a CheckBox is
    role-scoped: each signer sees only their own box until the other has signed. Neither party can
    see both halves of an either/or choice, and the XOR cannot be enforced or even observed by one
-   signer. Both boxes belong on the same role — or, better, both should be Labels set by the
-   sender, since the term of the agreement is not either signer's input.
+   signer.
+
+   **Decision: both become Labels.** See [Term A/B as Labels](#term-ab-as-labels) for the
+   mechanics.
 2. **The signing summary prints `f.label`, not `f.id`.** `buildSigningSummary()` in
    `api/boldsign.js` has the field id in hand and drops it, so every unnamed box prints as
    "CheckBox1" and the printout cannot be joined to the Selections list without the reconstruction
