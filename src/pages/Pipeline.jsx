@@ -26,7 +26,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, PACKET_FIELD_MAP, isPacketField, seedPacketState, packetTickValues, packetMissing, wantsEndDate, captionConflicts, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2412,9 +2412,19 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           // fieldTokenValue matches on the field's id, name OR label, normalized
           // for case and separators — BoldSign auto-assigns the id (`Label1`), so
           // a hand-typed token usually lives in the name or the label.
+          // A tick box is the SENDER's decision, not the signer's: it starts at
+          // whatever the template itself already carries (a box the packet was
+          // authored with stays ticked) and goes out locked either way. It used
+          // to start null — "leave it to the signer" — which is not what this
+          // panel is for: these boxes are terms of the agreement.
+          // A tick box the panel owns is a sender decision and is filled in
+          // below from the panel's state. Any other box is NOT a sender
+          // decision: it keeps whatever the template carries and no value is
+          // sent for it, so this panel can never flip a box it does not show.
           seededValues[f.id] = isTickableField(f.type) ? null : fieldTokenValue(tokenVals, f)
         }
         setValues(seededValues)
+        setPacket(seedPacketState({ fields }))
       })
       // A FAILED LOAD MUST NOT LOOK LIKE A LOADED TEMPLATE. This used to fall back to
       // a single generic "Signer" row — which, next to "Roles left blank are removed
@@ -2431,6 +2441,12 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     return () => { cancelled = true }
   }, [templateId, reloadKey])
 
+  // The panel's decisions. Kept apart from `values` because they are choices,
+  // not field contents — packetTickValues() turns them into field values at
+  // send time, which is what makes the radios the only place a mutex lives.
+  const [packet, setPacket] = React.useState({ representation: null, term: null, policy: {} })
+  const [showPolicy, setShowPolicy] = React.useState(false)
+
   const [showAllFields, setShowAllFields] = React.useState(false)
   const [showShared, setShowShared] = React.useState(false)
   const setSigner = (idx, k, v) => setSigners(p => ({ ...p, [idx]: { ...(p[idx] || {}), [k]: v } }))
@@ -2444,6 +2460,8 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     const roleList = details?.roles || []
     const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())
     if (!filled.length) { pushToast('At least one signer needs a name and email', 'error'); return null }
+    const missing = packetMissing(packet)
+    if (missing.length) { pushToast(`Choose ${missing.join(' and ')} first`, 'error'); return null }
 
     // Split the prefilled values in two — this is the whole point of Label
     // fields. `sharedFormFields` (the template's Labels) go out as ONE common,
@@ -2453,7 +2471,11 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     // Keyed by ORIGINAL role index — buildTemplateRoles handles the index shift.
     const { sharedFormFields, byRole } = buildPrefillFields({
       fields: details.fields || [],
-      values,
+      // The panel's radios decide the tick boxes it owns; `values` carries
+      // everything typed. Merged here, at the one place both buttons build
+      // their payload from, so Save as Draft and Place Fields cannot disagree
+      // about what the packet says.
+      values: { ...values, ...packetTickValues(packet) },
       filledRoleIndices: filled.map(r => r.index),
     })
     // Roles + removals, with BoldSign's post-removal index shift applied — see
@@ -2561,14 +2583,15 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
 
   const sharedTextFields = shown(textFields.filter(f => isSharedField(f.type)))
   const signerTextFields = shown(textFields.filter(f => !isSharedField(f.type)))
-  const shownTickFields  = shown(tickFields)
+  // The panel asks for the packet's decisions directly (Representation, Term,
+  // Policy) rather than listing every tick box on the template, so there is no
+  // per-box row list here any more. boldsignSelections.js still backs the
+  // generic naming used elsewhere; boldsignPacketPanel.js owns this panel.
   // Only the shared fields that actually carry a value. An empty one has nothing
   // to show in a summary, and listing it as blank would invite the agent to go
   // hunting for something to type where the template simply has a spare box.
   const sharedFilled = sharedTextFields.filter(f => String(values[f.id] ?? '').trim())
-  const hiddenCount = showAllFields
-    ? 0
-    : [...textFields, ...tickFields].filter(isUnconfiguredField).length
+  const hiddenCount = showAllFields ? 0 : textFields.filter(isUnconfiguredField).length
   // A role-scoped field can name no role at all, in which case it rides on the
   // first signer — either way it is one signer's, which is what the warning below
   // needs to say.
@@ -2603,6 +2626,24 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     today:  new Date().toISOString().slice(0, 10),
   }), [deal, property, contact, extraContacts, sideClients, activeAgent, dealAgents])
 
+  // The end date only exists on the fixed-date term, so its fields appear only
+  // when that radio is picked.
+  const endDateFields = React.useMemo(
+    () => (fields || []).filter(f => fieldTokenKey(f) === 'retainer_end_date'),
+    [fields],
+  )
+
+  // The map ties each decision to a field id; this re-checks those ids against
+  // the caption actually read off the PDF. It never overrides the map and shows
+  // the sender nothing — it exists so a template edit that moves a box surfaces
+  // here rather than as a wrong term on a signed agreement.
+  React.useEffect(() => {
+    const conflicts = captionConflicts({ fields })
+    for (const c of conflicts) {
+      console.warn(`[boldsign] packet panel: ${c.id} is captioned “${c.caption}” on the page, which does not match what the panel writes to it. Check the template's field placement.`)
+    }
+  }, [fields])
+
   // What BoldSign actually calls this field, and whether it matched a CRM token.
   // A blank box used to be unreadable — "did the deal have no value, or is the
   // field named something the CRM doesn't recognise?" — and the answer lived in
@@ -2629,7 +2670,17 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     // those resolves, the raw PascalCase id — which is what every one of these
     // used to show, unreadable id and all.
     const info = fieldInfo(f)
-    const heading = info?.text || f.label || f.name || prettyLabel(f.id)
+    // …and ahead of that raw id, the caption read off the PDF itself — the words
+    // printed beside the field on the page (see api/_lib/pdfText.js). A template
+    // nobody labelled still names its own fields this way.
+    //
+    // `f.name` only counts as a name when it differs from the id: BoldSign fills
+    // `name` with the auto id when nobody typed one, so trusting it blindly puts
+    // "Label7" ahead of the caption the page itself supplies — the exact thing
+    // the caption exists to replace.
+    const authored = String(f.name || '').trim()
+    const named = authored && authored.toLowerCase() !== String(f.id || '').trim().toLowerCase() ? authored : ''
+    const heading = info?.text || f.label || named || f.caption || prettyLabel(f.id)
     return (
     <div key={f.id} style={{ marginBottom:8 }}>
       <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:2, display:'flex', gap:8, alignItems:'baseline' }}>
@@ -2789,19 +2840,20 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                       Nothing on this template matches the deal yet. Open it below to fill anything in by hand.
                     </div>
                   )}
-                  {sharedFilled.length > 0 && !showShared && (
+                  {/* The deal, in the three facts worth checking before a send.
+                      Everything else stays behind the link below. */}
+                  {!showShared && (
                     <div style={{ fontSize:12, lineHeight:1.7 }}>
-                      {sharedFilled.slice(0, 5).map(f => (
-                        <div key={f.id} style={{ display:'flex', gap:8 }}>
-                          <span style={{ color:'var(--gw-mist)', minWidth:130 }}>{fieldInfo(f)?.text || prettyLabel(fieldTokenKey(f) || f.id)}</span>
-                          <strong style={{ flex:1 }}>{values[f.id]}</strong>
+                      {[
+                        ['Buyer',           tokenVals.client_names],
+                        ['Appointed agent', tokenVals.agent_name],
+                        ['Agreement date',  [tokenVals.agreement_month, tokenVals.agreement_day, tokenVals.agreement_year_full].filter(Boolean).join(' ')],
+                      ].filter(([, v]) => String(v || '').trim()).map(([k, v]) => (
+                        <div key={k} style={{ display:'flex', gap:8 }}>
+                          <span style={{ color:'var(--gw-mist)', minWidth:130 }}>{k}</span>
+                          <strong style={{ flex:1 }}>{v}</strong>
                         </div>
                       ))}
-                      {sharedFilled.length > 5 && (
-                        <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
-                          and {sharedFilled.length - 5} more
-                        </div>
-                      )}
                     </div>
                   )}
                   {showShared && renderGroupedFields(sharedTextFields)}
@@ -2811,9 +2863,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                     style={{ marginTop:6, padding:0 }}
                     onClick={() => setShowShared(v => !v)}
                   >
-                    {showShared
-                      ? 'Done — hide these'
-                      : `Review or edit ${sharedTextFields.length} shared field${sharedTextFields.length === 1 ? '' : 's'}`}
+                    {showShared ? 'Done — hide these' : 'Review or edit shared fields'}
                   </button>
                 </div>
               </div>
@@ -2867,51 +2917,85 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
             {/* The one problem this modal cannot fix from here: shared deal data
                 the template put on a role's own field. Say which fields, and say
                 what it means, rather than letting a client find the blank. */}
-            {sharedGaps.length > 0 && (
-              <div style={{ background:'#fffbe6', border:'1px solid #d4a017', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:12, fontSize:12, lineHeight:1.6 }}>
-                <strong>Some deal details will not be visible to everyone right away.</strong>
-                <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
-                  {sharedGaps.map(f => `“${f.label || f.name || prettyLabel(f.id)}” (${roleNameFor(f.roleIndex)})`).join(', ')} —
-                  {' '}these are filled in, but each is assigned to one signer, and BoldSign only shows a
-                  signer&rsquo;s fields to the others once that signer has finished.
-                  {inOrder
-                    ? <> They belong to someone who signs <strong>after</strong> {roleNameFor(firstSignerIndex)}, so the
-                        earlier signers open the document with those lines blank. Fix it in the BoldSign template by
-                        assigning them to the first signer (read-only), or by making them <strong>Label</strong> fields.</>
-                    : <> This send goes to everyone at once, so nobody sees anybody else&rsquo;s fields. Tick
-                        <strong> Sign in this order</strong> above and put the client first, or ask an admin to make
-                        them <strong>Label</strong> fields, which every signer sees whatever the order.</>}
-                </div>
-              </div>
-            )}
+            {/* The role-visibility warning is deliberately not rendered here. It
+                named signer roles ("Buyer's Agent") and described BoldSign's
+                reveal order — true, and not a decision the sender makes on this
+                screen. sharedGaps is still computed and still drives the
+                template-defect reporting elsewhere. */}
 
-            {/* Boxes the AGENT decides — exclusive agency, who pays what. Ticked
-                here they go out as real, locked values every signer sees; left
-                alone they stay the signer's to fill. Setting one inside
-                BoldSign's editor instead does NOT carry to the signers. */}
-            {shownTickFields.length > 0 && (
-              <div className="form-group">
-                <label className="form-label">Selections <span style={{ fontSize:11, fontWeight:400, color:'var(--gw-mist)' }}>— set these here and they travel with the send, locked. Each is still visible only to its own signer until they sign</span></label>
-                {shownTickFields.map(f => (
-                  <div key={f.id} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
-                    <div style={{ flex:1, fontSize:12 }}>
-                      {f.label || prettyLabel(f.id)}
-                      <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7, marginLeft:8 }}>{f.id} · {fieldType(f)}</span>
+            {/* REPRESENTATION and TERM — the two choices a buyer packet cannot
+                be sent without. Radios, so the mutex is structural: picking one
+                is picking against the other, and there is no state in which both
+                or neither are set for the sender to reconcile. */}
+            <div className="form-group">
+              <label className="form-label">Representation</label>
+              {PACKET_FIELD_MAP.representation.options.map(o => (
+                <label key={o.key} style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, marginBottom:4, fontWeight:400, cursor:'pointer' }}>
+                  <input
+                    type="radio"
+                    name="gw-representation"
+                    checked={packet.representation === o.key}
+                    onChange={() => setPacket(p => ({ ...p, representation: o.key }))}
+                  />
+                  {o.label}
+                </label>
+              ))}
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Term</label>
+              {PACKET_FIELD_MAP.term.options.map(o => (
+                <label key={o.key} style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, marginBottom:4, fontWeight:400, cursor:'pointer' }}>
+                  <input
+                    type="radio"
+                    name="gw-term"
+                    checked={packet.term === o.key}
+                    onChange={() => setPacket(p => ({ ...p, term: o.key }))}
+                  />
+                  {o.label}
+                </label>
+              ))}
+              {/* An end date exists only on the fixed-date term. */}
+              {wantsEndDate(packet.term) && endDateFields.length > 0 && (
+                <div style={{ marginTop:6 }}>{endDateFields.map(renderTextField)}</div>
+              )}
+            </div>
+
+            {/* POLICY — state, not a decision. Closed by default because the
+                packet is authored with these set and a sender changing them is
+                the exception. */}
+            <div className="form-group">
+              <button
+                type="button"
+                className="btn btn--link btn--sm"
+                style={{ padding:0 }}
+                onClick={() => setShowPolicy(v => !v)}
+              >
+                Policy {showPolicy ? '▾' : '▸'}
+              </button>
+              <div style={{ fontSize:12, lineHeight:1.7, marginTop:4 }}>
+                {PACKET_FIELD_MAP.policy.map(pol => {
+                  const on = packet.policy?.[pol.id] == null ? pol.default : Boolean(packet.policy[pol.id])
+                  return (
+                    <div key={pol.id} style={{ display:'flex', alignItems:'center', gap:8 }}>
+                      <span style={{ color:'var(--gw-mist)', minWidth:130 }}>{pol.label}</span>
+                      {showPolicy
+                        ? (
+                          <label style={{ display:'flex', alignItems:'center', gap:6, fontWeight:400, cursor:'pointer' }}>
+                            <input
+                              type="checkbox"
+                              checked={on}
+                              onChange={e => setPacket(p => ({ ...p, policy: { ...(p.policy || {}), [pol.id]: e.target.checked } }))}
+                            />
+                            {on ? 'on' : 'off'}
+                          </label>
+                        )
+                        : <strong>{on ? 'on' : 'off'}</strong>}
                     </div>
-                    <select
-                      className="form-control"
-                      style={{ width:150, flex:'none' }}
-                      value={values[f.id] === true ? 'yes' : values[f.id] === false ? 'no' : ''}
-                      onChange={e => setValue(f.id, e.target.value === 'yes' ? true : e.target.value === 'no' ? false : null)}
-                    >
-                      <option value="">Signer decides</option>
-                      <option value="yes">Checked</option>
-                      <option value="no">Unchecked</option>
-                    </select>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
-            )}
+            </div>
 
             {hiddenCount > 0 && (
               <button

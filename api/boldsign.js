@@ -2,6 +2,8 @@ import { applyJsonCors, requireAgent, errorResponse, getServiceClient, getUserCl
 import closingPacketHandler from './_handlers/closing-packet.js'
 import { wrap } from './_lib/observability.js'
 import crypto from 'node:crypto'
+import { extractPdfWords } from './_lib/pdfText.js'
+import { captionFields, detectSelectionCues } from '../src/lib/services/boldsignCaptions.js'
 
 // We verify webhook signatures against the RAW request body, so the automatic
 // body parser must be off — we read the stream and parse it ourselves below.
@@ -1839,6 +1841,80 @@ export async function resolveOnBehalfOf(supabase, agentId) {
 // request id — the same shape the other routes emit, and the thing that makes a
 // slow or failing send greppable instead of anecdotal. This is the busiest and
 // most consequential route in the app; it was the only one not wrapped.
+// ─── Captions read off the page ──────────────────────────────────────────────
+// A template whose fields nobody named reaches the send screen as `Checkbox1`,
+// `CheckBox11`, `Label7`. The words printed beside each box are the caption the
+// agent needs, and the template's own PDF has them — so fetch it once, extract
+// the text, and match each field's bounds against the words on its line. See
+// src/lib/services/boldsignCaptions.js for the geometry.
+//
+// BEST EFFORT, ALWAYS. Every failure here — no PDF, an unparseable one, a scale
+// that cannot be resolved — yields no captions rather than bad ones, and the
+// send screen falls back to exactly what it showed before. A wrong caption on a
+// box that locks a term of an agreement is worse than no caption at all, which
+// is why nothing here guesses: a field the page says nothing beside simply gets
+// no caption.
+//
+// Cached per template because the modal re-opens far more often than a template
+// changes, and a cold parse of a three-page packet is a couple of hundred
+// milliseconds. Instance-local and short-lived: a template edited in BoldSign
+// picks up its new captions within the TTL, with no invalidation to get wrong.
+const CAPTION_TTL_MS = 10 * 60 * 1000
+const CAPTION_CACHE_MAX = 24
+const captionCache = new Map()
+
+export async function templateCaptions(templateId, { fields = [], props = {}, fetchPdf = null } = {}) {
+  const hit = captionCache.get(templateId)
+  if (hit && hit.expires > Date.now()) return hit.value
+
+  const empty = { captions: {}, cues: [] }
+  let value = empty
+  try {
+    const geo = (fields || [])
+      .filter(f => f?.id && f?.bounds && Number.isFinite(Number(f.bounds.x)) && Number.isFinite(Number(f.bounds.y)))
+      .map(f => ({
+        id: f.id,
+        page: Number(f.page) || 1,
+        x: Number(f.bounds.x), y: Number(f.bounds.y),
+        width: Number(f.bounds.width) || 0, height: Number(f.bounds.height) || 0,
+      }))
+    if (!geo.length) return empty
+
+    // Injectable so the tests can drive the whole pass from a generated PDF
+    // without a BoldSign account.
+    const download = fetchPdf || (async () => {
+      const r = await boldsign(`/template/download?templateId=${encodeURIComponent(templateId)}`, { raw: true })
+      if (!r.ok) throw new Error(`/template/download refused (HTTP ${r.status})`)
+      return new Uint8Array(await r.arrayBuffer())
+    })
+    const bytes = await download()
+    const { words, pages } = await extractPdfWords(bytes)
+    if (!words.length || !pages.length) return empty
+
+    // BoldSign's bounds are not necessarily points — resolveBoundsScale decides
+    // from evidence which mapping this document uses, the same way the print
+    // path does. Null means nothing validated, and nothing should be captioned.
+    const scale = resolveBoundsScale({ fields: geo, pdfPages: pages, boldsignSizes: boldsignPageSizes(props) })
+    if (!scale) {
+      console.warn(`[boldsign] captions: could not establish a bounds scale for ${templateId}`)
+      return empty
+    }
+
+    const scaled = geo.map(f => ({
+      id: f.id, page: f.page,
+      bounds: { x: f.x * scale, y: f.y * scale, width: f.width * scale, height: f.height * scale },
+    }))
+    value = { captions: captionFields({ fields: scaled, words }), cues: detectSelectionCues(words) }
+  } catch (err) {
+    console.warn(`[boldsign] captions: skipped for ${templateId} (${err.message})`)
+    return empty
+  }
+
+  captionCache.set(templateId, { value, expires: Date.now() + CAPTION_TTL_MS })
+  if (captionCache.size > CAPTION_CACHE_MAX) captionCache.delete(captionCache.keys().next().value)
+  return value
+}
+
 async function handler(req, res) {
   applyJsonCors(res, req)
   if (req.method === 'OPTIONS') return res.status(200).end()
@@ -2600,13 +2676,28 @@ async function handler(req, res) {
         label:     f.label || f.placeholder || f.placeHolder || '',
         required:  Boolean(f.isRequired),
         value:     f.value != null ? String(f.value) : '',
+        // WHERE the field sits. Carried through so the send screen can name a
+        // field nobody named, from the words printed beside it on the page
+        // (templateCaptions above). Dropping these was why the only caption
+        // available for an unnamed tick box was its own auto-id — `Checkbox1`,
+        // which tells an agent nothing about the term they are about to lock.
+        page:      Number(f.pageNumber) || 1,
+        ...(f.bounds ? { bounds: f.bounds } : {}),
         ...(Array.isArray(f.dropdownOptions) && f.dropdownOptions.length ? { options: f.dropdownOptions } : {}),
       })).filter(f => {
         if (!f.id || seenFieldIds.has(f.id)) return false
         seenFieldIds.add(f.id)
         return true
       })
-      return res.json({ roles, fields })
+
+      // Captions are additive and never fatal: a template that cannot be parsed
+      // returns the same payload it always did.
+      const { captions, cues } = await templateCaptions(templateId, { fields, props: data })
+      const captioned = fields.map(f => (captions[f.id]
+        ? { ...f, caption: captions[f.id].caption, captionSide: captions[f.id].side, captionConfidence: captions[f.id].confidence }
+        : f))
+
+      return res.json({ roles, fields: captioned, selectionCues: cues })
     }
 
     // Returns an embedded BoldSign editor URL (open in an iframe/new tab) where an

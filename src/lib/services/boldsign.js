@@ -184,3 +184,9 @@ export const saveTemplateDraft     = (p) => call({ action: 'template-draft', ...
 // Node (scripts/audit-boldsign-templates.mjs sweeps the account's templates with
 // it), while this file imports the Supabase browser client and cannot.
 export * from './boldsignFields.js'
+// The Selections panel's rows — short labels derived from each box's printed
+// caption, the sender's two-state choice, and the mutex groups it enforces.
+export * from './boldsignSelections.js'
+// The Prepare Draft Agreement panel: the decisions it asks for, and the field
+// ids each one writes to.
+export * from './boldsignPacketPanel.js'
