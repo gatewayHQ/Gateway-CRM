@@ -329,7 +329,6 @@ export const READONLY_SUPPORTED_FIELD_TYPES = new Set([
 export const supportsReadOnly = (t) =>
   READONLY_SUPPORTED_FIELD_TYPES.has(String(t || '').toLowerCase().replace(/[^a-z]/g, ''))
 
-// BoldSign wants a checkbox value as the string "true"/"false".
 // BOLDSIGN SPELLS A TICK "on". Not "true" — that is the value this code sent for
 // its whole life, and it is why no checkbox on any packet ever arrived ticked.
 // BoldSign's own reference is explicit ("id": "Check_Box", "value": "on"), and a
