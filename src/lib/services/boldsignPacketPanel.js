@@ -236,7 +236,9 @@ export function packetPayloadCheck({ representation = null, term = null, policy 
 // How a ticked box is addressed. Matches prefillFieldEntry/tickValue in
 // boldsignFields.js, which is what actually builds the request — kept in one
 // expression here so the debug line shows exactly what the payload carries.
-export const tickPayloadValue = (on) => (on ? 'true' : 'false')
+// "on"/"off" is BoldSign's own spelling for a checkbox; "true" is silently
+// ignored and leaves the box empty (see tickValue).
+export const tickPayloadValue = (on) => (on ? 'on' : 'off')
 
 // ── The tick state the document must end up in ───────────────────────────────
 // Two things go wrong on the way from a template to a draft, and this is the one

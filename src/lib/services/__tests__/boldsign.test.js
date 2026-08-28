@@ -74,11 +74,13 @@ describe('prefillFieldEntry — what the agent decided reaches the signers, lock
     // The reported bug: a box the agent ticked in BoldSign's editor showed
     // unchecked when the client opened the document. Ticked in the CRM it goes
     // out as an actual field value, read-only.
-    expect(prefillFieldEntry(tick, true)).toEqual({ id: 'exclusive_agency', value: 'true', isReadOnly: true })
+    // "on"/"off" is BoldSign's spelling for a checkbox — "true" is ignored and
+    // leaves the box empty, which is why no packet ever arrived ticked.
+    expect(prefillFieldEntry(tick, true)).toEqual({ id: 'exclusive_agency', value: 'on', isReadOnly: true })
   })
 
   it('sends a deliberately cleared box too — an unticked term is still a term', () => {
-    expect(prefillFieldEntry(tick, false)).toEqual({ id: 'exclusive_agency', value: 'false', isReadOnly: true })
+    expect(prefillFieldEntry(tick, false)).toEqual({ id: 'exclusive_agency', value: 'off', isReadOnly: true })
   })
 
   it('leaves an untouched box for the signer rather than locking it', () => {
@@ -762,7 +764,7 @@ describe('buildPrefillFields — Labels go out shared, role fields stay with the
 
   it('sends a deliberately unticked box, since an unticked term is still a term', () => {
     const { byRole } = buildPrefillFields({ fields: FIELDS, values: { exclusive: false }, filledRoleIndices: [1] })
-    expect(byRole[1]).toEqual([{ id: 'exclusive', value: 'false', isReadOnly: true }])
+    expect(byRole[1]).toEqual([{ id: 'exclusive', value: 'off', isReadOnly: true }])
   })
 
   it('produces nothing at all when no role has a signer', () => {
@@ -1304,8 +1306,8 @@ describe('prefillFieldEntry — the lock is conditional, the value is not', () =
     expect(prefillFieldEntry({ id: 'b', type: 'Label' }, 'x')).toEqual({ id: 'b', value: 'x', isReadOnly: true })
     expect(prefillFieldEntry({ id: 'c', type: 'Dropdown' }, 'x')).toEqual({ id: 'c', value: 'x', isReadOnly: true })
     // A ticked box is a term of the agreement and stays locked.
-    expect(prefillFieldEntry({ id: 'd', type: 'CheckBox' }, true)).toEqual({ id: 'd', value: 'true', isReadOnly: true })
-    expect(prefillFieldEntry({ id: 'e', type: 'CheckBox' }, false)).toEqual({ id: 'e', value: 'false', isReadOnly: true })
+    expect(prefillFieldEntry({ id: 'd', type: 'CheckBox' }, true)).toEqual({ id: 'd', value: 'on', isReadOnly: true })
+    expect(prefillFieldEntry({ id: 'e', type: 'CheckBox' }, false)).toEqual({ id: 'e', value: 'off', isReadOnly: true })
   })
 
   it('the earlier rules are unchanged — a blank sends nothing, a Name sends nothing', () => {

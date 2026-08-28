@@ -814,6 +814,54 @@ which.
 field's `id`/`type`/`roleIndex` so those controls can be rendered with the
 template's own wording rather than a prettified field id.
 
+## A tick is spelled "on" — and why no checkbox ever arrived ticked
+
+BoldSign's value for a ticked checkbox is the string **`"on"`** (`"off"` to clear
+it), not `"true"`. Its own reference is explicit: `{"id": "Check_Box", "value":
+"on"}`. This code sent `"true"` for its whole life.
+
+A value BoldSign does not recognize does not fail. The request is accepted, the
+document comes back with the box empty, and nothing in any response explains it.
+So the symptom was: every packet's Selections looked correct on the send screen
+and every box arrived unticked.
+
+The same one string produced the second symptom, the one that looked worse. A box
+the TEMPLATE carried ticked, sent as `"true"`, was not read as on — so it arrived
+empty, exactly as if the send had cleared a term the template was authored with.
+One wrong value, two bugs, no error message.
+
+Nothing caught it from the reading side because `isCheckedValue()` /`isTicked()`
+have always accepted `"on"` among their spellings. Reads were fine; only writes
+were wrong. `tickValue()` in `boldsignFields.js` is the single place it is
+spelled, pinned by a test named for it.
+
+## Templates that forbid field edits
+
+A BoldSign template carries a **Field Configuration** ("allow senders to edit or
+delete fields"). With it off, every field the template placed is frozen on
+documents created from it, and `/document/edit` refuses:
+
+```
+Cannot update form field: 'CheckBox1'. This field is restricted by the
+template used and cannot be updated.
+```
+
+Two consequences, both handled in `api/boldsign.js`:
+
+- **Saved field layouts cannot be restored onto such a template.** The rule
+  applies to every template-placed field and `/document/edit` is atomic, so no
+  subset of the payload can succeed — the `confirmedOnly` retry resends a frozen
+  field and fails identically, costing the agent the whole arrangement.
+  `isTemplateRestrictedRejection()` recognizes it and the restore stands down
+  with a sentence that says what actually happened, instead of the raw API text.
+- **A tick cannot be repaired after the fact.** The values sent WITH the create
+  call are the only channel, which is why the `"on"` fix above is the one that
+  matters. `reconcileDocumentTicks()` treats the refusal as a note, not an error.
+
+**To let layouts and post-hoc repair work**, turn on "allow senders to edit or
+delete fields" in the template's Template Usage Settings → Field Configuration.
+Prefill at create time works either way.
+
 ## Selections is the sender's panel, not the signer's
 
 One row is one checkbox already placed on the template, and the dropdown is the

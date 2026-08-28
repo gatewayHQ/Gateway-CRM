@@ -1276,6 +1276,27 @@ export function countPayloadFields(payload) {
 // Those are worth retrying without the fields BoldSign cannot place: a field id it
 // does not hold, a type it will not create here. Anything else (auth, the document
 // state, a malformed body) would fail identically the second time.
+// THE TEMPLATE ITSELF FORBIDS THE EDIT. BoldSign templates carry a Field
+// Configuration ("allow senders to edit or delete fields"); with it off, every
+// field the template placed is frozen on documents created from it and
+// /document/edit refuses:
+//
+//   "Cannot update form field: 'CheckBox1'. This field is restricted by the
+//    template used and cannot be updated."
+//
+// This is not one unplaceable field, so the confirmedOnly retry cannot help — it
+// resends the same frozen field and fails identically, and /document/edit is
+// atomic, so the agent loses the WHOLE arrangement over a rule that applies to
+// all of it. Recognized separately so the restore stands down cleanly and says
+// something true instead.
+//
+// It also settles where a tick can come from on such a template: not from
+// /document/edit afterwards, only from the values sent with the create call.
+export function isTemplateRestrictedRejection(err) {
+  const msg = `${err?.message || ''} ${JSON.stringify(err?.data || {})}`
+  return /restricted by the template/i.test(msg)
+}
+
 export function isFieldLevelRejection(err) {
   if (err?.status !== 400) return false
   const msg = `${err?.message || ''} ${JSON.stringify(err?.data || {})}`
@@ -1455,7 +1476,7 @@ export function tickRepairPayload({ props, desired = {} } = {}) {
 }
 
 // How a tick is written. Kept next to the repair so the two cannot drift.
-export const tickValueString = (on) => (on ? 'true' : 'false')
+export const tickValueString = (on) => (on ? 'on' : 'off')
 
 // Which desired ticks the draft still does not carry. Used to verify the repair
 // landed rather than trusting the 200, the same way confirmLayoutApplied does.
@@ -1504,6 +1525,14 @@ export async function reconcileDocumentTicks(documentId, { desired = {}, onBehal
     }
     return { repaired: count, remaining }
   } catch (err) {
+    // A template that forbids sender field edits cannot be repaired after the
+    // fact at all. The values sent WITH the create call are the only channel,
+    // which is what tickValue() now spells correctly — so this is a note, not a
+    // failure to report to the agent.
+    if (isTemplateRestrictedRejection(err)) {
+      console.warn(`[boldsign] ticks for ${documentId}: this template forbids field edits, so the boxes stand as the create call set them — ${err.message}`)
+      return { repaired: 0, remaining: [], restricted: true }
+    }
     console.error(`[boldsign] ticks for ${documentId}: repair failed — status=${err?.status || 'n/a'} ${err?.message}`)
     return { repaired: 0, remaining: [], reason: describeLayoutFailure(err) }
   }
@@ -1551,6 +1580,19 @@ export async function applyFieldLayout(supabase, { documentId, dealId, templateI
         console.warn(`[boldsign] layout apply for ${documentId}: BoldSign refused IsReadOnly, retrying with every lock dropped — ${editErr.message}`)
         await editDocumentFields(documentId, { ...stripLayoutReadOnly(payload), ...(onBehalfOf ? { onBehalfOf } : {}) })
         return await confirmLayoutApplied(documentId, saved.field_count, 0)
+      }
+      // The template forbids sender field edits outright, so no subset of this
+      // payload can succeed. Not an error the agent can act on and not a failed
+      // send: the draft is fine, it simply opens with the template's own
+      // placement, which is what every send did before layouts existed.
+      if (isTemplateRestrictedRejection(editErr)) {
+        console.warn(`[boldsign] layout apply for ${documentId}: this template forbids sender field edits, so no layout can be restored — ${editErr.message}`)
+        return {
+          applied: false,
+          restricted: true,
+          reason: 'This template is set up to forbid changing its fields, so saved placements cannot be restored onto it. '
+            + 'The draft opened with the template\'s own field placement.',
+        }
       }
       if (!isFieldLevelRejection(editErr)) throw editErr
       const confirmed = buildLayoutEditPayload({ layout: saved.layout, signerDetails, confirmedOnly: true })

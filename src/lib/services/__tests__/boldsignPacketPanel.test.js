@@ -4,8 +4,9 @@ import { describe, it, expect } from 'vitest'
 import {
   PACKET_FIELD_MAP, PACKET_FIELD_IDS, isPacketField,
   seedPacketState, packetTickValues, packetMissing, wantsEndDate, captionConflicts,
-  resolvePacketFieldIds, missingPacketFields, packetPayloadCheck, desiredTickState,
+  resolvePacketFieldIds, missingPacketFields, packetPayloadCheck, desiredTickState, tickPayloadValue,
 } from '../boldsignPacketPanel.js'
+import { isTicked } from '../boldsignSelections.js'
 
 describe('the field map (verify table, PR #114)', () => {
   it('writes each decision to the id the table names', () => {
@@ -159,15 +160,16 @@ describe('payload — silent fields stay out of it', () => {
       const rows = packetPayloadCheck({ representation: rep, term, fields: templateFields }).rows
       const byId = Object.fromEntries(rows.map(r => [r.id, r.value]))
       expect(Object.keys(byId)).toEqual(expect.arrayContaining(['CheckBox1', 'CheckBox2', 'CheckBox8', 'CheckBox9']))
-      expect([byId.CheckBox1, byId.CheckBox2].sort()).toEqual(['false', 'true'])
-      expect([byId.CheckBox8, byId.CheckBox9].sort()).toEqual(['false', 'true'])
+      // "on"/"off" is BoldSign's own spelling for a checkbox value.
+      expect([byId.CheckBox1, byId.CheckBox2].sort()).toEqual(['off', 'on'])
+      expect([byId.CheckBox8, byId.CheckBox9].sort()).toEqual(['off', 'on'])
     }
   })
 
   it('addresses a ticked box with the value the client already uses', () => {
     const rows = packetPayloadCheck({ representation: 'exclusive', term: 'close', fields: templateFields }).rows
-    expect(rows.find(r => r.id === 'CheckBox1').value).toBe('true')
-    expect(rows.find(r => r.id === 'CheckBox2').value).toBe('false')
+    expect(rows.find(r => r.id === 'CheckBox1').value).toBe('on')
+    expect(rows.find(r => r.id === 'CheckBox2').value).toBe('off')
   })
 
   it('passes its own assertions on a sound payload', () => {
@@ -253,5 +255,34 @@ describe('desiredTickState', () => {
 
   it('is empty for a template with no boxes and no decisions', () => {
     expect(desiredTickState({ fields: [] })).toEqual({})
+  })
+})
+
+// ── The one string that broke every packet ───────────────────────────────────
+// BoldSign spells a checkbox tick "on". "true" is accepted by the API, ignored,
+// and leaves the box empty — no error, nothing in any response to explain it.
+// That single wrong value produced BOTH reported symptoms: boxes the send screen
+// ticked arrived unticked, and a box the TEMPLATE had ticked also arrived empty,
+// which read as the send having cleared it.
+//
+// Pinned here by name so a future change back to "true" fails loudly instead of
+// silently shipping unticked agreements.
+describe('a tick is spelled "on", never "true"', () => {
+  it('writes on/off, from the panel', () => {
+    expect(tickPayloadValue(true)).toBe('on')
+    expect(tickPayloadValue(false)).toBe('off')
+  })
+
+  it('writes on/off, from the prefill builder that actually sends it', async () => {
+    const { prefillFieldEntry, tickValue } = await import('../boldsign.js')
+    expect(tickValue(true)).toBe('on')
+    expect(tickValue(false)).toBe('off')
+    expect(prefillFieldEntry({ id: 'CheckBox2', type: 'CheckBox' }, true).value).toBe('on')
+    expect(prefillFieldEntry({ id: 'CheckBox1', type: 'CheckBox' }, false).value).toBe('off')
+  })
+
+  it('still reads back every spelling a document may report', () => {
+    for (const v of ['on', 'true', 'X', '1', 'yes', 'checked']) expect(isTicked(v)).toBe(true)
+    for (const v of ['off', 'false', '', null]) expect(isTicked(v)).toBe(false)
   })
 })

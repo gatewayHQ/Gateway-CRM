@@ -168,7 +168,7 @@ describe('tickRepairPayload', () => {
       desired: { CheckBox2: true },
     })
     expect(out).toEqual({ signers: [{ editAction: 'Update', id: 'signer-1', formFields: [
-      { editAction: 'Update', id: 'CheckBox2', value: 'true' },
+      { editAction: 'Update', id: 'CheckBox2', value: 'on' },
     ] }] })
   })
 
@@ -180,7 +180,7 @@ describe('tickRepairPayload', () => {
       props: props([{ id: 'CheckBox3', fieldType: 'CheckBox' }]),
       desired: { CheckBox3: true },
     })
-    expect(out.signers[0].formFields).toEqual([{ editAction: 'Update', id: 'CheckBox3', value: 'true' }])
+    expect(out.signers[0].formFields).toEqual([{ editAction: 'Update', id: 'CheckBox3', value: 'on' }])
   })
 
   it('touches nothing that already agrees', async () => {
@@ -269,5 +269,38 @@ describe('unmetTicks', () => {
       props: { signerDetails: [{ id: 's1', formFields: [{ id: 'CheckBox2', fieldType: 'CheckBox', value: 'true' }] }] },
       desired: { CheckBox2: true },
     })).toEqual([])
+  })
+})
+
+// ── A template that forbids field edits ──────────────────────────────────────
+// BoldSign templates carry a Field Configuration ("allow senders to edit or
+// delete fields"). With it off, every field the template placed is frozen on
+// documents made from it and /document/edit refuses:
+//
+//   "Cannot update form field: 'CheckBox1'. This field is restricted by the
+//    template used and cannot be updated."
+//
+// /document/edit is atomic and the rule applies to ALL of those fields, so the
+// confirmedOnly retry cannot help — it resends a frozen field and fails
+// identically, costing the agent the whole arrangement over a rule no subset of
+// the payload can satisfy.
+describe('isTemplateRestrictedRejection', () => {
+  it('recognizes the refusal, wherever BoldSign puts the text', async () => {
+    const { isTemplateRestrictedRejection } = await import('../boldsign.js')
+    expect(isTemplateRestrictedRejection({
+      status: 400,
+      message: "Cannot update form field: 'CheckBox1'. This field is restricted by the template used and cannot be updated.",
+    })).toBe(true)
+    expect(isTemplateRestrictedRejection({
+      status: 400,
+      data: { message: 'This field is restricted by the template used and cannot be updated.' },
+    })).toBe(true)
+  })
+
+  it('does not swallow an ordinary unplaceable-field rejection', async () => {
+    const { isTemplateRestrictedRejection, isFieldLevelRejection } = await import('../boldsign.js')
+    const err = { status: 400, message: "The document does not have a form field with the ID: 'CheckBox2'." }
+    expect(isTemplateRestrictedRejection(err)).toBe(false)
+    expect(isFieldLevelRejection(err)).toBe(true)
   })
 })

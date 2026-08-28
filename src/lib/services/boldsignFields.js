@@ -330,7 +330,20 @@ export const supportsReadOnly = (t) =>
   READONLY_SUPPORTED_FIELD_TYPES.has(String(t || '').toLowerCase().replace(/[^a-z]/g, ''))
 
 // BoldSign wants a checkbox value as the string "true"/"false".
-export const tickValue = (on) => (on ? 'true' : 'false')
+// BOLDSIGN SPELLS A TICK "on". Not "true" — that is the value this code sent for
+// its whole life, and it is why no checkbox on any packet ever arrived ticked.
+// BoldSign's own reference is explicit ("id": "Check_Box", "value": "on"), and a
+// value it does not recognize leaves the box empty rather than failing: the
+// request is accepted, the document comes back unticked, and there is nothing in
+// any response to explain it.
+//
+// It also explains the tick that looked like it was being REMOVED. A box the
+// template carried ticked, sent as "true", was not read as on — so it arrived
+// empty, exactly as if the send had cleared it. One wrong string, both symptoms.
+//
+// isCheckedValue()/isTicked() have always accepted "on" when READING, which is
+// why nothing caught this from the other direction.
+export const tickValue = (on) => (on ? 'on' : 'off')
 
 // One field's contribution to a role's `existingFormFields`, or null when the
 // agent left it for the signer to fill.
