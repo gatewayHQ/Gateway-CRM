@@ -4,7 +4,7 @@ import { describe, it, expect } from 'vitest'
 import {
   PACKET_FIELD_MAP, PACKET_FIELD_IDS, isPacketField,
   seedPacketState, packetTickValues, packetMissing, wantsEndDate, captionConflicts,
-  resolvePacketFieldIds, missingPacketFields, packetPayloadCheck,
+  resolvePacketFieldIds, missingPacketFields, packetPayloadCheck, desiredTickState,
 } from '../boldsignPacketPanel.js'
 
 describe('the field map (verify table, PR #114)', () => {
@@ -215,5 +215,43 @@ describe('payload — ids come from the template, not from the map', () => {
   it('reads the template state through the same casing', () => {
     expect(seedPacketState({ fields: [{ id: 'checkbox2', value: 'true' }, { id: 'Checkbox1', value: 'false' }] }).representation)
       .toBe('non-exclusive')
+  })
+})
+
+// ── The tick state the document must end up in ───────────────────────────────
+// Stated in full, rather than relying on omission to preserve anything: a draft
+// created from a template whose BUYER box was ticked came back with it empty.
+describe('desiredTickState', () => {
+  const fields = [
+    { id: 'CheckBox1' }, { id: 'CheckBox2' }, { id: 'CheckBox3', value: 'true' },
+    { id: 'CheckBox4' }, { id: 'CheckBox5' }, { id: 'CheckBox6', value: 'true' },
+    { id: 'CheckBox7', value: 'true' }, { id: 'CheckBox8' }, { id: 'CheckBox9' },
+    { id: 'CheckBox14', value: 'true' }, { id: 'CheckBox15' },
+  ]
+
+  it('asserts every tick the template carries, owned or not', () => {
+    const want = desiredTickState({ representation: 'non-exclusive', term: 'fixed', fields })
+    expect(want.CheckBox3).toBe(true)     // Party: Buyer — not in the UI, still kept
+    expect(want.CheckBox14).toBe(true)    // behind the unnamed-fields toggle, still kept
+  })
+
+  it('lets the panel’s decision win over the template', () => {
+    const want = desiredTickState({ representation: 'non-exclusive', term: 'fixed', policy: { CheckBox6: false }, fields })
+    expect(want.CheckBox2).toBe(true)
+    expect(want.CheckBox1).toBe(false)
+    expect(want.CheckBox9).toBe(true)
+    expect(want.CheckBox8).toBe(false)
+    expect(want.CheckBox6).toBe(false)    // turned off in the panel
+  })
+
+  // An unticked box nobody decided has no entry, so nothing can be cleared on
+  // this map's authority.
+  it('says nothing about an unticked box it does not own', () => {
+    const want = desiredTickState({ representation: 'exclusive', term: 'close', fields })
+    expect('CheckBox15' in want).toBe(false)
+  })
+
+  it('is empty for a template with no boxes and no decisions', () => {
+    expect(desiredTickState({ fields: [] })).toEqual({})
   })
 })

@@ -237,3 +237,34 @@ export function packetPayloadCheck({ representation = null, term = null, policy 
 // boldsignFields.js, which is what actually builds the request — kept in one
 // expression here so the debug line shows exactly what the payload carries.
 export const tickPayloadValue = (on) => (on ? 'true' : 'false')
+
+// ── The tick state the document must end up in ───────────────────────────────
+// Two things go wrong on the way from a template to a draft, and this is the one
+// statement that settles both:
+//
+//   • a box the panel decided arrives unticked, and
+//   • a box the TEMPLATE had ticked arrives cleared.
+//
+// Omitting a field was supposed to preserve it, and on the evidence it does not:
+// a draft created from a template whose BUYER box is ticked came back with that
+// box empty. Whatever the reason inside BoldSign, "say nothing and hope" is not
+// a strategy that can be verified. So the CRM states the whole intended tick
+// state instead, and the server reconciles the finished draft against it (see
+// reconcileDocumentTicks in api/boldsign.js).
+//
+// Precedence: the panel's decisions win, because they are this packet's terms.
+// Everything the template itself carries ticked is asserted as still ticked.
+// A box that is neither is absent from the map and never touched — the panel has
+// no opinion about it and an opinion is exactly what would clear it.
+export function desiredTickState({ representation = null, term = null, policy = {}, fields = [] } = {}) {
+  const out = {}
+  // What the template already says. Only ticks — an unticked box the panel does
+  // not own is left out, so nothing is ever cleared on this map's authority.
+  for (const f of fields || []) {
+    if (!f?.id) continue
+    if (isTicked(f.value)) out[f.id] = true
+  }
+  // The panel's decisions, addressed by the ids the template reports.
+  Object.assign(out, packetTickValues({ representation, term, policy, fields }))
+  return out
+}

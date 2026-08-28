@@ -26,7 +26,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, PACKET_FIELD_MAP, seedPacketState, packetTickValues, packetMissing, wantsEndDate, captionConflicts, packetPayloadCheck, missingPacketFields, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, PACKET_FIELD_MAP, seedPacketState, packetTickValues, packetMissing, wantsEndDate, captionConflicts, packetPayloadCheck, missingPacketFields, desiredTickState, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2512,6 +2512,11 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     return {
       templateId, deal_id: deal.id, roles, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
       emailSubject: subject, documentName: docName, labels,
+      // The tick state the finished draft must hold: the panel's decisions, plus
+      // every box the TEMPLATE already carries ticked. The server reconciles the
+      // created draft against this and repairs the difference — the create call
+      // does not reliably carry a tick, and omitting a box did not preserve it.
+      desiredTicks: desiredTickState({ ...packet, fields: details.fields || [] }),
     }
   }
 
@@ -2534,6 +2539,10 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     // it read as a failed send and sent the agent looking for a problem that was
     // not there.
     if (data.layoutWarning) pushToast(data.layoutWarning, 'info')
+    // BoldSign accepted the tick repair but the boxes still disagree. Said out
+    // loud because the packet's terms are what is wrong, and the agent is about
+    // to send it.
+    if (data.tickWarning) pushToast(data.tickWarning, 'error')
   }
 
   // SAVE AS DRAFT — the prepare-and-print path. Creates the document in BoldSign
