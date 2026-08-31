@@ -39,6 +39,10 @@ export const DEMO_LISTING = {
     headline: '14 Cliffside Terrace — A Modern Waterfront Estate',
     subheadline: 'Architecturally significant, walls of glass, and 180° lake views from nearly every room.',
     cta_text: 'Request a private showing',
+    // Mirrors the PUBLIC shape of an attached OM (no storage path — the server
+    // strips it) so /lp/demo shows the download gate as visitors see it. The
+    // demo's unlock is simulated; nothing is signed or captured.
+    om: { available: true, filename: 'Cliffside-Terrace-OM.pdf', title: 'Cliffside Terrace · Offering Memorandum', size: 4_600_000 },
     detail_mode: 'residential',
     price: '4750000',
     beds: '5',

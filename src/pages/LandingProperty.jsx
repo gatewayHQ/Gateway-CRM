@@ -6,7 +6,8 @@
  *   { headline, subheadline, price, beds, baths, sqft, lot_size, year_built,
  *     description, features[], images[{url,caption,price}], cta_text, accent,
  *     detail_mode, units, price_per_unit, cap_rate, noi, gross_income,
- *     building_sqft, occupancy }
+ *     building_sqft, occupancy,
+ *     om: { filename, title, size, available } }   ← gated OM download
  *
  * UI is composed from the reusable luxury landing kit in components/landing.
  */
@@ -17,8 +18,9 @@ import { fetchPublicMailing } from '../lib/publicMailing.js'
 import '../components/landing/landing.css'
 import {
   LandingShell, Hero, Section, DetailGrid, Gallery, Lightbox,
-  LeadForm, AgentCard, AgentTeam, Button, Reveal, Skeleton, StatePanel,
+  LeadForm, AgentCard, AgentTeam, Button, Reveal, Skeleton, StatePanel, OmGate,
 } from '../components/landing'
+import { normalizeOm, requestOm } from '../lib/om.js'
 
 const toNum = (v) => {
   const n = Number(String(v ?? '').replace(/[^0-9.]/g, ''))
@@ -138,6 +140,17 @@ export default function LandingProperty({ mailingId, preview = null }) {
     cfg.year_built != null && { label: 'Year Built', value: String(cfg.year_built) },
   ]).filter(Boolean).filter(d => d.value !== null && d.value !== '' && d.value !== 'NaN')
 
+  // The OM download gate. Present only when the builder attached a PDF; the
+  // page never holds a URL for it — see components/landing/OmGate.jsx.
+  const om = normalizeOm(cfg.om)
+  const unlockOm = async (fields) => {
+    if (preview) {
+      await new Promise(r => setTimeout(r, 700))
+      return { url: '', filename: om?.filename }
+    }
+    return requestOm(withVisitId({ mailing_id: mailingId, source_landing: 'property', ...fields }))
+  }
+
   const submitLead = async (form) => {
     if (preview) { await new Promise(r => setTimeout(r, 700)); return } // demo: simulate send
     const res = await fetch('/api/campaigns', {
@@ -203,6 +216,14 @@ export default function LandingProperty({ mailingId, preview = null }) {
 
           {/* Right column — sticky CTA */}
           <aside className="lx-sticky">
+            {/* The OM sits above the contact form on purpose: it is what the
+                scanner came for, and it captures strictly more (name + phone +
+                email, all required) than the form below it. */}
+            {om && (
+              <div style={{ marginBottom: 24 }}>
+                <OmGate om={om} onUnlock={unlockOm} accent={accent} />
+              </div>
+            )}
             <LeadForm title={ctaText} cta={ctaText} onSubmit={submitLead} agentName={agent?.name} />
             <AgentCard agent={agent} accent={accent} />
           </aside>
