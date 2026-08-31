@@ -46,7 +46,11 @@ create table if not exists contacts (
   phone             text,
   type              text check (type in ('buyer','seller','landlord','tenant','investor')) default 'buyer',
   status            text check (status in ('active','cold','closed','lead','opportunity','pending')) default 'active',
-  source            text check (source in ('referral','website','open house','social','cold call','team','paid service','other')) default 'other',
+  -- 'mailing-landing' / 'om-download' are written by api/campaigns.js when a QR
+  -- landing page captures someone (see migration 0043 — they were previously
+  -- missing here, and the contact insert failed silently because of it).
+  source            text check (source in ('referral','website','open house','social','cold call','team','paid service','other',
+                                           'mailing-landing','om-download')) default 'other',
   assigned_agent_id uuid references agents(id) on delete set null,
   notes             text,
   tags              text[],
@@ -1503,8 +1507,14 @@ create table if not exists mailing_leads (
   ip_hash           text,
   visit_id          text,                      -- ties this lead to the scan that produced it
   scan_id           uuid references mailing_scans(id) on delete set null,
+  -- True when the lead came from the gated Offering Memorandum download rather
+  -- than a plain contact form. See mailing_om_requests below.
+  om_requested      boolean default false,
   created_at        timestamptz default now()
 );
+
+-- Migration for existing installs (see migrations/0043)
+alter table mailing_leads add column if not exists om_requested boolean default false;
 
 create index if not exists mailing_leads_mailing_idx on mailing_leads(mailing_id);
 create index if not exists mailing_leads_contact_idx on mailing_leads(contact_id);
@@ -1569,6 +1579,60 @@ do $$ begin
   end if;
 end $$;
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- MAILING OM REQUESTS — who unlocked a campaign's Offering Memorandum.
+--
+-- The OM is the most valuable thing on a QR landing page, so it sits behind a
+-- gate: a visitor gives name + phone + email and the server hands back a
+-- short-lived signed URL for the PDF in the PRIVATE `campaign-oms` bucket
+-- (below). One row here per unlock, carrying the details they gave and the scan
+-- visit that brought them, so "who is reading my deal" is answerable and
+-- attributable to a specific piece of mail.
+--
+-- Written only by api/campaigns.js (action=om_request) on the service key.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists mailing_om_requests (
+  id            uuid primary key default uuid_generate_v4(),
+  mailing_id    uuid not null references mailings(id) on delete cascade,
+  lead_id       uuid references mailing_leads(id) on delete set null,
+  contact_id    uuid references contacts(id) on delete set null,
+  -- Snapshot of what they typed into the gate — kept even if the contact is
+  -- later merged, renamed or deleted, so the audit trail stays truthful.
+  name          text,
+  email         text,
+  phone         text,
+  om_path       text,                       -- object key inside `campaign-oms`
+  om_filename   text,
+  visit_id      text,                       -- ties the unlock back to a scan
+  scan_id       uuid references mailing_scans(id) on delete set null,
+  ip_hash       text,
+  user_agent    text,
+  download_count   integer default 1,       -- bumped when the same person re-unlocks
+  created_at       timestamptz default now(),
+  last_download_at timestamptz default now()
+);
+
+create index if not exists mailing_om_requests_mailing_idx on mailing_om_requests(mailing_id, created_at desc);
+create index if not exists mailing_om_requests_contact_idx on mailing_om_requests(contact_id);
+create index if not exists mailing_om_requests_visit_idx   on mailing_om_requests(visit_id) where visit_id is not null;
+-- Clicking download twice is one person, not two leads. This composite is the
+-- ON CONFLICT target the API upserts against.
+create unique index if not exists mailing_om_requests_dedupe
+  on mailing_om_requests(mailing_id, email) where email is not null;
+
+alter table mailing_om_requests enable row level security;
+do $$ begin
+  -- Reads are for signed-in agents (the Campaigns UI). The public gate writes
+  -- through the service-key API, which bypasses RLS — so no anon policy.
+  if not exists (
+    select 1 from pg_policies
+    where tablename='mailing_om_requests' and policyname='om_requests_authenticated_read'
+  ) then
+    create policy "om_requests_authenticated_read" on mailing_om_requests
+      for select to authenticated using (true);
+  end if;
+end $$;
+
 -- ─── Campaign Images Storage (run once in Supabase SQL Editor) ───────────────
 -- Creates a public bucket for direct browser uploads from the landing page
 -- builder. Agents upload photos; the public URL is stored in landing_config.
@@ -1619,6 +1683,66 @@ do $$ begin
     create policy "campaign-images: authenticated delete"
       on storage.objects for delete to authenticated
       using (bucket_id = 'campaign-images');
+  end if;
+end $$;
+
+-- ─── Offering Memorandum Storage (PRIVATE — gated downloads) ─────────────────
+-- Holds the OM PDFs attached to QR landing pages. `public = false` is
+-- load-bearing: an object in here has no working public URL, so the ONLY way to
+-- read an OM is a short-lived signed URL that api/campaigns.js mints after the
+-- visitor has handed over name + phone + email (action=om_request). Flip this
+-- bucket public and the gate becomes decorative — one shared link bypasses it
+-- forever.
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'campaign-oms',
+  'campaign-oms',
+  false,
+  52428800,  -- 50 MB per file — OMs carry rent rolls and photo pages
+  array['application/pdf']
+)
+on conflict (id) do update
+  set public             = false,
+      file_size_limit    = excluded.file_size_limit,
+      allowed_mime_types = excluded.allowed_mime_types;
+
+-- Agents upload from the landing-page builder
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename='objects' and schemaname='storage'
+    and policyname='campaign-oms: authenticated upload'
+  ) then
+    create policy "campaign-oms: authenticated upload"
+      on storage.objects for insert to authenticated
+      with check (bucket_id = 'campaign-oms');
+  end if;
+end $$;
+
+-- Signed-in agents can list/preview the attached file. NOTE: no public select
+-- policy, on purpose — anonymous reads go through service-key signed URLs.
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename='objects' and schemaname='storage'
+    and policyname='campaign-oms: authenticated read'
+  ) then
+    create policy "campaign-oms: authenticated read"
+      on storage.objects for select to authenticated
+      using (bucket_id = 'campaign-oms');
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename='objects' and schemaname='storage'
+    and policyname='campaign-oms: authenticated delete'
+  ) then
+    create policy "campaign-oms: authenticated delete"
+      on storage.objects for delete to authenticated
+      using (bucket_id = 'campaign-oms');
   end if;
 end $$;
 

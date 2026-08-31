@@ -13,6 +13,8 @@ import { supabase } from '../lib/supabase.js'
 import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
 import { fetchPublicMailing } from '../lib/publicMailing.js'
 import AdvisorDark from '../components/landing/AdvisorDark.jsx'
+import { OmGate } from '../components/landing/OmGate.jsx'
+import { normalizeOm, requestOm } from '../lib/om.js'
 
 const PROPERTY_TYPES = [
   { value:'single-family',  label:'Single-Family Home'       },
@@ -122,6 +124,13 @@ export default function LandingValuation({ mailingId }) {
     : DEFAULT_HIGHLIGHTS
 
   const mosaic = useMosaicLayout(images.length)
+
+  // Optional gated download (a market report or offering memorandum attached in
+  // the builder). Captures name + phone + email for a short-lived signed URL.
+  const om = normalizeOm(cfg.om)
+  const unlockOm = (fields) => requestOm(
+    withVisitId({ mailing_id: mailingId, source_landing: 'valuation', ...fields })
+  )
 
   const submit = async (e) => {
     e.preventDefault()
@@ -243,8 +252,13 @@ export default function LandingValuation({ mailingId }) {
             </ul>
           </div>
 
-          {/* Right — form */}
+          {/* Right — gated download (when attached), then the valuation form */}
           <div style={{ position:'sticky', top:24 }}>
+            {om && (
+              <div style={{ marginBottom:16 }}>
+                <OmGate om={om} onUnlock={unlockOm} accent={accent} theme="dark" />
+              </div>
+            )}
             <div style={{ background:'#1a1a1a', border:'1px solid #2f2f2f', borderRadius:12,
                           padding:28, boxShadow:'0 24px 64px rgba(0,0,0,0.45)' }}>
               {submitted ? (

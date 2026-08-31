@@ -24,10 +24,17 @@
  *   POST {action:'remove_recipient',id}        → delete one recipient
  *   POST {action:'update_recipient',id,...}    → patch response status
  *   POST {action:'capture_lead',...}           → public landing-page form submit
+ *   POST {action:'om_request',...}             → public; trade name/phone/email
+ *                                                for a signed OM download URL
+ *   GET  ?action=om_requests&mailing_id=X      → who unlocked the OM
  *
  * Auth: service role key bypasses RLS for server-side writes. The 'scan',
- *       'scan_replay', 'landing', 'og', 'capture_lead', 'capture_subscriber' and
+ *       'scan_replay', 'landing', 'og', 'capture_lead', 'om_request',
+ *       'capture_subscriber' and
  *       'unsubscribe' actions are intentionally unauthenticated (public).
+ *       'om_request' resolves the file from the campaign's own landing_config —
+ *       never from the request — so it can't be turned into an anonymous reader
+ *       for the private `campaign-oms` bucket.
  *       'landing' returns a fixed four-column projection and nothing else — see
  *       the comment on the action for why that list is load-bearing.
  *       'scan_replay' is
@@ -449,6 +456,160 @@ async function tryRpc(fn, args) {
   throw error
 }
 
+// ─── Offering Memorandum (gated download) ────────────────────────────────────
+// The OM lives in the PRIVATE `campaign-oms` bucket (migration 0043). Nothing
+// anonymous can read it directly; the only door is a signed URL minted here,
+// after the visitor has traded their name, phone and email for it.
+
+const OM_BUCKET = 'campaign-oms'
+// Long enough to open the PDF and start reading on a slow phone, short enough
+// that the URL is worthless if it gets forwarded or ends up in a screenshot.
+const OM_URL_TTL_SECONDS = 15 * 60
+
+/**
+ * The OM descriptor stored on `landing_config.om` by the landing-page builder:
+ *   { path, filename, title, size, uploaded_at }
+ * `path` is the object key inside the private bucket. Returns null when the
+ * campaign has no OM attached (the overwhelmingly common case).
+ */
+function omFromConfig(cfg) {
+  const om = cfg?.om
+  if (!om || typeof om !== 'object') return null
+  const path = String(om.path || '').trim()
+  if (!path) return null
+  return {
+    path,
+    filename: String(om.filename || 'offering-memorandum.pdf').slice(0, 200),
+    title:    String(om.title    || '').slice(0, 160) || null,
+    size:     Number.isFinite(Number(om.size)) ? Number(om.size) : null,
+  }
+}
+
+/**
+ * Strip the OM's storage path out of the config before it is handed to an
+ * anonymous browser.
+ *
+ * The bucket is private, so leaking the path would not by itself give anyone
+ * the file — but it is also of no use to the page, which asks the server for a
+ * signed URL rather than building one. The public payload keeps only what the
+ * gate needs to render (that an OM exists, what it is called, how big it is),
+ * which is the smallest thing that works. Same reasoning as the fixed
+ * four-column projection on the `landing` action itself.
+ */
+function publicLandingConfig(cfg) {
+  const om = omFromConfig(cfg)
+  if (!om) return cfg || {}
+  const { path, ...rest } = cfg.om
+  return { ...cfg, om: { ...rest, path: undefined, available: true } }
+}
+
+/**
+ * Insert a landing-page lead and best-effort mirror it into `contacts`.
+ *
+ * Shared by `capture_lead` and `om_request` so the two entry points can never
+ * drift on what a captured lead means. Everything after the lead insert is
+ * best-effort: a lead is worth far more than its attribution, so nothing below
+ * the insert is allowed to fail the request.
+ *
+ * Returns { lead, contactId, visitId }.
+ */
+async function captureLeadAndContact({
+  mailing_id, name, email, phone, message, property_address, property_type,
+  source_landing, visit_id, ip_hash, om_requested = false,
+}) {
+  const cleanEmail = email?.trim()?.toLowerCase() || null
+
+  const { data: lead, error: leadErr } = await db().from('mailing_leads').insert([{
+    mailing_id,
+    name:             name?.trim() || null,
+    email:            cleanEmail,
+    phone:            phone?.trim() || null,
+    message:          message?.trim() || null,
+    property_address: property_address?.trim() || null,
+    property_type:    property_type || null,
+    source_landing:   ['property','valuation','custom','multifamily','mailing'].includes(source_landing) ? source_landing : 'property',
+    ip_hash,
+  }]).select().single()
+  if (leadErr) throw leadErr
+
+  // Stamp visit_id and om_requested separately rather than inline in the
+  // insert: on a database where 0031 / 0043 haven't been applied those columns
+  // don't exist, and an inline value would fail the whole insert and lose the
+  // lead. A lead is worth far more than its attribution.
+  const cleanVisit = visit_id ? String(visit_id).slice(0, 40) : null
+  if (cleanVisit) {
+    try { await db().from('mailing_leads').update({ visit_id: cleanVisit }).eq('id', lead.id) } catch { /* attribution only */ }
+  }
+  if (om_requested) {
+    try { await db().from('mailing_leads').update({ om_requested: true }).eq('id', lead.id) } catch { /* pre-0043 database */ }
+  }
+
+  // Upsert into contacts (best-effort — don't fail the lead capture if this errors)
+  let contactId = null
+  try {
+    if (cleanEmail || phone) {
+      const parts = (name || '').trim().split(/\s+/)
+      const first = parts[0] || ''
+      const last  = parts.slice(1).join(' ') || ''
+      if (cleanEmail) {
+        const { data: existing } = await db()
+          .from('contacts').select('id').eq('email', cleanEmail).limit(1)
+        if (existing?.length) contactId = existing[0].id
+      }
+      if (!contactId) {
+        const base = {
+          first_name: first || '—',
+          last_name:  last  || '—',
+          email:      cleanEmail,
+          phone:      phone?.trim() || null,
+          type:       source_landing === 'valuation' ? 'seller' : 'buyer',
+          status:     'active',
+        }
+        const source = om_requested ? 'om-download' : 'mailing-landing'
+        let { data: created } = await db().from('contacts').insert([{ ...base, source }]).select('id').single()
+        // Both of those sources only became legal values in migration 0043;
+        // before it, `contacts.source`'s CHECK rejected them and the whole
+        // insert failed — silently, because this block is best-effort. That is
+        // how a QR landing page could capture a lead and still never put the
+        // person in the CRM. Retry with a value that has always been allowed:
+        // a contact filed under a coarser source beats no contact at all.
+        if (!created?.id) {
+          ;({ data: created } = await db().from('contacts')
+            .insert([{ ...base, source: 'website' }]).select('id').single())
+        }
+        contactId = created?.id || null
+      }
+      if (contactId) {
+        await db().from('mailing_leads').update({ contact_id: contactId }).eq('id', lead.id)
+      }
+    }
+  } catch { /* swallow — lead is already saved */ }
+
+  // Close the attribution loop: tie this lead back to the scan that brought
+  // them here. With one QR code per campaign the visit id is the only hard
+  // evidence linking a conversion to a specific scan, and — when the person
+  // matches a contact already on the recipient list — to a specific piece of
+  // mail. Best-effort: a lead is never failed for want of attribution.
+  try {
+    if (cleanVisit) {
+      await db().rpc('link_visit_conversion', {
+        p_visit_id:   cleanVisit,
+        p_mailing_id: mailing_id,
+        p_lead_id:    lead.id,
+        p_sub_id:     null,
+        p_contact_id: contactId,
+      })
+    }
+  } catch { /* pre-0031 database, or nothing to link */ }
+
+  // Bump denormalized lead counter
+  await db().from('mailings').update({
+    lead_count: (await db().from('mailing_leads').select('*', { count: 'exact', head: true }).eq('mailing_id', mailing_id)).count || 0,
+  }).eq('id', mailing_id)
+
+  return { lead, contactId, visitId: cleanVisit }
+}
+
 // ─── Main handler ───────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
@@ -743,7 +904,10 @@ export default async function handler(req, res) {
       if (error) throw error
       if (!m) return json(res, 404, { error: 'Mailing not found' })
 
-      return json(res, 200, { mailing: m })
+      // The OM's storage path is stripped here — the page asks the server for a
+      // signed URL (action=om_request) rather than building one. See
+      // publicLandingConfig.
+      return json(res, 200, { mailing: { ...m, landing_config: publicLandingConfig(m.landing_config) } })
     }
 
     // ── Health check ────────────────────────────────────────────────────────
@@ -920,6 +1084,21 @@ export default async function handler(req, res) {
         .order('created_at', { ascending: false })
       if (error) throw error
       return json(res, 200, { leads: data })
+    }
+
+    // ── List OM downloads (who unlocked the offering memorandum) ────────────
+    // Returns [] rather than an error on a pre-0043 database so the Campaigns
+    // drawer keeps loading its other tabs before the migration is applied.
+    if (action === 'om_requests') {
+      const { mailing_id } = req.query
+      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      const { data, error } = await db()
+        .from('mailing_om_requests')
+        .select('*')
+        .eq('mailing_id', mailing_id)
+        .order('created_at', { ascending: false })
+      if (error) return json(res, 200, { om_requests: [], unavailable: true })
+      return json(res, 200, { om_requests: data || [] })
     }
 
     // ── List subscribers (mailing-list campaigns) ───────────────────────────
@@ -1220,87 +1399,97 @@ export default async function handler(req, res) {
       if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
       if (!name && !email && !phone) return json(res, 400, { error: 'Provide at least name, email, or phone' })
 
-      const ip = clientIp(req)
-      const ipHash = hashIp(ip)
-
-      // Insert the lead
-      const { data: lead, error: leadErr } = await db().from('mailing_leads').insert([{
-        mailing_id,
-        name:             name?.trim() || null,
-        email:            email?.trim()?.toLowerCase() || null,
-        phone:            phone?.trim() || null,
-        message:          message?.trim() || null,
-        property_address: property_address?.trim() || null,
-        property_type:    property_type || null,
-        source_landing:   ['property','valuation','custom','multifamily'].includes(source_landing) ? source_landing : 'property',
-        ip_hash:          ipHash,
-      }]).select().single()
-      if (leadErr) throw leadErr
-
-      // Stamp the visit id separately rather than inline in the insert: on a
-      // database where 0031 hasn't been applied the column doesn't exist, and
-      // an inline value would fail the whole insert and lose the lead. A lead is
-      // worth far more than its attribution.
-      const cleanVisit = visit_id ? String(visit_id).slice(0, 40) : null
-      if (cleanVisit) {
-        try { await db().from('mailing_leads').update({ visit_id: cleanVisit }).eq('id', lead.id) } catch { /* attribution only */ }
-      }
-
-      // Upsert into contacts (best-effort — don't fail the lead capture if this errors)
-      let capturedContactId = null
-      try {
-        if (email || phone) {
-          const parts = (name || '').trim().split(/\s+/)
-          const first = parts[0] || ''
-          const last  = parts.slice(1).join(' ') || ''
-          let contactId = null
-          if (email) {
-            const { data: existing } = await db()
-              .from('contacts').select('id').eq('email', email.trim().toLowerCase()).limit(1)
-            if (existing?.length) contactId = existing[0].id
-          }
-          if (!contactId) {
-            const { data: created } = await db().from('contacts').insert([{
-              first_name: first || '—',
-              last_name:  last  || '—',
-              email:      email?.trim()?.toLowerCase() || null,
-              phone:      phone?.trim() || null,
-              source:     'mailing-landing',
-              type:       source_landing === 'valuation' ? 'seller' : 'buyer',
-              status:     'active',
-            }]).select('id').single()
-            contactId = created?.id || null
-          }
-          if (contactId) {
-            await db().from('mailing_leads').update({ contact_id: contactId }).eq('id', lead.id)
-            capturedContactId = contactId
-          }
-        }
-      } catch { /* swallow — lead is already saved */ }
-
-      // Close the attribution loop: tie this lead back to the scan that brought
-      // them here. With one QR code per campaign the visit id is the only hard
-      // evidence linking a conversion to a specific scan, and — when the person
-      // matches a contact already on the recipient list — to a specific piece of
-      // mail. Best-effort: a lead is never failed for want of attribution.
-      try {
-        if (cleanVisit) {
-          await db().rpc('link_visit_conversion', {
-            p_visit_id:   cleanVisit,
-            p_mailing_id: mailing_id,
-            p_lead_id:    lead.id,
-            p_sub_id:     null,
-            p_contact_id: capturedContactId,
-          })
-        }
-      } catch { /* pre-0031 database, or nothing to link */ }
-
-      // Bump denormalized lead counter
-      await db().from('mailings').update({
-        lead_count: (await db().from('mailing_leads').select('*', { count: 'exact', head: true }).eq('mailing_id', mailing_id)).count || 0,
-      }).eq('id', mailing_id)
+      const { lead } = await captureLeadAndContact({
+        mailing_id, name, email, phone, message, property_address, property_type,
+        source_landing, visit_id, ip_hash: hashIp(clientIp(req)),
+      })
 
       return json(res, 200, { ok: true, lead_id: lead.id })
+    }
+
+    // ── Public: unlock the Offering Memorandum ──────────────────────────────
+    // The gate behind the OM download on every /lp/* page. Unlike capture_lead,
+    // all three of name, phone and email are REQUIRED: this is an exchange, and
+    // handing over a PDF worth six figures of commission for a first name alone
+    // is not one. The reward is a signed URL to the private bucket, good for a
+    // few minutes — forwarding it later gets the next person nothing.
+    if (action === 'om_request') {
+      const { mailing_id, name, email, phone, message, source_landing, visit_id } = req.body
+      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+
+      const cleanName  = String(name  || '').trim()
+      const cleanEmail = String(email || '').trim().toLowerCase()
+      const cleanPhone = String(phone || '').trim()
+      if (cleanName.length < 2)  return json(res, 400, { error: 'Please enter your full name' })
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(cleanEmail)) {
+        return json(res, 400, { error: 'A valid email address is required' })
+      }
+      // Digits only, so "(515) 555-0134" and "515.555.0134" both pass and
+      // "555-1234" (no area code) does not.
+      if ((cleanPhone.match(/\d/g) || []).length < 10) {
+        return json(res, 400, { error: 'A valid phone number is required' })
+      }
+
+      // Resolve the OM from the campaign's own config — never from the request.
+      // Taking a path from the client would turn this endpoint into an
+      // unauthenticated reader for the whole bucket.
+      const { data: m, error: mErr } = await db()
+        .from('mailings').select('id, name, landing_config').eq('id', mailing_id).maybeSingle()
+      if (mErr) throw mErr
+      if (!m) return json(res, 404, { error: 'Mailing not found' })
+
+      const om = omFromConfig(m.landing_config)
+      if (!om) return json(res, 404, { error: 'No offering memorandum is attached to this page' })
+
+      // Sign first. If storage is having a bad minute we would rather tell the
+      // visitor to retry than record a download that never happened — and the
+      // lead is not lost either way, because they still have the form in front
+      // of them.
+      const { data: signed, error: signErr } = await db().storage
+        .from(OM_BUCKET).createSignedUrl(om.path, OM_URL_TTL_SECONDS, { download: om.filename })
+      if (signErr || !signed?.signedUrl) {
+        log.error('om_request.sign_failed', { mailing_id, error: signErr?.message })
+        return json(res, 502, { error: "We couldn't prepare the download. Please try again in a moment." })
+      }
+
+      const ipHash = hashIp(clientIp(req))
+      const { lead, contactId, visitId } = await captureLeadAndContact({
+        mailing_id,
+        name: cleanName, email: cleanEmail, phone: cleanPhone,
+        message: message || `Downloaded the offering memorandum${om.title ? ` — ${om.title}` : ''}`,
+        source_landing, visit_id, ip_hash: ipHash, om_requested: true,
+      })
+
+      // The OM audit trail. Best-effort and deliberately after the lead: on a
+      // pre-0043 database this table doesn't exist yet, and that must cost the
+      // visitor their download no more than it costs the agent their lead.
+      try {
+        await db().from('mailing_om_requests').upsert({
+          mailing_id,
+          lead_id:     lead.id,
+          contact_id:  contactId,
+          name:        cleanName,
+          email:       cleanEmail,
+          phone:       cleanPhone,
+          om_path:     om.path,
+          om_filename: om.filename,
+          visit_id:    visitId,
+          ip_hash:     ipHash,
+          user_agent:  String(req.headers['user-agent'] || '').slice(0, 400) || null,
+          last_download_at: new Date().toISOString(),
+        }, { onConflict: 'mailing_id,email' })
+      } catch { /* pre-0043 database — the lead and the download both stand */ }
+
+      // The response carries a working (if brief) download URL — never let an
+      // edge or proxy hold onto it.
+      noStore(res)
+      return json(res, 200, {
+        ok: true,
+        lead_id:  lead.id,
+        url:      signed.signedUrl,
+        filename: om.filename,
+        expires_in: OM_URL_TTL_SECONDS,
+      })
     }
 
     // ── Public: subscribe to a mailing-list landing page ─────────────────────

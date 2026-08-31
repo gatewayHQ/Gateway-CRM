@@ -208,6 +208,34 @@ location. It is never used to attribute a scan to an address.
 
 ---
 
+## The Offering Memorandum gate
+
+A landing page can carry an OM (or any deal PDF), attached in the campaign
+builder. It is the strongest conversion point on the page, so it is **gated**:
+the visitor gives name, phone **and** email — all three required, unlike the
+ordinary contact form — and gets the file.
+
+How the gate holds:
+
+| piece | where | why |
+|---|---|---|
+| `campaign-oms` bucket | migration 0043 | **Private.** An object in it has no working public URL, so there is no link to share around. Make it public and the gate becomes decorative. |
+| `landing_config.om` | `{ path, filename, title, size }` | The builder writes it; `path` is the object key. |
+| `?action=landing` | strips `om.path` | The page is told an OM exists (`om.available`) and what it's called. It never sees the path and never builds a URL. |
+| `POST action=om_request` | `api/campaigns.js` | Validates the three fields, resolves the file **from the campaign's own config — never from the request**, and mints a signed URL good for 15 minutes. Resolving from the request would make this unauthenticated endpoint a reader for the whole bucket. |
+| `mailing_om_requests` | migration 0043 | One row per unlock: the details given, the `visit_id`, a download counter. Deduped on `(mailing_id, email)` — a second click is the same person. Surfaced as the **OM Downloads** tab, exportable as CSV. |
+| `mailing_leads.om_requested` | migration 0043 | The unlock also creates a normal lead, flagged so the Leads tab can show it as the warmer thing it is. |
+
+Ordering inside `om_request` is deliberate: **sign first, then capture**. If
+storage is unavailable the visitor is told to retry with the form still in front
+of them, rather than the agent getting a "downloaded the OM" row for a download
+that never happened. Everything after the lead insert — the audit row, the
+contact upsert, the scan link — is best-effort, on the same principle as
+`capture_lead`: a lead is worth more than its attribution, and a download is
+worth more than its audit row.
+
+---
+
 ## Reporting
 
 Counting moved out of JavaScript and into SQL:

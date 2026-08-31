@@ -22,6 +22,10 @@ export const titleCase = (s) => s.charAt(0).toUpperCase() + s.slice(1)
 // Mirror of contacts.{type,status,source} CHECK constraints in schema.sql.
 export const CONTACT_TYPES    = ['buyer', 'seller', 'landlord', 'tenant', 'investor']
 export const CONTACT_STATUSES = ['lead', 'opportunity', 'active', 'pending', 'cold', 'closed']
+// Deliberately a SUBSET of the schema's CHECK: 'mailing-landing' and
+// 'om-download' are written only by api/campaigns.js when a QR landing page
+// captures someone (see migration 0043), and putting them in the manual picker
+// would invite an agent to mislabel a contact they typed in by hand.
 export const CONTACT_SOURCES  = ['referral', 'website', 'open house', 'social', 'cold call', 'team', 'paid service', 'other']
 
 // ── Templates ────────────────────────────────────────────────────────────────

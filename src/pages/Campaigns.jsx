@@ -18,6 +18,7 @@ import { Icon, Modal, pushToast, EmptyState, ConfirmDialog } from '../components
 import QrCode from '../components/QrCode.jsx'
 import { shortUrl, downloadQr } from '../lib/qr.js'
 import { streetLine } from '../lib/address.js'
+import { normalizeOm, uploadOm, deleteOm, formatBytes } from '../lib/om.js'
 
 const MAILING_TYPE_OPTS = [
   { value: 'postcard',    label: 'Postcard'    },
@@ -584,6 +585,102 @@ const normImg = v => typeof v === 'string' || !v
   ? { url: v || '', units: '', price: '', caption: '' }
   : { url: v.url || '', units: v.units || '', price: v.price || '', caption: v.caption || '' }
 
+// ─── Offering Memorandum upload (shared between builders) ────────────────────
+/**
+ * Attach an OM PDF to a landing page, behind a name/phone/email gate.
+ *
+ * The PDF goes into the PRIVATE `campaign-oms` bucket (migration 0043), so
+ * unlike the photo uploads above there is no public URL to paste or copy — the
+ * only way a visitor reads it is by filling in the gate, which is the entire
+ * point. What lands in landing_config is a descriptor: { path, filename, title,
+ * size, uploaded_at }.
+ */
+function OmUploadField({ cfg, setCfg, label = 'Offering Memorandum (PDF)', hint }) {
+  const [busy, setBusy] = useState(false)
+  const om = normalizeOm(cfg.om)
+
+  const pick = async (file) => {
+    if (!file) return
+    setBusy(true)
+    try {
+      const next = await uploadOm(file)
+      // Replacing an OM: drop the old object rather than leaving it paid-for and
+      // unreachable in the bucket forever.
+      if (om?.path && om.path !== next.path) deleteOm(om.path)
+      setCfg('om', { ...next, title: om?.title || '' })
+      pushToast('Offering memorandum attached — visitors trade name, phone & email for it', 'success')
+    } catch (err) {
+      pushToast('Upload failed: ' + err.message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = () => {
+    if (om?.path) deleteOm(om.path)
+    setCfg('om', null)
+    pushToast('Offering memorandum removed from this page')
+  }
+
+  return (
+    <div>
+      <label style={fieldLabel}>{label}</label>
+      <div style={{ fontSize:11, color:'var(--gw-mist)', margin:'3px 0 7px', lineHeight:1.45 }}>
+        {hint || 'Gated: the download only unlocks after the visitor gives their name, phone and email. Every unlock lands in the campaign\u2019s OM Downloads tab as a lead.'}
+      </div>
+
+      {om ? (
+        <div style={{ border:'1px solid var(--gw-border)', borderRadius:8, padding:10, background:'#fff',
+                      display:'flex', alignItems:'center', gap:10 }}>
+          <div style={{ width:36, height:36, borderRadius:6, flexShrink:0, display:'grid', placeItems:'center',
+                        background:'#fdf3e0', color:'#b8860b', border:'1px solid #f0e0c0' }}>
+            <Icon name="om" size={16} />
+          </div>
+          <div style={{ minWidth:0, flex:1 }}>
+            <div style={{ fontSize:12.5, fontWeight:700, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+              {om.filename}
+            </div>
+            <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
+              {[formatBytes(om.size), 'gated download'].filter(Boolean).join(' · ')}
+            </div>
+          </div>
+          <label title="Replace this PDF"
+                 style={{ cursor: busy ? 'wait' : 'pointer', padding:'6px 10px', fontSize:11.5, fontWeight:600,
+                          border:'1px solid var(--gw-border)', borderRadius:6, background:'#fff', flexShrink:0 }}>
+            {busy ? 'Uploading…' : 'Replace'}
+            <input type="file" accept="application/pdf" style={{ display:'none' }}
+                   onChange={e => { pick(e.target.files?.[0]); e.target.value = '' }} />
+          </label>
+          <button type="button" className="btn btn--ghost" onClick={remove}
+                  style={{ padding:'6px 8px', flexShrink:0 }} title="Remove">
+            <Icon name="x" size={12} />
+          </button>
+        </div>
+      ) : (
+        <label style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:7,
+                        cursor: busy ? 'wait' : 'pointer', padding:'14px 10px', fontSize:12.5, fontWeight:600,
+                        border:'1px dashed var(--gw-border)', borderRadius:8, background:'#fff',
+                        color:'var(--gw-mist)' }}>
+          {busy
+            ? <>Uploading…</>
+            : <><Icon name="upload" size={13} /> Upload the OM (PDF, up to 50 MB)</>}
+          <input type="file" accept="application/pdf" style={{ display:'none' }}
+                 onChange={e => { pick(e.target.files?.[0]); e.target.value = '' }} />
+        </label>
+      )}
+
+      {om && (
+        <div style={{ marginTop:8 }}>
+          <input className="input" maxLength={80} value={om.title || ''}
+                 onChange={e => setCfg('om', { ...om, title: e.target.value })}
+                 placeholder="Label shown on the page — e.g. “Riverside Apartments · Offering Memorandum”"
+                 style={{ fontSize:12 }} />
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Image row with upload (shared between builders) ─────────────────────────
 
 function ImageRow({ img, index, uploading, onField, onUpload, onRemove, maxPhotos, unitsLabel = 'Units', priceLabel = 'Sale price / note' }) {
@@ -817,6 +914,12 @@ function CollageBuilder({ cfg, setCfg, variant = 'multifamily' }) {
             )}
           </div>
         </div>
+
+        <OmUploadField cfg={cfg} setCfg={setCfg}
+                       label={isVal ? 'Gated PDF download (optional)' : 'Offering Memorandum (PDF, optional)'}
+                       hint={isVal
+                         ? 'Attach a market report or seller guide. It unlocks only after the visitor gives their name, phone and email — each unlock is a lead.'
+                         : 'Attach the deal package. It unlocks only after the visitor gives their name, phone and email — an OM reader is your warmest lead.'} />
 
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
           <div>
@@ -1109,6 +1212,10 @@ function MailingListBuilder({ cfg, setCfg }) {
           </div>
         </div>
 
+        <OmUploadField cfg={cfg} setCfg={setCfg}
+                       label="Gated PDF download (optional)"
+                       hint="A deal package, market report or OM. It sits above the signup form and unlocks only after the visitor gives their name, phone and email — those land as leads, separately from the email list." />
+
         <div>
           <label style={fieldLabel}>Consent / fine print</label>
           <input className="input" maxLength={200} value={cfg.consent_text || ''}
@@ -1350,6 +1457,8 @@ function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
             The first photo becomes the page's hero banner; the rest fill the gallery below it.
           </div>
         </div>
+
+        <OmUploadField cfg={cfg} setCfg={setCfg} />
 
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
           <div>
@@ -1759,11 +1868,12 @@ function RecipientImporter({ mailingId, contacts, onDone, onCancel }) {
 // ─── Mailing detail drawer ────────────────────────────────────────────────────
 
 function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onClose, onUpdate, onDelete }) {
-  const [tab, setTab] = useState('overview') // overview | recipients | scans | leads | edit
+  const [tab, setTab] = useState('overview') // overview | recipients | scans | leads | om | edit
   const [recipients, setRecipients] = useState([])
   const [scans, setScans] = useState([])
   const [leads, setLeads] = useState([])
   const [subscribers, setSubscribers] = useState([])
+  const [omRequests, setOmRequests] = useState([])
   const [analytics, setAnalytics] = useState(null)
   const [loading, setLoading] = useState(true)
   const [importerOpen, setImporterOpen] = useState(false)
@@ -1771,20 +1881,26 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
   const [saving, setSaving] = useState(false)
 
   const isMailingList = mailing.landing_type === 'mailing'
+  const attachedOm    = normalizeOm(mailing.landing_config?.om)
+  const hasOmAttached = !!attachedOm
 
   const refresh = async () => {
     setLoading(true)
-    const [r, s, l, a, sub] = await Promise.all([
+    const [r, s, l, a, sub, om] = await Promise.all([
       api('recipients', { mailing_id: mailing.id }, 'GET'),
       api('scans',      { mailing_id: mailing.id }, 'GET'),
       api('leads',      { mailing_id: mailing.id }, 'GET'),
       api('analytics',  { mailing_id: mailing.id }, 'GET'),
       isMailingList ? api('subscribers', { mailing_id: mailing.id }, 'GET') : Promise.resolve({ subscribers: [] }),
+      // Only when the page actually has an OM attached — no point asking
+      // otherwise, and it keeps the drawer's round trips down.
+      hasOmAttached ? api('om_requests', { mailing_id: mailing.id }, 'GET') : Promise.resolve({ om_requests: [] }),
     ])
     setRecipients(r.recipients || [])
     setScans(s.scans || [])
     setLeads(l.leads || [])
     setSubscribers(sub.subscribers || [])
+    setOmRequests(om.om_requests || [])
     setAnalytics(a)
     setLoading(false)
   }
@@ -1864,6 +1980,22 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
     a.download = `${mailing.name.replace(/[^a-z0-9]/gi, '_')}-subscribers.csv`
     a.click()
   }
+  const exportOmRequestsCSV = () => {
+    const headers = ['Name', 'Email', 'Phone', 'Downloads', 'First Download', 'Last Download', 'From A Scan']
+    const rows = omRequests.map(r => [
+      r.name || '', r.email || '', r.phone || '', r.download_count ?? 1,
+      r.created_at ? new Date(r.created_at).toISOString().slice(0, 16).replace('T', ' ') : '',
+      r.last_download_at ? new Date(r.last_download_at).toISOString().slice(0, 16).replace('T', ' ') : '',
+      r.visit_id ? 'Yes' : 'No',
+    ])
+    const csv = [headers, ...rows].map(row => row.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `${mailing.name.replace(/[^a-z0-9]/gi, '_')}-om-downloads.csv`
+    a.click()
+  }
+
   const activeSubscribers = subscribers.filter(s => s.status === 'subscribed')
 
   return (
@@ -1892,6 +2024,7 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
           { id:'recipients', label:`Recipients (${analytics?.recipients_total ?? recipients.length})` },
           { id:'scans',      label:`Scans (${analytics?.total_scans ?? scans.length})` },
           ...(isMailingList ? [] : [{ id:'leads', label:`Leads (${analytics?.total_leads ?? leads.length})` }]),
+          ...(hasOmAttached ? [{ id:'om', label:`OM Downloads (${omRequests.length})` }] : []),
           { id:'edit',       label:'Edit' },
         ].map(t => (
           <button key={t.id}
@@ -2155,9 +2288,22 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
               <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
                 {leads.map(l => (
                   <div key={l.id} style={{ border:'1px solid var(--gw-border)', borderRadius:8, padding:12 }}>
-                    <div style={{ display:'flex', justifyContent:'space-between' }}>
-                      <div style={{ fontWeight:700 }}>{l.name || 'Anonymous'}</div>
-                      <div style={{ fontSize:11, color:'var(--gw-mist)' }}>{new Date(l.created_at).toLocaleString()}</div>
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:8 }}>
+                      <div style={{ fontWeight:700, display:'flex', alignItems:'center', gap:7, minWidth:0 }}>
+                        <span style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                          {l.name || 'Anonymous'}
+                        </span>
+                        {/* An OM download is a materially warmer lead than a
+                            "call me" form fill — say so at a glance. */}
+                        {l.om_requested && (
+                          <span style={{ fontSize:10, fontWeight:700, letterSpacing:0.4, textTransform:'uppercase',
+                                         color:'#b8860b', background:'#fdf3e0', border:'1px solid #f0e0c0',
+                                         borderRadius:99, padding:'2px 7px', flexShrink:0 }}>
+                            Downloaded OM
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ fontSize:11, color:'var(--gw-mist)', flexShrink:0 }}>{new Date(l.created_at).toLocaleString()}</div>
                     </div>
                     <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:4, display:'flex', gap:14, flexWrap:'wrap' }}>
                       {l.email && <span><Icon name="mail" size={11} /> {l.email}</span>}
@@ -2165,6 +2311,48 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
                       {l.property_address && <span><Icon name="building" size={11} /> {l.property_address}</span>}
                     </div>
                     {l.message && <div style={{ marginTop:6, fontSize:13, color:'var(--gw-ink)' }}>{l.message}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {tab === 'om' && (
+          <>
+            <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:12, flexWrap:'wrap' }}>
+              <div style={{ fontSize:13, color:'var(--gw-mist)' }}>
+                <strong style={{ color:'var(--gw-ink)' }}>{omRequests.length}</strong> unlocked
+                {attachedOm && <> · <span style={{ color:'var(--gw-ink)' }}>{attachedOm.filename}</span></>}
+              </div>
+              <button className="btn btn--secondary" style={{ fontSize:12, marginLeft:'auto' }}
+                      disabled={omRequests.length === 0} onClick={exportOmRequestsCSV}>
+                <Icon name="download" size={12} /> Export CSV
+              </button>
+            </div>
+            {omRequests.length === 0 ? (
+              <EmptyState title="Nobody has opened the OM yet"
+                          message="The download is gated: whoever wants the offering memorandum gives their name, phone and email first. Everyone who does shows up here — and as a lead." />
+            ) : (
+              <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                {omRequests.map(r => (
+                  <div key={r.id} style={{ border:'1px solid var(--gw-border)', borderRadius:8, padding:'10px 12px' }}>
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:8 }}>
+                      <div style={{ fontWeight:700, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                        {r.name || 'Anonymous'}
+                      </div>
+                      <div style={{ fontSize:11, color:'var(--gw-mist)', flexShrink:0, display:'flex', gap:8, alignItems:'center' }}>
+                        {r.download_count > 1 && (
+                          <span title="Times they've re-opened the download">×{r.download_count}</span>
+                        )}
+                        {new Date(r.last_download_at || r.created_at).toLocaleString()}
+                      </div>
+                    </div>
+                    <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:4, display:'flex', gap:14, flexWrap:'wrap' }}>
+                      {r.email && <a href={`mailto:${r.email}`} style={{ color:'inherit' }}><Icon name="mail" size={11} /> {r.email}</a>}
+                      {r.phone && <a href={`tel:${r.phone}`} style={{ color:'inherit' }}><Icon name="phone" size={11} /> {r.phone}</a>}
+                      {r.visit_id && <span title="Came from a tracked QR scan"><Icon name="link" size={11} /> from a scan</span>}
+                    </div>
                   </div>
                 ))}
               </div>

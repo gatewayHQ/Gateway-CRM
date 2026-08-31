@@ -53,5 +53,16 @@ next billing cycle starts.
 ## If it's still high
 
 - Check Supabase → Storage for any single very-large object the buckets missed.
+
+## A note on `campaign-oms`
+
+Offering Memorandums (migration 0043) do **not** live in a public bucket and are
+deliberately **not** compressed or re-encoded — a PDF an owner reads page by
+page has to arrive byte-identical, and the 50 MB ceiling is the bucket's own
+limit. Their egress is not cached CDN egress either: every download is a
+short-lived signed URL, so the bytes come out of the (much larger) egress
+allowance rather than the cached-egress cap this document is about. If OM
+downloads ever dominate egress, the lever is file size at the source — ask the
+agent to upload a web-optimized export — not transcoding on our side.
 - Consider a branded image CDN later (the OG social-preview images in
   `api/campaigns` are a candidate to serve pre-sized).
