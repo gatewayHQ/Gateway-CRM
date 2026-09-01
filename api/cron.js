@@ -31,6 +31,7 @@
 
 import { createClient } from '@supabase/supabase-js'
 import { boldsign, listAllTemplates, getRateLimitState } from './boldsign.js'
+import { normalizeSigners, outstandingSigners } from '../src/lib/services/boldsignSigners.js'
 import { OPERATING_STATES } from '../src/lib/constants.js'
 import { ALL_DEAL_STAGES, isOpenStage } from '../src/lib/stages.js'
 import { streetLine, readPropertiesWithUnit } from '../src/lib/address.js'
@@ -807,7 +808,7 @@ export function shouldRemind(doc, now = new Date()) {
 async function runSignatureReminders(supabase) {
   const { data: pending, error } = await supabase
     .from('boldsign_documents')
-    .select('id, document_id, document_name, status, sent_at, created_at, last_reminded_at, reminder_count')
+    .select('id, document_id, document_name, status, sent_at, created_at, last_reminded_at, reminder_count, signers, signer_email')
     .in('status', ['sent', 'delivered'])
     .order('sent_at', { ascending: true })
     .limit(500)
@@ -822,7 +823,19 @@ async function runSignatureReminders(supabase) {
   const failed = []
   for (const doc of due) {
     try {
-      await boldsign(`/document/remind?documentId=${encodeURIComponent(doc.document_id)}`, { method: 'POST', json: {} })
+      // TARGETED. Without `receiverEmails`, BoldSign reminds every pending
+      // recipient — which on a sequential send includes people it has not
+      // asked yet, and on any send includes nobody useful once the row is
+      // stale. The nightly sweep is the one that runs unattended and therefore
+      // the one most able to train a client to ignore us, so it chases exactly
+      // the people who still owe a signature. No recorded signer state (a
+      // document sent before per-signer state was captured) falls back to
+      // BoldSign's own default rather than skipping the reminder.
+      const qs = new URLSearchParams({ documentId: doc.document_id })
+      for (const s of outstandingSigners(normalizeSigners(doc.signers))) {
+        if (s.email) qs.append('receiverEmails', s.email)
+      }
+      await boldsign(`/document/remind?${qs.toString()}`, { method: 'POST', json: {} })
       await supabase.from('boldsign_documents').update({
         last_reminded_at: now.toISOString(),
         reminder_count:   (doc.reminder_count || 0) + 1,

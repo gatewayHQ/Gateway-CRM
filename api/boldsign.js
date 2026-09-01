@@ -4,6 +4,7 @@ import { wrap } from './_lib/observability.js'
 import crypto from 'node:crypto'
 import { extractPdfWords } from './_lib/pdfText.js'
 import { captionFields, detectSelectionCues } from '../src/lib/services/boldsignCaptions.js'
+import { normalizeSigners, outstandingSigners } from '../src/lib/services/boldsignSigners.js'
 
 // We verify webhook signatures against the RAW request body, so the automatic
 // body parser must be off — we read the stream and parse it ourselves below.
@@ -2440,11 +2441,20 @@ async function handler(req, res) {
       // `status` is null when BoldSign reports something outside the set this app
       // stores; `rawStatus` still carries it so the UI can show the truth without
       // writing an unknown value into a column every other query filters on.
+      // Per-signer state rides along on every status read. The document's own
+      // status says whether it is done; only this says WHO is holding it up,
+      // which is the fact an agent acts on. Normalized here — with BoldSign's
+      // own signing-order flag — so what gets stored on the row is already
+      // resolved and every screen renders the same thing without re-deriving it.
+      const signerRows = normalizeSigners(data.signerDetails, {
+        inOrder: Boolean(data.enableSigningOrder ?? data.enableSigningOrderInfo),
+      })
       return res.json({
         status:            normalizeKnownStatus(data.status),
         rawStatus:         data.status ?? null,
         sentDateTime:      toIso(data.createdDate || data.sentDate || null),
         completedDateTime: toIso(data.completedDate || data.signedDate || null),
+        signers:           signerRows,
       })
     }
 
@@ -2517,23 +2527,71 @@ async function handler(req, res) {
 
     // Nudge outstanding signers. Records the nudge so the nightly auto-reminder
     // sweep and the UI both know when this document was last chased.
+    //
+    // TARGETED BY DEFAULT. `/document/remind` takes repeated `receiverEmails`
+    // query parameters, and without them it emails every pending signer —
+    // including, on a sequential send, people BoldSign has not asked yet. A
+    // caller that names signers gets exactly those; a caller that names none
+    // gets whoever the row says is still outstanding.
+    //
+    // THE LIST IS FILTERED AGAINST THE DOCUMENT'S OWN SIGNERS. `signerEmails`
+    // arrives from the browser, and an unchecked pass-through would turn this
+    // endpoint into a way to send brokerage-branded mail to any address through
+    // our BoldSign account. Only addresses already on the document survive.
     if (body.action === 'remind') {
       const id = body.envelopeId || body.documentId
       if (!id) return res.status(400).json({ error: 'documentId required' })
       const svc = getServiceClient()
       const { data: record } = await svc.from('boldsign_documents')
-        .select('id, status, reminder_count').eq('document_id', id).maybeSingle()
+        .select('id, status, reminder_count, signers, signer_email').eq('document_id', id).maybeSingle()
       if (record && !['sent', 'delivered'].includes(record.status)) {
         return res.status(400).json({ error: `This document is ${record.status} — there is nobody left to remind.` })
       }
-      await boldsign(`/document/remind?documentId=${encodeURIComponent(id)}`, { method: 'POST', json: {} })
+
+      const known = new Set(
+        [
+          ...normalizeSigners(record?.signers).map(x => x.email),
+          ...String(record?.signer_email || '').split(',').map(x => x.trim()),
+        ].filter(Boolean).map(e => e.toLowerCase()),
+      )
+      const asked = (Array.isArray(body.signerEmails) ? body.signerEmails : [])
+        .map(e => String(e || '').trim()).filter(Boolean)
+      const rejected = asked.filter(e => known.size && !known.has(e.toLowerCase()))
+      if (rejected.length) {
+        console.warn(`[boldsign] remind ${id}: ignoring ${rejected.length} address(es) not on the document`)
+      }
+      let targets = asked.filter(e => !known.size || known.has(e.toLowerCase()))
+      // No explicit list: whoever the row still says owes a signature.
+      if (!targets.length && !asked.length) {
+        targets = outstandingSigners(normalizeSigners(record?.signers)).map(x => x.email).filter(Boolean)
+      }
+      if (asked.length && !targets.length) {
+        return res.status(400).json({ error: 'None of those signers are on this document.' })
+      }
+
+      const qs = new URLSearchParams({ documentId: id })
+      for (const email of targets) qs.append('receiverEmails', email)
+      try {
+        await boldsign(`/document/remind?${qs.toString()}`, { method: 'POST', json: {} })
+      } catch (err) {
+        // BoldSign allows one manual reminder per document per day. That is a
+        // rule an agent can work with, and a bare 400 is not.
+        if (err.status === 400 && /reminder|once|already/i.test(err.message || '')) {
+          return res.status(429).json({
+            error: 'BoldSign allows one manual reminder a day per document, and this one has already been reminded today. '
+              + 'The nightly sweep will keep chasing, or you can call them.',
+          })
+        }
+        throw err
+      }
+
       if (record) {
         await svc.from('boldsign_documents').update({
           last_reminded_at: new Date().toISOString(),
           reminder_count:   (record.reminder_count || 0) + 1,
         }).eq('id', record.id)
       }
-      return res.json({ ok: true, remindedAt: new Date().toISOString() })
+      return res.json({ ok: true, remindedAt: new Date().toISOString(), remindedEmails: targets })
     }
 
     // Delete a draft/unsigned/expired document to keep the Signatures tab tidy.
@@ -3222,6 +3280,31 @@ async function handleWebhook(req, res) {
       advanced = Boolean(updated?.length)
     } else if (record.status !== status) {
       console.warn(`[boldsign] webhook for ${documentId}: ignoring out-of-order "${status}" — row is already "${record.status}"`)
+    }
+
+    // ── Per-signer state ──────────────────────────────────────────────────
+    // Written on ANY delivery that carries it, not only one that advances the
+    // document. That is the whole point: "Jane signed, John hasn't" does not
+    // move the document off 'sent', so gating this on `advanced` would mean the
+    // one event that tells an agent who to chase is the one event we discard.
+    //
+    // MONOTONIC, because deliveries are unordered. A retried early event can
+    // land after a later one, and overwriting three signatures with the payload
+    // from one would make the row walk backwards. A payload is only written
+    // when it knows at least as much as the row already does.
+    const incomingSigners = normalizeSigners(doc?.signerDetails, {
+      inOrder: Boolean(doc?.enableSigningOrder ?? body?.enableSigningOrder),
+    })
+    if (incomingSigners.length) {
+      const signedIn    = incomingSigners.filter(x => x.status === 'signed').length
+      const signedOnRow = normalizeSigners(record.signers).filter(x => x.status === 'signed').length
+      if (signedIn >= signedOnRow) {
+        const { error: signerErr } = await supabase.from('boldsign_documents')
+          .update({ signers: incomingSigners }).eq('id', record.id)
+        if (signerErr) console.warn(`[boldsign] could not record signer state for ${documentId}: ${signerErr.message}`)
+      } else {
+        console.warn(`[boldsign] webhook for ${documentId}: ignoring out-of-order signer payload (${signedIn} signed vs ${signedOnRow} on the row)`)
+      }
     }
 
     // Nothing left to do for a duplicate or superseded delivery, EXCEPT for a

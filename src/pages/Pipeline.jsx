@@ -26,7 +26,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -1792,9 +1792,16 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
     // back without it, losing the "Signed on …" record permanently.
     const patch = { status: data.status }
     if (data.completedDateTime) patch.completed_at = data.completedDateTime
+    // Per-signer state comes back with every status read, and this is the one
+    // moment an agent has explicitly asked "where is this?" — so it is stored,
+    // not just shown. A document sent before per-signer state existed gets its
+    // recipient list filled in the first time anyone refreshes it.
+    if (Array.isArray(data.signers) && data.signers.length) patch.signers = data.signers
     await supabase.from('boldsign_documents').update(patch).eq('id', env.id)
     setEnvelopes(prev => prev.map(e => e.id === env.id ? { ...e, ...patch } : e))
-    pushToast(`Status: ${data.status}`, 'info')
+    const rows = signerRows({ ...env, ...patch })
+    const left = outstandingSigners(rows).length
+    pushToast(left ? `${waitingOnLabel(rows)} · ${data.status}` : `Status: ${data.status}`, 'info')
   }
 
   // Fetch the signed PDF (or audit trail) for THIS document.
@@ -1837,17 +1844,23 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
   // Nudge whoever still owes a signature. The API refuses when there's nobody
   // left to remind and records the nudge, so the nightly auto-reminder sweep
   // doesn't immediately chase the same signer again.
-  const remind = async (env) => {
-    setReminding(p => ({ ...p, [env.id]: true }))
+  // `only` names one signer; without it the API reminds whoever the row still
+  // shows as outstanding — which, on a sequential send, is not everybody.
+  const remind = async (env, only = null) => {
+    const key = only ? `${env.id}:${only.email}` : env.id
+    setReminding(p => ({ ...p, [key]: true }))
     try {
-      await apiRemindDocument(env.document_id)
+      const res = await apiRemindDocument(env.document_id, only ? [only.email] : null)
       const patch = { last_reminded_at: new Date().toISOString(), reminder_count: (env.reminder_count || 0) + 1 }
       setEnvelopes(prev => prev.map(e => e.id === env.id ? { ...e, ...patch } : e))
-      pushToast(`Reminder sent to ${env.signer_name || 'the signers'}`, 'success')
+      const who = only
+        ? (only.name || only.email)
+        : (res?.remindedEmails?.length ? `${res.remindedEmails.length} outstanding signer${res.remindedEmails.length === 1 ? '' : 's'}` : 'the signers')
+      pushToast(`Reminder sent to ${who}`, 'success')
     } catch (err) {
       pushToast(err.message, 'error')
     } finally {
-      setReminding(p => ({ ...p, [env.id]: false }))
+      setReminding(p => ({ ...p, [key]: false }))
     }
   }
 
@@ -2068,6 +2081,10 @@ create policy "agent_notifications_policy" on agent_notifications
               const daysOut   = awaiting && (env.sent_at || env.created_at)
                 ? Math.floor((Date.now() - new Date(env.sent_at || env.created_at)) / 86400000)
                 : null
+              // Who is on this document, and where each of them has got to.
+              const people   = signerRows(env)
+              const pending  = outstandingSigners(people)
+              const progress = signerProgress(people)
               return (
                 <div key={env.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:8, background:'#fff', overflow:'hidden' }}>
                   <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px' }}>
@@ -2075,7 +2092,12 @@ create policy "agent_notifications_policy" on agent_notifications
                     <div style={{ flex:1, minWidth:0 }}>
                       <div style={{ fontSize:13, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{env.document_name || 'Document'}</div>
                       <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>
-                        To: {env.signer_name} · {new Date(env.sent_at || env.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}
+                        {/* The sentence the old comma-joined string could never
+                            say. On a four-party packet "waiting on John Doe" is
+                            the only fact that decides what the agent does next. */}
+                        {awaiting ? waitingOnLabel(people) : `To: ${people.map(p => p.name || p.email).filter(Boolean).join(', ') || env.signer_name}`}
+                        {progress.total > 1 && ` · ${progress.signed}/${progress.total} signed`}
+                        {' · '}{new Date(env.sent_at || env.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}
                         {completed && env.completed_at && (
                           <span> · Signed {new Date(env.completed_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}</span>
                         )}
@@ -2094,9 +2116,14 @@ create policy "agent_notifications_policy" on agent_notifications
                         style={{ fontSize:11, flexShrink:0 }}
                         onClick={() => remind(env)}
                         disabled={reminding[env.id]}
-                        title={env.last_reminded_at
-                          ? `Last reminded ${new Date(env.last_reminded_at).toLocaleDateString('en-US', { month:'short', day:'numeric' })}`
-                          : 'Email the outstanding signers a reminder'}
+                        title={[
+                          pending.length
+                            ? `Emails ${pending.map(p => p.name || p.email).join(', ')} — nobody who has already signed`
+                            : 'Emails whoever still owes a signature',
+                          env.last_reminded_at
+                            ? `Last reminded ${new Date(env.last_reminded_at).toLocaleDateString('en-US', { month:'short', day:'numeric' })}`
+                            : null,
+                        ].filter(Boolean).join('. ')}
                       >
                         {reminding[env.id] ? 'Sending…' : 'Remind'}
                       </button>
@@ -2118,6 +2145,59 @@ create policy "agent_notifications_policy" on agent_notifications
                       </button>
                     )}
                   </div>
+                  {/* WHO STILL OWES A SIGNATURE. One row per recipient, in
+                      signing order, each with its own state and its own nudge.
+                      Shown only while the document is in flight: once everyone
+                      has signed, the completed strip below says all there is to
+                      say, and a list of green ticks is just noise on the row.
+
+                      A per-signer Remind is not a convenience. Reminding the
+                      whole document emails people who have already signed, and
+                      on a sequential send it emails people BoldSign has not
+                      asked yet — both of which teach a client to ignore the
+                      next one. */}
+                  {awaiting && people.length > 1 && (
+                    <div style={{ borderTop:'1px solid var(--gw-border)', padding:'6px 12px 8px', background:'var(--gw-bone)' }}>
+                      {people.map(p => {
+                        const done = p.status === 'signed'
+                        const bad  = ['declined', 'expired', 'revoked'].includes(p.status)
+                        const busy = Boolean(reminding[`${env.id}:${p.email}`])
+                        return (
+                          <div key={`${p.email || p.name}-${p.order}`} style={{ display:'flex', alignItems:'center', gap:8, padding:'3px 0' }}>
+                            <span style={{
+                              width:16, height:16, borderRadius:'50%', flexShrink:0, display:'inline-flex',
+                              alignItems:'center', justifyContent:'center', fontSize:9, fontWeight:700,
+                              background: done ? 'var(--gw-green)' : bad ? 'var(--gw-red)' : p.status === 'viewed' ? 'var(--gw-amber)' : 'var(--gw-border)',
+                              color: done || bad || p.status === 'viewed' ? '#fff' : 'var(--gw-mist)',
+                            }}>
+                              {done ? '\u2713' : bad ? '!' : p.order}
+                            </span>
+                            <span style={{ fontSize:12, flex:1, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                              {p.name || p.email}
+                              {p.role && <span style={{ color:'var(--gw-mist)' }}> · {p.role}</span>}
+                            </span>
+                            <span style={{ fontSize:11, color: done ? 'var(--gw-green)' : bad ? 'var(--gw-red)' : 'var(--gw-mist)', flexShrink:0 }}>
+                              {describeSignerState(p)}
+                            </span>
+                            {/* Only someone who can actually act right now gets
+                                a nudge. Queued signers have not been emailed. */}
+                            {p.status !== 'signed' && p.status !== 'queued' && !bad && p.email && (
+                              <button
+                                className="btn btn--ghost btn--sm"
+                                style={{ fontSize:10, flexShrink:0, padding:'2px 6px' }}
+                                onClick={() => remind(env, p)}
+                                disabled={busy}
+                                title={`Email only ${p.name || p.email}`}
+                              >
+                                {busy ? '…' : 'Nudge'}
+                              </button>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+
                   {/* A draft is unfinished work, not a sent document — say so, and
                       give the agent the doors back into it. Before this the row
                       showed a "Draft" chip and nothing else, so a send interrupted
@@ -2245,7 +2325,24 @@ create policy "agent_notifications_policy" on agent_notifications
               <p style={{ margin:'0 0 10px', color:'var(--gw-ink)' }}>
                 <strong>{sendAsk.document_name || 'This document'}</strong> will be emailed for e-signature to:
               </p>
-              <p style={{ margin:'0 0 10px', color:'var(--gw-ink)' }}>{sendAsk.signer_email || sendAsk.signer_name || 'its signers'}</p>
+              {/* IN SIGNING ORDER, one per line, with the address. The mistake
+                  this dialog exists to catch is sending the RIGHT document to
+                  the WRONG people, and a comma-joined run-on line is exactly
+                  what a person skims past. */}
+              {(() => {
+                const rows = signerRows(sendAsk)
+                if (!rows.length) return <p style={{ margin:'0 0 10px' }}>{sendAsk.signer_email || sendAsk.signer_name || 'its signers'}</p>
+                return (
+                  <ul style={{ margin:'0 0 10px', padding:0, listStyle:'none' }}>
+                    {rows.map(r => (
+                      <li key={`${r.email || r.name}-${r.order}`} style={{ display:'flex', gap:8, padding:'2px 0', color:'var(--gw-ink)' }}>
+                        <span style={{ color:'var(--gw-mist)', minWidth:16 }}>{r.order}.</span>
+                        <span><strong>{r.name || r.email}</strong>{r.name && r.email ? ` — ${r.email}` : ''}{r.role ? ` (${r.role})` : ''}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )
+              })()}
               <p style={{ margin:0 }}>
                 It stops being a draft, so it can no longer be edited here. If the client still has changes,
                 cancel and use <strong>Edit Fields</strong> instead.

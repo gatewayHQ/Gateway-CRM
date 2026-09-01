@@ -814,6 +814,81 @@ which.
 field's `id`/`type`/`roleIndex` so those controls can be rendered with the
 template's own wording rather than a prettified field id.
 
+## Per-signer state — who is actually holding it up
+
+**A document's status and a signer's status are different things.** The document
+is `sent` until everyone is done; each signer is somewhere between "hasn't
+opened it" and "signed". Every send stored its full signer array and the UI
+rendered `signer_name` — a comma-joined string of everybody — plus one chip for
+the document as a whole. On a four-party packet an agent could see it was
+unsigned and could not see *who* was holding it up, which is the only fact that
+decides what they do next. The data was being collected and thrown away.
+
+`src/lib/services/boldsignSigners.js` is the shared, pure model
+(`api/boldsign.js` and `api/cron.js` import it directly, the same way they
+import `boldsignCaptions.js`). It normalizes to:
+
+| state | means |
+|---|---|
+| `signed` | done |
+| `viewed` | opened it, hasn't signed |
+| `waiting` | has it, hasn't opened it |
+| `queued` | **derived** — sequential send, BoldSign hasn't emailed them yet |
+| `declined` / `expired` / `revoked` | terminal, not chaseable |
+
+`queued` is the one that isn't BoldSign's. On a sequential send the people
+behind the active signer have not been asked yet, so showing them as "waiting"
+sends an agent chasing someone who never received anything. Because these rows
+are persisted to `boldsign_documents.signers` and read back,
+`normalizeSignerStatus` is **round-trip safe** — without that, `queued` decayed
+to `waiting` on every reload.
+
+### Where the state comes from
+
+- **Webhook** — written on *any* delivery carrying `signerDetails`, not only one
+  that advances the document. "Jane signed, John hasn't" does not move the
+  document off `sent`, so gating this on `advanced` would discard the one event
+  that says who to chase. **Monotonic**: deliveries are unordered, so a payload
+  is written only when it knows at least as much as the row already does.
+- **Status refresh** — `action: 'status'` returns normalized `signers` alongside
+  the document status, and the Signatures tab stores them. A document sent
+  before per-signer state existed fills in the first time anyone refreshes it.
+- **Legacy fallback** — `signerRows()` reconstructs people from the comma-joined
+  columns when there is no array, so old rows still render as a list.
+
+### Reminders are targeted
+
+`/document/remind` takes repeated `receiverEmails` query parameters. Without
+them BoldSign emails **every** pending recipient — including, on a sequential
+send, people it has not asked yet. Reminding someone who has already signed, or
+who cannot yet act, is how a client learns to ignore the next one.
+
+- The `remind` action reminds whoever the row still shows as outstanding, or
+  exactly the `signerEmails` the caller names.
+- **The list is filtered against the document's own signers.** `signerEmails`
+  comes from the browser, and an unchecked pass-through would turn the endpoint
+  into a way to send brokerage-branded mail to any address through our BoldSign
+  account.
+- The nightly sweep (`api/cron.js`) targets the same way. It is the one that
+  runs unattended and therefore the one most able to train a client to ignore
+  us. No recorded signer state falls back to BoldSign's default rather than
+  skipping the reminder.
+- **BoldSign allows one manual reminder per document per day.** That 400 is
+  translated into a sentence an agent can act on rather than surfacing bare.
+
+### What the agent sees
+
+- The Signatures row leads with **"waiting on John Doe"** and, on a multi-party
+  packet, `2/4 signed`.
+- In-flight documents with more than one recipient expand into a per-signer
+  strip: order badge, name, role, state ("opened Aug 14", "not their turn yet"),
+  and a per-person **Nudge** — offered only to someone who can actually act.
+- The send confirmation lists recipients **in signing order, one per line, with
+  addresses**. The mistake it exists to catch is sending the right document to
+  the wrong people, and a comma-joined run-on line is what a person skims past.
+- The dashboard queue (`SignatureQueue`) uses the same model, so "waiting on
+  John Doe" reads identically in both places.
+
 ## The terms panel is declared per packet, not per app
 
 **The decisions a packet asks its sender for — Representation, Term, agency

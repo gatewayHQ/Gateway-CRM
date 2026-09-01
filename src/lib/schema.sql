@@ -607,9 +607,24 @@ create table if not exists boldsign_documents (
   document_id   text not null,
   status        text default 'sent',
   subject       text,
+  -- Legacy comma-joined roll calls, kept for rows written before per-signer
+  -- state existed. Everything reads `signers` first and falls back to these.
   signer_name   text,
   signer_email  text,
   document_name text,
+  -- PER-SIGNER STATE, normalized: [{ name, email, role, order, status,
+  -- signedAt, viewedAt }] with status in queued|waiting|viewed|signed|declined|
+  -- expired|revoked. Seeded at send time from the signer list and then kept
+  -- current by the webhook (written on ANY delivery that carries signer
+  -- details, monotonically — a retried early event must not overwrite three
+  -- signatures with one) and by an explicit status refresh.
+  --
+  -- This is what makes "waiting on John Doe" possible. The document's own
+  -- `status` says whether it is finished; only this says who is holding it up,
+  -- which is the fact an agent acts on and the list a reminder is aimed at.
+  -- `queued` is derived, not BoldSign's: on a sequential send it means BoldSign
+  -- has not emailed that person yet, so they must never be chased.
+  -- See src/lib/services/boldsignSigners.js.
   signers           jsonb default '[]',
   sent_at           timestamptz default now(),
   completed_at      timestamptz,

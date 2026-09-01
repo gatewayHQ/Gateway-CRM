@@ -21,7 +21,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import React from 'react'
 import { supabase } from '../lib/supabase.js'
-import { remindDocument } from '../lib/services/boldsign.js'
+import { remindDocument, signerRows, outstandingSigners, waitingOnLabel, signerProgress } from '../lib/services/boldsign.js'
 import { Icon, pushToast } from './UI.jsx'
 
 // In flight: the client has it and has not finished with it.
@@ -84,18 +84,17 @@ export function waitingLabel(days) {
   return `waiting ${days} days`
 }
 
-// One line naming who still owes a signature. `signers` is the full array
-// stored on every send; `signer_name` is the legacy comma-joined string. Per-
-// signer state is not on the row yet, so this says who is on the document
-// rather than claiming to know who has finished.
+// One line naming who still owes a signature — not a list of everyone on the
+// document. "waiting on John Doe" is the fact an agent acts on; "Jane Doe, John
+// Doe" is the fact they have to decode. See boldsignSigners.js.
 export function recipientLine(doc) {
-  const list = Array.isArray(doc?.signers) ? doc.signers : []
-  const names = list.map(s => s?.name || s?.signerName || s?.email || s?.signerEmail).filter(Boolean)
-  const fallback = String(doc?.signer_name || '').split(',').map(s => s.trim()).filter(Boolean)
-  const all = names.length ? names : fallback
-  if (!all.length) return 'no recipients recorded'
-  if (all.length <= 2) return all.join(' and ')
-  return `${all[0]} and ${all.length - 1} others`
+  const rows = signerRows(doc)
+  if (!rows.length) return 'no recipients recorded'
+  if (doc?.status === 'draft') {
+    const names = rows.map(r => r.name || r.email).filter(Boolean)
+    return names.length <= 2 ? names.join(' and ') : `${names[0]} and ${names.length - 1} others`
+  }
+  return waitingOnLabel(rows)
 }
 
 const VISIBLE = 6
@@ -158,7 +157,11 @@ export default function SignatureQueue({ deals = [], properties = [], go }) {
   const remind = async (doc) => {
     setReminding(p => ({ ...p, [doc.id]: true }))
     try {
-      await remindDocument(doc.document_id)
+      // Only the people who still owe something. Reminding the whole document
+      // emails signers who have already finished, which is how a client learns
+      // to ignore the next one.
+      const pending = outstandingSigners(signerRows(doc)).map(r => r.email).filter(Boolean)
+      await remindDocument(doc.document_id, pending)
       const patch = { last_reminded_at: new Date().toISOString(), reminder_count: (doc.reminder_count || 0) + 1 }
       setRows(prev => prev.map(r => (r.id === doc.id ? { ...r, ...patch } : r)))
       pushToast(`Reminder sent — ${recipientLine(doc)}`, 'success')
@@ -238,7 +241,9 @@ export default function SignatureQueue({ deals = [], properties = [], go }) {
                     {doc.document_name || 'Document'}
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {recipientLine(doc)}{context ? ` · ${context}` : ''}
+                    {recipientLine(doc)}
+                    {(() => { const p = signerProgress(signerRows(doc)); return p.total > 1 ? ` · ${p.signed}/${p.total} signed` : '' })()}
+                    {context ? ` · ${context}` : ''}
                   </div>
                 </button>
 

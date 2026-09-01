@@ -91,22 +91,40 @@ describe('waitingLabel', () => {
 })
 
 describe('recipientLine', () => {
-  it('names the people on the document from the stored signer array', () => {
-    expect(recipientLine({ signers: [{ name: 'Jane Doe' }, { name: 'John Doe' }] })).toBe('Jane Doe and John Doe')
+  // In flight, the row leads with who is holding it up — not a roll call.
+  it('names who the document is waiting on', () => {
+    expect(recipientLine({ status: 'sent', signers: [{ name: 'Jane Doe' }, { name: 'John Doe' }] }))
+      .toBe('waiting on Jane Doe and John Doe')
   })
 
-  it('reads both naming conventions — ad-hoc sends and template sends differ', () => {
-    expect(recipientLine({ signers: [{ signerName: 'Jane Doe' }] })).toBe('Jane Doe')
-    expect(recipientLine({ signers: [{ signerEmail: 'jane@example.com' }] })).toBe('jane@example.com')
+  it('drops whoever has already signed out of the sentence', () => {
+    expect(recipientLine({
+      status: 'sent',
+      signers: [{ name: 'Jane Doe', status: 'Completed' }, { name: 'John Doe', status: 'NotCompleted' }],
+    })).toBe('waiting on John Doe')
+  })
+
+  it('leads with the decline, which outranks every other state on the row', () => {
+    expect(recipientLine({
+      status: 'sent',
+      signers: [{ name: 'Jane Doe', status: 'Completed' }, { name: 'John Doe', status: 'Declined' }],
+    })).toBe('declined by John Doe')
   })
 
   it('summarises a crowd rather than overflowing the row', () => {
-    expect(recipientLine({ signers: [{ name: 'A' }, { name: 'B' }, { name: 'C' }, { name: 'D' }] }))
-      .toBe('A and 3 others')
+    expect(recipientLine({ status: 'sent', signers: [{ name: 'A' }, { name: 'B' }, { name: 'C' }, { name: 'D' }] }))
+      .toBe('waiting on A and 3 others')
+  })
+
+  // A draft has not been sent, so nobody is "waiting" on anything yet.
+  it('lists the intended recipients for a draft instead', () => {
+    expect(recipientLine({ status: 'draft', signers: [{ name: 'Jane Doe' }, { name: 'John Doe' }] }))
+      .toBe('Jane Doe and John Doe')
   })
 
   it('falls back to the legacy comma-joined column', () => {
-    expect(recipientLine({ signer_name: 'Jane Doe, John Doe' })).toBe('Jane Doe and John Doe')
+    expect(recipientLine({ status: 'sent', signer_name: 'Jane Doe, John Doe' }))
+      .toBe('waiting on Jane Doe and John Doe')
   })
 
   it('says so plainly when there is nobody recorded', () => {
