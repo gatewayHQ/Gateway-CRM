@@ -2781,7 +2781,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [embedDocId, setEmbedDocId] = React.useState(null)   // its document id — needed to capture the field layout
   const [sending,    setSending]    = React.useState(false)
   const [savingDraft, setSavingDraft] = React.useState(false)
-  // The created draft, being looked at. Set by reviewDraft(); cleared only by
+  // The created draft, being looked at. Set by createDraft(); cleared only by
   // closing, because the draft outlives this modal either way.
   const [review,     setReview]     = React.useState(null)
 
@@ -3117,7 +3117,24 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // actions. That is the whole prepare-and-print workflow, except the agent no
   // longer has to leave the screen and go find a download to see what the
   // packet says.
-  const reviewDraft = async () => {
+  // ONE STEP, TWO DESTINATIONS. Both buttons do the same first thing — create
+  // the draft with every value above written into it — and then differ only in
+  // where the agent lands:
+  //
+  //   Review Draft         → the composed packet on screen (the common case:
+  //                          the form already has its fields, so the question
+  //                          is "does this say the right thing")
+  //   Place Fields         → straight into the embedded editor (the case where
+  //                          the agent already KNOWS this deal needs a box
+  //                          moved, and a review first is a detour)
+  //
+  // Neither sends. Both leave a real draft on the deal reachable from the
+  // Signatures tab, so whichever door they pick, nothing is lost by closing.
+  //
+  // Kept as one function because the two paths must never disagree about what
+  // gets created: same payload, same layout restore, same tracking, same send
+  // options. Only the last line differs.
+  const createDraft = async (destination) => {
     const args = buildArgs()
     if (!args) return
     setSavingDraft(true)
@@ -3125,10 +3142,27 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
       const data = await saveTemplateDraft(args)
       reportLayout(data)
       if (!data.documentId) {
-        pushToast('The draft was created but could not be opened for review — it is on the Signatures tab.', 'info')
+        pushToast('The draft was created but could not be opened — it is on the Signatures tab.', 'info')
         onSaved()
         return
       }
+
+      if (destination === 'place') {
+        // Into the editor on the draft that now exists. Reopening it (rather
+        // than creating a second document through the embed path) is what keeps
+        // the two routes producing identical drafts.
+        const edit = await documentEditUrl({ documentId: data.documentId, redirectUrl: boldSignReturnUrl() })
+        if (!edit?.url) {
+          // The draft is safe. Fall through to the review rather than dead-end.
+          pushToast('The draft was saved but the field editor would not open — showing it for review instead.', 'info')
+        } else {
+          setReview({ documentId: data.documentId, documentName: args.documentName, signers: args.roles })
+          setEmbedDocId(data.documentId)
+          setEmbedUrl(edit.url)
+          return
+        }
+      }
+
       // The composed copy: BoldSign's own bytes with every filled value drawn
       // on and a signing summary appended (api/boldsign.js → buildPrintablePdf).
       // A failure here is NOT a failed send — the draft exists either way — so
@@ -3159,6 +3193,28 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // as a second button competing with "save" before anything has been created.
   // Still a draft on the other side: it sends only if the agent clicks Send in
   // there.
+  // Leaving the editor: back to the review of the draft that was just adjusted.
+  // The preview is re-fetched because the whole point of having been in there is
+  // that the placement changed — showing the copy from before would be a lie
+  // about work the agent just did. A failed re-fetch keeps the review open with
+  // no preview rather than dropping them out of the flow.
+  const backToReview = async () => {
+    const documentId = review?.documentId || embedDocId
+    setEmbedUrl(null)
+    setEmbedDocId(null)
+    if (!documentId) { onSaved(); return }
+    let pdf = {}
+    try { pdf = await fetchDraftPreview(documentId) }
+    catch (err) { console.warn('[boldsign] review: preview unavailable after placement —', err.message) }
+    setReview(prev => ({
+      ...(prev || { documentId }),
+      documentId,
+      previewUrl:  pdf.previewUrl || null,
+      downloadUrl: pdf.url || null,
+      fieldCount:  pdf.fieldCount || prev?.fieldCount || 0,
+    }))
+  }
+
   const adjustFields = async () => {
     if (!review?.documentId) return
     setSending(true)
@@ -3350,7 +3406,13 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     </div>
   ))
 
-  // Step 3 — the embedded placement editor, reached from the review.
+  // The embedded placement editor. Reached either straight from the prepare
+  // screen ("Place Fields") or from the review.
+  //
+  // CLOSING IT RETURNS TO THE REVIEW, not out of the modal: the agent has just
+  // moved boxes, and seeing the result is the obvious next thing. The preview is
+  // re-fetched on the way back so it shows the placement they just made rather
+  // than the copy from before they opened the editor.
   if (embedUrl) {
     return (
       <BoldSignStepModal
@@ -3358,7 +3420,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         documentId={embedDocId}
         eyebrow="Adjust field placement"
         heading={review?.documentName || 'Place fields'}
-        onClose={onClose}
+        onClose={backToReview}
         onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
         onDraft={() => pushToast('Saved — nothing has been sent yet. The draft is on this deal\u2019s Signatures tab.', 'info')}
       />
@@ -3835,8 +3897,9 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         </div>
 
         <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px' }}>
-          <strong>Nothing is sent yet.</strong> This fills the form in from the deal and shows it to you — from there you
-          can adjust it, download a copy for the client, or send it.
+          <strong>Neither button sends anything.</strong> Both fill the form in from this deal and save it as a dray —
+          <strong>Review Draft</strong> shows you the packet, <strong>Place Fields</strong> opens it in BoldSign to move
+          boxes first. You can get to either from the other.
           <br/>
           Fill values in <em>here</em>, not on the placement screen: anything typed there is a preview and never
           reaches the signers.
@@ -3844,14 +3907,24 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-        {/* ONE action. Two co-equal buttons with a paragraph explaining the
-            difference is a fork the agent has to resolve before they can see
-            anything; this is a step they take and then decide. Adjusting
-            placement and sending both live on the other side, with the packet
-            in front of them. */}
+        {/* TWO ROUTES INTO THE SAME DRAFT, not two ways to create one. Both
+            buttons run the identical creation step and then land somewhere
+            different — review the packet, or go straight to moving fields.
+            Review is primary because most forms already have their fields and
+            the question is whether the wording is right; placement is the
+            detour an agent takes when they already know this deal needs a box
+            moved. Sending is on the other side of either. */}
+        <button
+          className="btn btn--secondary"
+          onClick={() => createDraft('place')}
+          disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details || panelBlocked}
+          title="Save the draft and open it in BoldSign to move, add or remove where people sign and fill — nothing is sent"
+        >
+          {savingDraft ? 'Preparing…' : 'Place Fields in BoldSign'}
+        </button>
         <button
           className="btn btn--primary"
-          onClick={reviewDraft}
+          onClick={() => createDraft('review')}
           disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details || panelBlocked}
           title="Fill this form in from the deal and show it to you — nothing is sent"
         >
