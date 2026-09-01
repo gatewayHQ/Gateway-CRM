@@ -265,6 +265,7 @@ All secrets live in Vercel **Project → Settings → Environment Variables**:
 | `TWILIO_ACCOUNT_SID` | All | SMS |
 | `TWILIO_AUTH_TOKEN` | All | SMS |
 | `BOLDSIGN_API_KEY` | All | E-signature |
+| `BOLDSIGN_BRAND_ID` | Optional | Brand on signature request emails — defaults in code to the Gateway brand |
 | `BITLY_ACCESS_TOKEN` | All | QR code generation |
 | `ANTHROPIC_API_KEY` | All | AI features |
 | `GATEWAY_CRON_SECRET` | All | Authenticates internal scheduled jobs |

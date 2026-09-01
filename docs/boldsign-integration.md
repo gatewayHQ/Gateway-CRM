@@ -889,6 +889,59 @@ who cannot yet act, is how a client learns to ignore the next one.
 - The dashboard queue (`SignatureQueue`) uses the same model, so "waiting on
   John Doe" reads identically in both places.
 
+## Send options — brand, CC, expiry (and the reminder we deliberately don't use)
+
+**BoldSign fixes all of these when the document is CREATED and refuses to
+change them afterwards.** That single fact decides the whole design: they ride
+on the draft-creating call, and the UI asks for them on the prepare screen. By
+the time an agent is looking at a Send button it is already too late to set an
+expiry or add a copy recipient.
+
+`buildSendOptions()` in `api/boldsign.js` produces the partial payload every
+JSON creation path spreads in (`/template/send`, `/template/createEmbeddedRequestUrl`);
+`appendSendOptions()` does the multipart equivalent for the two ad-hoc PDF paths.
+
+| Option | Where it comes from | Notes |
+|---|---|---|
+| `brandId` | `BOLDSIGN_BRAND_ID`, else the Gateway brand in code | Applied to **every** send. Not the agent's to choose |
+| `cc` | Send options → "Send a copy to" | Normalized to `[{ emailAddress }]`, deduped case-insensitively, malformed addresses dropped, **capped at 10** — a "copy everyone" list is a way to leak an agreement, not a feature |
+| `expiryDays` | Send options → "Expires after" | Clamped to 1–180. Blank means the account default, not "no expiry we imposed" |
+| `reminderSettings` | **not wired to any UI** | See below |
+
+**Every field is omitted when unset.** A payload that always carried
+`expiryDays: null` would be us overriding the account's own default with
+nothing.
+
+### Why BoldSign's auto-reminders stay off
+
+BoldSign will chase signers for you (`enableAutoReminder`, `reminderDays`,
+`reminderCount`). We don't use it, and that is a decision rather than an
+omission: **the CRM already owns chasing.** The nightly sweep decides when a
+document is stale, and since the per-signer work it reminds only the people who
+still owe something — which BoldSign's own reminder cannot do, because it has no
+idea our sequential sends leave later signers un-notified.
+
+Turning both on means two systems emailing the same client on two schedules,
+which is exactly how a client learns to filter you out. One reminder authority,
+and it is ours. `normalizeReminders()` is implemented, clamped and tested so
+this is a one-line change the day that judgment changes.
+
+### Multipart carries only the scalars
+
+`appendSendOptions()` sets `BrandId` and `ExpiryDays` on the two ad-hoc PDF
+paths and stops there. BoldSign documents `cc` and `reminderSettings` as
+objects, and how a multipart body nests those is not something this file will
+guess at — **this integration has already retired one feature built on a guess
+about BoldSign's wire format** (the coordinate auto-placement). The template
+paths, which are how the CRM actually sends agreements, carry the full set as
+JSON.
+
+### Still unused
+
+`in-person signing` (a host signer for a client at the table), `scheduled send`,
+and SMS delivery / SMS-OTP authentication. SMS is blocked on Twilio, which the
+brokerage has not connected yet; the other two are unbuilt, not undecided.
+
 ## The terms panel is declared per packet, not per app
 
 **The decisions a packet asks its sender for — Representation, Term, agency
@@ -1367,6 +1420,7 @@ go enter one rather than a silent `0%` on a signed agreement.
 | `BOLDSIGN_WEBHOOK_SECRET` | Webhook HMAC signing secret. **Required** — without it `/api/boldsign` answers 503 and processes nothing (an unverified endpoint lets anyone who knows the URL mark a real document completed or declined) |
 | `BOLDSIGN_WEBHOOK_AUDIT_ONLY` | Go-live safety valve: verify, log the verdict, process anyway. On for the first hours on Live, then off |
 | `BOLDSIGN_WEBHOOK_INSECURE` | Local dev only — process events with no secret configured |
+| `BOLDSIGN_BRAND_ID` | The brand applied to every signature request — logo, colours, sender identity in the client's inbox. Defaults in code to the Gateway brand (`67317627-…`), so branding works without configuring anything; set it only to point a second brand (a DBA, a partner office) at a different one. Not a secret: a brand id names an account resource, it does not grant access to one |
 | `BOLDSIGN_API_BASE` | Region override (EU accounts: `https://api-eu.boldsign.com/v1`) |
 | `ALLOWED_ORIGIN` | Comma-separated origins allowed to call the API from a browser. Unset = `*` |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | Server-side DB + storage (webhook, portal, cron) |

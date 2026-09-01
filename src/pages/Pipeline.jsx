@@ -2784,6 +2784,32 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // The created draft, being looked at. Set by reviewDraft(); cleared only by
   // closing, because the draft outlives this modal either way.
   const [review,     setReview]     = React.useState(null)
+
+  // ── Send options ──────────────────────────────────────────────────────────
+  // BoldSign fixes these when the document is CREATED and refuses to change
+  // them afterwards, which is why they are asked for here and not on the send
+  // confirmation: by the time an agent is looking at a Send button it is
+  // already too late to set an expiry or add a copy recipient.
+  //
+  // Deliberately NOT here: BoldSign's own auto-reminders. The CRM already owns
+  // chasing — the nightly sweep decides when, and since F-03 it targets only
+  // the signers who still owe something. Turning BoldSign's on as well would
+  // mean two systems emailing the same client on two schedules, which is how a
+  // client learns to filter you out. One reminder authority, and it is ours.
+  const [showOptions, setShowOptions] = React.useState(false)
+  const [message,     setMessage]     = React.useState('Please review and sign.')
+  const [ccInput,     setCcInput]     = React.useState('')
+  const [cc,          setCc]          = React.useState([])
+  const [expiryDays,  setExpiryDays]  = React.useState('')
+
+  const addCc = (raw) => {
+    const email = String(raw || '').trim().replace(/[,;]$/, '')
+    if (!email) return
+    if (!isValidEmail(email)) { pushToast(`"${email}" is not a valid email address.`, 'error'); return }
+    if (cc.some(e => e.toLowerCase() === email.toLowerCase())) { setCcInput(''); return }
+    setCc(p => [...p, email])
+    setCcInput('')
+  }
   const [details,    setDetails]    = React.useState(null)   // { roles, fields }
   const [loadingDet, setLoadingDet] = React.useState(false)
   const [detailsErr, setDetailsErr] = React.useState('')     // why the roles/fields could not be read
@@ -3052,6 +3078,11 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     return {
       templateId, deal_id: deal.id, roles, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
       emailSubject: subject, documentName: docName, labels,
+      // Set at creation because BoldSign will not accept them later. The brand
+      // is applied server-side on every send and is not the agent's to choose.
+      message: message.trim() || 'Please review and sign.',
+      cc,
+      ...(String(expiryDays).trim() ? { expiryDays: Number(expiryDays) } : {}),
     }
   }
 
@@ -3719,6 +3750,89 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
             )}
           </>
         )}
+
+        {/* SEND OPTIONS — collapsed, because the defaults are right for almost
+            every packet. Open when this one is different: a lender who needs a
+            copy, a term sheet that should lapse in a week, a note to the
+            client. All three are fixed at creation by BoldSign and cannot be
+            added later, which is why they are on this screen. */}
+        <div className="form-group">
+          <button
+            type="button"
+            className="btn btn--link btn--sm"
+            style={{ padding:0 }}
+            onClick={() => setShowOptions(v => !v)}
+            aria-expanded={showOptions}
+          >
+            Send options {showOptions ? '▾' : '▸'}
+          </button>
+          {!showOptions && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:3 }}>
+              Gateway branding{cc.length ? ` · copy to ${cc.length}` : ''}
+              {String(expiryDays).trim() ? ` · expires in ${expiryDays} days` : ' · no expiry'}
+            </div>
+          )}
+          {showOptions && (
+            <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)', padding:'12px', marginTop:6 }}>
+              <div style={{ marginBottom:12 }}>
+                <label className="form-label">Note to the signers</label>
+                <textarea
+                  className="form-control"
+                  rows={2}
+                  value={message}
+                  onChange={e => setMessage(e.target.value)}
+                  placeholder="Please review and sign."
+                />
+                <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:3 }}>
+                  Appears in the email your client receives.
+                </div>
+              </div>
+
+              <div style={{ marginBottom:12 }}>
+                <label className="form-label">Send a copy to</label>
+                {cc.length > 0 && (
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginBottom:6 }}>
+                    {cc.map(e => (
+                      <span key={e} style={{ display:'inline-flex', alignItems:'center', gap:6, padding:'3px 8px', background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', fontSize:12 }}>
+                        {e}
+                        <button type="button" onClick={() => setCc(p => p.filter(x => x !== e))} aria-label={`Remove ${e}`}
+                          style={{ border:'none', background:'none', cursor:'pointer', padding:0, lineHeight:0, color:'var(--gw-mist)' }}>
+                          <Icon name="x" size={10}/>
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <input
+                  className="form-control"
+                  placeholder="Transaction coordinator, attorney, lender…"
+                  value={ccInput}
+                  onChange={e => setCcInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addCc(ccInput) } }}
+                  onBlur={() => addCc(ccInput)}
+                />
+                <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:3 }}>
+                  They get the completed copy without being asked to sign. Press Enter after each address.
+                </div>
+              </div>
+
+              <div>
+                <label className="form-label">Expires after</label>
+                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  <input
+                    className="form-control"
+                    style={{ width:90 }}
+                    inputMode="numeric"
+                    placeholder="—"
+                    value={expiryDays}
+                    onChange={e => setExpiryDays(e.target.value.replace(/[^\d]/g, ''))}
+                  />
+                  <span style={{ fontSize:12, color:'var(--gw-mist)' }}>days · leave blank for no expiry</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
 
         <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px' }}>
           <strong>Nothing is sent yet.</strong> This fills the form in from the deal and shows it to you — from there you

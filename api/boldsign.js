@@ -33,6 +33,18 @@ export function betaBase(base = API_BASE) {
   if (/\/v1$/.test(trimmed))      return trimmed.replace(/\/v1$/, '/v1-beta')
   return `${trimmed}/v1-beta`          // a base configured without a version segment
 }
+// ─── Brand ───────────────────────────────────────────────────────────────────
+// Every signature request this CRM sends carries the brokerage's BoldSign brand
+// — logo, colours, the sender name a client sees in their inbox. Without it the
+// first impression of a Gateway agreement is a generic BoldSign email, which is
+// a brand moment given away on the single most important message the brokerage
+// sends a client all year.
+//
+// Not a secret: a brand id names an account resource, it does not grant access
+// to one. It is a constant so the feature works the moment this deploys, and an
+// env var so a second brand (a DBA, a partner office) needs no code change.
+const BRAND_ID = process.env.BOLDSIGN_BRAND_ID || '67317627-ae3d-40c6-bde2-8ec16d31e440'
+
 const WEBHOOK_SECRET = process.env.BOLDSIGN_WEBHOOK_SECRET
 // Two deliberate escape hatches, both OFF by default so production is verified
 // unless someone says otherwise in writing (an env var):
@@ -1669,6 +1681,87 @@ export function requiresExplicitFieldPlacement(signers, useTextTags) {
   return null
 }
 
+// ─── Send options ─────────────────────────────────────────────────────────────
+// Brand, CC, expiry and automatic reminders — four BoldSign capabilities this
+// account pays for and nothing exposed.
+//
+// SET AT CREATION OR NOT AT ALL. BoldSign fixes every one of these when the
+// document is created and refuses to change them afterwards, so they ride on
+// the draft-creating call rather than on the send. That is also why the UI asks
+// for them on the prepare screen: by the time an agent is looking at a send
+// button it is already too late to set an expiry.
+//
+// EVERY FIELD IS OPTIONAL AND OMITTED WHEN UNSET. A payload that always carried
+// `expiryDays: null` would be us overriding the account default with nothing.
+const MAX_EXPIRY_DAYS = 180
+const MAX_REMINDER_COUNT = 5
+
+/** CC entries BoldSign will accept: well-formed, deduped, capped. */
+export function normalizeCc(list) {
+  const seen = new Set()
+  const out = []
+  for (const raw of (Array.isArray(list) ? list : [])) {
+    const email = String(raw?.emailAddress || raw?.email || raw || '').trim()
+    if (!email || !EMAIL_RE.test(email)) continue
+    const key = email.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ emailAddress: email })
+    // A "copy everyone" list is a way to leak an agreement, not a feature.
+    if (out.length >= 10) break
+  }
+  return out
+}
+
+/** Auto-reminder settings, or null when the caller does not want them. */
+export function normalizeReminders(raw) {
+  if (!raw || raw.enabled === false) return null
+  const days  = Math.min(Math.max(Number(raw.reminderDays) || 3, 1), 30)
+  const count = Math.min(Math.max(Number(raw.reminderCount) || 3, 1), MAX_REMINDER_COUNT)
+  return { enableAutoReminder: true, reminderDays: days, reminderCount: count }
+}
+
+/**
+ * The options every creation path shares, as a partial JSON payload.
+ *
+ * Spread into the request body. Keys are omitted rather than nulled, so the
+ * BoldSign account's own defaults still apply to anything the agent did not ask
+ * for.
+ */
+export function buildSendOptions({ cc, expiryDays, reminders, brandId } = {}) {
+  const out = {}
+  const brand = brandId || BRAND_ID
+  if (brand) out.brandId = brand
+
+  const ccList = normalizeCc(cc)
+  if (ccList.length) out.cc = ccList
+
+  const expiry = Number(expiryDays)
+  if (Number.isFinite(expiry) && expiry > 0) out.expiryDays = Math.min(Math.round(expiry), MAX_EXPIRY_DAYS)
+
+  const reminderSettings = normalizeReminders(reminders)
+  if (reminderSettings) out.reminderSettings = reminderSettings
+
+  return out
+}
+
+/**
+ * The same options on a MULTIPART send (the two ad-hoc PDF paths).
+ *
+ * Only the scalars. BoldSign documents `cc` and `reminderSettings` as objects,
+ * and how a multipart body nests those is not something this file will guess at
+ * — this integration has already retired one feature built on a guess about
+ * BoldSign's wire format (see the coordinate auto-placement note above). The
+ * template paths, which are the ones the CRM actually sends agreements through,
+ * carry the full set as JSON.
+ */
+export function appendSendOptions(form, { expiryDays, brandId } = {}) {
+  const brand = brandId || BRAND_ID
+  if (brand) form.append('BrandId', brand)
+  const expiry = Number(expiryDays)
+  if (Number.isFinite(expiry) && expiry > 0) form.append('ExpiryDays', String(Math.min(Math.round(expiry), MAX_EXPIRY_DAYS)))
+}
+
 // BoldSign requires a non-empty Roles array when creating an embedded template
 // — omitting it returns {"Roles":["Roles cannot be null or empty."]}. Default
 // to a Seller/Listing-Agent pair matching our template convention (role 1 =
@@ -2064,6 +2157,7 @@ async function handler(req, res) {
       form.append('Message',            emailSubject || 'Please sign this document')
       form.append('EnableSigningOrder', String(hasOrder))
       appendSigners(form, signerPayload)
+      appendSendOptions(form, body)
       if (useTextTags) {
         form.append('UseTextTags', 'true')
         if (textTagDefinitions) form.append('TextTagDefinitions', JSON.stringify(textTagDefinitions))
@@ -2117,6 +2211,7 @@ async function handler(req, res) {
       form.append('Message',            emailSubject || 'Please sign this document')
       form.append('EnableSigningOrder', String(hasOrder))
       appendSigners(form, signerPayload)
+      appendSendOptions(form, body)
       form.append('SendViewOption',     'PreparePage')
       form.append('ShowToolbar',        'true')
       if (useTextTags) {
@@ -2955,6 +3050,9 @@ async function handler(req, res) {
         // filename). Prefer the caller's documentName so it's deal-specific.
         title:   documentName || emailSubject || 'Please sign this document',
         message: message || 'Please review and sign.',
+        // Brand, CC, expiry and auto-reminders. Set here because BoldSign fixes
+        // them at creation and refuses to change them afterwards.
+        ...buildSendOptions(body),
         roles:   mergeSharedFormFields(roles, sharedFormFields),
         // Without this, signerOrder is inert and every signer is notified at
         // once. See rolesWantSigningOrder.
@@ -3013,6 +3111,10 @@ async function handler(req, res) {
       const payload = {
         title:          documentName || emailSubject || 'Please sign this document',
         message:        message || 'Please review and sign.',
+        // See buildSendOptions: BoldSign fixes brand, CC, expiry and reminders
+        // at creation, so a draft carries them from the moment it exists — the
+        // agent cannot add an expiry later, and neither can we.
+        ...buildSendOptions(body),
         // Label values ride on the first role so every signer sees them from the
         // moment the draft is sent — see mergeSharedFormFields.
         roles:          mergeSharedFormFields(roles, sharedFormFields),
