@@ -29,6 +29,7 @@ import { streetLine, propertyLabel } from '../lib/address.js'
 import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { readDealTerms, termsForDeal, termsFilled, buildTermsPatch, normalizeTermValue, derivedTermHint } from '../lib/services/dealTerms.js'
+import { isOfficeAdmin } from '../lib/officeAdmins.js'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
@@ -1506,7 +1507,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       setSending(false); pushToast(err.message, 'error'); return
     }
     setSending(false)
-    if (!data.url) { pushToast('BoldSign did not return a send URL', 'error'); return }
+    if (!data.url) { pushToast('The document was created but the editor would not open — reopen it from the Signatures tab with Edit Fields.', 'error'); return }
     setEmbedDocId(data.documentId || null)
     setEmbedUrl(data.url)
   }
@@ -1879,7 +1880,7 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
     setOpening(p => ({ ...p, [env.id]: true }))
     try {
       const data = await documentEditUrl({ documentId: env.document_id, redirectUrl: boldSignReturnUrl() })
-      if (!data?.url) { pushToast('BoldSign did not return an edit link for this draft', 'error'); return }
+      if (!data?.url) { pushToast('This draft could not be reopened right now. Try again in a moment — nothing has been sent.', 'error'); return }
       setEditDraft({ url: data.url, env })
     } catch (err) {
       pushToast(err.message, 'error')
@@ -2740,6 +2741,18 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const panel        = panelInfo.panel
   const panelBlocked = (panelInfo.validation?.blocking || []).length > 0
 
+  // WHO SEES THE PLUMBING. This screen used to show every agent the field ids
+  // and BoldSign types behind each box — `Label7 · textbox`, `CheckBox2 →
+  // agent_name` — plus a button offering to reveal "12 unnamed template
+  // fields". None of that is a decision an agent makes; all of it is what an
+  // admin needs when a template is wrong. No agent on a competing system has
+  // ever seen a field id, and "Label" is a BoldSign implementation detail that
+  // had leaked as far as the person trying to send a listing agreement.
+  //
+  // The information is not wrong. It was on the wrong screen. Same computation,
+  // shown only to whoever can act on it.
+  const showDiagnostics = isOfficeAdmin(activeAgent)
+
   const [showAllFields, setShowAllFields] = React.useState(false)
   const [showShared, setShowShared] = React.useState(false)
   const setSigner = (idx, k, v) => setSigners(p => ({ ...p, [idx]: { ...(p[idx] || {}), [k]: v } }))
@@ -2860,7 +2873,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     setSending(true)
     try {
       const data = await templateEmbedUrl({ ...args, redirectUrl: boldSignReturnUrl() })
-      if (!data?.url) { pushToast('BoldSign did not return a send URL', 'error'); return }
+      if (!data?.url) { pushToast('The draft was saved but the editor would not open — reopen it from the Signatures tab with Edit Fields.', 'error'); return }
       reportLayout(data)
       setEmbedDocId(data.documentId || null)
       setEmbedUrl(data.url)
@@ -3001,9 +3014,12 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
             </span>
           )}
         </span>
-        <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7 }} title="The field id BoldSign uses, its type, and the CRM token it matched">
-          {fieldOrigin(f)} · {fieldType(f)}
-        </span>
+        {/* Plumbing, for whoever can fix it. See showDiagnostics. */}
+        {showDiagnostics && (
+          <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7 }} title="The field id BoldSign uses, its type, and the CRM token it matched">
+            {fieldOrigin(f)} · {fieldType(f)}
+          </span>
+        )}
       </div>
       {info?.optional && (
         <div style={{ fontSize:10, color:'var(--gw-mist)', marginBottom:3 }}>
@@ -3135,9 +3151,9 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 <input type="checkbox" checked={inOrder} onChange={e => setInOrder(e.target.checked)} style={{ width:14, height:14, cursor:'pointer' }}/>
                 <span style={{ fontSize:12, flex:1 }}>
                   <strong>Sign in this order</strong> — each signer waits for the one above.
-                  <span style={{ color:'var(--gw-mist)' }}> Keep this on unless nothing above is prefilled: BoldSign
-                    only shows a signer&rsquo;s fields to the others once that signer has finished, so sending to
-                    everyone at once means the client opens the packet with the prefilled lines blank.</span>
+                  <span style={{ color:'var(--gw-mist)' }}> Keep this on. Signers only see each other&rsquo;s entries
+                    once the person ahead of them has signed, so sending to everyone at once means your client opens
+                    the packet with the filled-in lines blank.</span>
                 </span>
               </label>
             </div>
@@ -3209,13 +3225,23 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 This is the silent one — BoldSign accepts the value, ignores it,
                 and prints the assigned signer's name instead — so it is stated
                 as an outright defect in the template, with the fix. */}
+            {/* A box the form fills with the SIGNER'S OWN name, being used for
+                somebody else's. BoldSign accepts the value we send, ignores it,
+                and prints the assigned signer's name instead — so the document
+                goes out with the wrong name rather than a blank one.
+
+                Two audiences, one defect. The agent is told what will be wrong
+                on the paper, in those words, because they are the one the client
+                will ask. Only an admin gets the fix, because only an admin can
+                apply it — and to an agent "delete it and place a Label" is an
+                instruction for a screen they have never opened. */}
             {nameMisuse.length > 0 && (
               <div style={{ background:'#fff5f5', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:12, fontSize:12, lineHeight:1.6 }} role="alert">
-                <strong>This template prints the wrong name in {nameMisuse.length === 1 ? 'one place' : `${nameMisuse.length} places`}.</strong>
+                <strong>This form will print the wrong name in {nameMisuse.length === 1 ? 'one place' : `${nameMisuse.length} places`}.</strong>
                 <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
-                  A BoldSign <strong>Name</strong> field always shows the name of the signer it is assigned to, and ignores
-                  any value sent for it — so these cannot be filled from the CRM, and each one will show its own
-                  signer&rsquo;s name instead of what it is captioned for:
+                  {nameMisuse.length === 1 ? 'One box on this form' : `${nameMisuse.length} boxes on this form`} always print
+                  the name of whoever signs there, so {nameMisuse.length === 1 ? 'it cannot' : 'they cannot'} be filled from
+                  this deal:
                 </div>
                 <ul style={{ margin:'6px 0 0', paddingLeft:18, color:'var(--gw-mist)' }}>
                   {nameMisuse.map(f => {
@@ -3223,16 +3249,20 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                     const want  = token ? tokenVals[token] : ''
                     return (
                       <li key={f.id}>
-                        “{f.label || f.name || prettyLabel(f.id)}” — assigned to {roleNameFor(f.roleIndex)}
-                        {token ? <>, meant to show <code>{token}</code>{want ? ` (“${want}”)` : ''}</> : ''}
+                        \u201c{f.caption || f.label || f.name || prettyLabel(f.id)}\u201d — will show {roleNameFor(f.roleIndex)}\u2019s name
+                        {want ? <>, not \u201c{want}\u201d</> : ''}
+                        {showDiagnostics && token ? <> <code style={{ fontSize:10 }}>{f.id} \u2192 {token}</code></> : ''}
                       </li>
                     )
                   })}
                 </ul>
                 <div style={{ color:'var(--gw-mist)', marginTop:6 }}>
-                  Ask an admin to fix the template: delete each of these and place a <strong>Label</strong> in the same
-                  spot (BoldSign cannot change a placed field&rsquo;s type), naming the Label after the token above so it
-                  fills automatically. A Label is also read by every signer immediately, whatever the signing order.
+                  {showDiagnostics
+                    ? <>Fix the template: delete each of these and place a <strong>Label</strong> in the same spot (BoldSign
+                       cannot change a placed field\u2019s type), naming the Label after the token above so it fills
+                       automatically. A Label is also read by every signer immediately, whatever the signing order.</>
+                    : <>You can still send this — just correct those lines by hand on the printed copy, and ask your admin
+                       to fix the form so the next one is right.</>}
                 </div>
               </div>
             )}
@@ -3392,35 +3422,37 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
               </div>
             )}
 
-            {hiddenCount > 0 && (
+            {/* The escape hatch stays for everyone — a box nobody named is still
+                a box somebody may need to fill on the one deal that needs it —
+                but the wording is the agent's, not the template author's. Only
+                an admin is told WHY these are unnamed and what to do about it,
+                because only an admin can go and name them. */}
+            {hiddenCount > 0 && !showAllFields && (
               <button
                 type="button"
                 className="btn btn--secondary btn--sm"
                 style={{ width:'100%', marginBottom:12 }}
                 onClick={() => setShowAllFields(true)}
               >
-                Show {hiddenCount} unnamed template field{hiddenCount === 1 ? '' : 's'}
+                Show {hiddenCount} more box{hiddenCount === 1 ? '' : 'es'} on this form
               </button>
             )}
             {showAllFields && (
               <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:12 }}>
-                Showing every field on the template, including the ones with no name of their own.
-                Give a field a name in BoldSign&rsquo;s template editor (a CRM token, or just a caption)
-                and it will show here by default.{' '}
-                <button type="button" className="btn btn--link btn--sm" onClick={() => setShowAllFields(false)}>Hide them again</button>
+                Showing every box on this form, including the ones the page gives no name to.
+                {showDiagnostics && ' Name a field in BoldSign\u2019s template editor (a CRM token, or just a caption) and it will show here by default.'}{' '}
+                <button type="button" className="btn btn--link btn--sm" onClick={() => setShowAllFields(false)}>Show fewer</button>
               </div>
             )}
           </>
         )}
 
         <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px' }}>
-          <strong>Neither button sends anything.</strong> Both save this as a draft on the deal, filled in with the values
-          above — from there you can download a filled PDF to print for the client, keep editing, and send only
-          when they&rsquo;re happy. <strong>From this deal</strong> is filled in for you and every signer can read it
-          the moment the document arrives, without waiting for anyone else to sign. <strong>Signer details</strong> and
-          the tick boxes stay hidden from the other parties until their own signer has signed, which is why the order
-          box above matters. Values typed or ticked inside BoldSign&rsquo;s own editor are placement previews and do{' '}
-          <strong>not</strong> reach the signers — set them here.
+          <strong>Neither button sends anything.</strong> Both save this as a draft on the deal with everything above
+          filled in — print it for the client, keep editing, and send only when they&rsquo;re happy.
+          <br/>
+          Fill values in <em>here</em>, not on the placement screen: anything typed there is a preview and never
+          reaches the signers.
         </div>
       </div>
       <div className="modal__foot">
@@ -3431,9 +3463,9 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           className="btn btn--secondary"
           onClick={placeFields}
           disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details || panelBlocked}
-          title="Save the draft and open it in BoldSign to move, add or remove fields"
+          title="Save the draft and open it to move, add or remove where people sign and fill"
         >
-          {sending ? 'Opening…' : 'Place Fields in BoldSign'}
+          {sending ? 'Opening…' : 'Adjust Field Placement'}
         </button>
         <button
           className="btn btn--primary"
