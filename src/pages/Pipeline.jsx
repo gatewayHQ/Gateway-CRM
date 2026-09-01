@@ -30,6 +30,7 @@ import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDo
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { readDealTerms, termsForDeal, termsFilled, buildTermsPatch, normalizeTermValue, derivedTermHint } from '../lib/services/dealTerms.js'
 import { isOfficeAdmin } from '../lib/officeAdmins.js'
+import SignerPicker, { buildCandidates, isValidEmail } from '../components/SignerPicker.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
@@ -1433,6 +1434,14 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     setFile(picked); setPickedFile('')
   }
 
+  // The people this deal already knows. The ad-hoc flow has no roles to seed
+  // from, so the picker is doing more work here than in the template flow.
+  const signerCandidates = React.useMemo(() => buildCandidates({
+    dealContacts: [contact, ownerContact].filter(Boolean),
+    contacts,
+    agents: activeAgent ? [activeAgent] : [],
+  }), [contact, ownerContact, contacts, activeAgent])
+
   const allSigners = React.useMemo(() => {
     const clients = signers.map(s => ({ ...s, routingOrder: 1 }))
     if (agentSigns && activeAgent) {
@@ -1444,6 +1453,10 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const sendForSignature = async () => {
     const invalid = signers.find(s => !s.name.trim() || !s.email.trim())
     if (invalid) { pushToast('All signers need a name and email', 'error'); return }
+    // A malformed address is accepted by BoldSign, delivered nowhere, and looks
+    // exactly like a client ignoring you. Caught before anything is uploaded.
+    const badEmail = signers.find(s => !isValidEmail(s.email))
+    if (badEmail) { pushToast(`"${badEmail.email}" is not a valid email address.`, 'error'); return }
     if (!file && !pickedFile) { pushToast('Select or upload a document', 'error'); return }
     setSending(true)
 
@@ -1548,12 +1561,25 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
         {/* Signers */}
         <div className="form-group">
           <label className="form-label required">Signers <span style={{fontSize:11,fontWeight:400,color:'var(--gw-mist)'}}>— sign in parallel (same step)</span></label>
+          {/* Same picker as the template flow — an ad-hoc send has exactly the
+              same problem, and a typo'd address here fails just as silently. */}
           {signers.map((s, i) => (
-            <div key={s.id} style={{ display:'flex', gap:8, alignItems:'center', marginBottom:8 }}>
-              <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[i]||SIGNER_COLORS[0], display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700, flexShrink:0 }}>{i+1}</div>
-              <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={s.name} onChange={e=>updateSigner(s.id,'name',e.target.value)}/>
-              <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={s.email} onChange={e=>updateSigner(s.id,'email',e.target.value)}/>
-              {signers.length > 1 && <button className="btn btn--ghost btn--icon btn--sm" onClick={()=>removeSigner(s.id)}><Icon name="x" size={13}/></button>}
+            <div key={s.id} style={{ display:'flex', gap:8, alignItems:'flex-start' }}>
+              <div style={{ flex:1, minWidth:0 }}>
+                <SignerPicker
+                  order={i + 1}
+                  roleLabel={i === 0 ? 'Signer' : `Signer ${i + 1}`}
+                  color={SIGNER_COLORS[i] || SIGNER_COLORS[0]}
+                  value={s}
+                  candidates={signerCandidates}
+                  onChange={(next) => setSigners(p => p.map(x => x.id === s.id ? { ...x, ...next } : x))}
+                />
+              </div>
+              {signers.length > 1 && (
+                <button className="btn btn--ghost btn--icon btn--sm" style={{ marginTop:22 }} onClick={()=>removeSigner(s.id)} aria-label="Remove signer">
+                  <Icon name="x" size={13}/>
+                </button>
+              )}
             </div>
           ))}
           <button className="btn btn--secondary btn--sm" onClick={addSigner} style={{marginTop:2}}>+ Add another signer</button>
@@ -2753,6 +2779,49 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // shown only to whoever can act on it.
   const showDiagnostics = isOfficeAdmin(activeAgent)
 
+  // WHO CAN SIGN. The deal's own people first — on a listing agreement the
+  // signer is nearly always already on the deal — then agents, then the rest of
+  // the address book. Everyone else is still typeable; this only stops an agent
+  // retyping somebody the CRM already knows, and catches the address typo that
+  // otherwise looks like a client ignoring them.
+  const signerCandidates = React.useMemo(() => buildCandidates({
+    dealContacts: [contact, ...(extraContacts || []), ...(sideClients?.buyerClients || []), ...(sideClients?.sellerClients || [])].filter(Boolean),
+    dealAgents,
+    contacts,
+    agents: [],
+  }), [contact, extraContacts, sideClients, dealAgents, contacts])
+
+  const [savingContact, setSavingContact] = React.useState(false)
+  // A signer who is real but not in the CRM. Offered on the row, never
+  // automatic: an address book that fills itself with every one-off signer is
+  // worse than one you have to click.
+  const saveSignerAsContact = async ({ name, email }) => {
+    setSavingContact(true)
+    try {
+      const parts = name.split(/\s+/)
+      const { data, error } = await supabase.from('contacts').insert([{
+        first_name: parts[0] || name,
+        last_name:  parts.slice(1).join(' ') || '',
+        email,
+        assigned_agent_id: activeAgent?.id || null,
+      }]).select('id, first_name, last_name, email').single()
+      if (error) throw error
+      // Link them to the deal too — a signer who is not on the deal is a
+      // contact you will have to find again by search.
+      const { error: linkErr } = await supabase.from('deal_contacts')
+        .insert([{ deal_id: deal.id, contact_id: data.id }])
+      if (linkErr && !/duplicate|unique/i.test(linkErr.message || '')) {
+        pushToast(`Saved ${name} to contacts, but they could not be added to this deal: ${linkErr.message}`, 'info')
+      } else {
+        pushToast(`${name} saved to contacts and added to this deal.`, 'success')
+      }
+    } catch (err) {
+      pushToast(`Could not save that contact: ${err.message}`, 'error')
+    } finally {
+      setSavingContact(false)
+    }
+  }
+
   const [showAllFields, setShowAllFields] = React.useState(false)
   const [showShared, setShowShared] = React.useState(false)
   const setSigner = (idx, k, v) => setSigners(p => ({ ...p, [idx]: { ...(p[idx] || {}), [k]: v } }))
@@ -2766,6 +2835,15 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     const roleList = details?.roles || []
     const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())
     if (!filled.length) { pushToast('At least one signer needs a name and email', 'error'); return null }
+    // Caught here rather than at the API, because a malformed address is the
+    // one send failure nobody ever sees: BoldSign accepts it, delivers nowhere,
+    // and the document sits at "waiting" looking exactly like a client who is
+    // ignoring you.
+    const badEmail = filled.find(r => !isValidEmail(signers[r.index]?.email))
+    if (badEmail) {
+      pushToast(`"${signers[badEmail.index].email}" is not a valid email address — check the ${badEmail.name} row.`, 'error')
+      return null
+    }
     // A declared panel that no longer matches its form stops here rather than
     // writing a term onto the wrong box. The on-screen error names the field;
     // this is the belt to that braces, so neither button can slip past it.
@@ -3134,16 +3212,17 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
             <div className="form-group">
               <label className="form-label required">Signers</label>
               {details.roles.map((r, i) => (
-                <div key={r.index} style={{ marginBottom:10 }}>
-                  <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:4 }}>
-                    <span style={{ display:'inline-flex', width:18, height:18, borderRadius:'50%', background:SIGNER_COLORS[i]||'#6b7280', color:'#fff', alignItems:'center', justifyContent:'center', fontSize:10, marginRight:6 }}>{r.index}</span>
-                    {r.name}
-                  </div>
-                  <div style={{ display:'flex', gap:8 }}>
-                    <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={signers[r.index]?.name || ''} onChange={e => setSigner(r.index, 'name', e.target.value)}/>
-                    <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={signers[r.index]?.email || ''} onChange={e => setSigner(r.index, 'email', e.target.value)}/>
-                  </div>
-                </div>
+                <SignerPicker
+                  key={r.index}
+                  order={r.index}
+                  roleLabel={r.name}
+                  color={SIGNER_COLORS[i] || '#6b7280'}
+                  value={signers[r.index] || {}}
+                  candidates={signerCandidates}
+                  onChange={(next) => setSigners(p => ({ ...p, [r.index]: { ...(p[r.index] || {}), ...next } }))}
+                  onSaveContact={saveSignerAsContact}
+                  savingContact={savingContact}
+                />
               ))}
               <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Roles left blank are removed from this send.</div>
 
