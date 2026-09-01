@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js'
 import { syncTaskCalendar } from '../lib/services/tasks.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
+import { readDealTerms, termsFilled } from '../lib/services/dealTerms.js'
 import { formatCurrency, formatDate, formatPhone } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
@@ -440,6 +441,10 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
   const doneSteps    = steps.filter(s => s.completed).length
   const nextStep     = steps.find(s => !s.completed)
   const keyDates     = cd.key_dates || []
+  // How much of what this deal's agreements ask for is already on file. Read
+  // straight off comp_data — the same jsonb the Deal Terms tab writes.
+  const dealTermValues     = readDealTerms(deal)
+  const dealTermsCoverage  = termsFilled(deal, dealTermValues)
   const portalUrl    = deal.portal_enabled && deal.portal_token ? `${window.location.origin}/portal/${deal.portal_token}` : null
 
   return (
@@ -612,6 +617,41 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
               </div>
             )}
           </div>
+        </SectionCard>
+
+        {/* Deal terms — the facts every agreement for this deal fills itself in
+            from. Shown as a coverage line rather than a list of inputs: the
+            point of the card is to make an unfilled deal visible, and the
+            editing happens in one place on the drawer tab. */}
+        <SectionCard title="Deal Terms" action={drawerLink(dealTermsCoverage.filled ? 'Edit' : 'Fill these in', () => openDrawer('terms'))}>
+          {dealTermsCoverage.total === 0 ? (
+            <div style={{ fontSize: 12.5, color: 'var(--gw-mist)', lineHeight: 1.6 }}>
+              Set whether this is a buyer or seller deal on the Details tab and the terms your agreements ask for
+              appear here.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ flex: 1, height: 6, background: 'var(--gw-bone)', borderRadius: 3, overflow: 'hidden' }}>
+                  <div style={{
+                    height: '100%', borderRadius: 3, transition: 'width 400ms ease',
+                    width: `${Math.round((dealTermsCoverage.filled / dealTermsCoverage.total) * 100)}%`,
+                    background: dealTermsCoverage.filled === dealTermsCoverage.total ? 'var(--gw-green)' : 'var(--gw-gold)',
+                  }} />
+                </div>
+                <div style={{ fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+                  {dealTermsCoverage.filled}/{dealTermsCoverage.total}
+                </div>
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--gw-mist)', lineHeight: 1.6 }}>
+                {dealTermsCoverage.filled === dealTermsCoverage.total
+                  ? 'Every term this deal needs is on file — your agreements fill themselves in.'
+                  : dealTermsCoverage.filled === 0
+                    ? 'Earnest money, title company, lender, deadlines. Fill them in once and every agreement for this deal carries them.'
+                    : `${dealTermsCoverage.total - dealTermsCoverage.filled} still blank — those print empty on the form.`}
+              </div>
+            </div>
+          )}
         </SectionCard>
 
         {/* Key dates */}

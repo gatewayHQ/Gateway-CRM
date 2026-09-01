@@ -28,6 +28,7 @@ import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
 import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
+import { readDealTerms, termsForDeal, termsFilled, buildTermsPatch, normalizeTermValue, derivedTermHint } from '../lib/services/dealTerms.js'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
@@ -2355,6 +2356,155 @@ create policy "agent_notifications_policy" on agent_notifications
   )
 }
 
+// ── Deal Terms tab — the per-agreement facts with no column of their own ──────
+// Twenty tokens in crmTokenValues() read these out of `deals.comp_data`, every
+// one of them wired end to end to a template field, and until this tab existed
+// nothing in the CRM wrote a single one. So each rendered on the send screen as
+// a named, empty box; the agent typed the title company in; the value went onto
+// that one draft and died there. Next packet on the same deal, same empty box.
+//
+// The list is NOT hard-coded here. It comes from DEAL_TERM_GROUPS, the same
+// schema whose keys `term()` reads, so a token added there gets an input here
+// without anyone remembering to add one — and a test asserts the two agree.
+//
+// SHORT BY CONSTRUCTION. Only the terms that apply to this deal's side are
+// shown: a buyer deal has no listing basis, a seller deal has no
+// property-types-sought. A form of twenty boxes that ignores that is a form
+// nobody fills in.
+function DealTermsTab({ deal }) {
+  const [values, setValues] = React.useState(() => readDealTerms(deal))
+  const [saving, setSaving] = React.useState(false)
+  const [dirty,  setDirty]  = React.useState(false)
+  const [loaded, setLoaded] = React.useState(false)
+
+  // Read the deal's own comp_data fresh rather than trusting the row the board
+  // handed down — another tab (or another session) may have written since.
+  React.useEffect(() => {
+    if (!deal?.id) return
+    let cancelled = false
+    supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+      .then(({ data }) => {
+        if (cancelled) return
+        setValues(readDealTerms({ comp_data: data?.comp_data || {} }))
+        setLoaded(true)
+      })
+    return () => { cancelled = true }
+  }, [deal?.id])
+
+  const groups = termsForDeal(deal, values)
+  const { filled, total } = termsFilled(deal, values)
+
+  const set = (key, v) => { setValues(p => ({ ...p, [key]: v })); setDirty(true) }
+  // Money and number terms are normalized when the agent leaves the box, not on
+  // every keystroke — reformatting under a cursor mid-type is the single most
+  // irritating thing a form can do.
+  const normalizeOnBlur = (key) => {
+    const next = normalizeTermValue(key, values[key])
+    if (next !== values[key]) setValues(p => ({ ...p, [key]: next }))
+  }
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      // MERGE, never replace. Key dates, portal docs, the state and the
+      // transaction type all live in this same jsonb, and a concurrent edit on
+      // another tab must survive this write — so comp_data is re-read
+      // immediately before merging, the same way KeyDatesTab and PortalTab do.
+      const { data, error: readErr } = await supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+      if (readErr) throw readErr
+      const comp_data = { ...(data?.comp_data || {}), ...buildTermsPatch(values) }
+      const { error } = await supabase.from('deals')
+        .update({ comp_data, updated_at: new Date().toISOString() }).eq('id', deal.id)
+      if (error) throw error
+      setDirty(false)
+      pushToast('Deal terms saved — every agreement for this deal fills these in from now on.', 'success')
+    } catch (err) {
+      pushToast(`Could not save the deal terms: ${err.message}`, 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const renderTerm = (t) => {
+    const hint = derivedTermHint(t.key, deal)
+    return (
+      <div key={t.key} style={{ marginBottom:10 }}>
+        <label className="form-label" style={{ display:'flex', alignItems:'baseline', gap:6 }}>
+          <span>{t.label}</span>
+          {t.unit && <span style={{ fontWeight:400, fontSize:11, color:'var(--gw-mist)' }}>({t.unit})</span>}
+        </label>
+        {t.type === 'select'
+          ? (
+            <select className="form-control" value={values[t.key] || ''} onChange={e => set(t.key, e.target.value)}>
+              <option value="">—</option>
+              {t.options.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          )
+          : t.type === 'date'
+          ? (
+            // Stored as ISO because the token runs it through usDate(). A
+            // US-formatted string here would reach the agreement half-converted.
+            <input
+              className="form-control" type="date"
+              value={values[t.key] || ''}
+              onChange={e => set(t.key, e.target.value)}
+            />
+          )
+          : (
+            <input
+              className="form-control"
+              inputMode={t.type === 'number' ? 'numeric' : undefined}
+              placeholder={t.placeholder || (hint ? hint : '')}
+              value={values[t.key] || ''}
+              onChange={e => set(t.key, e.target.value)}
+              onBlur={() => normalizeOnBlur(t.key)}
+            />
+          )}
+        {t.help && <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:3, lineHeight:1.5 }}>{t.help}</div>}
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <div className="drawer__body">
+        <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, lineHeight:1.6, marginBottom:16 }}>
+          <strong>Fill these in once.</strong> Every agreement you send for this deal fills itself in from here — earnest
+          money, the title company, the lender, the deadlines. {total > 0 && <><strong>{filled} of {total}</strong> filled.</>}
+          <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
+            Only the terms that apply to this deal are shown. Anything left blank simply prints blank on the form,
+            where you can still fill it in by hand before sending.
+          </div>
+        </div>
+
+        {!loaded && <div style={{ fontSize:13, color:'var(--gw-mist)' }}>Loading…</div>}
+
+        {loaded && groups.length === 0 && (
+          <div style={{ fontSize:13, color:'var(--gw-mist)', lineHeight:1.6 }}>
+            No terms apply to this deal yet. Set whether it is a buyer or seller deal on the{' '}
+            <strong>Details</strong> tab and the relevant terms appear here.
+          </div>
+        )}
+
+        {loaded && groups.map(g => (
+          <div key={g.key} style={{ marginBottom:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.05em', color:'var(--gw-mist)', marginBottom:2 }}>
+              {g.label}
+            </div>
+            {g.help && <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:8, lineHeight:1.5 }}>{g.help}</div>}
+            {g.terms.map(renderTerm)}
+          </div>
+        ))}
+      </div>
+      <div className="drawer__foot">
+        <button className="btn btn--primary" onClick={save} disabled={saving || !dirty || !loaded}>
+          {saving ? 'Saving…' : dirty ? 'Save Deal Terms' : 'Saved'}
+        </button>
+      </div>
+    </>
+  )
+}
+
 // ── Prepare from Template modal — dynamic. Reads the template's actual roles +
 //    fillable fields from BoldSign, renders a signer input per role and an
 //    editable (CRM-prefilled) input per field, then creates the document as a
@@ -3914,7 +4064,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       {/* Tab bar — only for existing deals */}
       {isExisting && (
         <div className="drawer-tabs">
-          {[['details','Details'],['dates','Key Dates'],['pricing','Pricing History'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
+          {[['details','Details'],['terms','Deal Terms'],['dates','Key Dates'],['pricing','Pricing History'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
             <button key={id} className={`drawer-tab${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}>
               {label}
             </button>
@@ -4173,6 +4323,13 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       )}
 
       {/* Key Dates tab */}
+      {/* Deal Terms tab — the per-agreement facts every packet asks for. Sits
+          right after Details because it is the same kind of work: describing
+          the deal once so nothing downstream has to ask again. */}
+      {tab === 'terms' && isExisting && (
+        <DealTermsTab deal={deal} />
+      )}
+
       {tab === 'dates' && isExisting && (
         <KeyDatesTab deal={deal} />
       )}
