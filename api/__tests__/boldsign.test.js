@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -1704,5 +1704,51 @@ describe('signing order is actually requested, not just numbered', () => {
     expect(rolesWantSigningOrder([{ roleIndex: 1 }, { signerOrder: 2 }])).toBe(true)
     expect(rolesWantSigningOrder([])).toBe(false)
     expect(rolesWantSigningOrder(undefined)).toBe(false)
+  })
+})
+
+// ─── The field-id floor under every template send ────────────────────────────
+// BoldSign auto-names its fields, so `CheckBox1` exists on every template in the
+// account. A client that carried one template's field map onto another's send
+// wrote one form's answers onto another form's boxes, as locked terms, with a
+// 200 back. The client fix is a panel declared per packet; this is the floor
+// under it, so no caller — this app, a future one, an agent driving the API —
+// can reproduce that class of bug.
+describe('template field index', () => {
+  it('collects ids from the top level and from every role', () => {
+    const ids = collectTemplateFieldIds({
+      formFields: [{ id: 'Label1' }, { fieldId: 'CheckBox1' }],
+      roles: [
+        { roleIndex: 1, formFields: [{ id: 'TextBox3' }] },
+        { roleIndex: 2, fields: [{ name: 'Signature2' }] },
+      ],
+    })
+    expect([...ids].sort()).toEqual(['CheckBox1', 'Label1', 'Signature2', 'TextBox3'])
+  })
+
+  it('reads the alternate shapes BoldSign returns a template in', () => {
+    expect([...collectTemplateFieldIds({ fields: [{ id: 'A' }], signerRoles: [{ formFields: [{ id: 'B' }] }] })].sort())
+      .toEqual(['A', 'B'])
+    expect(collectTemplateFieldIds({}).size).toBe(0)
+    expect(collectTemplateFieldIds(null).size).toBe(0)
+  })
+})
+
+describe('payloadFieldIds', () => {
+  it('finds every id a send addresses, in all three places one can hide', () => {
+    expect(payloadFieldIds({
+      roles: [
+        { roleIndex: 1, existingFormFields: [{ id: 'TextBox1', value: 'x' }] },
+        { roleIndex: 2, existingFormFields: [{ id: 'CheckBox4', value: 'true' }] },
+      ],
+      sharedFormFields: [{ id: 'Label1', value: 'y' }],
+      fieldRemovalIds: ['Label9'],
+    }).sort()).toEqual(['CheckBox4', 'Label1', 'Label9', 'TextBox1'])
+  })
+
+  it('dedupes, and is empty for a payload that addresses nothing', () => {
+    expect(payloadFieldIds({ roles: [{ existingFormFields: [{ id: 'A' }] }], sharedFormFields: [{ id: 'A' }] })).toEqual(['A'])
+    expect(payloadFieldIds({})).toEqual([])
+    expect(payloadFieldIds({ roles: [{ signerName: 'Jane' }] })).toEqual([])
   })
 })

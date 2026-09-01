@@ -814,6 +814,96 @@ which.
 field's `id`/`type`/`roleIndex` so those controls can be rendered with the
 template's own wording rather than a prettified field id.
 
+## The terms panel is declared per packet, not per app
+
+**The decisions a packet asks its sender for — Representation, Term, agency
+Policy — belong to that packet and are bound to its own field ids.** This used
+to be one hard-coded map (`CheckBox1` … `CheckBox9`) applied to every template
+the send screen opened, and that is not survivable: **BoldSign auto-assigns
+`CheckBox1`, `CheckBox2`, … on every template it creates**, so those ids are
+shared across the whole catalog. Registering a second template with tick boxes —
+a seller listing agreement, a disclosure, a Nebraska form — meant the Iowa buyer
+packet's answers were written onto that template's first nine boxes as locked
+terms of a signed agreement, silently. The same map also gated *both* send
+buttons, so a listing agreement could not be saved as a draft until the agent
+answered two buyer-agency questions that did not apply to it.
+
+A panel is now a **declarative spec on the packet row**
+(`form_packets.signing_panel`, migration 0043), read and enforced by
+`src/lib/services/boldsignPacketPanel.js`:
+
+```jsonc
+{ "version": 1, "key": "ia_buyer_agency_v1", "groups": [
+  { "key": "representation", "kind": "choice", "label": "Representation", "required": true,
+    "options": [
+      { "key": "exclusive",     "label": "Exclusive",     "fieldId": "CheckBox1", "expect": "^(?!.*non-?\\s?exclusive).*\\bexclusive\\b" },
+      { "key": "non-exclusive", "label": "Non-exclusive", "fieldId": "CheckBox2", "expect": "non-?\\s?exclusive" }
+    ] }
+] }
+```
+
+Three group kinds: `choice` (radios; the mutex is structural, `required` gates
+the send), `toggles` (independent state, collapsed by default), `fixed` (never
+rendered, written at its stated value — "this is a buyer packet, so the BUYER
+box is ticked"). `expect` is a **regex source string**, not a RegExp, because a
+panel round-trips through jsonb; it is compiled at load and matched against the
+caption read off the page.
+
+### Two modes, and the difference is the whole design
+
+| | Where it comes from | A validation failure means |
+|---|---|---|
+| **Declared** | `form_packets.signing_panel` | **The send is blocked** and the field is named on screen. An admin asserted these ids mean these things here, so quietly dropping the panel would send the agreement without the terms it exists to set. |
+| **Inferred** | A built-in panel matching the packet's `(state, transaction_type)` | **No panel at all.** Nobody asserted it applies, so a failure means "this isn't that packet". |
+
+An inferred panel is applied only if it validates **completely**: every field id
+present, every one a tick box, and every one captioned the way the panel
+expects. "Probably the Iowa packet" is not good enough to lock terms onto an
+agreement. This is what keeps the Iowa buyer packet working on a database where
+0043 has not been applied, without ever reaching another template by accident.
+
+### What validation checks
+
+- `missing_field` — the panel names an id the template does not have → **blocking**
+- `not_tickable` — the id exists but is a TextBox/Label, not a tick box → **blocking**
+- `caption_conflict` — the page prints something else beside that box → **blocking**
+- `no_caption` / `unverifiable` — nothing to check against (scanned or image-only
+  page, or no `expect`) → **warning**, shown as a count, never blocking
+
+Blocking defects render as a red panel above the buttons naming the decision,
+the box and what the page actually says, and both send buttons are disabled.
+This was previously a `console.warn` nobody was watching.
+
+### The floor under it, server-side
+
+`api/boldsign.js` refuses any template send whose payload addresses a field the
+template does not have (`assertPayloadFieldsExist`, checking
+`roles[].existingFormFields`, `sharedFormFields` and `fieldRemovalIds` against a
+cached `/template/properties`). Best-effort by design: if BoldSign cannot be
+asked, the send proceeds unvalidated rather than failing, because refusing every
+send during a BoldSign blip is a worse failure than the one being guarded
+against. This catches the same class of bug from any caller — a future client, a
+typo'd token id, an AI agent driving the API.
+
+### Boxes the panel does not own
+
+Every other tick box on the form is offered as a **tri-state** selection named
+from its printed caption: *As the form is* (default — no value sent, the form's
+own setting stands), *Checked*, *Unchecked*. That default is what makes opening
+the send screen safe on a template nobody has configured: it cannot change a box
+by itself, and the agent can still tick one deliberately.
+
+### Adding a panel to a packet
+
+1. Open the packet in **Prepare Draft Agreement**. The status line under the
+   template picker says whether a panel applies and whether it verifies.
+2. Confirm the field ids against the form in BoldSign.
+3. Run the `update form_packets set signing_panel = …` block at the bottom of
+   `migrations/0043_form_packet_signing_panel.sql` — **for one packet, by id**.
+   Never by state alone: two Iowa buyer packets built from different source PDFs
+   do not share field ids.
+4. Setting it back to `null` reverts to the self-validating fallback.
+
 ## Selections is the sender's panel, not the signer's
 
 One row is one checkbox already placed on the template, and the dropdown is the

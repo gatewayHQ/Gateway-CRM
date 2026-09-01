@@ -1883,6 +1883,19 @@ create table if not exists form_packets (
   -- exists on it (migration 0028). This is what makes IA/SD/NE compliance a
   -- property of the system instead of something the coordinator remembers.
   required             boolean not null default false,
+  -- The sender decisions this packet asks for before it can be sent —
+  -- Representation, Term, agency Policy — as a declarative spec bound to THIS
+  -- packet's template (migration 0043). Each option names a BoldSign field id
+  -- and an `expect` regex source matched against the caption read off the page,
+  -- so a template edit that moves a box is caught instead of locking a wrong
+  -- term onto an agreement.
+  --
+  -- Null means no declared panel. It must stay per-packet: BoldSign auto-names
+  -- checkboxes CheckBox1, CheckBox2, … on every template it creates, so those
+  -- ids are shared across the whole catalog and a panel applied by anything
+  -- broader than one packet writes one form's terms onto another's boxes.
+  -- See src/lib/services/boldsignPacketPanel.js.
+  signing_panel        jsonb,
   created_at           timestamptz default now()
 );
 create index if not exists idx_form_packets_required

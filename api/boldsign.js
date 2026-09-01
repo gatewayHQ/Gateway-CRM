@@ -1915,6 +1915,87 @@ export async function templateCaptions(templateId, { fields = [], props = {}, fe
   return value
 }
 
+// ─── Template field index ─────────────────────────────────────────────────────
+// Every field id a template actually carries — the guard behind every template
+// send in this file.
+//
+// WHY THIS EXISTS. A send payload addresses fields by id, and the ids come from
+// the browser. BoldSign auto-names its fields (`CheckBox1`, `Label2`), so those
+// ids are not unique to a template: every template in the account has a
+// `CheckBox1`. A client bug that carried one template's field map onto another
+// template's send did exactly that — wrote one form's answers onto another
+// form's boxes, as locked terms of an agreement, with a 200 back and nothing
+// anywhere saying so.
+//
+// The client-side fix (a panel declared per packet and validated against the
+// live template) is the primary one. This is the floor under it: the server
+// refuses a payload naming a field the template does not have, so no caller —
+// this app, a future one, an AI agent driving the API — can reproduce that
+// class of bug. It catches a typo'd token id just as well.
+//
+// BEST EFFORT BY DESIGN. If BoldSign cannot be asked (rate limit, outage), the
+// send proceeds unvalidated rather than failing: an unverifiable payload is far
+// more likely to be correct than not, and refusing every send during a BoldSign
+// blip is a worse failure than the one being guarded against.
+const FIELD_INDEX_TTL_MS = 10 * 60 * 1000
+const FIELD_INDEX_MAX = 24
+const fieldIndexCache = new Map()
+
+export function collectTemplateFieldIds(props) {
+  const ids = new Set()
+  const add = (f) => { const id = f?.id || f?.fieldId || f?.name; if (id) ids.add(String(id)) }
+  for (const f of (props?.formFields || props?.fields || [])) add(f)
+  for (const r of (props?.roles || props?.signerRoles || props?.templateRoles || [])) {
+    for (const f of (r?.formFields || r?.fields || [])) add(f)
+  }
+  return ids
+}
+
+async function templateFieldIds(templateId) {
+  const hit = fieldIndexCache.get(templateId)
+  if (hit && hit.expires > Date.now()) return hit.value
+  const props = await boldsign(`/template/properties?templateId=${encodeURIComponent(templateId)}`)
+  const value = collectTemplateFieldIds(props)
+  fieldIndexCache.set(templateId, { value, expires: Date.now() + FIELD_INDEX_TTL_MS })
+  if (fieldIndexCache.size > FIELD_INDEX_MAX) fieldIndexCache.delete(fieldIndexCache.keys().next().value)
+  return value
+}
+
+// Every field id a send payload addresses, across all three places one can hide.
+export function payloadFieldIds({ roles, sharedFormFields, fieldRemovalIds } = {}) {
+  const ids = []
+  for (const r of (Array.isArray(roles) ? roles : [])) {
+    for (const f of (r?.existingFormFields || [])) if (f?.id != null) ids.push(String(f.id))
+  }
+  for (const f of (Array.isArray(sharedFormFields) ? sharedFormFields : [])) if (f?.id != null) ids.push(String(f.id))
+  for (const id of (Array.isArray(fieldRemovalIds) ? fieldRemovalIds : [])) if (id != null) ids.push(String(id))
+  return [...new Set(ids)]
+}
+
+// Throws a 400 naming the offenders when a payload addresses fields this
+// template does not have. Never throws for a reason other than that.
+async function assertPayloadFieldsExist(templateId, payload) {
+  const wanted = payloadFieldIds(payload)
+  if (!wanted.length) return
+  let known
+  try {
+    known = await templateFieldIds(templateId)
+  } catch (err) {
+    console.warn(`[boldsign] could not verify field ids against template ${templateId} (${err.message}) — sending unverified`)
+    return
+  }
+  if (!known.size) return                       // a template with no fields reported: nothing to check against
+  const unknown = wanted.filter(id => !known.has(id))
+  if (!unknown.length) return
+  console.error(`[boldsign] REFUSED send on template ${templateId}: payload names ${unknown.length} field(s) it does not have — ${unknown.slice(0, 20).join(', ')}`)
+  throw badRequest(
+    `This send refers to ${unknown.length} field${unknown.length === 1 ? '' : 's'} that ${unknown.length === 1 ? 'is' : 'are'} not on the selected form `
+    + `(${unknown.slice(0, 6).join(', ')}${unknown.length > 6 ? `, +${unknown.length - 6} more` : ''}). `
+    + 'Nothing was created. This usually means the form was edited in BoldSign after it was registered — '
+    + 'reopen it here to reload its fields, or ask your admin to re-check the packet.'
+  )
+}
+
 async function handler(req, res) {
   applyJsonCors(res, req)
   if (req.method === 'OPTIONS') return res.status(200).end()
@@ -2789,6 +2870,10 @@ async function handler(req, res) {
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
+      // Before anything is created: every field this payload addresses must be
+      // on this template. See assertPayloadFieldsExist.
+      await assertPayloadFieldsExist(templateId, { roles, sharedFormFields })
+
       const svc        = getServiceClient()
       const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
       const payload = {
@@ -2846,6 +2931,10 @@ async function handler(req, res) {
     const createTemplateDraft = async (svc, {
       templateId, dealId, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
     }) => {
+      // Before the draft exists: every field this payload addresses must be on
+      // this template. See assertPayloadFieldsExist.
+      await assertPayloadFieldsExist(templateId, { roles, sharedFormFields, fieldRemovalIds })
+
       const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
       const payload = {
         title:          documentName || emailSubject || 'Please sign this document',

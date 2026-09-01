@@ -120,13 +120,22 @@ export function selectionRows({ fields = [] } = {}) {
   return rows.sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x)
 }
 
-// The starting value for every tick box: what the template already says.
-// Two-state on purpose — every box goes out with a decision on it, because the
-// sender is the one making these choices and an absent value would leave a term
-// of the agreement to whoever opens the document.
-export function seedSelectionValues(rows = []) {
+// The starting value for every tick box.
+//
+// Two modes, because the two callers want opposite things:
+//
+//   default (`inherit: false`) — every box starts at what the template already
+//     says and goes out with an explicit decision on it. Right for a packet
+//     whose boxes are known terms the sender is answering.
+//
+//   `inherit: true` — every box starts at null, meaning "leave this box exactly
+//     as the form is set up" and send no value for it. Right for a template
+//     nobody has declared a panel for: writing an explicit true/false onto
+//     every box on an unknown form would lock terms the sender never saw, and
+//     null is the only starting point that changes nothing.
+export function seedSelectionValues(rows = [], { inherit = false } = {}) {
   const out = {}
-  for (const r of rows || []) out[r.id] = Boolean(r.defaultChecked)
+  for (const r of rows || []) out[r.id] = inherit ? null : Boolean(r.defaultChecked)
   return out
 }
 
@@ -135,9 +144,15 @@ export function seedSelectionValues(rows = []) {
 // ticks anything — clearing both is a valid intermediate state, and picking the
 // other one for the sender would be this panel deciding a term of the agreement
 // on their behalf.
+//
+// `checked` is THREE-state: true, false, or null for "leave it as the form is
+// set up" (no value sent). Null is preserved rather than coerced — `Boolean(null)`
+// would turn "don't touch this box" into "send it out deliberately unticked",
+// which on a form where an empty box is itself a term is a different agreement.
+// Only an explicit true moves the mutex; neither false nor null does.
 export function applySelection(values = {}, rows = [], id, checked) {
-  const next = { ...values, [id]: Boolean(checked) }
-  if (!checked) return next
+  const next = { ...values, [id]: checked === null || checked === undefined ? null : Boolean(checked) }
+  if (checked !== true) return next
   const row = (rows || []).find(r => r.id === id)
   if (!row?.mutex) return next
   for (const other of rows) {

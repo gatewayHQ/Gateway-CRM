@@ -26,7 +26,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, PACKET_FIELD_MAP, isPacketField, seedPacketState, packetTickValues, packetMissing, wantsEndDate, captionConflicts, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -1701,12 +1701,27 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
     // failed, `templates` stayed empty, and the "Send from Template" button
     // simply never rendered — the entire feature looked unbuilt rather than
     // unprovisioned, with nothing anywhere saying why.
-    const { data, error } = await supabase
+    // `transaction_type` and `signing_panel` ride along because they decide
+    // which sender decisions the send screen asks for — see resolvePanel().
+    // `signing_panel` is migration 0043, so it is asked for OPTIMISTICALLY and
+    // dropped on a database that doesn't have it yet: a missing column fails the
+    // whole query, and letting that empty the catalog would make the entire
+    // template feature look unbuilt over one additive column. Without it every
+    // packet falls back to the built-in self-validating panel, which is exactly
+    // the behavior that shipped before 0043.
+    const BASE_COLUMNS = 'template_id:boldsign_template_id, name, state, transaction_type, doc_type, field_tokens, active'
+    const query = (columns) => supabase
       .from('form_packets')
-      .select('template_id:boldsign_template_id, name, state, doc_type, field_tokens, active')
+      .select(columns)
       .not('boldsign_template_id', 'is', null)
       .eq('active', true)
       .order('name')
+
+    let { data, error } = await query(`${BASE_COLUMNS}, signing_panel`)
+    if (error && (error.code === '42703' || error.code === 'PGRST204' || /signing_panel/.test(error.message || ''))) {
+      console.warn('[boldsign] form_packets.signing_panel is missing — falling back to built-in packet panels; apply migrations/0043_form_packet_signing_panel.sql')
+      ;({ data, error } = await query(BASE_COLUMNS))
+    }
     if (error) {
       const missingColumn = error.code === '42703' || error.code === 'PGRST204' || /boldsign_template_id|form_packets/.test(error.message || '')
       setTemplateErr(missingColumn
@@ -2424,7 +2439,24 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           seededValues[f.id] = isTickableField(f.type) ? null : fieldTokenValue(tokenVals, f)
         }
         setValues(seededValues)
-        setPacket(seedPacketState({ fields }))
+
+        // WHICH DECISIONS THIS PACKET ASKS FOR. Resolved from the packet row —
+        // never from a map that applies to every template. `resolvePanel`
+        // returns a declared panel (an admin said these ids mean these things
+        // here) or a built-in one that validated cleanly against this exact
+        // template, or nothing at all. See boldsignPacketPanel.js.
+        const resolved = resolvePanel({ packet: tpl, fields })
+        setPanelInfo(resolved)
+        setPanelState(seedPanelState({ panel: resolved.panel, fields }))
+
+        // Any tick box the panel does NOT own stays available to the sender as
+        // a plain selection, named by the words printed beside it on the page.
+        // Every one starts at "leave it as the form is set up" and sends no
+        // value, so opening this screen can never change a box by itself.
+        const owned = panelFieldIds(resolved.panel)
+        const rows  = selectionRows({ fields: fields.filter(f => isTickableField(f.type) && !owned.has(f.id)) })
+        setSelectionList(rows)
+        setSelections(seedSelectionValues(rows, { inherit: true }))
       })
       // A FAILED LOAD MUST NOT LOOK LIKE A LOADED TEMPLATE. This used to fall back to
       // a single generic "Signer" row — which, next to "Roles left blank are removed
@@ -2442,10 +2474,24 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   }, [templateId, reloadKey])
 
   // The panel's decisions. Kept apart from `values` because they are choices,
-  // not field contents — packetTickValues() turns them into field values at
-  // send time, which is what makes the radios the only place a mutex lives.
-  const [packet, setPacket] = React.useState({ representation: null, term: null, policy: {} })
-  const [showPolicy, setShowPolicy] = React.useState(false)
+  // not field contents — panelTickValues() turns them into field values at send
+  // time, which is what makes the radios the only place a mutex lives.
+  //
+  // `panelInfo` carries the panel itself, where it came from, and how it
+  // validated against this template. A declared panel that no longer matches
+  // its form BLOCKS the send: it was going to write a term of an agreement onto
+  // a box that means something else, and there is no version of that worth
+  // shipping to a client.
+  const [panelInfo,  setPanelInfo]  = React.useState({ panel: null, source: null, validation: { ok: true, blocking: [], warnings: [] } })
+  const [panelState, setPanelState] = React.useState({})
+  const [openGroups, setOpenGroups] = React.useState({})
+  // Tick boxes the panel doesn't own — tri-state, defaulting to "as the form is".
+  const [selectionList, setSelectionList] = React.useState([])
+  const [selections,    setSelections]    = React.useState({})
+  const [showSelections, setShowSelections] = React.useState(false)
+
+  const panel        = panelInfo.panel
+  const panelBlocked = (panelInfo.validation?.blocking || []).length > 0
 
   const [showAllFields, setShowAllFields] = React.useState(false)
   const [showShared, setShowShared] = React.useState(false)
@@ -2460,7 +2506,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     const roleList = details?.roles || []
     const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())
     if (!filled.length) { pushToast('At least one signer needs a name and email', 'error'); return null }
-    const missing = packetMissing(packet)
+    // A declared panel that no longer matches its form stops here rather than
+    // writing a term onto the wrong box. The on-screen error names the field;
+    // this is the belt to that braces, so neither button can slip past it.
+    if (panelBlocked) {
+      pushToast('This form no longer matches the terms panel set up for it — see the message above. Nothing was created.', 'error')
+      return null
+    }
+    const missing = panelMissing({ panel, state: panelState })
     if (missing.length) { pushToast(`Choose ${missing.join(' and ')} first`, 'error'); return null }
 
     // Split the prefilled values in two — this is the whole point of Label
@@ -2475,7 +2528,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
       // everything typed. Merged here, at the one place both buttons build
       // their payload from, so Save as Draft and Place Fields cannot disagree
       // about what the packet says.
-      values: { ...values, ...packetTickValues(packet) },
+      // Three layers, narrowest last. `values` is everything typed;
+      // `selections` is the tri-state tick boxes the panel doesn't own (a null
+      // there means no value is sent and the form's own setting stands, which
+      // prefillFieldEntry already understands); `panelTickValues` is the
+      // packet's own declared decisions, which win. Merged at the one place
+      // both buttons build their payload from, so Save as Draft and Place
+      // Fields cannot disagree about what the packet says.
+      values: { ...values, ...selections, ...panelTickValues({ panel, state: panelState }) },
       filledRoleIndices: filled.map(r => r.index),
     })
     // Roles + removals, with BoldSign's post-removal index shift applied — see
@@ -2626,23 +2686,25 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     today:  new Date().toISOString().slice(0, 10),
   }), [deal, property, contact, extraContacts, sideClients, activeAgent, dealAgents])
 
-  // The end date only exists on the fixed-date term, so its fields appear only
-  // when that radio is picked.
-  const endDateFields = React.useMemo(
-    () => (fields || []).filter(f => fieldTokenKey(f) === 'retainer_end_date'),
-    [fields],
-  )
+  // Some answers make a field relevant that otherwise isn't — the fixed-date
+  // term is the only one with an end date to fill in. The panel names the token
+  // rather than the field, so this stays generic: a new panel adds a
+  // `revealToken` and needs no code change here.
+  const revealedFields = React.useMemo(() => {
+    const tokens = new Set(revealedTokens({ panel, state: panelState }))
+    if (!tokens.size) return []
+    return (fields || []).filter(f => tokens.has(fieldTokenKey(f)))
+  }, [fields, panel, panelState])
 
-  // The map ties each decision to a field id; this re-checks those ids against
-  // the caption actually read off the PDF. It never overrides the map and shows
-  // the sender nothing — it exists so a template edit that moves a box surfaces
-  // here rather than as a wrong term on a signed agreement.
+  // A declared panel whose ids no longer match the page is reported here, on
+  // screen, and blocks both buttons. It used to be a console.warn nobody was
+  // watching — which meant the one safety net against a template edit writing a
+  // term onto the wrong box existed but never reached a person.
   React.useEffect(() => {
-    const conflicts = captionConflicts({ fields })
-    for (const c of conflicts) {
-      console.warn(`[boldsign] packet panel: ${c.id} is captioned “${c.caption}” on the page, which does not match what the panel writes to it. Check the template's field placement.`)
+    for (const p of (panelInfo.validation?.blocking || [])) {
+      console.error(`[boldsign] packet panel ${panelInfo.panel?.key}: ${describePanelProblem(p)}`)
     }
-  }, [fields])
+  }, [panelInfo])
 
   // What BoldSign actually calls this field, and whether it matched a CRM token.
   // A blank box used to be unreadable — "did the deal have no value, or is the
@@ -2768,6 +2830,20 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           {dealState && (
             <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
               Showing templates for {dealState}{matched.length ? '' : ' — none registered for this state yet, showing all'}.
+            </div>
+          )}
+          {/* Where this form's terms come from, and whether they still match the
+              page. Small and quiet when everything is fine — but it is the line
+              an admin reads before declaring a panel for a packet, and the line
+              an agent reads when they wonder why a form is asking them nothing. */}
+          {panel && !panelBlocked && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4, display:'flex', alignItems:'center', gap:5 }}>
+              <Icon name="check" size={11} style={{ color:'var(--gw-green)', flexShrink:0 }}/>
+              <span>
+                Terms below verified against this form
+                {panelInfo.source === 'builtin' && ' (using Gateway\u2019s built-in setup for this packet)'}
+                {(panelInfo.validation?.warnings || []).length > 0 && ` \u00b7 ${panelInfo.validation.warnings.length} box${panelInfo.validation.warnings.length === 1 ? '' : 'es'} could not be read off the page`}
+              </span>
             </div>
           )}
         </div>
@@ -2923,79 +2999,151 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 screen. sharedGaps is still computed and still drives the
                 template-defect reporting elsewhere. */}
 
-            {/* REPRESENTATION and TERM — the two choices a buyer packet cannot
-                be sent without. Radios, so the mutex is structural: picking one
-                is picking against the other, and there is no state in which both
-                or neither are set for the sender to reconcile. */}
-            <div className="form-group">
-              <label className="form-label">Representation</label>
-              {PACKET_FIELD_MAP.representation.options.map(o => (
-                <label key={o.key} style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, marginBottom:4, fontWeight:400, cursor:'pointer' }}>
-                  <input
-                    type="radio"
-                    name="gw-representation"
-                    checked={packet.representation === o.key}
-                    onChange={() => setPacket(p => ({ ...p, representation: o.key }))}
-                  />
-                  {o.label}
-                </label>
-              ))}
-            </div>
+            {/* THE PACKET'S OWN DECISIONS. Rendered from the panel declared
+                for THIS packet (form_packets.signing_panel, migration 0043) —
+                never from a map applied to every template. A choice group is
+                radios, so the mutex is structural: picking one is picking
+                against the other, and there is no state in which both or
+                neither are set for the sender to reconcile. */}
 
-            <div className="form-group">
-              <label className="form-label">Term</label>
-              {PACKET_FIELD_MAP.term.options.map(o => (
-                <label key={o.key} style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, marginBottom:4, fontWeight:400, cursor:'pointer' }}>
-                  <input
-                    type="radio"
-                    name="gw-term"
-                    checked={packet.term === o.key}
-                    onChange={() => setPacket(p => ({ ...p, term: o.key }))}
-                  />
-                  {o.label}
-                </label>
-              ))}
-              {/* An end date exists only on the fixed-date term. */}
-              {wantsEndDate(packet.term) && endDateFields.length > 0 && (
-                <div style={{ marginTop:6 }}>{endDateFields.map(renderTextField)}</div>
-              )}
-            </div>
-
-            {/* POLICY — state, not a decision. Closed by default because the
-                packet is authored with these set and a sender changing them is
-                the exception. */}
-            <div className="form-group">
-              <button
-                type="button"
-                className="btn btn--link btn--sm"
-                style={{ padding:0 }}
-                onClick={() => setShowPolicy(v => !v)}
-              >
-                Policy {showPolicy ? '▾' : '▸'}
-              </button>
-              <div style={{ fontSize:12, lineHeight:1.7, marginTop:4 }}>
-                {PACKET_FIELD_MAP.policy.map(pol => {
-                  const on = packet.policy?.[pol.id] == null ? pol.default : Boolean(packet.policy[pol.id])
-                  return (
-                    <div key={pol.id} style={{ display:'flex', alignItems:'center', gap:8 }}>
-                      <span style={{ color:'var(--gw-mist)', minWidth:130 }}>{pol.label}</span>
-                      {showPolicy
-                        ? (
-                          <label style={{ display:'flex', alignItems:'center', gap:6, fontWeight:400, cursor:'pointer' }}>
-                            <input
-                              type="checkbox"
-                              checked={on}
-                              onChange={e => setPacket(p => ({ ...p, policy: { ...(p.policy || {}), [pol.id]: e.target.checked } }))}
-                            />
-                            {on ? 'on' : 'off'}
-                          </label>
-                        )
-                        : <strong>{on ? 'on' : 'off'}</strong>}
-                    </div>
-                  )
-                })}
+            {/* A declared panel that no longer matches its form. Blocking, and
+                said in the terms an agent can act on: which decision, which box,
+                and what the page actually says there. The alternative is writing
+                a term of an agreement onto a box that means something else. */}
+            {panelBlocked && (
+              <div style={{ background:'#fff5f5', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:12, fontSize:12, lineHeight:1.6 }} role="alert">
+                <strong>This form no longer matches the terms set up for it, so it can&rsquo;t be sent.</strong>
+                <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
+                  The boxes below are what this packet ticks when you choose a term. One of them has moved or changed
+                  meaning in BoldSign, and sending now would lock the wrong term onto the agreement:
+                </div>
+                <ul style={{ margin:'6px 0 0', paddingLeft:18, color:'var(--gw-mist)' }}>
+                  {panelInfo.validation.blocking.map((prob, i) => <li key={`${prob.fieldId}-${i}`}>{describePanelProblem(prob)}</li>)}
+                </ul>
+                <div style={{ color:'var(--gw-mist)', marginTop:6 }}>
+                  Ask an admin to re-check this packet in the Form Library against the form in BoldSign. Nothing has been
+                  created and nothing has been sent.
+                </div>
               </div>
-            </div>
+            )}
+
+            {panel && !panelBlocked && panel.groups.filter(g => g.kind !== 'fixed').map(g => {
+              // CHOICE — the decisions the packet cannot go out without.
+              if (g.kind === 'choice') return (
+                <div className="form-group" key={g.key}>
+                  <label className={`form-label${g.required ? ' required' : ''}`}>{g.label}</label>
+                  {g.help && <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:4 }}>{g.help}</div>}
+                  {g.options.map(o => (
+                    <label key={o.key} style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, marginBottom:4, fontWeight:400, cursor:'pointer' }}>
+                      <input
+                        type="radio"
+                        name={`gw-panel-${g.key}`}
+                        checked={panelState[g.key] === o.key}
+                        onChange={() => setPanelState(p => ({ ...p, [g.key]: o.key }))}
+                      />
+                      {o.label}
+                    </label>
+                  ))}
+                  {/* A field an answer makes relevant — the end date on a
+                      fixed-date term — appears with the answer that needs it. */}
+                  {revealedFields.length > 0 && g.options.some(o => o.revealToken && panelState[g.key] === o.key) && (
+                    <div style={{ marginTop:6 }}>{revealedFields.map(renderTextField)}</div>
+                  )}
+                </div>
+              )
+
+              // TOGGLES — state, not a decision. Closed by default because the
+              // packet is authored with these set and a sender changing them is
+              // the exception; the values are still shown while closed, because
+              // "what is this agreement saying" is worth reading at a glance.
+              const open = Boolean(openGroups[g.key])
+              const map  = panelState[g.key] || {}
+              return (
+                <div className="form-group" key={g.key}>
+                  <button
+                    type="button"
+                    className="btn btn--link btn--sm"
+                    style={{ padding:0 }}
+                    onClick={() => setOpenGroups(p => ({ ...p, [g.key]: !p[g.key] }))}
+                    aria-expanded={open}
+                  >
+                    {g.label} {open ? '▾' : '▸'}
+                  </button>
+                  {open && g.help && <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>{g.help}</div>}
+                  <div style={{ fontSize:12, lineHeight:1.7, marginTop:4 }}>
+                    {g.options.map(o => {
+                      const on = map[o.fieldId] == null ? o.default : Boolean(map[o.fieldId])
+                      return (
+                        <div key={o.fieldId} style={{ display:'flex', alignItems:'center', gap:8 }}>
+                          <span style={{ color:'var(--gw-mist)', minWidth:130 }}>{o.label}</span>
+                          {open
+                            ? (
+                              <label style={{ display:'flex', alignItems:'center', gap:6, fontWeight:400, cursor:'pointer' }}>
+                                <input
+                                  type="checkbox"
+                                  checked={on}
+                                  onChange={e => setPanelState(p => ({ ...p, [g.key]: { ...(p[g.key] || {}), [o.fieldId]: e.target.checked } }))}
+                                />
+                                {on ? 'on' : 'off'}
+                              </label>
+                            )
+                            : <strong>{on ? 'on' : 'off'}</strong>}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })}
+
+            {/* EVERY OTHER TICK BOX on the form. Not decisions this packet
+                declares, so they are collapsed and every one starts at "as the
+                form is set up" — sending no value, leaving the form's own
+                setting alone. That is what makes opening this screen safe on a
+                template nobody has configured: it cannot change a box by
+                itself, and the agent can still tick one deliberately. */}
+            {selectionList.length > 0 && (
+              <div className="form-group">
+                <button
+                  type="button"
+                  className="btn btn--link btn--sm"
+                  style={{ padding:0 }}
+                  onClick={() => setShowSelections(v => !v)}
+                  aria-expanded={showSelections}
+                >
+                  Other boxes on this form ({selectionList.length}) {showSelections ? '▾' : '▸'}
+                </button>
+                {showSelections && (
+                  <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)', padding:'10px 12px', marginTop:6 }}>
+                    <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:8 }}>
+                      Named from the words printed beside each box. Leave one alone and the form keeps whatever it was
+                      built with; tick or clear one and it goes out that way, locked, for every signer.
+                    </div>
+                    {selectionList.map(row => (
+                      <div key={row.id} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
+                        <span style={{ flex:1, fontSize:12.5, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }} title={row.caption || row.id}>
+                          {row.title}
+                          <span style={{ color:'var(--gw-mist)' }}> · p{row.page}</span>
+                        </span>
+                        <select
+                          className="form-control"
+                          style={{ width:'auto', fontSize:12, padding:'3px 8px' }}
+                          value={selections[row.id] === true ? 'yes' : selections[row.id] === false ? 'no' : ''}
+                          onChange={e => {
+                            const v = e.target.value === 'yes' ? true : e.target.value === 'no' ? false : null
+                            setSelections(prev => applySelection(prev, selectionList, row.id, v))
+                          }}
+                        >
+                          <option value="">As the form is</option>
+                          <option value="yes">Checked</option>
+                          <option value="no">Unchecked</option>
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {hiddenCount > 0 && (
               <button
@@ -3022,10 +3170,10 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           <strong>Neither button sends anything.</strong> Both save this as a draft on the deal, filled in with the values
           above — from there you can download a filled PDF to print for the client, keep editing, and send only
           when they&rsquo;re happy. <strong>From this deal</strong> is filled in for you and every signer can read it
-          the moment the document arrives, without waiting for anyone else to sign. <strong>Signer details</strong> and{' '}
-          <strong>Selections</strong> stay hidden from the other parties until their own signer has signed, which is why
-          the order box above matters. Values typed or ticked inside BoldSign&rsquo;s own editor are placement previews
-          and do <strong>not</strong> reach the signers — set them here.
+          the moment the document arrives, without waiting for anyone else to sign. <strong>Signer details</strong> and
+          the tick boxes stay hidden from the other parties until their own signer has signed, which is why the order
+          box above matters. Values typed or ticked inside BoldSign&rsquo;s own editor are placement previews and do{' '}
+          <strong>not</strong> reach the signers — set them here.
         </div>
       </div>
       <div className="modal__foot">
@@ -3035,7 +3183,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         <button
           className="btn btn--secondary"
           onClick={placeFields}
-          disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details}
+          disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details || panelBlocked}
           title="Save the draft and open it in BoldSign to move, add or remove fields"
         >
           {sending ? 'Opening…' : 'Place Fields in BoldSign'}
@@ -3043,7 +3191,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         <button
           className="btn btn--primary"
           onClick={saveDraft}
-          disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details}
+          disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details || panelBlocked}
           title="Create the filled document on this deal as a draft — nothing is sent"
         >
           {savingDraft ? 'Saving…' : 'Save as Draft'}
