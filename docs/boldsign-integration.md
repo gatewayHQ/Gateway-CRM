@@ -15,8 +15,9 @@ Agent (CRM)                    /api/boldsign                 BoldSign (US)
   Send for Signature  ─────▶   send / document-embed-url ─▶  api.boldsign.com/v1
   Send from Template  ─────▶   template-send / -embed-url ─▶
   Prepare & Print:
-    Save as Draft     ─────▶   template-draft ────────────▶  (creates a DRAFT,
-    Download Filled   ─────▶   document-print ────────────▶   sends nothing)
+    Review Draft      ─────▶   template-draft ────────────▶  (creates a DRAFT,
+                            +  document-print (preview) ─▶   sends nothing)
+    Download Filled   ─────▶   document-print ────────────▶
     Send for Signature ────▶   draft-send ────────────────▶  /v1-beta draftSend
         │                          │  (X-API-KEY, retry+idempotency)
         ▼                          ▼
@@ -82,7 +83,7 @@ Signed PDFs + audit-trail PDFs are archived to the `deal-documents` bucket.
 | `document-delete` | agent (sender) / admin | Remove a draft/unsigned/expired document — revokes if in-progress, then deletes in BoldSign, then removes the local row. Refuses `completed` records. |
 | `template-list` / `template-details` | agent | List templates / read a template's roles + fields |
 | `template-send` / `template-embed-url` | agent | Send from template (JSON) / embedded prepare from template |
-| `template-draft` | agent | **Save as Draft from a template — no editor, nothing sent.** Same payload as `template-embed-url` but `deal_id` is required. Returns `{ documentId, status:'draft', prepareUrl }`. Both share `createTemplateDraft()`. |
+| `template-draft` | agent | **Create a draft from a template — no editor, nothing sent.** Same payload as `template-embed-url` but `deal_id` is required. Returns `{ documentId, status:'draft', prepareUrl }`. Both share `createTemplateDraft()`. |
 | `template-editor-url` | admin | Embedded template create/edit URL. Requires `roles` (defaults to Seller/Listing Agent) and a document title on create — see "Fixing 'Roles cannot be null or empty'" below. `useTextTags` + `textTagDefinitions` supported. |
 | `identity-create` / `identity-details` / `identity-update` / `identity-delete` / `identity-set-default` / `identity-sync` / `identity-resend` | admin | Full sender-identity lifecycle — see "Sender Identity Management" below |
 | _(no `action`)_ | webhook | BoldSign lifecycle events (HMAC-verified) |
@@ -308,14 +309,19 @@ Signatures tab → Prepare from Template
    ▼  pick template · signer rows seeded from the deal · every prefillable
       field rendered as an input, pre-filled from CRM tokens
    │
-   ├── Save as Draft ───────────▶ template-draft
-   │      (primary; no editor)     /template/createEmbeddedRequestUrl
-   │                               → document EXISTS, is a DRAFT, values written
-   │                               → tracked on the deal + saved layout applied
+   ▼  ONE creation step, whichever door is clicked — template-draft
+      /template/createEmbeddedRequestUrl
+      → document EXISTS, is a DRAFT, values written
+      → tracked on the deal + saved layout applied
    │
-   └── Place Fields in BoldSign ▶ template-embed-url  (same draft, opened in the
-          (only when placement       embedded editor; still sends only if the
-           needs adjusting)          agent clicks Send in there)
+   ├── Review Draft ────────────▶ document-print (previewUrl)
+   │      (the common case)        → the composed packet on screen, with
+   │                                 Adjust Field Placement · Download PDF ·
+   │                                 Send for Signature beside it
+   │
+   └── Place Fields in BoldSign ▶ document-edit-url  (the SAME draft, opened in
+          (when the agent already    the embedded editor; leaving it lands on the
+           knows a box must move)    review with the preview re-fetched)
    │
    ▼  the draft row on the Signatures tab, with three distinct actions:
        ┌───────────────────────┬───────────────┬─────────────────────┐
@@ -333,7 +339,7 @@ again**, as many times as it takes. The document stays a draft, on the same
 layout is preserved, and the audit trail is one document rather than five
 abandoned ones.
 
-### Why "Save as Draft" doesn't need the editor
+### Why creating the draft doesn't need the editor
 
 `POST /template/createEmbeddedRequestUrl` is the API's draft-from-template door.
 It mints the document **with the roles and their `existingFormFields` values
@@ -341,8 +347,10 @@ already written onto it**, and returns both a `documentId` and an embedded
 prepare URL. **The document exists, and is a draft, whether or not anyone ever
 opens that URL.** That single fact is what lets `template-draft` skip the editor
 and still hand back a real, filled, downloadable document — and it is why both
-template actions share one `createTemplateDraft()` helper rather than being two
-different creation mechanisms that could drift.
+doors out of the prepare screen share one `createDraft()` call rather than being
+two different creation mechanisms that could drift. **Place Fields reopens the
+draft that was just created** (`document-edit-url`) instead of creating its own
+through the embed path, so the two routes cannot produce different documents.
 
 Not opening the editor also means no **edit lock** is set (see "Editing a
 draft"), so the very next action on that draft cannot hit a stale-lock 400.
@@ -405,7 +413,9 @@ signatures and no audit trail; the button and its tooltip say so.
 | No draft yet | — | **Prepare from Template** / Send for Signature (ad-hoc) |
 | Modal, template loading | "Loading template…" | both buttons disabled |
 | Modal, template unreadable | red panel + **Try again** | both buttons disabled — a failed load must never look like a loaded template |
-| Modal, ready | signer rows + a control per prefillable field | **Save as Draft** (primary) · **Place Fields in BoldSign** (secondary) |
+| Modal, ready | signer rows + a control per prefillable field | **Review Draft** (primary) · **Place Fields in BoldSign** (secondary) — both create the same draft, and differ only in where the agent lands |
+| Review | the composed packet in an iframe, field count, recipients in signing order | **Adjust Field Placement** · **Download PDF** · **Send for Signature** (confirmed) |
+| Review, preview unavailable | "the pages are not ready yet" | the other actions still work — a missing preview is never a failed draft |
 | `draft` | amber strip, "Draft — nothing sent." | **Download Filled PDF** · **Edit Fields** · **Send for Signature** |
 | Sending | — | Send button busy; confirm dialog shows a busy state |
 | `sent` / `delivered` | "waiting Nd", reminder count | Remind · Save PDF · Refresh · Delete |
@@ -456,10 +466,11 @@ or the flow degrades in ways worth naming:
 - **`BOLDSIGN_API_KEY`** on a plan that includes **embedded requests**. Draft
   creation goes through `createEmbeddedRequestUrl`, so a tier without embedding
   cannot create drafts at all — not just "cannot show the editor".
-- **Approved domains** (BoldSign → Settings → Embedded) for *Place Fields* and
-  *Edit Fields*. **Save as Draft, Download Filled PDF and Send for Signature do
-  not need them** — they are pure API calls — so an account mid-setup still has a
-  working prepare-and-print path.
+- **Approved domains** (BoldSign → Settings → Embedded) for *Place Fields*,
+  *Adjust Field Placement* and *Edit Fields*. **Creating the draft, Review Draft,
+  Download Filled PDF and Send for Signature do not need them** — they are pure
+  API calls — so an account mid-setup still has a working prepare-and-print path,
+  and Place Fields falls back to the review rather than dead-ending.
 - **Templates must have their signature fields placed.** A template with no
   fields still saves as a draft and still downloads as a filled PDF, but
   `draft-send` will refuse it (BoldSign runs the full send validation), and the
@@ -478,10 +489,16 @@ an email, a linked property, and a commission entered on the Details tab.
    read *Signer decides*.
 2. **Fill** — change a text value, set one box to *Checked* and one to
    *Unchecked*, leave a third alone.
-3. **Save draft** — *Save as Draft*. The modal closes, no editor opens, a row
-   appears with a **Draft** chip and the amber "Draft — nothing sent." strip.
-   Confirm in BoldSign's dashboard that the document is in **Drafts** and that
-   **no email was sent**.
+3. **Review the draft** — *Review Draft*. No editor opens; the draft is created
+   and the composed packet appears on screen, with the field count and the
+   recipients in signing order. **The values from step 2 must be visible on the
+   pages.** Confirm in BoldSign's dashboard that the document is in **Drafts**
+   and that **no email was sent**. Close the review: a row appears with a
+   **Draft** chip and the amber "Draft — nothing sent." strip.
+3b. **The other door** — repeat from step 1 and click *Place Fields in BoldSign*
+   instead. The same draft is created and opens straight in the embedded editor;
+   leaving it lands on the review with the preview re-fetched. Confirm the two
+   routes produce identical drafts (same field values, one document each).
 4. **Download filled PDF** — *Download Filled PDF*. The file downloads with the
    CRM's filename. **Open it: the values from step 2 must be on the pages** (blue
    text; the ticked box marked, the unticked and untouched ones not), and the
@@ -1060,8 +1077,8 @@ to whoever opened the document.
   from the packet's rules, not read off the page: page 1 prints "CHECK ALL BOXES
   THAT APPLY" above the representation pair.
 - **Every row is written on save.** `prefillFieldEntry` turns each `true`/`false`
-  into a read-only `"true"`/`"false"` on the matching BoldSign field id, so Save
-  as Draft and Place Fields both carry the tick states.
+  into a read-only `"true"`/`"false"` on the matching BoldSign field id, so both
+  doors out of the prepare screen carry the tick states — they build one payload.
 
 Consequence worth knowing: because no checkbox is left unset any more, a box a
 signer used to be able to tick themselves now goes out locked as the sender left
@@ -1632,7 +1649,7 @@ guarantee the token resolves, or untick Required on CRM-filled fields.
 4. ✅ Form Library ↔ template unification + nightly drift sync.
 5. ✅ Full sender-identity management (create/update/delete/default) + fixed "Build in BoldSign" (Roles/DocumentTitle) + drafts cleanup + document_versions metadata on completion.
 6. ✅ Form Library modal scrolling fix, embedded (not new-tab) template editor with auto-save-back, and a real "Rebuild" (edit, not recreate) path.
-6b. ✅ Prepare & Print draft agreements — `template-draft` (Save as Draft, no editor), filled-PDF download on a draft, and `draft-send` as the single explicit send.
+6b. ✅ Prepare & Print draft agreements — `template-draft` (Review Draft / Place Fields, no editor required), filled-PDF download on a draft, and `draft-send` as the single explicit send.
 7. Monitoring/alerting on the signature funnel (webhook failures, stuck `sent` docs, send error rate, drift-sync `unmatched` titles).
 8. Confirm the BoldSign plan supports a 4th daily cron job (this repo's Vercel cron count just grew from 3 → 4) and that embedded signing/sending is enabled on the account tier.
 

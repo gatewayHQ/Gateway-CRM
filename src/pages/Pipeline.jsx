@@ -2692,9 +2692,10 @@ function DraftReviewStep({ documentId, documentName, previewUrl, downloadUrl, fi
 //    editable (CRM-prefilled) input per field, then creates the document as a
 //    DRAFT on the deal.
 //
-//    It has no send button, deliberately. Both of its actions end at a draft —
-//    "Save as Draft" straight away, "Place Fields in BoldSign" via the embedded
-//    editor — and sending is a separate, confirmed act on the draft row (see
+//    It has no send button, deliberately. Both of its doors end at a draft —
+//    "Review Draft" shows the composed packet, "Place Fields in BoldSign" opens
+//    the same draft in the embedded editor — and sending is a separate,
+//    confirmed act on the draft row or from the review (see
 //    sendDraftNow / the draft-send action). That separation is the workflow: an
 //    agent prints the filled draft, walks a client through it on paper, edits it
 //    as many times as the client asks, and sends only at the end.
@@ -3046,17 +3047,13 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     // Keyed by ORIGINAL role index — buildTemplateRoles handles the index shift.
     const { sharedFormFields, byRole } = buildPrefillFields({
       fields: details.fields || [],
-      // The panel's radios decide the tick boxes it owns; `values` carries
-      // everything typed. Merged here, at the one place both buttons build
-      // their payload from, so Save as Draft and Place Fields cannot disagree
-      // about what the packet says.
       // Three layers, narrowest last. `values` is everything typed;
       // `selections` is the tri-state tick boxes the panel doesn't own (a null
       // there means no value is sent and the form's own setting stands, which
       // prefillFieldEntry already understands); `panelTickValues` is the
       // packet's own declared decisions, which win. Merged at the one place
-      // both buttons build their payload from, so Save as Draft and Place
-      // Fields cannot disagree about what the packet says.
+      // BOTH DOORS out of this screen build their payload from, so Review Draft
+      // and Place Fields cannot disagree about what the packet says.
       values: { ...values, ...selections, ...panelTickValues({ panel, state: panelState }) },
       filledRoleIndices: filled.map(r => r.index),
     })
