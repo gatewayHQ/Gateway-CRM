@@ -1,4 +1,4 @@
-import React, { useState, useEffect, Component } from 'react'
+import React, { useState, useEffect, useRef, Component } from 'react'
 
 // ─── ICONS ───────────────────────────────────────────────────────────────────
 const ICONS = {
@@ -140,6 +140,74 @@ export function Drawer({ open, onClose, title, children, width = 480 }) {
         {children}
       </div>
     </>
+  )
+}
+
+// ─── ACTION MENU ──────────────────────────────────────────────────────────────
+// One trigger button that folds a handful of secondary actions into a popup, so
+// a drawer footer keeps a single primary action instead of a row of equals.
+// `items`: { id, label, icon, onClick, disabled, danger, title }.
+export function ActionMenu({
+  label = 'Actions', icon = 'more', items = [], disabled = false,
+  align = 'left', direction = 'up', className = '',
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e) => { if (!ref.current?.contains(e.target)) setOpen(false) }
+    // Capture the Escape before the Drawer/Modal sees it — closing the menu
+    // should not also close the dialog underneath it.
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return
+      e.stopImmediatePropagation()
+      setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      window.removeEventListener('keydown', onKey, true)
+    }
+  }, [open])
+
+  const usable = items.filter(Boolean)
+  if (!usable.length) return null
+
+  return (
+    <div className={`action-menu${className ? ` ${className}` : ''}`} ref={ref}>
+      <button
+        type="button"
+        className={`btn btn--secondary action-menu__trigger${open ? ' is-open' : ''}`}
+        onClick={() => setOpen(v => !v)}
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        {icon && <Icon name={icon} size={14} />}
+        {label}
+        <Icon name="chevronDown" size={12} className="action-menu__caret" />
+      </button>
+      {open && (
+        <div className={`action-menu__pop action-menu__pop--${direction} action-menu__pop--${align}`} role="menu">
+          {usable.map(it => (
+            <button
+              key={it.id || it.label}
+              type="button"
+              role="menuitem"
+              className={`action-menu__item${it.danger ? ' danger' : ''}`}
+              title={it.title}
+              disabled={it.disabled}
+              onClick={() => { setOpen(false); it.onClick?.() }}
+            >
+              {it.icon && <Icon name={it.icon} size={14} />}
+              <span className="action-menu__item-label">{it.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
