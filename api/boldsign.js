@@ -2281,8 +2281,24 @@ async function handler(req, res) {
       if (signErr || !signed?.signedUrl) {
         return res.status(500).json({ error: `Could not create a link to the print copy${signErr?.message ? `: ${signErr.message}` : ''}` })
       }
+      // TWO URLs FOR THE SAME BYTES, because the `download` option sets
+      // Content-Disposition: attachment — which is exactly right for Save PDF
+      // and exactly wrong for showing the document on screen: an attachment in
+      // an iframe downloads instead of rendering. The preview link is the same
+      // object signed without it, so an agent can read the packet before
+      // sending it rather than downloading a file to find out what it says.
+      // Best-effort: a preview URL that cannot be minted just means no inline
+      // preview, never a failed Save PDF.
+      let previewUrl = null
+      try {
+        const { data: inline } = await svc.storage.from(DEAL_BUCKET).createSignedUrl(path, 300)
+        previewUrl = inline?.signedUrl || null
+      } catch (e) {
+        console.warn(`[boldsign] print: could not mint a preview URL for ${id}: ${e.message}`)
+      }
       return res.json({
         url:        signed.signedUrl,
+        previewUrl,
         filename,
         status:     normalizeStatus(props?.status),
         fieldCount: buildSigningSummary(props).total,
