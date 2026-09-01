@@ -4,6 +4,7 @@ import { syncTaskCalendar } from '../lib/services/tasks.js'
 import { formatCurrency, formatDate, STAGE_ORDER, upcomingReminders } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
 import { Icon, Badge, Avatar, Loading, pushToast } from '../components/UI.jsx'
+import SignatureQueue from '../components/SignatureQueue.jsx'
 
 export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
   // Funnel headings follow the agent's own pipeline column names.
@@ -95,6 +96,13 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
       </div>
 
       <div className="dash-grid">
+        {/* FIRST, above the funnel. A bar chart of stages is a status report;
+            this is a work queue with a client on the other end of every row,
+            and it is the thing most likely to change what the agent does in the
+            next ten minutes. It renders nothing at all when there is nothing
+            waiting, so it costs no space on a dashboard that doesn't need it. */}
+        <SignatureQueue deals={deals} properties={properties} go={go} />
+
         <div className="card">
           <div className="section-head">
             <div className="section-title">Pipeline Overview</div>

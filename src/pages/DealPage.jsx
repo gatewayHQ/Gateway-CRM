@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react'
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { syncTaskCalendar } from '../lib/services/tasks.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
@@ -106,7 +106,7 @@ const drawerLink = (label, onClick) => (
   <button className="btn btn--ghost btn--sm" style={{ fontSize: 11, padding: '2px 8px' }} onClick={onClick}>{label}</button>
 )
 
-export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, openCompose }) {
+export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, openTab = null, openCompose }) {
   const stageLabels = useStageLabels()
   const deals      = db.deals      || []
   const agents     = db.agents     || []
@@ -149,6 +149,16 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [drawerTab, setDrawerTab]   = useState('details')
   const openDrawer = (tab) => { setDrawerTab(tab); setDrawerOpen(true) }
+  // Arrived from somewhere that already knew which tab it meant — the
+  // dashboard's signature queue, a notification. Opened once per deal+tab, so
+  // closing the drawer doesn't immediately reopen it.
+  const landedOn = useRef(null)
+  useEffect(() => {
+    const key = `${dealId}/${openTab || ''}`
+    if (!openTab || landedOn.current === key) return
+    landedOn.current = key
+    openDrawer(openTab)
+  }, [dealId, openTab])
   const refreshDeal = useCallback(async () => {
     const { data } = await supabase.from('deals').select('*').eq('id', dealId).single()
     if (data) {
