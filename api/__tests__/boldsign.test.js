@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds, buildSendOptions, appendSendOptions, normalizeCc, normalizeReminders } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -1848,5 +1848,143 @@ describe('signing order is actually requested, not just numbered', () => {
     expect(rolesWantSigningOrder([{ roleIndex: 1 }, { signerOrder: 2 }])).toBe(true)
     expect(rolesWantSigningOrder([])).toBe(false)
     expect(rolesWantSigningOrder(undefined)).toBe(false)
+  })
+})
+
+// ─── The field-id floor under every template send ────────────────────────────
+// BoldSign auto-names its fields, so `CheckBox1` exists on every template in the
+// account. A client that carried one template's field map onto another's send
+// wrote one form's answers onto another form's boxes, as locked terms, with a
+// 200 back. The client fix is a panel declared per packet; this is the floor
+// under it, so no caller — this app, a future one, an agent driving the API —
+// can reproduce that class of bug.
+describe('template field index', () => {
+  it('collects ids from the top level and from every role', () => {
+    const ids = collectTemplateFieldIds({
+      formFields: [{ id: 'Label1' }, { fieldId: 'CheckBox1' }],
+      roles: [
+        { roleIndex: 1, formFields: [{ id: 'TextBox3' }] },
+        { roleIndex: 2, fields: [{ name: 'Signature2' }] },
+      ],
+    })
+    expect([...ids].sort()).toEqual(['CheckBox1', 'Label1', 'Signature2', 'TextBox3'])
+  })
+
+  it('reads the alternate shapes BoldSign returns a template in', () => {
+    expect([...collectTemplateFieldIds({ fields: [{ id: 'A' }], signerRoles: [{ formFields: [{ id: 'B' }] }] })].sort())
+      .toEqual(['A', 'B'])
+    expect(collectTemplateFieldIds({}).size).toBe(0)
+    expect(collectTemplateFieldIds(null).size).toBe(0)
+  })
+})
+
+describe('payloadFieldIds', () => {
+  it('finds every id a send addresses, in all three places one can hide', () => {
+    expect(payloadFieldIds({
+      roles: [
+        { roleIndex: 1, existingFormFields: [{ id: 'TextBox1', value: 'x' }] },
+        { roleIndex: 2, existingFormFields: [{ id: 'CheckBox4', value: 'true' }] },
+      ],
+      sharedFormFields: [{ id: 'Label1', value: 'y' }],
+      fieldRemovalIds: ['Label9'],
+    }).sort()).toEqual(['CheckBox4', 'Label1', 'Label9', 'TextBox1'])
+  })
+
+  it('dedupes, and is empty for a payload that addresses nothing', () => {
+    expect(payloadFieldIds({ roles: [{ existingFormFields: [{ id: 'A' }] }], sharedFormFields: [{ id: 'A' }] })).toEqual(['A'])
+    expect(payloadFieldIds({})).toEqual([])
+    expect(payloadFieldIds({ roles: [{ signerName: 'Jane' }] })).toEqual([])
+  })
+})
+
+// ─── Send options: brand, CC, expiry, reminders ──────────────────────────────
+// Four capabilities the account pays for and nothing exposed. BoldSign fixes
+// every one at document CREATION and refuses to change them afterwards, which
+// is why they ride on the draft-creating call.
+describe('buildSendOptions', () => {
+  it('brands every send — a generic BoldSign email is a brand moment given away', () => {
+    expect(buildSendOptions({}).brandId).toBeTruthy()
+    expect(buildSendOptions({ brandId: 'other-brand' }).brandId).toBe('other-brand')
+  })
+
+  // A payload that always carried `expiryDays: null` would be us overriding the
+  // account default with nothing.
+  it('omits everything the caller did not ask for, so account defaults stand', () => {
+    expect(Object.keys(buildSendOptions({})).sort()).toEqual(['brandId'])
+    expect(buildSendOptions({ expiryDays: '' })).not.toHaveProperty('expiryDays')
+    expect(buildSendOptions({ cc: [] })).not.toHaveProperty('cc')
+    expect(buildSendOptions({ reminders: null })).not.toHaveProperty('reminderSettings')
+  })
+
+  it('carries a valid expiry and clamps an absurd one', () => {
+    expect(buildSendOptions({ expiryDays: 7 }).expiryDays).toBe(7)
+    expect(buildSendOptions({ expiryDays: '14' }).expiryDays).toBe(14)
+    expect(buildSendOptions({ expiryDays: 99999 }).expiryDays).toBe(180)
+    expect(buildSendOptions({ expiryDays: -3 })).not.toHaveProperty('expiryDays')
+  })
+
+  it('passes CC through in the shape BoldSign takes', () => {
+    expect(buildSendOptions({ cc: ['tc@example.com'] }).cc).toEqual([{ emailAddress: 'tc@example.com' }])
+  })
+})
+
+describe('normalizeCc', () => {
+  it('accepts a bare string, an {email} or an {emailAddress}', () => {
+    expect(normalizeCc(['a@x.com', { email: 'b@x.com' }, { emailAddress: 'c@x.com' }]))
+      .toEqual([{ emailAddress: 'a@x.com' }, { emailAddress: 'b@x.com' }, { emailAddress: 'c@x.com' }])
+  })
+
+  it('drops malformed addresses rather than letting a send fail on one', () => {
+    expect(normalizeCc(['good@x.com', 'not-an-email', '', null])).toEqual([{ emailAddress: 'good@x.com' }])
+  })
+
+  it('dedupes case-insensitively', () => {
+    expect(normalizeCc(['A@x.com', 'a@X.com'])).toEqual([{ emailAddress: 'A@x.com' }])
+  })
+
+  // A "copy everyone" list is a way to leak an agreement, not a feature.
+  it('caps the list', () => {
+    const many = Array.from({ length: 25 }, (_, i) => `p${i}@x.com`)
+    expect(normalizeCc(many)).toHaveLength(10)
+  })
+
+  it('is empty for nothing', () => {
+    expect(normalizeCc(undefined)).toEqual([])
+    expect(normalizeCc('nope')).toEqual([])
+  })
+})
+
+describe('normalizeReminders', () => {
+  // Not wired to any UI on purpose — the CRM's nightly sweep owns chasing, and
+  // two reminder systems on one document double-email the client. Kept correct
+  // and ready for the day that changes.
+  it('is off unless asked for', () => {
+    expect(normalizeReminders(null)).toBeNull()
+    expect(normalizeReminders({ enabled: false })).toBeNull()
+  })
+
+  it('clamps to what BoldSign accepts', () => {
+    expect(normalizeReminders({ enabled: true })).toEqual({ enableAutoReminder: true, reminderDays: 3, reminderCount: 3 })
+    expect(normalizeReminders({ enabled: true, reminderCount: 99 }).reminderCount).toBe(5)
+    expect(normalizeReminders({ enabled: true, reminderDays: 0 }).reminderDays).toBe(3)
+    expect(normalizeReminders({ enabled: true, reminderDays: 999 }).reminderDays).toBe(30)
+  })
+})
+
+describe('appendSendOptions (multipart)', () => {
+  // Only the scalars. How a multipart body nests cc/reminderSettings is not
+  // something this file guesses at — this integration already retired one
+  // feature built on a guess about BoldSign's wire format.
+  it('brands a multipart send and carries an expiry', () => {
+    const form = new FormData()
+    appendSendOptions(form, { expiryDays: 10 })
+    expect(form.get('BrandId')).toBeTruthy()
+    expect(form.get('ExpiryDays')).toBe('10')
+  })
+
+  it('omits an expiry that was not asked for', () => {
+    const form = new FormData()
+    appendSendOptions(form, {})
+    expect(form.get('ExpiryDays')).toBeNull()
   })
 })

@@ -758,7 +758,14 @@ export default function App() {
           {route === 'contacts'   && <ContactsPage {...props} focusRecord={focusRecord} onFocusHandled={() => setFocusRecord(null)} />}
           {route === 'properties' && <PropertiesPage {...props} focusRecord={focusRecord} onFocusHandled={() => setFocusRecord(null)} />}
           {route === 'pipeline'   && <PipelinePage {...props} isAdmin={isAdmin} />}
-          {route.startsWith('deal/') && <DealPage {...props} dealId={route.slice(5)} />}
+          {/* `deal/<id>` and `deal/<id>/<drawer tab>`. The suffix is how another
+              screen hands an agent straight to the thing they clicked — the
+              dashboard's signature queue lands on that deal's Signatures tab
+              rather than on the deal page for them to find it again. */}
+          {route.startsWith('deal/') && (() => {
+            const [dealId, openTab] = route.slice(5).split('/')
+            return <DealPage {...props} dealId={dealId} openTab={openTab || null} />
+          })()}
           {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
           {route === 'campaigns'  && <CampaignsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
           {route === 'commission' && <CommissionPage {...props} />}

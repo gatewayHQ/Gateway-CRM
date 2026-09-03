@@ -4,6 +4,7 @@ import { wrap } from './_lib/observability.js'
 import crypto from 'node:crypto'
 import { extractPdfWords } from './_lib/pdfText.js'
 import { captionFields, detectSelectionCues } from '../src/lib/services/boldsignCaptions.js'
+import { normalizeSigners, outstandingSigners } from '../src/lib/services/boldsignSigners.js'
 
 // We verify webhook signatures against the RAW request body, so the automatic
 // body parser must be off — we read the stream and parse it ourselves below.
@@ -32,6 +33,18 @@ export function betaBase(base = API_BASE) {
   if (/\/v1$/.test(trimmed))      return trimmed.replace(/\/v1$/, '/v1-beta')
   return `${trimmed}/v1-beta`          // a base configured without a version segment
 }
+// ─── Brand ───────────────────────────────────────────────────────────────────
+// Every signature request this CRM sends carries the brokerage's BoldSign brand
+// — logo, colours, the sender name a client sees in their inbox. Without it the
+// first impression of a Gateway agreement is a generic BoldSign email, which is
+// a brand moment given away on the single most important message the brokerage
+// sends a client all year.
+//
+// Not a secret: a brand id names an account resource, it does not grant access
+// to one. It is a constant so the feature works the moment this deploys, and an
+// env var so a second brand (a DBA, a partner office) needs no code change.
+const BRAND_ID = process.env.BOLDSIGN_BRAND_ID || '67317627-ae3d-40c6-bde2-8ec16d31e440'
+
 const WEBHOOK_SECRET = process.env.BOLDSIGN_WEBHOOK_SECRET
 // Two deliberate escape hatches, both OFF by default so production is verified
 // unless someone says otherwise in writing (an env var):
@@ -1735,6 +1748,87 @@ export function requiresExplicitFieldPlacement(signers, useTextTags) {
   return null
 }
 
+// ─── Send options ─────────────────────────────────────────────────────────────
+// Brand, CC, expiry and automatic reminders — four BoldSign capabilities this
+// account pays for and nothing exposed.
+//
+// SET AT CREATION OR NOT AT ALL. BoldSign fixes every one of these when the
+// document is created and refuses to change them afterwards, so they ride on
+// the draft-creating call rather than on the send. That is also why the UI asks
+// for them on the prepare screen: by the time an agent is looking at a send
+// button it is already too late to set an expiry.
+//
+// EVERY FIELD IS OPTIONAL AND OMITTED WHEN UNSET. A payload that always carried
+// `expiryDays: null` would be us overriding the account default with nothing.
+const MAX_EXPIRY_DAYS = 180
+const MAX_REMINDER_COUNT = 5
+
+/** CC entries BoldSign will accept: well-formed, deduped, capped. */
+export function normalizeCc(list) {
+  const seen = new Set()
+  const out = []
+  for (const raw of (Array.isArray(list) ? list : [])) {
+    const email = String(raw?.emailAddress || raw?.email || raw || '').trim()
+    if (!email || !EMAIL_RE.test(email)) continue
+    const key = email.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ emailAddress: email })
+    // A "copy everyone" list is a way to leak an agreement, not a feature.
+    if (out.length >= 10) break
+  }
+  return out
+}
+
+/** Auto-reminder settings, or null when the caller does not want them. */
+export function normalizeReminders(raw) {
+  if (!raw || raw.enabled === false) return null
+  const days  = Math.min(Math.max(Number(raw.reminderDays) || 3, 1), 30)
+  const count = Math.min(Math.max(Number(raw.reminderCount) || 3, 1), MAX_REMINDER_COUNT)
+  return { enableAutoReminder: true, reminderDays: days, reminderCount: count }
+}
+
+/**
+ * The options every creation path shares, as a partial JSON payload.
+ *
+ * Spread into the request body. Keys are omitted rather than nulled, so the
+ * BoldSign account's own defaults still apply to anything the agent did not ask
+ * for.
+ */
+export function buildSendOptions({ cc, expiryDays, reminders, brandId } = {}) {
+  const out = {}
+  const brand = brandId || BRAND_ID
+  if (brand) out.brandId = brand
+
+  const ccList = normalizeCc(cc)
+  if (ccList.length) out.cc = ccList
+
+  const expiry = Number(expiryDays)
+  if (Number.isFinite(expiry) && expiry > 0) out.expiryDays = Math.min(Math.round(expiry), MAX_EXPIRY_DAYS)
+
+  const reminderSettings = normalizeReminders(reminders)
+  if (reminderSettings) out.reminderSettings = reminderSettings
+
+  return out
+}
+
+/**
+ * The same options on a MULTIPART send (the two ad-hoc PDF paths).
+ *
+ * Only the scalars. BoldSign documents `cc` and `reminderSettings` as objects,
+ * and how a multipart body nests those is not something this file will guess at
+ * — this integration has already retired one feature built on a guess about
+ * BoldSign's wire format (see the coordinate auto-placement note above). The
+ * template paths, which are the ones the CRM actually sends agreements through,
+ * carry the full set as JSON.
+ */
+export function appendSendOptions(form, { expiryDays, brandId } = {}) {
+  const brand = brandId || BRAND_ID
+  if (brand) form.append('BrandId', brand)
+  const expiry = Number(expiryDays)
+  if (Number.isFinite(expiry) && expiry > 0) form.append('ExpiryDays', String(Math.min(Math.round(expiry), MAX_EXPIRY_DAYS)))
+}
+
 // BoldSign requires a non-empty Roles array when creating an embedded template
 // — omitting it returns {"Roles":["Roles cannot be null or empty."]}. Default
 // to a Seller/Listing-Agent pair matching our template convention (role 1 =
@@ -1982,6 +2076,87 @@ export async function templateCaptions(templateId, { fields = [], props = {}, fe
   return value
 }
 
+// ─── Template field index ─────────────────────────────────────────────────────
+// Every field id a template actually carries — the guard behind every template
+// send in this file.
+//
+// WHY THIS EXISTS. A send payload addresses fields by id, and the ids come from
+// the browser. BoldSign auto-names its fields (`CheckBox1`, `Label2`), so those
+// ids are not unique to a template: every template in the account has a
+// `CheckBox1`. A client bug that carried one template's field map onto another
+// template's send did exactly that — wrote one form's answers onto another
+// form's boxes, as locked terms of an agreement, with a 200 back and nothing
+// anywhere saying so.
+//
+// The client-side fix (a panel declared per packet and validated against the
+// live template) is the primary one. This is the floor under it: the server
+// refuses a payload naming a field the template does not have, so no caller —
+// this app, a future one, an AI agent driving the API — can reproduce that
+// class of bug. It catches a typo'd token id just as well.
+//
+// BEST EFFORT BY DESIGN. If BoldSign cannot be asked (rate limit, outage), the
+// send proceeds unvalidated rather than failing: an unverifiable payload is far
+// more likely to be correct than not, and refusing every send during a BoldSign
+// blip is a worse failure than the one being guarded against.
+const FIELD_INDEX_TTL_MS = 10 * 60 * 1000
+const FIELD_INDEX_MAX = 24
+const fieldIndexCache = new Map()
+
+export function collectTemplateFieldIds(props) {
+  const ids = new Set()
+  const add = (f) => { const id = f?.id || f?.fieldId || f?.name; if (id) ids.add(String(id)) }
+  for (const f of (props?.formFields || props?.fields || [])) add(f)
+  for (const r of (props?.roles || props?.signerRoles || props?.templateRoles || [])) {
+    for (const f of (r?.formFields || r?.fields || [])) add(f)
+  }
+  return ids
+}
+
+async function templateFieldIds(templateId) {
+  const hit = fieldIndexCache.get(templateId)
+  if (hit && hit.expires > Date.now()) return hit.value
+  const props = await boldsign(`/template/properties?templateId=${encodeURIComponent(templateId)}`)
+  const value = collectTemplateFieldIds(props)
+  fieldIndexCache.set(templateId, { value, expires: Date.now() + FIELD_INDEX_TTL_MS })
+  if (fieldIndexCache.size > FIELD_INDEX_MAX) fieldIndexCache.delete(fieldIndexCache.keys().next().value)
+  return value
+}
+
+// Every field id a send payload addresses, across all three places one can hide.
+export function payloadFieldIds({ roles, sharedFormFields, fieldRemovalIds } = {}) {
+  const ids = []
+  for (const r of (Array.isArray(roles) ? roles : [])) {
+    for (const f of (r?.existingFormFields || [])) if (f?.id != null) ids.push(String(f.id))
+  }
+  for (const f of (Array.isArray(sharedFormFields) ? sharedFormFields : [])) if (f?.id != null) ids.push(String(f.id))
+  for (const id of (Array.isArray(fieldRemovalIds) ? fieldRemovalIds : [])) if (id != null) ids.push(String(id))
+  return [...new Set(ids)]
+}
+
+// Throws a 400 naming the offenders when a payload addresses fields this
+// template does not have. Never throws for a reason other than that.
+async function assertPayloadFieldsExist(templateId, payload) {
+  const wanted = payloadFieldIds(payload)
+  if (!wanted.length) return
+  let known
+  try {
+    known = await templateFieldIds(templateId)
+  } catch (err) {
+    console.warn(`[boldsign] could not verify field ids against template ${templateId} (${err.message}) — sending unverified`)
+    return
+  }
+  if (!known.size) return                       // a template with no fields reported: nothing to check against
+  const unknown = wanted.filter(id => !known.has(id))
+  if (!unknown.length) return
+  console.error(`[boldsign] REFUSED send on template ${templateId}: payload names ${unknown.length} field(s) it does not have — ${unknown.slice(0, 20).join(', ')}`)
+  throw badRequest(
+    `This send refers to ${unknown.length} field${unknown.length === 1 ? '' : 's'} that ${unknown.length === 1 ? 'is' : 'are'} not on the selected form `
+    + `(${unknown.slice(0, 6).join(', ')}${unknown.length > 6 ? `, +${unknown.length - 6} more` : ''}). `
+    + 'Nothing was created. This usually means the form was edited in BoldSign after it was registered — '
+    + 'reopen it here to reload its fields, or ask your admin to re-check the packet.'
+  )
+}
+
 async function handler(req, res) {
   applyJsonCors(res, req)
   if (req.method === 'OPTIONS') return res.status(200).end()
@@ -2049,6 +2224,7 @@ async function handler(req, res) {
       form.append('Message',            emailSubject || 'Please sign this document')
       form.append('EnableSigningOrder', String(hasOrder))
       appendSigners(form, signerPayload)
+      appendSendOptions(form, body)
       if (useTextTags) {
         form.append('UseTextTags', 'true')
         if (textTagDefinitions) form.append('TextTagDefinitions', JSON.stringify(textTagDefinitions))
@@ -2102,6 +2278,7 @@ async function handler(req, res) {
       form.append('Message',            emailSubject || 'Please sign this document')
       form.append('EnableSigningOrder', String(hasOrder))
       appendSigners(form, signerPayload)
+      appendSendOptions(form, body)
       form.append('SendViewOption',     'PreparePage')
       form.append('ShowToolbar',        'true')
       if (useTextTags) {
@@ -2266,8 +2443,24 @@ async function handler(req, res) {
       if (signErr || !signed?.signedUrl) {
         return res.status(500).json({ error: `Could not create a link to the print copy${signErr?.message ? `: ${signErr.message}` : ''}` })
       }
+      // TWO URLs FOR THE SAME BYTES, because the `download` option sets
+      // Content-Disposition: attachment — which is exactly right for Save PDF
+      // and exactly wrong for showing the document on screen: an attachment in
+      // an iframe downloads instead of rendering. The preview link is the same
+      // object signed without it, so an agent can read the packet before
+      // sending it rather than downloading a file to find out what it says.
+      // Best-effort: a preview URL that cannot be minted just means no inline
+      // preview, never a failed Save PDF.
+      let previewUrl = null
+      try {
+        const { data: inline } = await svc.storage.from(DEAL_BUCKET).createSignedUrl(path, 300)
+        previewUrl = inline?.signedUrl || null
+      } catch (e) {
+        console.warn(`[boldsign] print: could not mint a preview URL for ${id}: ${e.message}`)
+      }
       return res.json({
         url:        signed.signedUrl,
+        previewUrl,
         filename,
         status:     normalizeStatus(props?.status),
         fieldCount: buildSigningSummary(props).total,
@@ -2426,11 +2619,20 @@ async function handler(req, res) {
       // `status` is null when BoldSign reports something outside the set this app
       // stores; `rawStatus` still carries it so the UI can show the truth without
       // writing an unknown value into a column every other query filters on.
+      // Per-signer state rides along on every status read. The document's own
+      // status says whether it is done; only this says WHO is holding it up,
+      // which is the fact an agent acts on. Normalized here — with BoldSign's
+      // own signing-order flag — so what gets stored on the row is already
+      // resolved and every screen renders the same thing without re-deriving it.
+      const signerRows = normalizeSigners(data.signerDetails, {
+        inOrder: Boolean(data.enableSigningOrder ?? data.enableSigningOrderInfo),
+      })
       return res.json({
         status:            normalizeKnownStatus(data.status),
         rawStatus:         data.status ?? null,
         sentDateTime:      toIso(data.createdDate || data.sentDate || null),
         completedDateTime: toIso(data.completedDate || data.signedDate || null),
+        signers:           signerRows,
       })
     }
 
@@ -2503,23 +2705,71 @@ async function handler(req, res) {
 
     // Nudge outstanding signers. Records the nudge so the nightly auto-reminder
     // sweep and the UI both know when this document was last chased.
+    //
+    // TARGETED BY DEFAULT. `/document/remind` takes repeated `receiverEmails`
+    // query parameters, and without them it emails every pending signer —
+    // including, on a sequential send, people BoldSign has not asked yet. A
+    // caller that names signers gets exactly those; a caller that names none
+    // gets whoever the row says is still outstanding.
+    //
+    // THE LIST IS FILTERED AGAINST THE DOCUMENT'S OWN SIGNERS. `signerEmails`
+    // arrives from the browser, and an unchecked pass-through would turn this
+    // endpoint into a way to send brokerage-branded mail to any address through
+    // our BoldSign account. Only addresses already on the document survive.
     if (body.action === 'remind') {
       const id = body.envelopeId || body.documentId
       if (!id) return res.status(400).json({ error: 'documentId required' })
       const svc = getServiceClient()
       const { data: record } = await svc.from('boldsign_documents')
-        .select('id, status, reminder_count').eq('document_id', id).maybeSingle()
+        .select('id, status, reminder_count, signers, signer_email').eq('document_id', id).maybeSingle()
       if (record && !['sent', 'delivered'].includes(record.status)) {
         return res.status(400).json({ error: `This document is ${record.status} — there is nobody left to remind.` })
       }
-      await boldsign(`/document/remind?documentId=${encodeURIComponent(id)}`, { method: 'POST', json: {} })
+
+      const known = new Set(
+        [
+          ...normalizeSigners(record?.signers).map(x => x.email),
+          ...String(record?.signer_email || '').split(',').map(x => x.trim()),
+        ].filter(Boolean).map(e => e.toLowerCase()),
+      )
+      const asked = (Array.isArray(body.signerEmails) ? body.signerEmails : [])
+        .map(e => String(e || '').trim()).filter(Boolean)
+      const rejected = asked.filter(e => known.size && !known.has(e.toLowerCase()))
+      if (rejected.length) {
+        console.warn(`[boldsign] remind ${id}: ignoring ${rejected.length} address(es) not on the document`)
+      }
+      let targets = asked.filter(e => !known.size || known.has(e.toLowerCase()))
+      // No explicit list: whoever the row still says owes a signature.
+      if (!targets.length && !asked.length) {
+        targets = outstandingSigners(normalizeSigners(record?.signers)).map(x => x.email).filter(Boolean)
+      }
+      if (asked.length && !targets.length) {
+        return res.status(400).json({ error: 'None of those signers are on this document.' })
+      }
+
+      const qs = new URLSearchParams({ documentId: id })
+      for (const email of targets) qs.append('receiverEmails', email)
+      try {
+        await boldsign(`/document/remind?${qs.toString()}`, { method: 'POST', json: {} })
+      } catch (err) {
+        // BoldSign allows one manual reminder per document per day. That is a
+        // rule an agent can work with, and a bare 400 is not.
+        if (err.status === 400 && /reminder|once|already/i.test(err.message || '')) {
+          return res.status(429).json({
+            error: 'BoldSign allows one manual reminder a day per document, and this one has already been reminded today. '
+              + 'The nightly sweep will keep chasing, or you can call them.',
+          })
+        }
+        throw err
+      }
+
       if (record) {
         await svc.from('boldsign_documents').update({
           last_reminded_at: new Date().toISOString(),
           reminder_count:   (record.reminder_count || 0) + 1,
         }).eq('id', record.id)
       }
-      return res.json({ ok: true, remindedAt: new Date().toISOString() })
+      return res.json({ ok: true, remindedAt: new Date().toISOString(), remindedEmails: targets })
     }
 
     // Delete a draft/unsigned/expired document to keep the Signatures tab tidy.
@@ -2856,6 +3106,10 @@ async function handler(req, res) {
       if (!templateId)     return res.status(400).json({ error: 'templateId required' })
       if (!roles?.length)  return res.status(400).json({ error: 'roles required' })
 
+      // Before anything is created: every field this payload addresses must be
+      // on this template. See assertPayloadFieldsExist.
+      await assertPayloadFieldsExist(templateId, { roles, sharedFormFields })
+
       const svc        = getServiceClient()
       const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
       const payload = {
@@ -2863,6 +3117,9 @@ async function handler(req, res) {
         // filename). Prefer the caller's documentName so it's deal-specific.
         title:   documentName || emailSubject || 'Please sign this document',
         message: message || 'Please review and sign.',
+        // Brand, CC, expiry and auto-reminders. Set here because BoldSign fixes
+        // them at creation and refuses to change them afterwards.
+        ...buildSendOptions(body),
         roles:   mergeSharedFormFields(roles, sharedFormFields),
         // Without this, signerOrder is inert and every signer is notified at
         // once. See rolesWantSigningOrder.
@@ -2913,10 +3170,18 @@ async function handler(req, res) {
     const createTemplateDraft = async (svc, {
       templateId, dealId, roles, emailSubject, message, cc, documentName, labels, redirectUrl, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
     }) => {
+      // Before the draft exists: every field this payload addresses must be on
+      // this template. See assertPayloadFieldsExist.
+      await assertPayloadFieldsExist(templateId, { roles, sharedFormFields, fieldRemovalIds })
+
       const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
       const payload = {
         title:          documentName || emailSubject || 'Please sign this document',
         message:        message || 'Please review and sign.',
+        // See buildSendOptions: BoldSign fixes brand, CC, expiry and reminders
+        // at creation, so a draft carries them from the moment it exists — the
+        // agent cannot add an expiry later, and neither can we.
+        ...buildSendOptions(body),
         // Label values ride on the first role so every signer sees them from the
         // moment the draft is sent — see mergeSharedFormFields.
         roles:          mergeSharedFormFields(roles, sharedFormFields),
@@ -3200,6 +3465,31 @@ async function handleWebhook(req, res) {
       advanced = Boolean(updated?.length)
     } else if (record.status !== status) {
       console.warn(`[boldsign] webhook for ${documentId}: ignoring out-of-order "${status}" — row is already "${record.status}"`)
+    }
+
+    // ── Per-signer state ──────────────────────────────────────────────────
+    // Written on ANY delivery that carries it, not only one that advances the
+    // document. That is the whole point: "Jane signed, John hasn't" does not
+    // move the document off 'sent', so gating this on `advanced` would mean the
+    // one event that tells an agent who to chase is the one event we discard.
+    //
+    // MONOTONIC, because deliveries are unordered. A retried early event can
+    // land after a later one, and overwriting three signatures with the payload
+    // from one would make the row walk backwards. A payload is only written
+    // when it knows at least as much as the row already does.
+    const incomingSigners = normalizeSigners(doc?.signerDetails, {
+      inOrder: Boolean(doc?.enableSigningOrder ?? body?.enableSigningOrder),
+    })
+    if (incomingSigners.length) {
+      const signedIn    = incomingSigners.filter(x => x.status === 'signed').length
+      const signedOnRow = normalizeSigners(record.signers).filter(x => x.status === 'signed').length
+      if (signedIn >= signedOnRow) {
+        const { error: signerErr } = await supabase.from('boldsign_documents')
+          .update({ signers: incomingSigners }).eq('id', record.id)
+        if (signerErr) console.warn(`[boldsign] could not record signer state for ${documentId}: ${signerErr.message}`)
+      } else {
+        console.warn(`[boldsign] webhook for ${documentId}: ignoring out-of-order signer payload (${signedIn} signed vs ${signedOnRow} on the row)`)
+      }
     }
 
     // Nothing left to do for a duplicate or superseded delivery, EXCEPT for a

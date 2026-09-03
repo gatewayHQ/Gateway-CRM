@@ -15,8 +15,9 @@ Agent (CRM)                    /api/boldsign                 BoldSign (US)
   Send for Signature  ─────▶   send / document-embed-url ─▶  api.boldsign.com/v1
   Send from Template  ─────▶   template-send / -embed-url ─▶
   Prepare & Print:
-    Save as Draft     ─────▶   template-draft ────────────▶  (creates a DRAFT,
-    Download Filled   ─────▶   document-print ────────────▶   sends nothing)
+    Review Draft      ─────▶   template-draft ────────────▶  (creates a DRAFT,
+                            +  document-print (preview) ─▶   sends nothing)
+    Download Filled   ─────▶   document-print ────────────▶
     Send for Signature ────▶   draft-send ────────────────▶  /v1-beta draftSend
         │                          │  (X-API-KEY, retry+idempotency)
         ▼                          ▼
@@ -82,7 +83,7 @@ Signed PDFs + audit-trail PDFs are archived to the `deal-documents` bucket.
 | `document-delete` | agent (sender) / admin | Remove a draft/unsigned/expired document — revokes if in-progress, then deletes in BoldSign, then removes the local row. Refuses `completed` records. |
 | `template-list` / `template-details` | agent | List templates / read a template's roles + fields |
 | `template-send` / `template-embed-url` | agent | Send from template (JSON) / embedded prepare from template |
-| `template-draft` | agent | **Save as Draft from a template — no editor, nothing sent.** Same payload as `template-embed-url` but `deal_id` is required. Returns `{ documentId, status:'draft', prepareUrl }`. Both share `createTemplateDraft()`. |
+| `template-draft` | agent | **Create a draft from a template — no editor, nothing sent.** Same payload as `template-embed-url` but `deal_id` is required. Returns `{ documentId, status:'draft', prepareUrl }`. Both share `createTemplateDraft()`. |
 | `template-editor-url` | admin | Embedded template create/edit URL. Requires `roles` (defaults to Seller/Listing Agent) and a document title on create — see "Fixing 'Roles cannot be null or empty'" below. `useTextTags` + `textTagDefinitions` supported. |
 | `identity-create` / `identity-details` / `identity-update` / `identity-delete` / `identity-set-default` / `identity-sync` / `identity-resend` | admin | Full sender-identity lifecycle — see "Sender Identity Management" below |
 | _(no `action`)_ | webhook | BoldSign lifecycle events (HMAC-verified) |
@@ -308,14 +309,19 @@ Signatures tab → Prepare from Template
    ▼  pick template · signer rows seeded from the deal · every prefillable
       field rendered as an input, pre-filled from CRM tokens
    │
-   ├── Save as Draft ───────────▶ template-draft
-   │      (primary; no editor)     /template/createEmbeddedRequestUrl
-   │                               → document EXISTS, is a DRAFT, values written
-   │                               → tracked on the deal + saved layout applied
+   ▼  ONE creation step, whichever door is clicked — template-draft
+      /template/createEmbeddedRequestUrl
+      → document EXISTS, is a DRAFT, values written
+      → tracked on the deal + saved layout applied
    │
-   └── Place Fields in BoldSign ▶ template-embed-url  (same draft, opened in the
-          (only when placement       embedded editor; still sends only if the
-           needs adjusting)          agent clicks Send in there)
+   ├── Review Draft ────────────▶ document-print (previewUrl)
+   │      (the common case)        → the composed packet on screen, with
+   │                                 Adjust Field Placement · Download PDF ·
+   │                                 Send for Signature beside it
+   │
+   └── Place Fields in BoldSign ▶ document-edit-url  (the SAME draft, opened in
+          (when the agent already    the embedded editor; leaving it lands on the
+           knows a box must move)    review with the preview re-fetched)
    │
    ▼  the draft row on the Signatures tab, with three distinct actions:
        ┌───────────────────────┬───────────────┬─────────────────────┐
@@ -333,7 +339,7 @@ again**, as many times as it takes. The document stays a draft, on the same
 layout is preserved, and the audit trail is one document rather than five
 abandoned ones.
 
-### Why "Save as Draft" doesn't need the editor
+### Why creating the draft doesn't need the editor
 
 `POST /template/createEmbeddedRequestUrl` is the API's draft-from-template door.
 It mints the document **with the roles and their `existingFormFields` values
@@ -341,8 +347,10 @@ already written onto it**, and returns both a `documentId` and an embedded
 prepare URL. **The document exists, and is a draft, whether or not anyone ever
 opens that URL.** That single fact is what lets `template-draft` skip the editor
 and still hand back a real, filled, downloadable document — and it is why both
-template actions share one `createTemplateDraft()` helper rather than being two
-different creation mechanisms that could drift.
+doors out of the prepare screen share one `createDraft()` call rather than being
+two different creation mechanisms that could drift. **Place Fields reopens the
+draft that was just created** (`document-edit-url`) instead of creating its own
+through the embed path, so the two routes cannot produce different documents.
 
 Not opening the editor also means no **edit lock** is set (see "Editing a
 draft"), so the very next action on that draft cannot hit a stale-lock 400.
@@ -405,7 +413,9 @@ signatures and no audit trail; the button and its tooltip say so.
 | No draft yet | — | **Prepare from Template** / Send for Signature (ad-hoc) |
 | Modal, template loading | "Loading template…" | both buttons disabled |
 | Modal, template unreadable | red panel + **Try again** | both buttons disabled — a failed load must never look like a loaded template |
-| Modal, ready | signer rows + a control per prefillable field | **Save as Draft** (primary) · **Place Fields in BoldSign** (secondary) |
+| Modal, ready | signer rows + a control per prefillable field | **Review Draft** (primary) · **Place Fields in BoldSign** (secondary) — both create the same draft, and differ only in where the agent lands |
+| Review | the composed packet in an iframe, field count, recipients in signing order | **Adjust Field Placement** · **Download PDF** · **Send for Signature** (confirmed) |
+| Review, preview unavailable | "the pages are not ready yet" | the other actions still work — a missing preview is never a failed draft |
 | `draft` | amber strip, "Draft — nothing sent." | **Download Filled PDF** · **Edit Fields** · **Send for Signature** |
 | Sending | — | Send button busy; confirm dialog shows a busy state |
 | `sent` / `delivered` | "waiting Nd", reminder count | Remind · Save PDF · Refresh · Delete |
@@ -456,10 +466,11 @@ or the flow degrades in ways worth naming:
 - **`BOLDSIGN_API_KEY`** on a plan that includes **embedded requests**. Draft
   creation goes through `createEmbeddedRequestUrl`, so a tier without embedding
   cannot create drafts at all — not just "cannot show the editor".
-- **Approved domains** (BoldSign → Settings → Embedded) for *Place Fields* and
-  *Edit Fields*. **Save as Draft, Download Filled PDF and Send for Signature do
-  not need them** — they are pure API calls — so an account mid-setup still has a
-  working prepare-and-print path.
+- **Approved domains** (BoldSign → Settings → Embedded) for *Place Fields*,
+  *Adjust Field Placement* and *Edit Fields*. **Creating the draft, Review Draft,
+  Download Filled PDF and Send for Signature do not need them** — they are pure
+  API calls — so an account mid-setup still has a working prepare-and-print path,
+  and Place Fields falls back to the review rather than dead-ending.
 - **Templates must have their signature fields placed.** A template with no
   fields still saves as a draft and still downloads as a filled PDF, but
   `draft-send` will refuse it (BoldSign runs the full send validation), and the
@@ -478,10 +489,16 @@ an email, a linked property, and a commission entered on the Details tab.
    read *Signer decides*.
 2. **Fill** — change a text value, set one box to *Checked* and one to
    *Unchecked*, leave a third alone.
-3. **Save draft** — *Save as Draft*. The modal closes, no editor opens, a row
-   appears with a **Draft** chip and the amber "Draft — nothing sent." strip.
-   Confirm in BoldSign's dashboard that the document is in **Drafts** and that
-   **no email was sent**.
+3. **Review the draft** — *Review Draft*. No editor opens; the draft is created
+   and the composed packet appears on screen, with the field count and the
+   recipients in signing order. **The values from step 2 must be visible on the
+   pages.** Confirm in BoldSign's dashboard that the document is in **Drafts**
+   and that **no email was sent**. Close the review: a row appears with a
+   **Draft** chip and the amber "Draft — nothing sent." strip.
+3b. **The other door** — repeat from step 1 and click *Place Fields in BoldSign*
+   instead. The same draft is created and opens straight in the embedded editor;
+   leaving it lands on the review with the preview re-fetched. Confirm the two
+   routes produce identical drafts (same field values, one document each).
 4. **Download filled PDF** — *Download Filled PDF*. The file downloads with the
    CRM's filename. **Open it: the values from step 2 must be on the pages** (blue
    text; the ticked box marked, the unticked and untouched ones not), and the
@@ -830,6 +847,224 @@ which.
 field's `id`/`type`/`roleIndex` so those controls can be rendered with the
 template's own wording rather than a prettified field id.
 
+## Per-signer state — who is actually holding it up
+
+**A document's status and a signer's status are different things.** The document
+is `sent` until everyone is done; each signer is somewhere between "hasn't
+opened it" and "signed". Every send stored its full signer array and the UI
+rendered `signer_name` — a comma-joined string of everybody — plus one chip for
+the document as a whole. On a four-party packet an agent could see it was
+unsigned and could not see *who* was holding it up, which is the only fact that
+decides what they do next. The data was being collected and thrown away.
+
+`src/lib/services/boldsignSigners.js` is the shared, pure model
+(`api/boldsign.js` and `api/cron.js` import it directly, the same way they
+import `boldsignCaptions.js`). It normalizes to:
+
+| state | means |
+|---|---|
+| `signed` | done |
+| `viewed` | opened it, hasn't signed |
+| `waiting` | has it, hasn't opened it |
+| `queued` | **derived** — sequential send, BoldSign hasn't emailed them yet |
+| `declined` / `expired` / `revoked` | terminal, not chaseable |
+
+`queued` is the one that isn't BoldSign's. On a sequential send the people
+behind the active signer have not been asked yet, so showing them as "waiting"
+sends an agent chasing someone who never received anything. Because these rows
+are persisted to `boldsign_documents.signers` and read back,
+`normalizeSignerStatus` is **round-trip safe** — without that, `queued` decayed
+to `waiting` on every reload.
+
+### Where the state comes from
+
+- **Webhook** — written on *any* delivery carrying `signerDetails`, not only one
+  that advances the document. "Jane signed, John hasn't" does not move the
+  document off `sent`, so gating this on `advanced` would discard the one event
+  that says who to chase. **Monotonic**: deliveries are unordered, so a payload
+  is written only when it knows at least as much as the row already does.
+- **Status refresh** — `action: 'status'` returns normalized `signers` alongside
+  the document status, and the Signatures tab stores them. A document sent
+  before per-signer state existed fills in the first time anyone refreshes it.
+- **Legacy fallback** — `signerRows()` reconstructs people from the comma-joined
+  columns when there is no array, so old rows still render as a list.
+
+### Reminders are targeted
+
+`/document/remind` takes repeated `receiverEmails` query parameters. Without
+them BoldSign emails **every** pending recipient — including, on a sequential
+send, people it has not asked yet. Reminding someone who has already signed, or
+who cannot yet act, is how a client learns to ignore the next one.
+
+- The `remind` action reminds whoever the row still shows as outstanding, or
+  exactly the `signerEmails` the caller names.
+- **The list is filtered against the document's own signers.** `signerEmails`
+  comes from the browser, and an unchecked pass-through would turn the endpoint
+  into a way to send brokerage-branded mail to any address through our BoldSign
+  account.
+- The nightly sweep (`api/cron.js`) targets the same way. It is the one that
+  runs unattended and therefore the one most able to train a client to ignore
+  us. No recorded signer state falls back to BoldSign's default rather than
+  skipping the reminder.
+- **BoldSign allows one manual reminder per document per day.** That 400 is
+  translated into a sentence an agent can act on rather than surfacing bare.
+
+### What the agent sees
+
+- The Signatures row leads with **"waiting on John Doe"** and, on a multi-party
+  packet, `2/4 signed`.
+- In-flight documents with more than one recipient expand into a per-signer
+  strip: order badge, name, role, state ("opened Aug 14", "not their turn yet"),
+  and a per-person **Nudge** — offered only to someone who can actually act.
+- The send confirmation lists recipients **in signing order, one per line, with
+  addresses**. The mistake it exists to catch is sending the right document to
+  the wrong people, and a comma-joined run-on line is what a person skims past.
+- The dashboard queue (`SignatureQueue`) uses the same model, so "waiting on
+  John Doe" reads identically in both places.
+
+## Send options — brand, CC, expiry (and the reminder we deliberately don't use)
+
+**BoldSign fixes all of these when the document is CREATED and refuses to
+change them afterwards.** That single fact decides the whole design: they ride
+on the draft-creating call, and the UI asks for them on the prepare screen. By
+the time an agent is looking at a Send button it is already too late to set an
+expiry or add a copy recipient.
+
+`buildSendOptions()` in `api/boldsign.js` produces the partial payload every
+JSON creation path spreads in (`/template/send`, `/template/createEmbeddedRequestUrl`);
+`appendSendOptions()` does the multipart equivalent for the two ad-hoc PDF paths.
+
+| Option | Where it comes from | Notes |
+|---|---|---|
+| `brandId` | `BOLDSIGN_BRAND_ID`, else the Gateway brand in code | Applied to **every** send. Not the agent's to choose |
+| `cc` | Send options → "Send a copy to" | Normalized to `[{ emailAddress }]`, deduped case-insensitively, malformed addresses dropped, **capped at 10** — a "copy everyone" list is a way to leak an agreement, not a feature |
+| `expiryDays` | Send options → "Expires after" | Clamped to 1–180. Blank means the account default, not "no expiry we imposed" |
+| `reminderSettings` | **not wired to any UI** | See below |
+
+**Every field is omitted when unset.** A payload that always carried
+`expiryDays: null` would be us overriding the account's own default with
+nothing.
+
+### Why BoldSign's auto-reminders stay off
+
+BoldSign will chase signers for you (`enableAutoReminder`, `reminderDays`,
+`reminderCount`). We don't use it, and that is a decision rather than an
+omission: **the CRM already owns chasing.** The nightly sweep decides when a
+document is stale, and since the per-signer work it reminds only the people who
+still owe something — which BoldSign's own reminder cannot do, because it has no
+idea our sequential sends leave later signers un-notified.
+
+Turning both on means two systems emailing the same client on two schedules,
+which is exactly how a client learns to filter you out. One reminder authority,
+and it is ours. `normalizeReminders()` is implemented, clamped and tested so
+this is a one-line change the day that judgment changes.
+
+### Multipart carries only the scalars
+
+`appendSendOptions()` sets `BrandId` and `ExpiryDays` on the two ad-hoc PDF
+paths and stops there. BoldSign documents `cc` and `reminderSettings` as
+objects, and how a multipart body nests those is not something this file will
+guess at — **this integration has already retired one feature built on a guess
+about BoldSign's wire format** (the coordinate auto-placement). The template
+paths, which are how the CRM actually sends agreements, carry the full set as
+JSON.
+
+### Still unused
+
+`in-person signing` (a host signer for a client at the table), `scheduled send`,
+and SMS delivery / SMS-OTP authentication. SMS is blocked on Twilio, which the
+brokerage has not connected yet; the other two are unbuilt, not undecided.
+
+## The terms panel is declared per packet, not per app
+
+**The decisions a packet asks its sender for — Representation, Term, agency
+Policy — belong to that packet and are bound to its own field ids.** This used
+to be one hard-coded map (`CheckBox1` … `CheckBox9`) applied to every template
+the send screen opened, and that is not survivable: **BoldSign auto-assigns
+`CheckBox1`, `CheckBox2`, … on every template it creates**, so those ids are
+shared across the whole catalog. Registering a second template with tick boxes —
+a seller listing agreement, a disclosure, a Nebraska form — meant the Iowa buyer
+packet's answers were written onto that template's first nine boxes as locked
+terms of a signed agreement, silently. The same map also gated *both* send
+buttons, so a listing agreement could not be saved as a draft until the agent
+answered two buyer-agency questions that did not apply to it.
+
+A panel is now a **declarative spec on the packet row**
+(`form_packets.signing_panel`, migration 0043), read and enforced by
+`src/lib/services/boldsignPacketPanel.js`:
+
+```jsonc
+{ "version": 1, "key": "ia_buyer_agency_v1", "groups": [
+  { "key": "representation", "kind": "choice", "label": "Representation", "required": true,
+    "options": [
+      { "key": "exclusive",     "label": "Exclusive",     "fieldId": "CheckBox1", "expect": "^(?!.*non-?\\s?exclusive).*\\bexclusive\\b" },
+      { "key": "non-exclusive", "label": "Non-exclusive", "fieldId": "CheckBox2", "expect": "non-?\\s?exclusive" }
+    ] }
+] }
+```
+
+Three group kinds: `choice` (radios; the mutex is structural, `required` gates
+the send), `toggles` (independent state, collapsed by default), `fixed` (never
+rendered, written at its stated value — "this is a buyer packet, so the BUYER
+box is ticked"). `expect` is a **regex source string**, not a RegExp, because a
+panel round-trips through jsonb; it is compiled at load and matched against the
+caption read off the page.
+
+### Two modes, and the difference is the whole design
+
+| | Where it comes from | A validation failure means |
+|---|---|---|
+| **Declared** | `form_packets.signing_panel` | **The send is blocked** and the field is named on screen. An admin asserted these ids mean these things here, so quietly dropping the panel would send the agreement without the terms it exists to set. |
+| **Inferred** | A built-in panel matching the packet's `(state, transaction_type)` | **No panel at all.** Nobody asserted it applies, so a failure means "this isn't that packet". |
+
+An inferred panel is applied only if it validates **completely**: every field id
+present, every one a tick box, and every one captioned the way the panel
+expects. "Probably the Iowa packet" is not good enough to lock terms onto an
+agreement. This is what keeps the Iowa buyer packet working on a database where
+0043 has not been applied, without ever reaching another template by accident.
+
+### What validation checks
+
+- `missing_field` — the panel names an id the template does not have → **blocking**
+- `not_tickable` — the id exists but is a TextBox/Label, not a tick box → **blocking**
+- `caption_conflict` — the page prints something else beside that box → **blocking**
+- `no_caption` / `unverifiable` — nothing to check against (scanned or image-only
+  page, or no `expect`) → **warning**, shown as a count, never blocking
+
+Blocking defects render as a red panel above the buttons naming the decision,
+the box and what the page actually says, and both send buttons are disabled.
+This was previously a `console.warn` nobody was watching.
+
+### The floor under it, server-side
+
+`api/boldsign.js` refuses any template send whose payload addresses a field the
+template does not have (`assertPayloadFieldsExist`, checking
+`roles[].existingFormFields`, `sharedFormFields` and `fieldRemovalIds` against a
+cached `/template/properties`). Best-effort by design: if BoldSign cannot be
+asked, the send proceeds unvalidated rather than failing, because refusing every
+send during a BoldSign blip is a worse failure than the one being guarded
+against. This catches the same class of bug from any caller — a future client, a
+typo'd token id, an AI agent driving the API.
+
+### Boxes the panel does not own
+
+Every other tick box on the form is offered as a **tri-state** selection named
+from its printed caption: *As the form is* (default — no value sent, the form's
+own setting stands), *Checked*, *Unchecked*. That default is what makes opening
+the send screen safe on a template nobody has configured: it cannot change a box
+by itself, and the agent can still tick one deliberately.
+
+### Adding a panel to a packet
+
+1. Open the packet in **Prepare Draft Agreement**. The status line under the
+   template picker says whether a panel applies and whether it verifies.
+2. Confirm the field ids against the form in BoldSign.
+3. Run the `update form_packets set signing_panel = …` block at the bottom of
+   `migrations/0043_form_packet_signing_panel.sql` — **for one packet, by id**.
+   Never by state alone: two Iowa buyer packets built from different source PDFs
+   do not share field ids.
+4. Setting it back to `null` reverts to the self-validating fallback.
+
 ## Selections is the sender's panel, not the signer's
 
 One row is one checkbox already placed on the template, and the dropdown is the
@@ -858,8 +1093,8 @@ to whoever opened the document.
   from the packet's rules, not read off the page: page 1 prints "CHECK ALL BOXES
   THAT APPLY" above the representation pair.
 - **Every row is written on save.** `prefillFieldEntry` turns each `true`/`false`
-  into a read-only `"true"`/`"false"` on the matching BoldSign field id, so Save
-  as Draft and Place Fields both carry the tick states.
+  into a read-only `"true"`/`"false"` on the matching BoldSign field id, so both
+  doors out of the prepare screen carry the tick states — they build one payload.
 
 Consequence worth knowing: because no checkbox is left unset any more, a box a
 signer used to be able to tick themselves now goes out locked as the sender left
@@ -1218,6 +1453,7 @@ go enter one rather than a silent `0%` on a signed agreement.
 | `BOLDSIGN_WEBHOOK_SECRET` | Webhook HMAC signing secret. **Required** — without it `/api/boldsign` answers 503 and processes nothing (an unverified endpoint lets anyone who knows the URL mark a real document completed or declined) |
 | `BOLDSIGN_WEBHOOK_AUDIT_ONLY` | Go-live safety valve: verify, log the verdict, process anyway. On for the first hours on Live, then off |
 | `BOLDSIGN_WEBHOOK_INSECURE` | Local dev only — process events with no secret configured |
+| `BOLDSIGN_BRAND_ID` | The brand applied to every signature request — logo, colours, sender identity in the client's inbox. Defaults in code to the Gateway brand (`67317627-…`), so branding works without configuring anything; set it only to point a second brand (a DBA, a partner office) at a different one. Not a secret: a brand id names an account resource, it does not grant access to one |
 | `BOLDSIGN_API_BASE` | Region override (EU accounts: `https://api-eu.boldsign.com/v1`) |
 | `ALLOWED_ORIGIN` | Comma-separated origins allowed to call the API from a browser. Unset = `*` |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | Server-side DB + storage (webhook, portal, cron) |
@@ -1429,7 +1665,7 @@ guarantee the token resolves, or untick Required on CRM-filled fields.
 4. ✅ Form Library ↔ template unification + nightly drift sync.
 5. ✅ Full sender-identity management (create/update/delete/default) + fixed "Build in BoldSign" (Roles/DocumentTitle) + drafts cleanup + document_versions metadata on completion.
 6. ✅ Form Library modal scrolling fix, embedded (not new-tab) template editor with auto-save-back, and a real "Rebuild" (edit, not recreate) path.
-6b. ✅ Prepare & Print draft agreements — `template-draft` (Save as Draft, no editor), filled-PDF download on a draft, and `draft-send` as the single explicit send.
+6b. ✅ Prepare & Print draft agreements — `template-draft` (Review Draft / Place Fields, no editor required), filled-PDF download on a draft, and `draft-send` as the single explicit send.
 7. Monitoring/alerting on the signature funnel (webhook failures, stuck `sent` docs, send error rate, drift-sync `unmatched` titles).
 8. Confirm the BoldSign plan supports a 4th daily cron job (this repo's Vercel cron count just grew from 3 → 4) and that embedded signing/sending is enabled on the account tier.
 

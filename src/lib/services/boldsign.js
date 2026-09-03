@@ -99,7 +99,12 @@ export const getDocStatus    = (documentId) => call({ action: 'status',   docume
 // to its OWN archived file.
 export const downloadSigned  = (documentId) => call({ action: 'download', documentId })
 export const downloadAudit   = (documentId) => call({ action: 'audit-download', documentId })
-export const remindDocument  = (documentId) => call({ action: 'remind',   documentId })
+// Nudge whoever still owes a signature. `signerEmails` targets specific people
+// — the only ones an agent ever means to chase — and the API filters the list
+// against the document's own signers before it reaches BoldSign. Omit it and
+// the server reminds whoever the row still shows as outstanding, which on a
+// sequential send is not the same thing as "everybody".
+export const remindDocument  = (documentId, signerEmails) => call({ action: 'remind', documentId, ...(signerEmails?.length ? { signerEmails } : {}) })
 export const deleteDocument  = (documentId) => call({ action: 'document-delete', documentId })
 
 // ── Sendable-PDF upload ───────────────────────────────────────────────────────
@@ -190,3 +195,7 @@ export * from './boldsignSelections.js'
 // The Prepare Draft Agreement panel: the decisions it asks for, and the field
 // ids each one writes to.
 export * from './boldsignPacketPanel.js'
+// Per-signer state — who has signed, who has opened it, and who a reminder
+// should actually go to. Shared with api/boldsign.js, which imports the same
+// module directly (it is pure, like boldsignCaptions.js).
+export * from './boldsignSigners.js'

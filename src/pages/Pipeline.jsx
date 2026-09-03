@@ -26,8 +26,11 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, templateEmbedUrl, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, PACKET_FIELD_MAP, isPacketField, seedPacketState, packetTickValues, packetMissing, wantsEndDate, captionConflicts, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
+import { readDealTerms, termsForDeal, termsFilled, buildTermsPatch, normalizeTermValue, derivedTermHint } from '../lib/services/dealTerms.js'
+import { isOfficeAdmin } from '../lib/officeAdmins.js'
+import SignerPicker, { buildCandidates, isValidEmail } from '../components/SignerPicker.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
@@ -1157,6 +1160,18 @@ async function saveBoldSignDocumentPdf(documentId) {
   return { ...res, fieldCount }
 }
 
+// The same composed copy, as LINKS rather than a download — what the review
+// step needs. Deliberately separate from saveBoldSignDocumentPdf(): that
+// function's whole job is to put a file on the agent's disk, and calling it to
+// show a preview would download a PDF nobody asked for every time the review
+// opened. `previewUrl` is signed without Content-Disposition so it renders in
+// the frame instead of downloading; `url` is the attachment link for the
+// Download button beside it.
+async function fetchDraftPreview(documentId) {
+  const { previewUrl, url, filename, fieldCount } = await documentPdfUrl(documentId)
+  return { previewUrl: previewUrl || null, url: url || null, filename, fieldCount: fieldCount || 0 }
+}
+
 function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone, onDraft, onLayoutSaved, returnUrlMarker = 'boldsign-return' }) {
   const [savingLayout, setSavingLayout] = React.useState(false)
   const [savingPdf,    setSavingPdf]    = React.useState(false)
@@ -1431,6 +1446,14 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     setFile(picked); setPickedFile('')
   }
 
+  // The people this deal already knows. The ad-hoc flow has no roles to seed
+  // from, so the picker is doing more work here than in the template flow.
+  const signerCandidates = React.useMemo(() => buildCandidates({
+    dealContacts: [contact, ownerContact].filter(Boolean),
+    contacts,
+    agents: activeAgent ? [activeAgent] : [],
+  }), [contact, ownerContact, contacts, activeAgent])
+
   const allSigners = React.useMemo(() => {
     const clients = signers.map(s => ({ ...s, routingOrder: 1 }))
     if (agentSigns && activeAgent) {
@@ -1442,6 +1465,10 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const sendForSignature = async () => {
     const invalid = signers.find(s => !s.name.trim() || !s.email.trim())
     if (invalid) { pushToast('All signers need a name and email', 'error'); return }
+    // A malformed address is accepted by BoldSign, delivered nowhere, and looks
+    // exactly like a client ignoring you. Caught before anything is uploaded.
+    const badEmail = signers.find(s => !isValidEmail(s.email))
+    if (badEmail) { pushToast(`"${badEmail.email}" is not a valid email address.`, 'error'); return }
     if (!file && !pickedFile) { pushToast('Select or upload a document', 'error'); return }
     setSending(true)
 
@@ -1505,7 +1532,7 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
       setSending(false); pushToast(err.message, 'error'); return
     }
     setSending(false)
-    if (!data.url) { pushToast('BoldSign did not return a send URL', 'error'); return }
+    if (!data.url) { pushToast('The document was created but the editor would not open — reopen it from the Signatures tab with Edit Fields.', 'error'); return }
     setEmbedDocId(data.documentId || null)
     setEmbedUrl(data.url)
   }
@@ -1546,12 +1573,25 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
         {/* Signers */}
         <div className="form-group">
           <label className="form-label required">Signers <span style={{fontSize:11,fontWeight:400,color:'var(--gw-mist)'}}>— sign in parallel (same step)</span></label>
+          {/* Same picker as the template flow — an ad-hoc send has exactly the
+              same problem, and a typo'd address here fails just as silently. */}
           {signers.map((s, i) => (
-            <div key={s.id} style={{ display:'flex', gap:8, alignItems:'center', marginBottom:8 }}>
-              <div style={{ width:22, height:22, borderRadius:'50%', background:SIGNER_COLORS[i]||SIGNER_COLORS[0], display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:700, flexShrink:0 }}>{i+1}</div>
-              <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={s.name} onChange={e=>updateSigner(s.id,'name',e.target.value)}/>
-              <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={s.email} onChange={e=>updateSigner(s.id,'email',e.target.value)}/>
-              {signers.length > 1 && <button className="btn btn--ghost btn--icon btn--sm" onClick={()=>removeSigner(s.id)}><Icon name="x" size={13}/></button>}
+            <div key={s.id} style={{ display:'flex', gap:8, alignItems:'flex-start' }}>
+              <div style={{ flex:1, minWidth:0 }}>
+                <SignerPicker
+                  order={i + 1}
+                  roleLabel={i === 0 ? 'Signer' : `Signer ${i + 1}`}
+                  color={SIGNER_COLORS[i] || SIGNER_COLORS[0]}
+                  value={s}
+                  candidates={signerCandidates}
+                  onChange={(next) => setSigners(p => p.map(x => x.id === s.id ? { ...x, ...next } : x))}
+                />
+              </div>
+              {signers.length > 1 && (
+                <button className="btn btn--ghost btn--icon btn--sm" style={{ marginTop:22 }} onClick={()=>removeSigner(s.id)} aria-label="Remove signer">
+                  <Icon name="x" size={13}/>
+                </button>
+              )}
             </div>
           ))}
           <button className="btn btn--secondary btn--sm" onClick={addSigner} style={{marginTop:2}}>+ Add another signer</button>
@@ -1701,12 +1741,27 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
     // failed, `templates` stayed empty, and the "Send from Template" button
     // simply never rendered — the entire feature looked unbuilt rather than
     // unprovisioned, with nothing anywhere saying why.
-    const { data, error } = await supabase
+    // `transaction_type` and `signing_panel` ride along because they decide
+    // which sender decisions the send screen asks for — see resolvePanel().
+    // `signing_panel` is migration 0043, so it is asked for OPTIMISTICALLY and
+    // dropped on a database that doesn't have it yet: a missing column fails the
+    // whole query, and letting that empty the catalog would make the entire
+    // template feature look unbuilt over one additive column. Without it every
+    // packet falls back to the built-in self-validating panel, which is exactly
+    // the behavior that shipped before 0043.
+    const BASE_COLUMNS = 'template_id:boldsign_template_id, name, state, transaction_type, doc_type, field_tokens, active'
+    const query = (columns) => supabase
       .from('form_packets')
-      .select('template_id:boldsign_template_id, name, state, doc_type, field_tokens, active')
+      .select(columns)
       .not('boldsign_template_id', 'is', null)
       .eq('active', true)
       .order('name')
+
+    let { data, error } = await query(`${BASE_COLUMNS}, signing_panel`)
+    if (error && (error.code === '42703' || error.code === 'PGRST204' || /signing_panel/.test(error.message || ''))) {
+      console.warn('[boldsign] form_packets.signing_panel is missing — falling back to built-in packet panels; apply migrations/0043_form_packet_signing_panel.sql')
+      ;({ data, error } = await query(BASE_COLUMNS))
+    }
     if (error) {
       const missingColumn = error.code === '42703' || error.code === 'PGRST204' || /boldsign_template_id|form_packets/.test(error.message || '')
       setTemplateErr(missingColumn
@@ -1777,9 +1832,16 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
     // back without it, losing the "Signed on …" record permanently.
     const patch = { status: data.status }
     if (data.completedDateTime) patch.completed_at = data.completedDateTime
+    // Per-signer state comes back with every status read, and this is the one
+    // moment an agent has explicitly asked "where is this?" — so it is stored,
+    // not just shown. A document sent before per-signer state existed gets its
+    // recipient list filled in the first time anyone refreshes it.
+    if (Array.isArray(data.signers) && data.signers.length) patch.signers = data.signers
     await supabase.from('boldsign_documents').update(patch).eq('id', env.id)
     setEnvelopes(prev => prev.map(e => e.id === env.id ? { ...e, ...patch } : e))
-    pushToast(`Status: ${data.status}`, 'info')
+    const rows = signerRows({ ...env, ...patch })
+    const left = outstandingSigners(rows).length
+    pushToast(left ? `${waitingOnLabel(rows)} · ${data.status}` : `Status: ${data.status}`, 'info')
   }
 
   // Fetch the signed PDF (or audit trail) for THIS document.
@@ -1822,17 +1884,23 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
   // Nudge whoever still owes a signature. The API refuses when there's nobody
   // left to remind and records the nudge, so the nightly auto-reminder sweep
   // doesn't immediately chase the same signer again.
-  const remind = async (env) => {
-    setReminding(p => ({ ...p, [env.id]: true }))
+  // `only` names one signer; without it the API reminds whoever the row still
+  // shows as outstanding — which, on a sequential send, is not everybody.
+  const remind = async (env, only = null) => {
+    const key = only ? `${env.id}:${only.email}` : env.id
+    setReminding(p => ({ ...p, [key]: true }))
     try {
-      await apiRemindDocument(env.document_id)
+      const res = await apiRemindDocument(env.document_id, only ? [only.email] : null)
       const patch = { last_reminded_at: new Date().toISOString(), reminder_count: (env.reminder_count || 0) + 1 }
       setEnvelopes(prev => prev.map(e => e.id === env.id ? { ...e, ...patch } : e))
-      pushToast(`Reminder sent to ${env.signer_name || 'the signers'}`, 'success')
+      const who = only
+        ? (only.name || only.email)
+        : (res?.remindedEmails?.length ? `${res.remindedEmails.length} outstanding signer${res.remindedEmails.length === 1 ? '' : 's'}` : 'the signers')
+      pushToast(`Reminder sent to ${who}`, 'success')
     } catch (err) {
       pushToast(err.message, 'error')
     } finally {
-      setReminding(p => ({ ...p, [env.id]: false }))
+      setReminding(p => ({ ...p, [key]: false }))
     }
   }
 
@@ -1850,7 +1918,7 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
     setOpening(p => ({ ...p, [env.id]: true }))
     try {
       const data = await documentEditUrl({ documentId: env.document_id, redirectUrl: boldSignReturnUrl() })
-      if (!data?.url) { pushToast('BoldSign did not return an edit link for this draft', 'error'); return }
+      if (!data?.url) { pushToast('This draft could not be reopened right now. Try again in a moment — nothing has been sent.', 'error'); return }
       setEditDraft({ url: data.url, env })
     } catch (err) {
       pushToast(err.message, 'error')
@@ -2053,6 +2121,10 @@ create policy "agent_notifications_policy" on agent_notifications
               const daysOut   = awaiting && (env.sent_at || env.created_at)
                 ? Math.floor((Date.now() - new Date(env.sent_at || env.created_at)) / 86400000)
                 : null
+              // Who is on this document, and where each of them has got to.
+              const people   = signerRows(env)
+              const pending  = outstandingSigners(people)
+              const progress = signerProgress(people)
               return (
                 <div key={env.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:8, background:'#fff', overflow:'hidden' }}>
                   <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px' }}>
@@ -2060,7 +2132,12 @@ create policy "agent_notifications_policy" on agent_notifications
                     <div style={{ flex:1, minWidth:0 }}>
                       <div style={{ fontSize:13, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{env.document_name || 'Document'}</div>
                       <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>
-                        To: {env.signer_name} · {new Date(env.sent_at || env.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}
+                        {/* The sentence the old comma-joined string could never
+                            say. On a four-party packet "waiting on John Doe" is
+                            the only fact that decides what the agent does next. */}
+                        {awaiting ? waitingOnLabel(people) : `To: ${people.map(p => p.name || p.email).filter(Boolean).join(', ') || env.signer_name}`}
+                        {progress.total > 1 && ` · ${progress.signed}/${progress.total} signed`}
+                        {' · '}{new Date(env.sent_at || env.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}
                         {completed && env.completed_at && (
                           <span> · Signed {new Date(env.completed_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}</span>
                         )}
@@ -2079,9 +2156,14 @@ create policy "agent_notifications_policy" on agent_notifications
                         style={{ fontSize:11, flexShrink:0 }}
                         onClick={() => remind(env)}
                         disabled={reminding[env.id]}
-                        title={env.last_reminded_at
-                          ? `Last reminded ${new Date(env.last_reminded_at).toLocaleDateString('en-US', { month:'short', day:'numeric' })}`
-                          : 'Email the outstanding signers a reminder'}
+                        title={[
+                          pending.length
+                            ? `Emails ${pending.map(p => p.name || p.email).join(', ')} — nobody who has already signed`
+                            : 'Emails whoever still owes a signature',
+                          env.last_reminded_at
+                            ? `Last reminded ${new Date(env.last_reminded_at).toLocaleDateString('en-US', { month:'short', day:'numeric' })}`
+                            : null,
+                        ].filter(Boolean).join('. ')}
                       >
                         {reminding[env.id] ? 'Sending…' : 'Remind'}
                       </button>
@@ -2103,6 +2185,59 @@ create policy "agent_notifications_policy" on agent_notifications
                       </button>
                     )}
                   </div>
+                  {/* WHO STILL OWES A SIGNATURE. One row per recipient, in
+                      signing order, each with its own state and its own nudge.
+                      Shown only while the document is in flight: once everyone
+                      has signed, the completed strip below says all there is to
+                      say, and a list of green ticks is just noise on the row.
+
+                      A per-signer Remind is not a convenience. Reminding the
+                      whole document emails people who have already signed, and
+                      on a sequential send it emails people BoldSign has not
+                      asked yet — both of which teach a client to ignore the
+                      next one. */}
+                  {awaiting && people.length > 1 && (
+                    <div style={{ borderTop:'1px solid var(--gw-border)', padding:'6px 12px 8px', background:'var(--gw-bone)' }}>
+                      {people.map(p => {
+                        const done = p.status === 'signed'
+                        const bad  = ['declined', 'expired', 'revoked'].includes(p.status)
+                        const busy = Boolean(reminding[`${env.id}:${p.email}`])
+                        return (
+                          <div key={`${p.email || p.name}-${p.order}`} style={{ display:'flex', alignItems:'center', gap:8, padding:'3px 0' }}>
+                            <span style={{
+                              width:16, height:16, borderRadius:'50%', flexShrink:0, display:'inline-flex',
+                              alignItems:'center', justifyContent:'center', fontSize:9, fontWeight:700,
+                              background: done ? 'var(--gw-green)' : bad ? 'var(--gw-red)' : p.status === 'viewed' ? 'var(--gw-amber)' : 'var(--gw-border)',
+                              color: done || bad || p.status === 'viewed' ? '#fff' : 'var(--gw-mist)',
+                            }}>
+                              {done ? '\u2713' : bad ? '!' : p.order}
+                            </span>
+                            <span style={{ fontSize:12, flex:1, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                              {p.name || p.email}
+                              {p.role && <span style={{ color:'var(--gw-mist)' }}> · {p.role}</span>}
+                            </span>
+                            <span style={{ fontSize:11, color: done ? 'var(--gw-green)' : bad ? 'var(--gw-red)' : 'var(--gw-mist)', flexShrink:0 }}>
+                              {describeSignerState(p)}
+                            </span>
+                            {/* Only someone who can actually act right now gets
+                                a nudge. Queued signers have not been emailed. */}
+                            {p.status !== 'signed' && p.status !== 'queued' && !bad && p.email && (
+                              <button
+                                className="btn btn--ghost btn--sm"
+                                style={{ fontSize:10, flexShrink:0, padding:'2px 6px' }}
+                                onClick={() => remind(env, p)}
+                                disabled={busy}
+                                title={`Email only ${p.name || p.email}`}
+                              >
+                                {busy ? '…' : 'Nudge'}
+                              </button>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+
                   {/* A draft is unfinished work, not a sent document — say so, and
                       give the agent the doors back into it. Before this the row
                       showed a "Draft" chip and nothing else, so a send interrupted
@@ -2230,7 +2365,24 @@ create policy "agent_notifications_policy" on agent_notifications
               <p style={{ margin:'0 0 10px', color:'var(--gw-ink)' }}>
                 <strong>{sendAsk.document_name || 'This document'}</strong> will be emailed for e-signature to:
               </p>
-              <p style={{ margin:'0 0 10px', color:'var(--gw-ink)' }}>{sendAsk.signer_email || sendAsk.signer_name || 'its signers'}</p>
+              {/* IN SIGNING ORDER, one per line, with the address. The mistake
+                  this dialog exists to catch is sending the RIGHT document to
+                  the WRONG people, and a comma-joined run-on line is exactly
+                  what a person skims past. */}
+              {(() => {
+                const rows = signerRows(sendAsk)
+                if (!rows.length) return <p style={{ margin:'0 0 10px' }}>{sendAsk.signer_email || sendAsk.signer_name || 'its signers'}</p>
+                return (
+                  <ul style={{ margin:'0 0 10px', padding:0, listStyle:'none' }}>
+                    {rows.map(r => (
+                      <li key={`${r.email || r.name}-${r.order}`} style={{ display:'flex', gap:8, padding:'2px 0', color:'var(--gw-ink)' }}>
+                        <span style={{ color:'var(--gw-mist)', minWidth:16 }}>{r.order}.</span>
+                        <span><strong>{r.name || r.email}</strong>{r.name && r.email ? ` — ${r.email}` : ''}{r.role ? ` (${r.role})` : ''}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )
+              })()}
               <p style={{ margin:0 }}>
                 It stops being a draft, so it can no longer be edited here. If the client still has changes,
                 cancel and use <strong>Edit Fields</strong> instead.
@@ -2243,14 +2395,307 @@ create policy "agent_notifications_policy" on agent_notifications
   )
 }
 
+// ── Deal Terms tab — the per-agreement facts with no column of their own ──────
+// Twenty tokens in crmTokenValues() read these out of `deals.comp_data`, every
+// one of them wired end to end to a template field, and until this tab existed
+// nothing in the CRM wrote a single one. So each rendered on the send screen as
+// a named, empty box; the agent typed the title company in; the value went onto
+// that one draft and died there. Next packet on the same deal, same empty box.
+//
+// The list is NOT hard-coded here. It comes from DEAL_TERM_GROUPS, the same
+// schema whose keys `term()` reads, so a token added there gets an input here
+// without anyone remembering to add one — and a test asserts the two agree.
+//
+// SHORT BY CONSTRUCTION. Only the terms that apply to this deal's side are
+// shown: a buyer deal has no listing basis, a seller deal has no
+// property-types-sought. A form of twenty boxes that ignores that is a form
+// nobody fills in.
+function DealTermsTab({ deal }) {
+  const [values, setValues] = React.useState(() => readDealTerms(deal))
+  const [saving, setSaving] = React.useState(false)
+  const [dirty,  setDirty]  = React.useState(false)
+  const [loaded, setLoaded] = React.useState(false)
+
+  // Read the deal's own comp_data fresh rather than trusting the row the board
+  // handed down — another tab (or another session) may have written since.
+  React.useEffect(() => {
+    if (!deal?.id) return
+    let cancelled = false
+    supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+      .then(({ data }) => {
+        if (cancelled) return
+        setValues(readDealTerms({ comp_data: data?.comp_data || {} }))
+        setLoaded(true)
+      })
+    return () => { cancelled = true }
+  }, [deal?.id])
+
+  const groups = termsForDeal(deal, values)
+  const { filled, total } = termsFilled(deal, values)
+
+  const set = (key, v) => { setValues(p => ({ ...p, [key]: v })); setDirty(true) }
+  // Money and number terms are normalized when the agent leaves the box, not on
+  // every keystroke — reformatting under a cursor mid-type is the single most
+  // irritating thing a form can do.
+  const normalizeOnBlur = (key) => {
+    const next = normalizeTermValue(key, values[key])
+    if (next !== values[key]) setValues(p => ({ ...p, [key]: next }))
+  }
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      // MERGE, never replace. Key dates, portal docs, the state and the
+      // transaction type all live in this same jsonb, and a concurrent edit on
+      // another tab must survive this write — so comp_data is re-read
+      // immediately before merging, the same way KeyDatesTab and PortalTab do.
+      const { data, error: readErr } = await supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+      if (readErr) throw readErr
+      const comp_data = { ...(data?.comp_data || {}), ...buildTermsPatch(values) }
+      const { error } = await supabase.from('deals')
+        .update({ comp_data, updated_at: new Date().toISOString() }).eq('id', deal.id)
+      if (error) throw error
+      setDirty(false)
+      pushToast('Deal terms saved — every agreement for this deal fills these in from now on.', 'success')
+    } catch (err) {
+      pushToast(`Could not save the deal terms: ${err.message}`, 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const renderTerm = (t) => {
+    const hint = derivedTermHint(t.key, deal)
+    return (
+      <div key={t.key} style={{ marginBottom:10 }}>
+        <label className="form-label" style={{ display:'flex', alignItems:'baseline', gap:6 }}>
+          <span>{t.label}</span>
+          {t.unit && <span style={{ fontWeight:400, fontSize:11, color:'var(--gw-mist)' }}>({t.unit})</span>}
+        </label>
+        {t.type === 'select'
+          ? (
+            <select className="form-control" value={values[t.key] || ''} onChange={e => set(t.key, e.target.value)}>
+              <option value="">—</option>
+              {t.options.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          )
+          : t.type === 'date'
+          ? (
+            // Stored as ISO because the token runs it through usDate(). A
+            // US-formatted string here would reach the agreement half-converted.
+            <input
+              className="form-control" type="date"
+              value={values[t.key] || ''}
+              onChange={e => set(t.key, e.target.value)}
+            />
+          )
+          : (
+            <input
+              className="form-control"
+              inputMode={t.type === 'number' ? 'numeric' : undefined}
+              placeholder={t.placeholder || (hint ? hint : '')}
+              value={values[t.key] || ''}
+              onChange={e => set(t.key, e.target.value)}
+              onBlur={() => normalizeOnBlur(t.key)}
+            />
+          )}
+        {t.help && <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:3, lineHeight:1.5 }}>{t.help}</div>}
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <div className="drawer__body">
+        <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, lineHeight:1.6, marginBottom:16 }}>
+          <strong>Fill these in once.</strong> Every agreement you send for this deal fills itself in from here — earnest
+          money, the title company, the lender, the deadlines. {total > 0 && <><strong>{filled} of {total}</strong> filled.</>}
+          <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
+            Only the terms that apply to this deal are shown. Anything left blank simply prints blank on the form,
+            where you can still fill it in by hand before sending.
+          </div>
+        </div>
+
+        {!loaded && <div style={{ fontSize:13, color:'var(--gw-mist)' }}>Loading…</div>}
+
+        {loaded && groups.length === 0 && (
+          <div style={{ fontSize:13, color:'var(--gw-mist)', lineHeight:1.6 }}>
+            No terms apply to this deal yet. Set whether it is a buyer or seller deal on the{' '}
+            <strong>Details</strong> tab and the relevant terms appear here.
+          </div>
+        )}
+
+        {loaded && groups.map(g => (
+          <div key={g.key} style={{ marginBottom:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.05em', color:'var(--gw-mist)', marginBottom:2 }}>
+              {g.label}
+            </div>
+            {g.help && <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:8, lineHeight:1.5 }}>{g.help}</div>}
+            {g.terms.map(renderTerm)}
+          </div>
+        ))}
+      </div>
+      <div className="drawer__foot">
+        <button className="btn btn--primary" onClick={save} disabled={saving || !dirty || !loaded}>
+          {saving ? 'Saving…' : dirty ? 'Save Deal Terms' : 'Saved'}
+        </button>
+      </div>
+    </>
+  )
+}
+
+// ── Review Draft — the document on screen at the moment of the decision ───────
+// The send screen used to end in two co-equal buttons, styled almost
+// identically, with a paragraph above explaining the difference. And the agent
+// could not see the document before choosing: previewing meant creating a
+// draft, closing the modal, finding the row, and clicking Download Filled PDF —
+// a modal, a tab and a download to answer "does this say the right thing".
+//
+// One primary action instead, and everything else becomes a choice made WITH
+// the packet in front of you: adjust where people sign, save a copy for the
+// client, or send it. That is a sequence rather than a fork, and it is the
+// step competing systems do not have — they hand you a template and a Send
+// button.
+//
+// The draft is real by this point and lives on the deal, so closing here loses
+// nothing: the row is on the Signatures tab with the same three actions.
+function DraftReviewStep({ documentId, documentName, previewUrl, downloadUrl, fieldCount, signers = [], onAdjust, onSent, onClose, adjusting }) {
+  const [sending, setSending] = React.useState(false)
+  const [confirm, setConfirm] = React.useState(false)
+
+  const people = signerRows({ signers })
+
+  const download = () => {
+    if (!downloadUrl) { pushToast('That copy is not ready yet — try again in a moment.', 'error'); return }
+    const a = document.createElement('a')
+    a.href = downloadUrl
+    a.download = `${String(documentName || 'document').replace(/\.pdf$/i, '')} (filled).pdf`
+    a.target = '_blank'
+    a.rel = 'noopener'
+    document.body.appendChild(a); a.click(); a.remove()
+  }
+
+  const send = async () => {
+    setSending(true)
+    try {
+      await apiSendDraft(documentId)
+      pushToast('Sent for signature — the signers have been notified.', 'success')
+      onSent()
+    } catch (err) {
+      pushToast(err.message, 'error')
+      setConfirm(false)
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return (
+    <Modal open={true} onClose={onClose} width={null} className="modal--workspace">
+      <div className="modal__head">
+        <div>
+          <div className="eyebrow-label">Review before sending</div>
+          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>{documentName || 'Draft agreement'}</h3>
+        </div>
+        <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
+      </div>
+
+      <div style={{ display:'flex', flexDirection:'column', flex:1, minHeight:0 }}>
+        <div style={{ padding:'8px 16px', borderBottom:'1px solid var(--gw-border)', background:'var(--gw-bone)', fontSize:12, display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' }}>
+          <Icon name="check" size={13} style={{ color:'var(--gw-green)', flexShrink:0 }}/>
+          <span style={{ flex:1, minWidth:200 }}>
+            <strong>Saved as a draft — nothing sent.</strong>{' '}
+            {fieldCount ? `${fieldCount} field${fieldCount === 1 ? '' : 's'} filled in from this deal. ` : ''}
+            This is exactly what your signers will see.
+          </span>
+          {people.length > 0 && (
+            <span style={{ color:'var(--gw-mist)' }}>
+              To: {people.map(p => p.name || p.email).filter(Boolean).join(', ')}
+            </span>
+          )}
+        </div>
+
+        {/* The packet itself. A cross-origin signed URL served inline — the same
+            bytes Save PDF downloads, composed server-side with every filled
+            value drawn on and the signing summary appended. */}
+        {previewUrl ? (
+          <iframe
+            title="Draft agreement preview"
+            src={previewUrl}
+            style={{ flex:1, width:'100%', border:'none', background:'#525659', minHeight:0 }}
+          />
+        ) : (
+          <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column', gap:10, padding:24, textAlign:'center' }}>
+            <div style={{ fontSize:13, color:'var(--gw-mist)', maxWidth:420, lineHeight:1.7 }}>
+              The draft is saved on this deal, but the preview could not be built right now — this usually means
+              BoldSign is still finishing the document. Download the copy, or try again from the Signatures tab in
+              a moment. Nothing has been sent.
+            </div>
+            <button className="btn btn--secondary btn--sm" onClick={download} disabled={!downloadUrl}>
+              <Icon name="document" size={12}/> Download the filled PDF
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="modal__foot">
+        <button className="btn btn--secondary" onClick={onAdjust} disabled={adjusting || sending}>
+          {adjusting ? 'Opening…' : 'Adjust Field Placement'}
+        </button>
+        <button className="btn btn--secondary" onClick={download} disabled={!downloadUrl || sending}>
+          <Icon name="document" size={13}/> Download PDF
+        </button>
+        <button className="btn btn--primary" onClick={() => setConfirm(true)} disabled={sending}>
+          <Icon name="send" size={13}/> Send for Signature
+        </button>
+      </div>
+
+      {/* The one irreversible step. Names the actual recipients in signing
+          order, because the mistake it catches is sending the RIGHT document to
+          the WRONG people. */}
+      {confirm && (
+        <ConfirmDialog
+          eyebrow="Send for Signature"
+          title="Send this document to its signers?"
+          confirmLabel="Send for Signature"
+          busyLabel="Sending…"
+          confirmVariant="btn--primary"
+          busy={sending}
+          onCancel={() => setConfirm(false)}
+          onConfirm={send}
+          message={
+            <>
+              <p style={{ margin:'0 0 10px', color:'var(--gw-ink)' }}>
+                <strong>{documentName || 'This document'}</strong> will be emailed for e-signature to:
+              </p>
+              <ul style={{ margin:'0 0 10px', padding:0, listStyle:'none' }}>
+                {people.map(r => (
+                  <li key={`${r.email || r.name}-${r.order}`} style={{ display:'flex', gap:8, padding:'2px 0', color:'var(--gw-ink)' }}>
+                    <span style={{ color:'var(--gw-mist)', minWidth:16 }}>{r.order}.</span>
+                    <span><strong>{r.name || r.email}</strong>{r.name && r.email ? ` — ${r.email}` : ''}{r.role ? ` (${r.role})` : ''}</span>
+                  </li>
+                ))}
+              </ul>
+              <p style={{ margin:0 }}>
+                It stops being a draft, so it can no longer be edited here. If the client still has changes,
+                cancel and use <strong>Adjust Field Placement</strong> instead.
+              </p>
+            </>
+          }
+        />
+      )}
+    </Modal>
+  )
+}
+
 // ── Prepare from Template modal — dynamic. Reads the template's actual roles +
 //    fillable fields from BoldSign, renders a signer input per role and an
 //    editable (CRM-prefilled) input per field, then creates the document as a
 //    DRAFT on the deal.
 //
-//    It has no send button, deliberately. Both of its actions end at a draft —
-//    "Save as Draft" straight away, "Place Fields in BoldSign" via the embedded
-//    editor — and sending is a separate, confirmed act on the draft row (see
+//    It has no send button, deliberately. Both of its doors end at a draft —
+//    "Review Draft" shows the composed packet, "Place Fields in BoldSign" opens
+//    the same draft in the embedded editor — and sending is a separate,
+//    confirmed act on the draft row or from the review (see
 //    sendDraftNow / the draft-send action). That separation is the workflow: an
 //    agent prints the filled draft, walks a client through it on paper, edits it
 //    as many times as the client asks, and sends only at the end.
@@ -2337,6 +2782,35 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [embedDocId, setEmbedDocId] = React.useState(null)   // its document id — needed to capture the field layout
   const [sending,    setSending]    = React.useState(false)
   const [savingDraft, setSavingDraft] = React.useState(false)
+  // The created draft, being looked at. Set by createDraft(); cleared only by
+  // closing, because the draft outlives this modal either way.
+  const [review,     setReview]     = React.useState(null)
+
+  // ── Send options ──────────────────────────────────────────────────────────
+  // BoldSign fixes these when the document is CREATED and refuses to change
+  // them afterwards, which is why they are asked for here and not on the send
+  // confirmation: by the time an agent is looking at a Send button it is
+  // already too late to set an expiry or add a copy recipient.
+  //
+  // Deliberately NOT here: BoldSign's own auto-reminders. The CRM already owns
+  // chasing — the nightly sweep decides when, and since F-03 it targets only
+  // the signers who still owe something. Turning BoldSign's on as well would
+  // mean two systems emailing the same client on two schedules, which is how a
+  // client learns to filter you out. One reminder authority, and it is ours.
+  const [showOptions, setShowOptions] = React.useState(false)
+  const [message,     setMessage]     = React.useState('Please review and sign.')
+  const [ccInput,     setCcInput]     = React.useState('')
+  const [cc,          setCc]          = React.useState([])
+  const [expiryDays,  setExpiryDays]  = React.useState('')
+
+  const addCc = (raw) => {
+    const email = String(raw || '').trim().replace(/[,;]$/, '')
+    if (!email) return
+    if (!isValidEmail(email)) { pushToast(`"${email}" is not a valid email address.`, 'error'); return }
+    if (cc.some(e => e.toLowerCase() === email.toLowerCase())) { setCcInput(''); return }
+    setCc(p => [...p, email])
+    setCcInput('')
+  }
   const [details,    setDetails]    = React.useState(null)   // { roles, fields }
   const [loadingDet, setLoadingDet] = React.useState(false)
   const [detailsErr, setDetailsErr] = React.useState('')     // why the roles/fields could not be read
@@ -2424,7 +2898,24 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           seededValues[f.id] = isTickableField(f.type) ? null : fieldTokenValue(tokenVals, f)
         }
         setValues(seededValues)
-        setPacket(seedPacketState({ fields }))
+
+        // WHICH DECISIONS THIS PACKET ASKS FOR. Resolved from the packet row —
+        // never from a map that applies to every template. `resolvePanel`
+        // returns a declared panel (an admin said these ids mean these things
+        // here) or a built-in one that validated cleanly against this exact
+        // template, or nothing at all. See boldsignPacketPanel.js.
+        const resolved = resolvePanel({ packet: tpl, fields })
+        setPanelInfo(resolved)
+        setPanelState(seedPanelState({ panel: resolved.panel, fields }))
+
+        // Any tick box the panel does NOT own stays available to the sender as
+        // a plain selection, named by the words printed beside it on the page.
+        // Every one starts at "leave it as the form is set up" and sends no
+        // value, so opening this screen can never change a box by itself.
+        const owned = panelFieldIds(resolved.panel)
+        const rows  = selectionRows({ fields: fields.filter(f => isTickableField(f.type) && !owned.has(f.id)) })
+        setSelectionList(rows)
+        setSelections(seedSelectionValues(rows, { inherit: true }))
       })
       // A FAILED LOAD MUST NOT LOOK LIKE A LOADED TEMPLATE. This used to fall back to
       // a single generic "Signer" row — which, next to "Roles left blank are removed
@@ -2442,10 +2933,79 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   }, [templateId, reloadKey])
 
   // The panel's decisions. Kept apart from `values` because they are choices,
-  // not field contents — packetTickValues() turns them into field values at
-  // send time, which is what makes the radios the only place a mutex lives.
-  const [packet, setPacket] = React.useState({ representation: null, term: null, policy: {} })
-  const [showPolicy, setShowPolicy] = React.useState(false)
+  // not field contents — panelTickValues() turns them into field values at send
+  // time, which is what makes the radios the only place a mutex lives.
+  //
+  // `panelInfo` carries the panel itself, where it came from, and how it
+  // validated against this template. A declared panel that no longer matches
+  // its form BLOCKS the send: it was going to write a term of an agreement onto
+  // a box that means something else, and there is no version of that worth
+  // shipping to a client.
+  const [panelInfo,  setPanelInfo]  = React.useState({ panel: null, source: null, validation: { ok: true, blocking: [], warnings: [] } })
+  const [panelState, setPanelState] = React.useState({})
+  const [openGroups, setOpenGroups] = React.useState({})
+  // Tick boxes the panel doesn't own — tri-state, defaulting to "as the form is".
+  const [selectionList, setSelectionList] = React.useState([])
+  const [selections,    setSelections]    = React.useState({})
+  const [showSelections, setShowSelections] = React.useState(false)
+
+  const panel        = panelInfo.panel
+  const panelBlocked = (panelInfo.validation?.blocking || []).length > 0
+
+  // WHO SEES THE PLUMBING. This screen used to show every agent the field ids
+  // and BoldSign types behind each box — `Label7 · textbox`, `CheckBox2 →
+  // agent_name` — plus a button offering to reveal "12 unnamed template
+  // fields". None of that is a decision an agent makes; all of it is what an
+  // admin needs when a template is wrong. No agent on a competing system has
+  // ever seen a field id, and "Label" is a BoldSign implementation detail that
+  // had leaked as far as the person trying to send a listing agreement.
+  //
+  // The information is not wrong. It was on the wrong screen. Same computation,
+  // shown only to whoever can act on it.
+  const showDiagnostics = isOfficeAdmin(activeAgent)
+
+  // WHO CAN SIGN. The deal's own people first — on a listing agreement the
+  // signer is nearly always already on the deal — then agents, then the rest of
+  // the address book. Everyone else is still typeable; this only stops an agent
+  // retyping somebody the CRM already knows, and catches the address typo that
+  // otherwise looks like a client ignoring them.
+  const signerCandidates = React.useMemo(() => buildCandidates({
+    dealContacts: [contact, ...(extraContacts || []), ...(sideClients?.buyerClients || []), ...(sideClients?.sellerClients || [])].filter(Boolean),
+    dealAgents,
+    contacts,
+    agents: [],
+  }), [contact, extraContacts, sideClients, dealAgents, contacts])
+
+  const [savingContact, setSavingContact] = React.useState(false)
+  // A signer who is real but not in the CRM. Offered on the row, never
+  // automatic: an address book that fills itself with every one-off signer is
+  // worse than one you have to click.
+  const saveSignerAsContact = async ({ name, email }) => {
+    setSavingContact(true)
+    try {
+      const parts = name.split(/\s+/)
+      const { data, error } = await supabase.from('contacts').insert([{
+        first_name: parts[0] || name,
+        last_name:  parts.slice(1).join(' ') || '',
+        email,
+        assigned_agent_id: activeAgent?.id || null,
+      }]).select('id, first_name, last_name, email').single()
+      if (error) throw error
+      // Link them to the deal too — a signer who is not on the deal is a
+      // contact you will have to find again by search.
+      const { error: linkErr } = await supabase.from('deal_contacts')
+        .insert([{ deal_id: deal.id, contact_id: data.id }])
+      if (linkErr && !/duplicate|unique/i.test(linkErr.message || '')) {
+        pushToast(`Saved ${name} to contacts, but they could not be added to this deal: ${linkErr.message}`, 'info')
+      } else {
+        pushToast(`${name} saved to contacts and added to this deal.`, 'success')
+      }
+    } catch (err) {
+      pushToast(`Could not save that contact: ${err.message}`, 'error')
+    } finally {
+      setSavingContact(false)
+    }
+  }
 
   const [showAllFields, setShowAllFields] = React.useState(false)
   const [showShared, setShowShared] = React.useState(false)
@@ -2460,7 +3020,23 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     const roleList = details?.roles || []
     const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())
     if (!filled.length) { pushToast('At least one signer needs a name and email', 'error'); return null }
-    const missing = packetMissing(packet)
+    // Caught here rather than at the API, because a malformed address is the
+    // one send failure nobody ever sees: BoldSign accepts it, delivers nowhere,
+    // and the document sits at "waiting" looking exactly like a client who is
+    // ignoring you.
+    const badEmail = filled.find(r => !isValidEmail(signers[r.index]?.email))
+    if (badEmail) {
+      pushToast(`"${signers[badEmail.index].email}" is not a valid email address — check the ${badEmail.name} row.`, 'error')
+      return null
+    }
+    // A declared panel that no longer matches its form stops here rather than
+    // writing a term onto the wrong box. The on-screen error names the field;
+    // this is the belt to that braces, so neither button can slip past it.
+    if (panelBlocked) {
+      pushToast('This form no longer matches the terms panel set up for it — see the message above. Nothing was created.', 'error')
+      return null
+    }
+    const missing = panelMissing({ panel, state: panelState })
     if (missing.length) { pushToast(`Choose ${missing.join(' and ')} first`, 'error'); return null }
 
     // Split the prefilled values in two — this is the whole point of Label
@@ -2471,11 +3047,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     // Keyed by ORIGINAL role index — buildTemplateRoles handles the index shift.
     const { sharedFormFields, byRole } = buildPrefillFields({
       fields: details.fields || [],
-      // The panel's radios decide the tick boxes it owns; `values` carries
-      // everything typed. Merged here, at the one place both buttons build
-      // their payload from, so Save as Draft and Place Fields cannot disagree
-      // about what the packet says.
-      values: { ...values, ...packetTickValues(packet) },
+      // Three layers, narrowest last. `values` is everything typed;
+      // `selections` is the tri-state tick boxes the panel doesn't own (a null
+      // there means no value is sent and the form's own setting stands, which
+      // prefillFieldEntry already understands); `panelTickValues` is the
+      // packet's own declared decisions, which win. Merged at the one place
+      // BOTH DOORS out of this screen build their payload from, so Review Draft
+      // and Place Fields cannot disagree about what the packet says.
+      values: { ...values, ...selections, ...panelTickValues({ panel, state: panelState }) },
       filledRoleIndices: filled.map(r => r.index),
     })
     // Roles + removals, with BoldSign's post-removal index shift applied — see
@@ -2496,6 +3075,11 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     return {
       templateId, deal_id: deal.id, roles, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
       emailSubject: subject, documentName: docName, labels,
+      // Set at creation because BoldSign will not accept them later. The brand
+      // is applied server-side on every send and is not the agent's to choose.
+      message: message.trim() || 'Please review and sign.',
+      cc,
+      ...(String(expiryDays).trim() ? { expiryDays: Number(expiryDays) } : {}),
     }
   }
 
@@ -2520,22 +3104,77 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     if (data.layoutWarning) pushToast(data.layoutWarning, 'info')
   }
 
-  // SAVE AS DRAFT — the prepare-and-print path. Creates the document in BoldSign
-  // with every value entered above already written into it, and stops. Nothing is
-  // sent, no editor opens; the agent lands back on the Signatures tab where the
-  // draft can be downloaded as a filled PDF, printed, re-edited, and sent later.
+  // REVIEW DRAFT — the one action this screen has, and a sequence rather than a
+  // fork. It creates the document with every value above already written into
+  // it, and then SHOWS IT: the composed packet, on screen, with adjust /
+  // download / send available beside it.
   //
-  // This is the default action because it is the safe one: the packet exists, the
-  // client can read it on paper, and no email has gone anywhere.
-  const saveDraft = async () => {
+  // Nothing is sent. The draft is real and lives on the deal, so closing the
+  // review loses nothing — the row is on the Signatures tab with the same three
+  // actions. That is the whole prepare-and-print workflow, except the agent no
+  // longer has to leave the screen and go find a download to see what the
+  // packet says.
+  // ONE STEP, TWO DESTINATIONS. Both buttons do the same first thing — create
+  // the draft with every value above written into it — and then differ only in
+  // where the agent lands:
+  //
+  //   Review Draft         → the composed packet on screen (the common case:
+  //                          the form already has its fields, so the question
+  //                          is "does this say the right thing")
+  //   Place Fields         → straight into the embedded editor (the case where
+  //                          the agent already KNOWS this deal needs a box
+  //                          moved, and a review first is a detour)
+  //
+  // Neither sends. Both leave a real draft on the deal reachable from the
+  // Signatures tab, so whichever door they pick, nothing is lost by closing.
+  //
+  // Kept as one function because the two paths must never disagree about what
+  // gets created: same payload, same layout restore, same tracking, same send
+  // options. Only the last line differs.
+  const createDraft = async (destination) => {
     const args = buildArgs()
     if (!args) return
     setSavingDraft(true)
     try {
       const data = await saveTemplateDraft(args)
       reportLayout(data)
-      pushToast('Saved as a draft — nothing sent. Use "Download Filled PDF" on the draft to print a copy for the client.', 'success')
-      onSaved()
+      if (!data.documentId) {
+        pushToast('The draft was created but could not be opened — it is on the Signatures tab.', 'info')
+        onSaved()
+        return
+      }
+
+      if (destination === 'place') {
+        // Into the editor on the draft that now exists. Reopening it (rather
+        // than creating a second document through the embed path) is what keeps
+        // the two routes producing identical drafts.
+        const edit = await documentEditUrl({ documentId: data.documentId, redirectUrl: boldSignReturnUrl() })
+        if (!edit?.url) {
+          // The draft is safe. Fall through to the review rather than dead-end.
+          pushToast('The draft was saved but the field editor would not open — showing it for review instead.', 'info')
+        } else {
+          setReview({ documentId: data.documentId, documentName: args.documentName, signers: args.roles })
+          setEmbedDocId(data.documentId)
+          setEmbedUrl(edit.url)
+          return
+        }
+      }
+
+      // The composed copy: BoldSign's own bytes with every filled value drawn
+      // on and a signing summary appended (api/boldsign.js → buildPrintablePdf).
+      // A failure here is NOT a failed send — the draft exists either way — so
+      // the review opens regardless and says so if the pages are not ready.
+      let pdf = {}
+      try { pdf = await fetchDraftPreview(data.documentId) }
+      catch (err) { console.warn('[boldsign] review: preview unavailable —', err.message) }
+      setReview({
+        documentId:   data.documentId,
+        documentName: args.documentName,
+        previewUrl:   pdf.previewUrl || null,
+        downloadUrl:  pdf.url || null,
+        fieldCount:   pdf.fieldCount || 0,
+        signers:      args.roles,
+      })
     } catch (err) {
       pushToast(err.message, 'error')
     } finally {
@@ -2543,19 +3182,43 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     }
   }
 
-  // PLACE FIELDS — the same draft, opened in BoldSign's embedded editor. Needed
-  // when the template's own field placement has to be adjusted for this deal
-  // (an extra initial box, a label only this county wants). Still a draft on the
-  // other side: BoldSign sends only if the agent clicks Send in there.
-  const placeFields = async () => {
-    const args = buildArgs()
-    if (!args) return
+  // ADJUST FIELD PLACEMENT — the same draft the agent is looking at, reopened
+  // in the embedded editor. Needed when the form's own placement has to change
+  // for this deal (an extra initial box, a label only this county wants).
+  //
+  // Reached from the REVIEW step, on a draft that already exists, rather than
+  // as a second button competing with "save" before anything has been created.
+  // Still a draft on the other side: it sends only if the agent clicks Send in
+  // there.
+  // Leaving the editor: back to the review of the draft that was just adjusted.
+  // The preview is re-fetched because the whole point of having been in there is
+  // that the placement changed — showing the copy from before would be a lie
+  // about work the agent just did. A failed re-fetch keeps the review open with
+  // no preview rather than dropping them out of the flow.
+  const backToReview = async () => {
+    const documentId = review?.documentId || embedDocId
+    setEmbedUrl(null)
+    setEmbedDocId(null)
+    if (!documentId) { onSaved(); return }
+    let pdf = {}
+    try { pdf = await fetchDraftPreview(documentId) }
+    catch (err) { console.warn('[boldsign] review: preview unavailable after placement —', err.message) }
+    setReview(prev => ({
+      ...(prev || { documentId }),
+      documentId,
+      previewUrl:  pdf.previewUrl || null,
+      downloadUrl: pdf.url || null,
+      fieldCount:  pdf.fieldCount || prev?.fieldCount || 0,
+    }))
+  }
+
+  const adjustFields = async () => {
+    if (!review?.documentId) return
     setSending(true)
     try {
-      const data = await templateEmbedUrl({ ...args, redirectUrl: boldSignReturnUrl() })
-      if (!data?.url) { pushToast('BoldSign did not return a send URL', 'error'); return }
-      reportLayout(data)
-      setEmbedDocId(data.documentId || null)
+      const data = await documentEditUrl({ documentId: review.documentId, redirectUrl: boldSignReturnUrl() })
+      if (!data?.url) { pushToast('This draft could not be reopened right now — it is safe on the Signatures tab.', 'error'); return }
+      setEmbedDocId(review.documentId)
       setEmbedUrl(data.url)
     } catch (err) {
       pushToast(err.message, 'error')
@@ -2626,23 +3289,25 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     today:  new Date().toISOString().slice(0, 10),
   }), [deal, property, contact, extraContacts, sideClients, activeAgent, dealAgents])
 
-  // The end date only exists on the fixed-date term, so its fields appear only
-  // when that radio is picked.
-  const endDateFields = React.useMemo(
-    () => (fields || []).filter(f => fieldTokenKey(f) === 'retainer_end_date'),
-    [fields],
-  )
+  // Some answers make a field relevant that otherwise isn't — the fixed-date
+  // term is the only one with an end date to fill in. The panel names the token
+  // rather than the field, so this stays generic: a new panel adds a
+  // `revealToken` and needs no code change here.
+  const revealedFields = React.useMemo(() => {
+    const tokens = new Set(revealedTokens({ panel, state: panelState }))
+    if (!tokens.size) return []
+    return (fields || []).filter(f => tokens.has(fieldTokenKey(f)))
+  }, [fields, panel, panelState])
 
-  // The map ties each decision to a field id; this re-checks those ids against
-  // the caption actually read off the PDF. It never overrides the map and shows
-  // the sender nothing — it exists so a template edit that moves a box surfaces
-  // here rather than as a wrong term on a signed agreement.
+  // A declared panel whose ids no longer match the page is reported here, on
+  // screen, and blocks both buttons. It used to be a console.warn nobody was
+  // watching — which meant the one safety net against a template edit writing a
+  // term onto the wrong box existed but never reached a person.
   React.useEffect(() => {
-    const conflicts = captionConflicts({ fields })
-    for (const c of conflicts) {
-      console.warn(`[boldsign] packet panel: ${c.id} is captioned “${c.caption}” on the page, which does not match what the panel writes to it. Check the template's field placement.`)
+    for (const p of (panelInfo.validation?.blocking || [])) {
+      console.error(`[boldsign] packet panel ${panelInfo.panel?.key}: ${describePanelProblem(p)}`)
     }
-  }, [fields])
+  }, [panelInfo])
 
   // What BoldSign actually calls this field, and whether it matched a CRM token.
   // A blank box used to be unreadable — "did the deal have no value, or is the
@@ -2692,9 +3357,12 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
             </span>
           )}
         </span>
-        <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7 }} title="The field id BoldSign uses, its type, and the CRM token it matched">
-          {fieldOrigin(f)} · {fieldType(f)}
-        </span>
+        {/* Plumbing, for whoever can fix it. See showDiagnostics. */}
+        {showDiagnostics && (
+          <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7 }} title="The field id BoldSign uses, its type, and the CRM token it matched">
+            {fieldOrigin(f)} · {fieldType(f)}
+          </span>
+        )}
       </div>
       {info?.optional && (
         <div style={{ fontSize:10, color:'var(--gw-mist)', marginBottom:3 }}>
@@ -2735,17 +3403,36 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     </div>
   ))
 
-  // Step 2 — BoldSign's embedded prepare/send UI (replaces our own send popup).
+  // The embedded placement editor. Reached either straight from the prepare
+  // screen ("Place Fields") or from the review.
+  //
+  // CLOSING IT RETURNS TO THE REVIEW, not out of the modal: the agent has just
+  // moved boxes, and seeing the result is the obvious next thing. The preview is
+  // re-fetched on the way back so it shows the placement they just made rather
+  // than the copy from before they opened the editor.
   if (embedUrl) {
     return (
       <BoldSignStepModal
         url={embedUrl}
         documentId={embedDocId}
-        eyebrow="BoldSign · Review & Send"
-        heading="Place fields & send"
-        onClose={onClose}
+        eyebrow="Adjust field placement"
+        heading={review?.documentName || 'Place fields'}
+        onClose={backToReview}
         onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
-        onDraft={() => pushToast('Saved as a draft — nothing has been sent yet. You can keep working, or reopen it from the Signatures tab with "Edit & Send".', 'info')}
+        onDraft={() => pushToast('Saved — nothing has been sent yet. The draft is on this deal\u2019s Signatures tab.', 'info')}
+      />
+    )
+  }
+
+  // Step 2 — the packet, on screen, with every action available beside it.
+  if (review) {
+    return (
+      <DraftReviewStep
+        {...review}
+        adjusting={sending}
+        onAdjust={adjustFields}
+        onSent={onSent}
+        onClose={onSaved}
       />
     )
   }
@@ -2768,6 +3455,20 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           {dealState && (
             <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
               Showing templates for {dealState}{matched.length ? '' : ' — none registered for this state yet, showing all'}.
+            </div>
+          )}
+          {/* Where this form's terms come from, and whether they still match the
+              page. Small and quiet when everything is fine — but it is the line
+              an admin reads before declaring a panel for a packet, and the line
+              an agent reads when they wonder why a form is asking them nothing. */}
+          {panel && !panelBlocked && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4, display:'flex', alignItems:'center', gap:5 }}>
+              <Icon name="check" size={11} style={{ color:'var(--gw-green)', flexShrink:0 }}/>
+              <span>
+                Terms below verified against this form
+                {panelInfo.source === 'builtin' && ' (using Gateway\u2019s built-in setup for this packet)'}
+                {(panelInfo.validation?.warnings || []).length > 0 && ` \u00b7 ${panelInfo.validation.warnings.length} box${panelInfo.validation.warnings.length === 1 ? '' : 'es'} could not be read off the page`}
+              </span>
             </div>
           )}
         </div>
@@ -2795,16 +3496,17 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
             <div className="form-group">
               <label className="form-label required">Signers</label>
               {details.roles.map((r, i) => (
-                <div key={r.index} style={{ marginBottom:10 }}>
-                  <div style={{ fontSize:11, fontWeight:700, color:'var(--gw-mist)', marginBottom:4 }}>
-                    <span style={{ display:'inline-flex', width:18, height:18, borderRadius:'50%', background:SIGNER_COLORS[i]||'#6b7280', color:'#fff', alignItems:'center', justifyContent:'center', fontSize:10, marginRight:6 }}>{r.index}</span>
-                    {r.name}
-                  </div>
-                  <div style={{ display:'flex', gap:8 }}>
-                    <input className="form-control" style={{ flex:1 }} placeholder="Full name" value={signers[r.index]?.name || ''} onChange={e => setSigner(r.index, 'name', e.target.value)}/>
-                    <input className="form-control" style={{ flex:1 }} placeholder="Email" type="email" value={signers[r.index]?.email || ''} onChange={e => setSigner(r.index, 'email', e.target.value)}/>
-                  </div>
-                </div>
+                <SignerPicker
+                  key={r.index}
+                  order={r.index}
+                  roleLabel={r.name}
+                  color={SIGNER_COLORS[i] || '#6b7280'}
+                  value={signers[r.index] || {}}
+                  candidates={signerCandidates}
+                  onChange={(next) => setSigners(p => ({ ...p, [r.index]: { ...(p[r.index] || {}), ...next } }))}
+                  onSaveContact={saveSignerAsContact}
+                  savingContact={savingContact}
+                />
               ))}
               <div style={{ fontSize:11, color:'var(--gw-mist)' }}>Roles left blank are removed from this send.</div>
 
@@ -2812,9 +3514,9 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 <input type="checkbox" checked={inOrder} onChange={e => setInOrder(e.target.checked)} style={{ width:14, height:14, cursor:'pointer' }}/>
                 <span style={{ fontSize:12, flex:1 }}>
                   <strong>Sign in this order</strong> — each signer waits for the one above.
-                  <span style={{ color:'var(--gw-mist)' }}> Keep this on unless nothing above is prefilled: BoldSign
-                    only shows a signer&rsquo;s fields to the others once that signer has finished, so sending to
-                    everyone at once means the client opens the packet with the prefilled lines blank.</span>
+                  <span style={{ color:'var(--gw-mist)' }}> Keep this on. Signers only see each other&rsquo;s entries
+                    once the person ahead of them has signed, so sending to everyone at once means your client opens
+                    the packet with the filled-in lines blank.</span>
                 </span>
               </label>
             </div>
@@ -2886,13 +3588,23 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 This is the silent one — BoldSign accepts the value, ignores it,
                 and prints the assigned signer's name instead — so it is stated
                 as an outright defect in the template, with the fix. */}
+            {/* A box the form fills with the SIGNER'S OWN name, being used for
+                somebody else's. BoldSign accepts the value we send, ignores it,
+                and prints the assigned signer's name instead — so the document
+                goes out with the wrong name rather than a blank one.
+
+                Two audiences, one defect. The agent is told what will be wrong
+                on the paper, in those words, because they are the one the client
+                will ask. Only an admin gets the fix, because only an admin can
+                apply it — and to an agent "delete it and place a Label" is an
+                instruction for a screen they have never opened. */}
             {nameMisuse.length > 0 && (
               <div style={{ background:'#fff5f5', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:12, fontSize:12, lineHeight:1.6 }} role="alert">
-                <strong>This template prints the wrong name in {nameMisuse.length === 1 ? 'one place' : `${nameMisuse.length} places`}.</strong>
+                <strong>This form will print the wrong name in {nameMisuse.length === 1 ? 'one place' : `${nameMisuse.length} places`}.</strong>
                 <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
-                  A BoldSign <strong>Name</strong> field always shows the name of the signer it is assigned to, and ignores
-                  any value sent for it — so these cannot be filled from the CRM, and each one will show its own
-                  signer&rsquo;s name instead of what it is captioned for:
+                  {nameMisuse.length === 1 ? 'One box on this form' : `${nameMisuse.length} boxes on this form`} always print
+                  the name of whoever signs there, so {nameMisuse.length === 1 ? 'it cannot' : 'they cannot'} be filled from
+                  this deal:
                 </div>
                 <ul style={{ margin:'6px 0 0', paddingLeft:18, color:'var(--gw-mist)' }}>
                   {nameMisuse.map(f => {
@@ -2900,16 +3612,20 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                     const want  = token ? tokenVals[token] : ''
                     return (
                       <li key={f.id}>
-                        “{f.label || f.name || prettyLabel(f.id)}” — assigned to {roleNameFor(f.roleIndex)}
-                        {token ? <>, meant to show <code>{token}</code>{want ? ` (“${want}”)` : ''}</> : ''}
+                        \u201c{f.caption || f.label || f.name || prettyLabel(f.id)}\u201d — will show {roleNameFor(f.roleIndex)}\u2019s name
+                        {want ? <>, not \u201c{want}\u201d</> : ''}
+                        {showDiagnostics && token ? <> <code style={{ fontSize:10 }}>{f.id} \u2192 {token}</code></> : ''}
                       </li>
                     )
                   })}
                 </ul>
                 <div style={{ color:'var(--gw-mist)', marginTop:6 }}>
-                  Ask an admin to fix the template: delete each of these and place a <strong>Label</strong> in the same
-                  spot (BoldSign cannot change a placed field&rsquo;s type), naming the Label after the token above so it
-                  fills automatically. A Label is also read by every signer immediately, whatever the signing order.
+                  {showDiagnostics
+                    ? <>Fix the template: delete each of these and place a <strong>Label</strong> in the same spot (BoldSign
+                       cannot change a placed field\u2019s type), naming the Label after the token above so it fills
+                       automatically. A Label is also read by every signer immediately, whatever the signing order.</>
+                    : <>You can still send this — just correct those lines by hand on the printed copy, and ask your admin
+                       to fix the form so the next one is right.</>}
                 </div>
               </div>
             )}
@@ -2923,130 +3639,293 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 screen. sharedGaps is still computed and still drives the
                 template-defect reporting elsewhere. */}
 
-            {/* REPRESENTATION and TERM — the two choices a buyer packet cannot
-                be sent without. Radios, so the mutex is structural: picking one
-                is picking against the other, and there is no state in which both
-                or neither are set for the sender to reconcile. */}
-            <div className="form-group">
-              <label className="form-label">Representation</label>
-              {PACKET_FIELD_MAP.representation.options.map(o => (
-                <label key={o.key} style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, marginBottom:4, fontWeight:400, cursor:'pointer' }}>
-                  <input
-                    type="radio"
-                    name="gw-representation"
-                    checked={packet.representation === o.key}
-                    onChange={() => setPacket(p => ({ ...p, representation: o.key }))}
-                  />
-                  {o.label}
-                </label>
-              ))}
-            </div>
+            {/* THE PACKET'S OWN DECISIONS. Rendered from the panel declared
+                for THIS packet (form_packets.signing_panel, migration 0043) —
+                never from a map applied to every template. A choice group is
+                radios, so the mutex is structural: picking one is picking
+                against the other, and there is no state in which both or
+                neither are set for the sender to reconcile. */}
 
-            <div className="form-group">
-              <label className="form-label">Term</label>
-              {PACKET_FIELD_MAP.term.options.map(o => (
-                <label key={o.key} style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, marginBottom:4, fontWeight:400, cursor:'pointer' }}>
-                  <input
-                    type="radio"
-                    name="gw-term"
-                    checked={packet.term === o.key}
-                    onChange={() => setPacket(p => ({ ...p, term: o.key }))}
-                  />
-                  {o.label}
-                </label>
-              ))}
-              {/* An end date exists only on the fixed-date term. */}
-              {wantsEndDate(packet.term) && endDateFields.length > 0 && (
-                <div style={{ marginTop:6 }}>{endDateFields.map(renderTextField)}</div>
-              )}
-            </div>
-
-            {/* POLICY — state, not a decision. Closed by default because the
-                packet is authored with these set and a sender changing them is
-                the exception. */}
-            <div className="form-group">
-              <button
-                type="button"
-                className="btn btn--link btn--sm"
-                style={{ padding:0 }}
-                onClick={() => setShowPolicy(v => !v)}
-              >
-                Policy {showPolicy ? '▾' : '▸'}
-              </button>
-              <div style={{ fontSize:12, lineHeight:1.7, marginTop:4 }}>
-                {PACKET_FIELD_MAP.policy.map(pol => {
-                  const on = packet.policy?.[pol.id] == null ? pol.default : Boolean(packet.policy[pol.id])
-                  return (
-                    <div key={pol.id} style={{ display:'flex', alignItems:'center', gap:8 }}>
-                      <span style={{ color:'var(--gw-mist)', minWidth:130 }}>{pol.label}</span>
-                      {showPolicy
-                        ? (
-                          <label style={{ display:'flex', alignItems:'center', gap:6, fontWeight:400, cursor:'pointer' }}>
-                            <input
-                              type="checkbox"
-                              checked={on}
-                              onChange={e => setPacket(p => ({ ...p, policy: { ...(p.policy || {}), [pol.id]: e.target.checked } }))}
-                            />
-                            {on ? 'on' : 'off'}
-                          </label>
-                        )
-                        : <strong>{on ? 'on' : 'off'}</strong>}
-                    </div>
-                  )
-                })}
+            {/* A declared panel that no longer matches its form. Blocking, and
+                said in the terms an agent can act on: which decision, which box,
+                and what the page actually says there. The alternative is writing
+                a term of an agreement onto a box that means something else. */}
+            {panelBlocked && (
+              <div style={{ background:'#fff5f5', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:12, fontSize:12, lineHeight:1.6 }} role="alert">
+                <strong>This form no longer matches the terms set up for it, so it can&rsquo;t be sent.</strong>
+                <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
+                  The boxes below are what this packet ticks when you choose a term. One of them has moved or changed
+                  meaning in BoldSign, and sending now would lock the wrong term onto the agreement:
+                </div>
+                <ul style={{ margin:'6px 0 0', paddingLeft:18, color:'var(--gw-mist)' }}>
+                  {panelInfo.validation.blocking.map((prob, i) => <li key={`${prob.fieldId}-${i}`}>{describePanelProblem(prob)}</li>)}
+                </ul>
+                <div style={{ color:'var(--gw-mist)', marginTop:6 }}>
+                  Ask an admin to re-check this packet in the Form Library against the form in BoldSign. Nothing has been
+                  created and nothing has been sent.
+                </div>
               </div>
-            </div>
+            )}
 
-            {hiddenCount > 0 && (
+            {panel && !panelBlocked && panel.groups.filter(g => g.kind !== 'fixed').map(g => {
+              // CHOICE — the decisions the packet cannot go out without.
+              if (g.kind === 'choice') return (
+                <div className="form-group" key={g.key}>
+                  <label className={`form-label${g.required ? ' required' : ''}`}>{g.label}</label>
+                  {g.help && <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:4 }}>{g.help}</div>}
+                  {g.options.map(o => (
+                    <label key={o.key} style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, marginBottom:4, fontWeight:400, cursor:'pointer' }}>
+                      <input
+                        type="radio"
+                        name={`gw-panel-${g.key}`}
+                        checked={panelState[g.key] === o.key}
+                        onChange={() => setPanelState(p => ({ ...p, [g.key]: o.key }))}
+                      />
+                      {o.label}
+                    </label>
+                  ))}
+                  {/* A field an answer makes relevant — the end date on a
+                      fixed-date term — appears with the answer that needs it. */}
+                  {revealedFields.length > 0 && g.options.some(o => o.revealToken && panelState[g.key] === o.key) && (
+                    <div style={{ marginTop:6 }}>{revealedFields.map(renderTextField)}</div>
+                  )}
+                </div>
+              )
+
+              // TOGGLES — state, not a decision. Closed by default because the
+              // packet is authored with these set and a sender changing them is
+              // the exception; the values are still shown while closed, because
+              // "what is this agreement saying" is worth reading at a glance.
+              const open = Boolean(openGroups[g.key])
+              const map  = panelState[g.key] || {}
+              return (
+                <div className="form-group" key={g.key}>
+                  <button
+                    type="button"
+                    className="btn btn--link btn--sm"
+                    style={{ padding:0 }}
+                    onClick={() => setOpenGroups(p => ({ ...p, [g.key]: !p[g.key] }))}
+                    aria-expanded={open}
+                  >
+                    {g.label} {open ? '▾' : '▸'}
+                  </button>
+                  {open && g.help && <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4 }}>{g.help}</div>}
+                  <div style={{ fontSize:12, lineHeight:1.7, marginTop:4 }}>
+                    {g.options.map(o => {
+                      const on = map[o.fieldId] == null ? o.default : Boolean(map[o.fieldId])
+                      return (
+                        <div key={o.fieldId} style={{ display:'flex', alignItems:'center', gap:8 }}>
+                          <span style={{ color:'var(--gw-mist)', minWidth:130 }}>{o.label}</span>
+                          {open
+                            ? (
+                              <label style={{ display:'flex', alignItems:'center', gap:6, fontWeight:400, cursor:'pointer' }}>
+                                <input
+                                  type="checkbox"
+                                  checked={on}
+                                  onChange={e => setPanelState(p => ({ ...p, [g.key]: { ...(p[g.key] || {}), [o.fieldId]: e.target.checked } }))}
+                                />
+                                {on ? 'on' : 'off'}
+                              </label>
+                            )
+                            : <strong>{on ? 'on' : 'off'}</strong>}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })}
+
+            {/* EVERY OTHER TICK BOX on the form. Not decisions this packet
+                declares, so they are collapsed and every one starts at "as the
+                form is set up" — sending no value, leaving the form's own
+                setting alone. That is what makes opening this screen safe on a
+                template nobody has configured: it cannot change a box by
+                itself, and the agent can still tick one deliberately. */}
+            {selectionList.length > 0 && (
+              <div className="form-group">
+                <button
+                  type="button"
+                  className="btn btn--link btn--sm"
+                  style={{ padding:0 }}
+                  onClick={() => setShowSelections(v => !v)}
+                  aria-expanded={showSelections}
+                >
+                  Other boxes on this form ({selectionList.length}) {showSelections ? '▾' : '▸'}
+                </button>
+                {showSelections && (
+                  <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)', padding:'10px 12px', marginTop:6 }}>
+                    <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:8 }}>
+                      Named from the words printed beside each box. Leave one alone and the form keeps whatever it was
+                      built with; tick or clear one and it goes out that way, locked, for every signer.
+                    </div>
+                    {selectionList.map(row => (
+                      <div key={row.id} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
+                        <span style={{ flex:1, fontSize:12.5, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }} title={row.caption || row.id}>
+                          {row.title}
+                          <span style={{ color:'var(--gw-mist)' }}> · p{row.page}</span>
+                        </span>
+                        <select
+                          className="form-control"
+                          style={{ width:'auto', fontSize:12, padding:'3px 8px' }}
+                          value={selections[row.id] === true ? 'yes' : selections[row.id] === false ? 'no' : ''}
+                          onChange={e => {
+                            const v = e.target.value === 'yes' ? true : e.target.value === 'no' ? false : null
+                            setSelections(prev => applySelection(prev, selectionList, row.id, v))
+                          }}
+                        >
+                          <option value="">As the form is</option>
+                          <option value="yes">Checked</option>
+                          <option value="no">Unchecked</option>
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* The escape hatch stays for everyone — a box nobody named is still
+                a box somebody may need to fill on the one deal that needs it —
+                but the wording is the agent's, not the template author's. Only
+                an admin is told WHY these are unnamed and what to do about it,
+                because only an admin can go and name them. */}
+            {hiddenCount > 0 && !showAllFields && (
               <button
                 type="button"
                 className="btn btn--secondary btn--sm"
                 style={{ width:'100%', marginBottom:12 }}
                 onClick={() => setShowAllFields(true)}
               >
-                Show {hiddenCount} unnamed template field{hiddenCount === 1 ? '' : 's'}
+                Show {hiddenCount} more box{hiddenCount === 1 ? '' : 'es'} on this form
               </button>
             )}
             {showAllFields && (
               <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:12 }}>
-                Showing every field on the template, including the ones with no name of their own.
-                Give a field a name in BoldSign&rsquo;s template editor (a CRM token, or just a caption)
-                and it will show here by default.{' '}
-                <button type="button" className="btn btn--link btn--sm" onClick={() => setShowAllFields(false)}>Hide them again</button>
+                Showing every box on this form, including the ones the page gives no name to.
+                {showDiagnostics && ' Name a field in BoldSign\u2019s template editor (a CRM token, or just a caption) and it will show here by default.'}{' '}
+                <button type="button" className="btn btn--link btn--sm" onClick={() => setShowAllFields(false)}>Show fewer</button>
               </div>
             )}
           </>
         )}
 
+        {/* SEND OPTIONS — collapsed, because the defaults are right for almost
+            every packet. Open when this one is different: a lender who needs a
+            copy, a term sheet that should lapse in a week, a note to the
+            client. All three are fixed at creation by BoldSign and cannot be
+            added later, which is why they are on this screen. */}
+        <div className="form-group">
+          <button
+            type="button"
+            className="btn btn--link btn--sm"
+            style={{ padding:0 }}
+            onClick={() => setShowOptions(v => !v)}
+            aria-expanded={showOptions}
+          >
+            Send options {showOptions ? '▾' : '▸'}
+          </button>
+          {!showOptions && (
+            <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:3 }}>
+              Gateway branding{cc.length ? ` · copy to ${cc.length}` : ''}
+              {String(expiryDays).trim() ? ` · expires in ${expiryDays} days` : ' · no expiry'}
+            </div>
+          )}
+          {showOptions && (
+            <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)', padding:'12px', marginTop:6 }}>
+              <div style={{ marginBottom:12 }}>
+                <label className="form-label">Note to the signers</label>
+                <textarea
+                  className="form-control"
+                  rows={2}
+                  value={message}
+                  onChange={e => setMessage(e.target.value)}
+                  placeholder="Please review and sign."
+                />
+                <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:3 }}>
+                  Appears in the email your client receives.
+                </div>
+              </div>
+
+              <div style={{ marginBottom:12 }}>
+                <label className="form-label">Send a copy to</label>
+                {cc.length > 0 && (
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginBottom:6 }}>
+                    {cc.map(e => (
+                      <span key={e} style={{ display:'inline-flex', alignItems:'center', gap:6, padding:'3px 8px', background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', fontSize:12 }}>
+                        {e}
+                        <button type="button" onClick={() => setCc(p => p.filter(x => x !== e))} aria-label={`Remove ${e}`}
+                          style={{ border:'none', background:'none', cursor:'pointer', padding:0, lineHeight:0, color:'var(--gw-mist)' }}>
+                          <Icon name="x" size={10}/>
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <input
+                  className="form-control"
+                  placeholder="Transaction coordinator, attorney, lender…"
+                  value={ccInput}
+                  onChange={e => setCcInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addCc(ccInput) } }}
+                  onBlur={() => addCc(ccInput)}
+                />
+                <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:3 }}>
+                  They get the completed copy without being asked to sign. Press Enter after each address.
+                </div>
+              </div>
+
+              <div>
+                <label className="form-label">Expires after</label>
+                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  <input
+                    className="form-control"
+                    style={{ width:90 }}
+                    inputMode="numeric"
+                    placeholder="—"
+                    value={expiryDays}
+                    onChange={e => setExpiryDays(e.target.value.replace(/[^\d]/g, ''))}
+                  />
+                  <span style={{ fontSize:12, color:'var(--gw-mist)' }}>days · leave blank for no expiry</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
         <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px' }}>
-          <strong>Neither button sends anything.</strong> Both save this as a draft on the deal, filled in with the values
-          above — from there you can download a filled PDF to print for the client, keep editing, and send only
-          when they&rsquo;re happy. <strong>From this deal</strong> is filled in for you and every signer can read it
-          the moment the document arrives, without waiting for anyone else to sign. <strong>Signer details</strong> and{' '}
-          <strong>Selections</strong> stay hidden from the other parties until their own signer has signed, which is why
-          the order box above matters. Values typed or ticked inside BoldSign&rsquo;s own editor are placement previews
-          and do <strong>not</strong> reach the signers — set them here.
+          <strong>Neither button sends anything.</strong> Both fill the form in from this deal and save it as a dray —
+          <strong>Review Draft</strong> shows you the packet, <strong>Place Fields</strong> opens it in BoldSign to move
+          boxes first. You can get to either from the other.
+          <br/>
+          Fill values in <em>here</em>, not on the placement screen: anything typed there is a preview and never
+          reaches the signers.
         </div>
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-        {/* Secondary, because most packets need no placement work: the template
-            already has its fields and this is the detour, not the route. */}
+        {/* TWO ROUTES INTO THE SAME DRAFT, not two ways to create one. Both
+            buttons run the identical creation step and then land somewhere
+            different — review the packet, or go straight to moving fields.
+            Review is primary because most forms already have their fields and
+            the question is whether the wording is right; placement is the
+            detour an agent takes when they already know this deal needs a box
+            moved. Sending is on the other side of either. */}
         <button
           className="btn btn--secondary"
-          onClick={placeFields}
-          disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details}
-          title="Save the draft and open it in BoldSign to move, add or remove fields"
+          onClick={() => createDraft('place')}
+          disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details || panelBlocked}
+          title="Save the draft and open it in BoldSign to move, add or remove where people sign and fill — nothing is sent"
         >
-          {sending ? 'Opening…' : 'Place Fields in BoldSign'}
+          {savingDraft ? 'Preparing…' : 'Place Fields in BoldSign'}
         </button>
         <button
           className="btn btn--primary"
-          onClick={saveDraft}
-          disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details}
-          title="Create the filled document on this deal as a draft — nothing is sent"
+          onClick={() => createDraft('review')}
+          disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details || panelBlocked}
+          title="Fill this form in from the deal and show it to you — nothing is sent"
         >
-          {savingDraft ? 'Saving…' : 'Save as Draft'}
+          {savingDraft ? 'Preparing…' : 'Review Draft'}
         </button>
       </div>
     </Modal>
@@ -3669,7 +4548,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       {/* Tab bar — only for existing deals */}
       {isExisting && (
         <div className="drawer-tabs">
-          {[['details','Details'],['dates','Key Dates'],['pricing','Pricing History'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
+          {[['details','Details'],['terms','Deal Terms'],['dates','Key Dates'],['pricing','Pricing History'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
             <button key={id} className={`drawer-tab${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}>
               {label}
             </button>
@@ -3928,6 +4807,13 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       )}
 
       {/* Key Dates tab */}
+      {/* Deal Terms tab — the per-agreement facts every packet asks for. Sits
+          right after Details because it is the same kind of work: describing
+          the deal once so nothing downstream has to ask again. */}
+      {tab === 'terms' && isExisting && (
+        <DealTermsTab deal={deal} />
+      )}
+
       {tab === 'dates' && isExisting && (
         <KeyDatesTab deal={deal} />
       )}
