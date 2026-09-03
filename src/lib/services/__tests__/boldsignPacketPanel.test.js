@@ -9,17 +9,27 @@ import {
   describePanelProblem, builtInPanelFor, IA_BUYER_AGENCY_PANEL,
 } from '../boldsignPacketPanel.js'
 
-// The Iowa packet's own boxes, captioned the way the page prints them.
+// The Iowa packet's own boxes, captioned the way the page prints them, with the
+// IDS FROM docs/ia-buyer-packet-selections.md — the spec written from the real
+// document (cb4acb7b-…) rather than from what the old hard-coded map assumed.
+//
+// This fixture used to invent a tidy CheckBox1..CheckBox9 run, which is what let
+// the built-in panel ship mapping "non-exclusive" onto CheckBox2 — a box the spec
+// confirms (by a printed X at 95.5pt on page 1) is **prospective BUYER**. The
+// tests passed because the fixture agreed with the bug.
 const iowaFields = [
-  { id: 'CheckBox1', type: 'CheckBox', caption: 'exclusive' },
-  { id: 'CheckBox2', type: 'CheckBox', caption: 'non-exclusive' },
-  { id: 'CheckBox3', type: 'CheckBox', caption: 'BUYER' },
-  { id: 'CheckBox4', type: 'CheckBox', caption: '1. SINGLE SELLER AGENCY' },
-  { id: 'CheckBox5', type: 'CheckBox', caption: '2. SINGLE BUYER AGENCY' },
-  { id: 'CheckBox6', type: 'CheckBox', caption: '3. APPOINTED AGENCY' },
-  { id: 'CheckBox7', type: 'CheckBox', caption: '4. CONSENSUAL DUAL AGENCY' },
-  { id: 'CheckBox8', type: 'CheckBox', caption: 'A. This Agreement shall continue until closing of the transaction' },
-  { id: 'CheckBox9', type: 'CheckBox', caption: 'B. This Agreement ends at 11:59 p.m. on the date stated' },
+  { id: 'CheckBox1',  type: 'CheckBox', caption: 'exclusive' },
+  { id: 'CheckBox11', type: 'CheckBox', caption: 'non-exclusive' },
+  { id: 'CheckBox2',  type: 'CheckBox', caption: 'prospective BUYER' },
+  { id: 'CheckBox12', type: 'CheckBox', caption: '1. SINGLE SELLER AGENCY' },
+  { id: 'CheckBox13', type: 'CheckBox', caption: '2. SINGLE BUYER AGENCY' },
+  { id: 'CheckBox6',  type: 'CheckBox', caption: '3. APPOINTED AGENCY' },
+  { id: 'CheckBox7',  type: 'CheckBox', caption: '4. CONSENSUAL DUAL AGENCY' },
+  // Out of scope per the spec: page 9, already ticked on the template, and NOT
+  // the term of this agreement. Present so a test can prove the panel leaves
+  // them alone.
+  { id: 'CheckBox8',  type: 'CheckBox', caption: '' },
+  { id: 'CheckBox9',  type: 'CheckBox', caption: '' },
 ]
 const iowaPacket = { state: 'IA', transaction_type: 'buyer' }
 
@@ -74,11 +84,22 @@ describe('normalizePanel', () => {
 describe('what the panel owns', () => {
   const { panel } = normalizePanel(IA_BUYER_AGENCY_PANEL)
 
-  it('names exactly the nine boxes it decides', () => {
+  it('names exactly the seven boxes it decides', () => {
     expect([...panelFieldIds(panel)].sort()).toEqual(
-      ['CheckBox1', 'CheckBox2', 'CheckBox3', 'CheckBox4', 'CheckBox5', 'CheckBox6', 'CheckBox7', 'CheckBox8', 'CheckBox9'],
+      ['CheckBox1', 'CheckBox11', 'CheckBox12', 'CheckBox13', 'CheckBox2', 'CheckBox6', 'CheckBox7'],
     )
     expect(isPanelField(panel, 'CheckBox10')).toBe(false)
+  })
+
+  // The term used to be a choice group over CheckBox8/CheckBox9. Per the spec
+  // those are two boxes on PAGE 9, out of scope and already ticked — ticking them
+  // as "the term of this agreement" wrote a term onto the wrong clause. §6.A/§6.B
+  // become Labels (a template change); until then the panel has no term group and
+  // must not invent one.
+  it('claims no term boxes, and leaves page 9 alone', () => {
+    expect(panel.groups.some(g => g.key === 'term')).toBe(false)
+    expect(isPanelField(panel, 'CheckBox8')).toBe(false)
+    expect(isPanelField(panel, 'CheckBox9')).toBe(false)
   })
 
   it('owns nothing when there is no panel — the case that was writing terms onto other forms', () => {
@@ -106,7 +127,10 @@ describe('validation against the live template', () => {
     const v = validatePanel({ panel, fields: sellerListing })
     expect(v.ok).toBe(false)
     expect(v.blocking.some(b => b.code === 'caption_conflict' && b.fieldId === 'CheckBox1')).toBe(true)
-    expect(v.blocking.some(b => b.code === 'missing_field' && b.fieldId === 'CheckBox8')).toBe(true)
+    // CheckBox2 exists on this form too, and means something else again.
+    expect(v.blocking.some(b => b.code === 'caption_conflict' && b.fieldId === 'CheckBox2')).toBe(true)
+    // …and the boxes a seller listing simply does not have.
+    expect(v.blocking.some(b => b.code === 'missing_field' && b.fieldId === 'CheckBox11')).toBe(true)
   })
 
   it('blocks a box that is no longer a tick box', () => {
@@ -121,7 +145,7 @@ describe('validation against the live template', () => {
     const fields = iowaFields.map(f => ({ ...f, caption: '' }))
     const v = validatePanel({ panel, fields })
     expect(v.ok).toBe(true)
-    expect(v.warnings).toHaveLength(9)
+    expect(v.warnings).toHaveLength(7)
     expect(v.warnings.every(w => w.code === 'no_caption')).toBe(true)
   })
 })
@@ -171,39 +195,41 @@ describe('state and what gets written', () => {
   const { panel } = normalizePanel(IA_BUYER_AGENCY_PANEL)
 
   it('adopts a choice the template already states', () => {
-    const fields = iowaFields.map(f => (
-      f.id === 'CheckBox2' ? { ...f, value: 'true' } : f.id === 'CheckBox9' ? { ...f, value: 'true' } : f
-    ))
+    const fields = iowaFields.map(f => (f.id === 'CheckBox11' ? { ...f, value: 'true' } : f))
     const state = seedPanelState({ panel, fields })
     expect(state.representation).toBe('non-exclusive')
-    expect(state.term).toBe('fixed')
+    // No term group to seed — see "claims no term boxes" above.
+    expect(state.term).toBeUndefined()
   })
 
   // Both ticked, or neither, is not the form stating a choice — picking one for
   // the sender would be the panel deciding a term of the agreement.
   it('stays unset when the template states no single choice', () => {
-    const both = iowaFields.map(f => (['CheckBox1', 'CheckBox2'].includes(f.id) ? { ...f, value: 'true' } : f))
+    const both = iowaFields.map(f => (['CheckBox1', 'CheckBox11'].includes(f.id) ? { ...f, value: 'true' } : f))
     expect(seedPanelState({ panel, fields: both }).representation).toBeNull()
     expect(seedPanelState({ panel, fields: iowaFields }).representation).toBeNull()
   })
 
   it('defaults toggles to the spec where the template is silent, and to the template where it is not', () => {
     expect(seedPanelState({ panel, fields: iowaFields }).policy).toEqual({
-      CheckBox4: false, CheckBox5: false, CheckBox6: true, CheckBox7: true,
+      CheckBox12: false, CheckBox13: false, CheckBox6: true, CheckBox7: true,
     })
     const off = iowaFields.map(f => (f.id === 'CheckBox6' ? { ...f, value: 'false' } : f))
     expect(seedPanelState({ panel, fields: off }).policy.CheckBox6).toBe(false)
   })
 
   it('sets the picked option and clears its sibling — the mutex is structural', () => {
-    const v = panelTickValues({ panel, state: { representation: 'exclusive', term: 'close' } })
-    expect(v).toMatchObject({ CheckBox1: true, CheckBox2: false, CheckBox8: true, CheckBox9: false })
-    const n = panelTickValues({ panel, state: { representation: 'non-exclusive', term: 'fixed' } })
-    expect(n).toMatchObject({ CheckBox1: false, CheckBox2: true, CheckBox8: false, CheckBox9: true })
+    const v = panelTickValues({ panel, state: { representation: 'exclusive' } })
+    expect(v).toMatchObject({ CheckBox1: true, CheckBox11: false })
+    const n = panelTickValues({ panel, state: { representation: 'non-exclusive' } })
+    expect(n).toMatchObject({ CheckBox1: false, CheckBox11: true })
+    // Page 9 is never written, whichever way the choice goes.
+    expect(v).not.toHaveProperty('CheckBox8')
+    expect(n).not.toHaveProperty('CheckBox9')
   })
 
   it('keeps the fixed party box ticked without showing it', () => {
-    expect(panelTickValues({ panel, state: {} }).CheckBox3).toBe(true)
+    expect(panelTickValues({ panel, state: {} }).CheckBox2).toBe(true)
   })
 
   it('writes a value for nothing outside the boxes it owns', () => {
@@ -218,9 +244,8 @@ describe('gates and reveals', () => {
   const { panel } = normalizePanel(IA_BUYER_AGENCY_PANEL)
 
   it('requires every required choice', () => {
-    expect(panelMissing({ panel, state: {} })).toEqual(['Representation', 'Term'])
-    expect(panelMissing({ panel, state: { representation: 'exclusive' } })).toEqual(['Term'])
-    expect(panelMissing({ panel, state: { representation: 'exclusive', term: 'close' } })).toEqual([])
+    expect(panelMissing({ panel, state: {} })).toEqual(['Representation'])
+    expect(panelMissing({ panel, state: { representation: 'exclusive' } })).toEqual([])
   })
 
   // The gate is the panel's, not the app's. A form that declares no decisions
@@ -230,10 +255,22 @@ describe('gates and reveals', () => {
     expect(panelMissing({ panel: null, state: {} })).toEqual([])
   })
 
-  it('reveals the end date only on the fixed-date term', () => {
-    expect(revealedTokens({ panel, state: { term: 'fixed' } })).toEqual(['retainer_end_date'])
-    expect(revealedTokens({ panel, state: { term: 'close' } })).toEqual([])
+  // The end-date reveal rode on the term group, which is gone until §6.A/§6.B
+  // become Labels. Nothing reveals a token today, and the machinery still works —
+  // proven against a panel that declares one rather than against the built-in.
+  it('reveals a token only when the option carrying it is picked', () => {
     expect(revealedTokens({ panel, state: {} })).toEqual([])
+    const { panel: withReveal } = normalizePanel({
+      version: 1, key: 't', groups: [{
+        key: 'term', kind: 'choice', label: 'Term', required: true,
+        options: [
+          { key: 'close', label: 'Until close', fieldId: 'CheckBoxA' },
+          { key: 'fixed', label: 'Fixed date',  fieldId: 'CheckBoxB', revealToken: 'retainer_end_date' },
+        ],
+      }],
+    })
+    expect(revealedTokens({ panel: withReveal, state: { term: 'fixed' } })).toEqual(['retainer_end_date'])
+    expect(revealedTokens({ panel: withReveal, state: { term: 'close' } })).toEqual([])
   })
 })
 
