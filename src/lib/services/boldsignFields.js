@@ -686,8 +686,26 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
     // under one consistent family covering both sides, because `seller_2_name`
     // was already taken by the side-AGNOSTIC alias and could not be reused
     // without changing what it means for templates already in production.
-    party_buyer_1:      buyerParties[0]?.name  || '',
-    party_buyer_2:      buyerParties[1]?.name  || '',
+    // `Buyer1NameLabel` IS THE CLIENT LABEL ON BOTH SIDES. That is the templates'
+    // own convention, stated by the brokerage: a buyer packet and a listing
+    // packet both name the client's line `Buyer1NameLabel` (with
+    // `Buyer1NameLabel_2`, `_3` for the same name printed again). So a
+    // strictly side-scoped value blanks it on every seller deal, every
+    // lease, and every deal whose transaction_type was never recorded — which
+    // is what printed the literal word "Label" where the client's name belongs.
+    //
+    // Preference, not replacement: this side's own party when we have one, and
+    // the deal's client only as a fallback. `sided` (a BOTH-sided deal, where
+    // the CRM stores each side's people explicitly) keeps the strict reading,
+    // because there we genuinely know who the buyer is and falling back would
+    // print the wrong party on a form that names both.
+    //
+    // The seller tokens deliberately DO NOT get this fallback. `Seller1NameLabel`
+    // is not used as a universal client label, so filling it from the client
+    // would print our buyer as "the seller" on a buyer packet — the wrong-name
+    // failure described above, which a blank is better than.
+    party_buyer_1:      buyerParties[0]?.name  || (sided ? '' : clients[0]?.name) || '',
+    party_buyer_2:      buyerParties[1]?.name  || (sided ? '' : clients[1]?.name) || '',
     party_seller_1:     sellerParties[0]?.name || '',
     party_seller_2:     sellerParties[1]?.name || '',
 
@@ -953,6 +971,50 @@ const CANONICAL_ALIASES = Object.fromEntries(
 // that happens to end in a digit — `RetainerDate1`, `Agent2NameLabel` — is never
 // ambiguous with a repeat instance. Bare-digit suffixes are not supported and
 // should not be authored.
+
+// ── Naming a Label the way a person would ────────────────────────────────────
+// `normalizeTokenKey` only turns SEPARATORS into underscores, so it matches a
+// field named "Client Name" (→ `client_name`) and misses one named `ClientName`
+// (→ `clientname`) — the same word, authored without a space. That asymmetry is
+// invisible from the template editor and produced a real, reported failure: an
+// Appointed Agency Agreement went out with the literal word "Label" on both
+// client-name lines while the brokerage and agent names filled in correctly,
+// because those two happened to be spelled with separators and the client's was
+// not.
+//
+// Two rules, both last-resort (after every exact and canonical-alias attempt, so
+// a real id is never reinterpreted):
+//
+//   SQUASHED — compare with every separator removed on BOTH sides, which makes
+//     matching separator-insensitive. `ClientName`, `clientname`, `CLIENT-NAME`
+//     and `Client Name` all reach `client_name`.
+//   SUFFIX   — drop a trailing `Label` / `Field` / `Text`, the words a template
+//     author appends to say what the thing IS rather than what it holds, so
+//     `ClientNameLabel` resolves to the same token as `ClientName`.
+const NAMEY_SUFFIX_RE = /(label|field|text|txt|input|box)$/
+const squashToken = (token) => String(token).replace(/[^a-z0-9]+/g, '')
+
+// Human spellings that are not a squash away from any token. Deliberately short
+// and only for PARTY NAMES, which is where the reported failure was: each entry
+// is a phrase that can only mean the person's name on an agreement.
+//
+// `client_1_name` earns its place by being an outright trap — `client_2_name` IS
+// a token, so an admin who names two Labels `client_1_name` / `client_2_name`
+// gets the second one filling and the first one blank, which reads as random.
+const HUMAN_TOKEN_ALIASES = Object.freeze({
+  client:            'client_name',
+  clients:           'client_names',
+  clientfullname:    'client_name',
+  client1name:       'client_name',
+  buyername:         'buyer_1_name',
+  buyersname:        'buyer_1_name',
+  buyer1name:        'buyer_1_name',
+  sellersname:       'seller_name',
+  seller1name:       'seller_name',
+  purchaser:         'client_name',
+  purchasername:     'client_name',
+})
+
 const REPEAT_SUFFIX_RE = /_\d+$/
 
 // Which CRM token this field means, or '' when it is not one of ours. Accepts a
@@ -983,6 +1045,23 @@ export function fieldTokenKey(field, tokenKeys = SHARED_PREFILL_TOKENS) {
     if (key && tokenKeys.has(key)) return key
     const alias = CANONICAL_ALIASES[squashFieldKey(base)]
     if (alias && tokenKeys.has(alias)) return alias
+  }
+
+  // SEPARATOR-INSENSITIVE, and a trailing `Label`/`Field` dropped. Last of all,
+  // so nothing above is ever second-guessed. See the note at NAMEY_SUFFIX_RE.
+  for (const c of candidates) {
+    let squashed = squashFieldKey(c)
+    if (!squashed) continue
+    for (const attempt of [squashed, squashed.replace(NAMEY_SUFFIX_RE, '')]) {
+      if (!attempt) continue
+      const human = HUMAN_TOKEN_ALIASES[attempt]
+      if (human && tokenKeys.has(human)) return human
+      for (const token of tokenKeys) {
+        if (squashToken(token) === attempt) return token
+      }
+      const alias = CANONICAL_ALIASES[attempt]
+      if (alias && tokenKeys.has(alias)) return alias
+    }
   }
   return ''
 }
@@ -1023,6 +1102,103 @@ export const CONDITIONAL_PARTY_TOKENS = new Set([
 export function conditionalFieldsToRemove({ fields = [], values = {} } = {}) {
   return (fields || [])
     .filter(f => f?.id && CONDITIONAL_PARTY_TOKENS.has(fieldTokenKey(f)))
+    .filter(f => !String(values?.[f.id] ?? '').trim())
+    .map(f => f.id)
+}
+
+// Tokens that print a PARTY's name — the client, their co-buyer/co-seller. An
+// agreement that goes out with these blank names nobody, which is the one gap on
+// this screen that is never acceptable to ship silently.
+const PARTY_NAME_TOKENS = new Set([
+  'client_name', 'client_names', 'client_2_name',
+  'seller_name', 'seller_names', 'seller_2_name',
+  'buyer_1_name', 'buyer_2_name',
+  'party_buyer_1', 'party_buyer_2', 'party_seller_1', 'party_seller_2',
+])
+
+/**
+ * Fields on this template that are meant to print a party's name and resolved to
+ * nothing — plus whether the template names such a field at all.
+ *
+ * WHY THIS EXISTS. An Appointed Agency Agreement came back from a real send with
+ * the literal word "Label" on both lines where the client's name belongs, while
+ * the brokerage name and the appointed agent's name filled in correctly. Those
+ * two fill from the agent and a constant; the client's name fills from the deal's
+ * linked CONTACT. So a deal with no contact linked produces exactly that page,
+ * and nothing on the send screen said so — the agent could only conclude the CRM
+ * had stopped pulling data over.
+ *
+ * Two different faults look identical on the page and need different fixes, so
+ * they are reported apart:
+ *   `empty`     — the template asks for a party name and the deal has nobody to
+ *                 put there. Link a contact to the deal.
+ *   `noneNamed` — no field on this template carries a party-name token at all, so
+ *                 nothing can ever fill those lines. The TEMPLATE needs naming
+ *                 (an admin job) — see the Label guidance in
+ *                 docs/boldsign-integration.md.
+ */
+export function partyNameGaps({ fields = [], values = {} } = {}) {
+  // Fields that PRINT text only. The human aliases in HUMAN_TOKEN_ALIASES mean a
+  // tick box captioned "Buyer" now resolves to a name token too — correct for
+  // matching, wrong here: a checkbox is not a blank name line, and warning about
+  // one would be a false alarm on the very form this warning was written for.
+  const named = (fields || []).filter(f => f?.id && isFillableField(f.type) && PARTY_NAME_TOKENS.has(fieldTokenKey(f)))
+  const empty = named.filter(f => !String(values?.[f.id] ?? '').trim())
+  return { empty, noneNamed: named.length === 0, named }
+}
+
+/**
+ * What this send is about to write into each of the template's fields, as rows
+ * for a log line: the field's id, the CRM token it matched, and the value.
+ *
+ * Exists because the label→value step is the one part of a send that is
+ * invisible when it goes wrong. A Label whose id matches no token, or matches
+ * one that resolved to nothing, is indistinguishable on the send screen from a
+ * Label that is meant to be blank — and it reaches the client as BoldSign's
+ * placeholder text. `matched: false` is the row worth grepping for.
+ *
+ * Pure and side-effect free: the caller decides whether and how to log it.
+ */
+export function describeFieldMapping({ fields = [], values = {} } = {}) {
+  return (fields || [])
+    .filter(f => f?.id && isPrefillableField(f.type))
+    .map((f) => {
+      const token = fieldTokenKey(f)
+      const value = values?.[f.id]
+      return {
+        id:      String(f.id),
+        type:    String(f.type || ''),
+        shared:  isSharedField(f.type),
+        token:   token || null,
+        matched: Boolean(token),
+        value:   value == null ? '' : String(value),
+        filled:  String(value ?? '').trim() !== '',
+      }
+    })
+}
+
+// ── Empty Labels must not reach the client ───────────────────────────────────
+// BoldSign renders an unfilled **Label** as its own placeholder — the literal
+// word "Label" — printed on the page. On an Appointed Agency Agreement that put
+// the word "Label" on the two lines where the client's name belongs, which reads
+// as a broken form rather than a blank one.
+//
+// CONDITIONAL_PARTY_TOKENS above already removed three specific ones (the
+// co-buyer, the second appointed agent). That was too narrow by construction: it
+// only covered fields the CRM knows a token for, and the fields that print
+// "Label" are exactly the ones nothing filled — including every Label the
+// template author never named, which no token list can enumerate.
+//
+// So the rule is about the VALUE, not the token: any Label going out with nothing
+// in it is removed from the draft. Removing an empty Label loses nothing a signer
+// would have seen (a Label is read-only — no signer could have typed in it) and
+// leaves the printed line blank, exactly as the paper form is.
+//
+// Labels ONLY. A signer-fillable box left empty is the signer's to complete and
+// must stay on the document.
+export function emptyLabelsToRemove({ fields = [], values = {} } = {}) {
+  return (fields || [])
+    .filter(f => f?.id && isSharedField(f.type))
     .filter(f => !String(values?.[f.id] ?? '').trim())
     .map(f => f.id)
 }

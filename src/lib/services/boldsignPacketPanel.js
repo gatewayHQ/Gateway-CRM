@@ -360,31 +360,32 @@ export const IA_BUYER_AGENCY_PANEL = Object.freeze({
         // "non-exclusive", so a bare /exclusive/ accepts the sibling box's
         // caption and the cross-check goes quiet on exactly the swap it exists
         // to catch.
-        { key: 'exclusive',     label: 'Exclusive',     fieldId: 'CheckBox1', expect: '^(?!.*non-?\\s?exclusive).*\\bexclusive\\b' },
-        { key: 'non-exclusive', label: 'Non-exclusive', fieldId: 'CheckBox2', expect: 'non-?\\s?exclusive' },
+        { key: 'exclusive',     label: 'Exclusive',     fieldId: 'CheckBox1',  expect: '^(?!.*non-?\\s?exclusive).*\\bexclusive\\b' },
+        { key: 'non-exclusive', label: 'Non-exclusive', fieldId: 'CheckBox11', expect: 'non-?\\s?exclusive' },
       ],
     },
-    {
-      key: 'term', kind: 'choice', label: 'Term', required: true,
-      options: [
-        { key: 'close', label: 'Until the deal closes', fieldId: 'CheckBox8', expect: 'continue\\s+until\\s+clos|until\\s+closing' },
-        { key: 'fixed', label: 'Ends on a fixed date',  fieldId: 'CheckBox9', expect: 'ends?\\s+at\\s+11:?59|and\\s+ends\\s+at\\b', revealToken: 'retainer_end_date' },
-      ],
-    },
+    // NO TERM GROUP. It used to map Term A/B onto CheckBox8 and CheckBox9, and
+    // docs/ia-buyer-packet-selections.md records those as two boxes on PAGE 9 —
+    // out of scope, and ALREADY TICKED on the template. Ticking them as "the term
+    // of this agreement" would have written a term onto the wrong clause of a
+    // signed agreement. The spec's resolution is that §6.A / §6.B become **Labels**
+    // carrying an `X` (see "Term A/B as Labels" in that doc), which is a template
+    // change; until it is made there is no honest checkbox for the term and this
+    // panel does not invent one.
     {
       key: 'policy', kind: 'toggles', label: 'Policy', collapsed: true,
       help: 'The packet is authored with appointed agency and consensual dual agency on.',
       options: [
-        { key: 'single_seller', label: 'Single seller',    fieldId: 'CheckBox4', default: false, expect: 'single\\s+seller\\s+agency' },
-        { key: 'single_buyer',  label: 'Single buyer',     fieldId: 'CheckBox5', default: false, expect: 'single\\s+buyer\\s+agency' },
-        { key: 'appointed',     label: 'Appointed agency', fieldId: 'CheckBox6', default: true,  expect: 'appointed\\s+agency' },
-        { key: 'dual',          label: 'Consensual dual',  fieldId: 'CheckBox7', default: true,  expect: 'consensual\\s+dual\\s+agency' },
+        { key: 'single_seller', label: 'Single seller',    fieldId: 'CheckBox12', default: false, expect: 'single\\s+seller\\s+agency' },
+        { key: 'single_buyer',  label: 'Single buyer',     fieldId: 'CheckBox13', default: false, expect: 'single\\s+buyer\\s+agency' },
+        { key: 'appointed',     label: 'Appointed agency', fieldId: 'CheckBox6',  default: true,  expect: 'appointed\\s+agency' },
+        { key: 'dual',          label: 'Consensual dual',  fieldId: 'CheckBox7',  default: true,  expect: 'consensual\\s+dual\\s+agency' },
       ],
     },
     {
       // Ticked on every buyer packet and never shown: the client is the buyer.
       key: 'party', kind: 'fixed',
-      options: [{ key: 'buyer', label: 'Party: Buyer', fieldId: 'CheckBox3', value: true, expect: '^(prospective\\s+)?buyer\\b' }],
+      options: [{ key: 'buyer', label: 'Party: Buyer', fieldId: 'CheckBox2', value: true, expect: '^(prospective\\s+)?buyer\\b' }],
     },
   ],
 })
