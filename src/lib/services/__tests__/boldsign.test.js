@@ -1168,10 +1168,26 @@ describe('Buyer1NameLabel — the client label, whichever side the deal is', () 
     expect(label({ contact: nic, deal: {} })).toBe('nic madsen')
   })
 
-  it('_2 is the same name again, not the second party', () => {
+  // The suffix numbers the INSTANCE, not the party: `_1`, `_2`, `_3` … are the
+  // same name printed again on the same document. `Buyer2NameLabel` is the
+  // second party. Numbering starts at `_1` and the rule is `/_\d+$/`, so the
+  // count of digits never matters.
+  it('_1, _2, _3 … are the same name again, not further parties', () => {
     const args = { contact: { ...nic, type: 'seller' }, deal: { comp_data: { transaction_type: 'seller' } } }
-    expect(label(args, 'Buyer1NameLabel_2')).toBe('nic madsen')
-    expect(label(args, 'Buyer1NameLabel_3')).toBe('nic madsen')
+    for (const n of ['_1', '_2', '_3', '_4', '_10', '_11']) {
+      expect(label(args, `Buyer1NameLabel${n}`), `Buyer1NameLabel${n}`).toBe('nic madsen')
+    }
+  })
+
+  it('numbers instances on the other canonical labels the same way', () => {
+    const args = {
+      contact: nic,
+      deal: { comp_data: { transaction_type: 'seller' } },
+      property: { address: '79 Northshore Drive', city: 'Sioux City', state: 'IA' },
+      agent: { name: 'Daniel Stillson' },
+    }
+    expect(label(args, 'PropertyAddressLabel_1')).toBe('79 Northshore Drive')
+    expect(label(args, 'Agent1NameLabel_2')).toBe('Daniel Stillson')
   })
 
   it('Buyer2NameLabel is the second client', () => {
