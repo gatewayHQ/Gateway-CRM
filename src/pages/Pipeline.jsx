@@ -26,7 +26,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, emptyLabelsToRemove, partyNameGaps, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { readDealTerms, termsForDeal, termsFilled, buildTermsPatch, normalizeTermValue, derivedTermHint } from '../lib/services/dealTerms.js'
 import { isOfficeAdmin } from '../lib/officeAdmins.js'
@@ -3079,7 +3079,18 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     // deal doesn't have — left blank above, and removed from the draft outright
     // so the template doesn't show them as unfilled "Label" placeholders. See
     // conditionalFieldsToRemove in boldsignFields.js.
-    const fieldRemovalIds = conditionalFieldsToRemove({ fields: details.fields || [], values })
+    // Two reasons a field is removed rather than sent, and both end as one list:
+    //   • it names a co-buyer or second agent this deal doesn't have
+    //     (conditionalFieldsToRemove), and
+    //   • it is a Label with nothing in it, which BoldSign would otherwise print
+    //     on the page as the literal word "Label" (emptyLabelsToRemove).
+    // The second subsumes most of the first, but the first is kept: it says WHY
+    // in the code for the three fields the CRM has a token for, and a Set makes
+    // the overlap free.
+    const fieldRemovalIds = [...new Set([
+      ...conditionalFieldsToRemove({ fields: details.fields || [], values }),
+      ...emptyLabelsToRemove({ fields: details.fields || [], values }),
+    ])]
     return {
       templateId, deal_id: deal.id, roles, roleRemovalIndices, sharedFormFields, fieldRemovalIds,
       emailSubject: subject, documentName: docName, labels,
@@ -3284,6 +3295,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // the assigned signer's name and silently drops whatever we send, so the
   // document goes out with the WRONG name rather than a blank one.
   const nameMisuse = signerBoundPrefillFields({ fields, values })
+
+  // THE ONE GAP THAT IS NEVER OK TO SHIP QUIETLY: an agreement whose client-name
+  // lines are blank. The brokerage name and the appointed agent fill from a
+  // constant and from the agent record, so they come through even when the deal
+  // has no contact linked — which is why a page can look half-filled and leave
+  // the agent concluding the CRM stopped pulling data over. Says which of the two
+  // causes it is, because they have different fixes.
+  const nameGaps = partyNameGaps({ fields, values })
 
   // Recomputed for the warning above, which names the value each misused Name
   // field was SUPPOSED to print — that is what tells an admin which Label to
@@ -3606,6 +3625,42 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                 will ask. Only an admin gets the fix, because only an admin can
                 apply it — and to an agent "delete it and place a Label" is an
                 instruction for a screen they have never opened. */}
+            {/* Blank client-name lines. Two causes, one appearance on the page,
+                different fixes — so the wording splits and only the admin half
+                mentions the template. */}
+            {(nameGaps.empty.length > 0 || nameGaps.noneNamed) && (
+              <div style={{ background:'#fff5f5', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:12, fontSize:12, lineHeight:1.6 }} role="alert">
+                {nameGaps.noneNamed ? (
+                  <>
+                    <strong>No box on this form is set up to print the client’s name.</strong>
+                    <div style={{ marginTop:4 }}>
+                      Whatever lines the form has for the client will go out blank — the CRM has the
+                      name, but nothing on this template asks for it. You can still type it in below
+                      if a box is offered.
+                    </div>
+                    {showDiagnostics && (
+                      <div style={{ marginTop:6, color:'var(--gw-mist)' }}>
+                        Admin: name a <strong>Label</strong> on the template <code>client_names</code>
+                        {' '}(or <code>party_buyer_1</code> / <code>party_seller_1</code> for a single line each).
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <strong>
+                      The client’s name will be blank in {nameGaps.empty.length === 1 ? 'one place' : `${nameGaps.empty.length} places`}.
+                    </strong>
+                    <div style={{ marginTop:4 }}>
+                      This form asks for the client’s name and this deal has nobody to put there —
+                      link the client as a <strong>contact on the deal</strong> and reopen this
+                      screen, or type the name into the box below. The brokerage and agent names
+                      fill in from elsewhere, which is why the rest of the page looks complete.
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
             {nameMisuse.length > 0 && (
               <div style={{ background:'#fff5f5', border:'1px solid var(--gw-red)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:12, fontSize:12, lineHeight:1.6 }} role="alert">
                 <strong>This form will print the wrong name in {nameMisuse.length === 1 ? 'one place' : `${nameMisuse.length} places`}.</strong>

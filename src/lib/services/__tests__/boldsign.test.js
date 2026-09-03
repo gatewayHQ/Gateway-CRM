@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, dealClientSides, CANONICAL_LABEL_TOKENS, supportsReadOnly, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES, conditionalFieldsToRemove } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, dealClientSides, CANONICAL_LABEL_TOKENS, supportsReadOnly, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES, conditionalFieldsToRemove, emptyLabelsToRemove, partyNameGaps } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -1130,6 +1130,76 @@ describe('additional_agent_date — only meaningful once there is an additional 
     const vals = crmTokenValues({ deal, today: '2026-08-18' })
     expect(vals.additional_agent_name).toBe('Pat Broker')
     expect(vals.additional_agent_date).toBe('09/01/2026')
+  })
+})
+
+// BoldSign renders an unfilled Label as the literal word "Label" ON THE PAGE. An
+// Appointed Agency Agreement came back from a real send with "Label" printed on
+// both lines where the client's name belongs.
+describe('emptyLabelsToRemove — an empty Label must not print "Label"', () => {
+  const fields = [
+    { id: 'Label1', type: 'label',   name: 'client_names' },
+    { id: 'Label2', type: 'label',   name: 'agent_name' },
+    { id: 'Label3', type: 'label' },                        // never named by anyone
+    { id: 'Text1',  type: 'textbox', name: 'notes' },        // a signer's to fill
+    { id: 'Chk1',   type: 'checkbox' },
+  ]
+
+  it('removes every Label going out blank, named or not', () => {
+    expect(emptyLabelsToRemove({ fields, values: { Label2: 'Daniel Stillson' } }).sort())
+      .toEqual(['Label1', 'Label3'])
+  })
+
+  it('keeps a Label that carries a value', () => {
+    expect(emptyLabelsToRemove({ fields, values: { Label1: 'Jane Doe', Label2: 'D S', Label3: 'x' } }))
+      .toEqual([])
+  })
+
+  // The distinction that matters: an empty Label is noise on the page, an empty
+  // TEXTBOX is the signer's job. Removing the latter would take the form away
+  // from the person meant to fill it in.
+  it('never removes a field a signer is supposed to fill', () => {
+    const out = emptyLabelsToRemove({ fields, values: {} })
+    expect(out).not.toContain('Text1')
+    expect(out).not.toContain('Chk1')
+  })
+
+  it('is empty rather than broken with nothing to work on', () => {
+    expect(emptyLabelsToRemove()).toEqual([])
+    expect(emptyLabelsToRemove({ fields: [], values: {} })).toEqual([])
+  })
+})
+
+// Two causes look identical on the page and need different fixes, so they are
+// reported apart. This is the gap that made a half-filled agreement read as "the
+// CRM stopped pulling data over": the brokerage and agent names fill from a
+// constant and the agent record, the client's name from the deal's contact.
+describe('partyNameGaps — why the client line is blank', () => {
+  const fields = [
+    { id: 'Label1', type: 'label', name: 'client_names' },
+    { id: 'Label2', type: 'label', name: 'agent_name' },
+  ]
+
+  it('names the party fields that resolved to nothing', () => {
+    const g = partyNameGaps({ fields, values: { Label2: 'Daniel Stillson' } })
+    expect(g.empty.map(f => f.id)).toEqual(['Label1'])
+    expect(g.noneNamed).toBe(false)
+  })
+
+  it('says nothing when the client name came through', () => {
+    expect(partyNameGaps({ fields, values: { Label1: 'Jane Doe', Label2: 'D S' } }).empty).toEqual([])
+  })
+
+  it('reports the other cause when no field asks for a party name at all', () => {
+    // A template whose client lines were never named: nothing can ever fill them,
+    // and no amount of linking contacts to the deal will change that.
+    const g = partyNameGaps({ fields: [{ id: 'Label9', type: 'label' }], values: {} })
+    expect(g.noneNamed).toBe(true)
+    expect(g.empty).toEqual([])
+  })
+
+  it('counts an agent-only template as unnamed for the party, not as filled', () => {
+    expect(partyNameGaps({ fields: [fields[1]], values: { Label2: 'D S' } }).noneNamed).toBe(true)
   })
 })
 

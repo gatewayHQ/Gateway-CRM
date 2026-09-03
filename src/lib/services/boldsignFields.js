@@ -1027,6 +1027,69 @@ export function conditionalFieldsToRemove({ fields = [], values = {} } = {}) {
     .map(f => f.id)
 }
 
+// Tokens that print a PARTY's name — the client, their co-buyer/co-seller. An
+// agreement that goes out with these blank names nobody, which is the one gap on
+// this screen that is never acceptable to ship silently.
+const PARTY_NAME_TOKENS = new Set([
+  'client_name', 'client_names', 'client_2_name',
+  'seller_name', 'seller_names', 'seller_2_name',
+  'buyer_1_name', 'buyer_2_name',
+  'party_buyer_1', 'party_buyer_2', 'party_seller_1', 'party_seller_2',
+])
+
+/**
+ * Fields on this template that are meant to print a party's name and resolved to
+ * nothing — plus whether the template names such a field at all.
+ *
+ * WHY THIS EXISTS. An Appointed Agency Agreement came back from a real send with
+ * the literal word "Label" on both lines where the client's name belongs, while
+ * the brokerage name and the appointed agent's name filled in correctly. Those
+ * two fill from the agent and a constant; the client's name fills from the deal's
+ * linked CONTACT. So a deal with no contact linked produces exactly that page,
+ * and nothing on the send screen said so — the agent could only conclude the CRM
+ * had stopped pulling data over.
+ *
+ * Two different faults look identical on the page and need different fixes, so
+ * they are reported apart:
+ *   `empty`     — the template asks for a party name and the deal has nobody to
+ *                 put there. Link a contact to the deal.
+ *   `noneNamed` — no field on this template carries a party-name token at all, so
+ *                 nothing can ever fill those lines. The TEMPLATE needs naming
+ *                 (an admin job) — see the Label guidance in
+ *                 docs/boldsign-integration.md.
+ */
+export function partyNameGaps({ fields = [], values = {} } = {}) {
+  const named = (fields || []).filter(f => f?.id && PARTY_NAME_TOKENS.has(fieldTokenKey(f)))
+  const empty = named.filter(f => !String(values?.[f.id] ?? '').trim())
+  return { empty, noneNamed: named.length === 0, named }
+}
+
+// ── Empty Labels must not reach the client ───────────────────────────────────
+// BoldSign renders an unfilled **Label** as its own placeholder — the literal
+// word "Label" — printed on the page. On an Appointed Agency Agreement that put
+// the word "Label" on the two lines where the client's name belongs, which reads
+// as a broken form rather than a blank one.
+//
+// CONDITIONAL_PARTY_TOKENS above already removed three specific ones (the
+// co-buyer, the second appointed agent). That was too narrow by construction: it
+// only covered fields the CRM knows a token for, and the fields that print
+// "Label" are exactly the ones nothing filled — including every Label the
+// template author never named, which no token list can enumerate.
+//
+// So the rule is about the VALUE, not the token: any Label going out with nothing
+// in it is removed from the draft. Removing an empty Label loses nothing a signer
+// would have seen (a Label is read-only — no signer could have typed in it) and
+// leaves the printed line blank, exactly as the paper form is.
+//
+// Labels ONLY. A signer-fillable box left empty is the signer's to complete and
+// must stay on the document.
+export function emptyLabelsToRemove({ fields = [], values = {} } = {}) {
+  return (fields || [])
+    .filter(f => f?.id && isSharedField(f.type))
+    .filter(f => !String(values?.[f.id] ?? '').trim())
+    .map(f => f.id)
+}
+
 // ── Fields nobody configured ─────────────────────────────────────────────────
 // BoldSign auto-names a placed field by type plus a counter: `Label1`,
 // `Checkbox2`, `Name3`, `EditableDate1`. That id is all the send screen has to
