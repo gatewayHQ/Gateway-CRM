@@ -2,7 +2,7 @@ import React, { useState, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { formatCurrency } from '../lib/helpers.js'
-import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast, ActionMenu } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
 import { findMatchingBuyers } from '../lib/matching.js'
@@ -1220,36 +1220,40 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       </div>
       <div className="drawer__foot">
 
+        {/* Secondary actions live behind one menu so the footer keeps a single
+            primary action instead of five buttons competing for attention. */}
         {property?.id && (
-          <div style={{ display:'flex', gap:6, marginRight:'auto' }}>
-            <button
-              className="btn btn--secondary"
-              onClick={startDeal}
+          <div style={{ marginRight: 'auto' }}>
+            <ActionMenu
+              label={startingDeal ? 'Creating…' : 'Actions'}
               disabled={startingDeal}
-              title="Create a deal in the Pipeline linked to this property"
-            >
-              <Icon name="pipeline" size={13} />
-              {startingDeal ? 'Creating…' : 'Start Deal'}
-            </button>
-            <button
-              className="btn btn--secondary"
-              title="Email a Just Closed / New Listing announcement about this property"
-              onClick={() => { onClose(); announce?.(property.id) }}
-            >
-              <Icon name="mail" size={13} />
-              Announce
-            </button>
-            <button
-              className="btn btn--ghost"
-              title="Copy share link — works on social media, email, and text"
-              onClick={() => {
-                const url = `${window.location.origin}/share/${property.id}`
-                navigator.clipboard.writeText(url).then(() => pushToast('Share link copied! Works on social, email & text.'))
-              }}
-            >
-              <Icon name="link" size={13} />
-              Share Link
-            </button>
+              items={[
+                {
+                  id: 'deal',
+                  label: 'Start a Deal',
+                  icon: 'pipeline',
+                  title: 'Create a deal in the Pipeline linked to this property',
+                  onClick: startDeal,
+                },
+                {
+                  id: 'announce',
+                  label: 'Announce by Email',
+                  icon: 'mail',
+                  title: 'Email a Just Closed / New Listing announcement about this property',
+                  onClick: () => { onClose(); announce?.(property.id) },
+                },
+                {
+                  id: 'share',
+                  label: 'Copy Share Link',
+                  icon: 'link',
+                  title: 'Copy share link — works on social media, email, and text',
+                  onClick: () => {
+                    const url = `${window.location.origin}/share/${property.id}`
+                    navigator.clipboard.writeText(url).then(() => pushToast('Share link copied! Works on social, email & text.'))
+                  },
+                },
+              ]}
+            />
           </div>
         )}
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>

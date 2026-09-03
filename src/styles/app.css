@@ -1514,3 +1514,39 @@ select.form-control { cursor: pointer; }
 }
 .coagent-item span:first-of-type { flex: 1; }
 .lp__404-sub { font-size: 15px; color: var(--gw-mist); margin-bottom: 28px; }
+
+/* ── ACTION MENU (overflow for secondary drawer/footer actions) ── */
+.action-menu { position: relative; display: inline-flex; }
+.action-menu__trigger { display: inline-flex; align-items: center; gap: 6px; }
+.action-menu__trigger .action-menu__caret { transition: transform 150ms ease; opacity: 0.6; }
+.action-menu__trigger.is-open .action-menu__caret { transform: rotate(180deg); }
+.action-menu__pop {
+  position: absolute; z-index: 60; min-width: 210px; padding: 6px;
+  background: #fff; border: 1px solid var(--gw-border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-modal);
+  display: flex; flex-direction: column; gap: 2px;
+  animation: fadeIn 120ms ease;
+}
+.action-menu__pop--up   { bottom: calc(100% + 6px); }
+.action-menu__pop--down { top: calc(100% + 6px); }
+.action-menu__pop--left  { left: 0; }
+.action-menu__pop--right { right: 0; }
+.action-menu__item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 9px 12px; border: none; background: none; cursor: pointer;
+  border-radius: 6px; text-align: left; color: var(--gw-ink);
+  font-family: var(--font-body); font-size: 13px; font-weight: 500;
+  transition: background 120ms ease, color 120ms ease;
+}
+.action-menu__item:hover:not(:disabled) { background: var(--gw-bone); }
+.action-menu__item:disabled { opacity: 0.45; cursor: not-allowed; }
+.action-menu__item.danger { color: var(--gw-red); }
+.action-menu__item-label { flex: 1; }
+
+/* Footer actions wrap instead of overflowing on narrow drawers. */
+.drawer__foot { flex-wrap: wrap; }
+
+/* The Quick Add FAB sits at the same screen corner as a drawer's Save button —
+   keep it out of the way while any drawer or modal is open. */
+body:has(.drawer) .fab-wrap,
+body:has(.modal-backdrop) .fab-wrap { display: none; }
