@@ -256,6 +256,27 @@ export async function boldsign(path, { method = 'GET', form, json, raw = false, 
 
 const DEAL_BUCKET = 'deal-documents'
 
+// The storage object name for a composed document filed onto a deal.
+//
+// Sanitized the same way the Documents tab's own upload path is
+// (`[^a-zA-Z0-9._-] -> _`), for a reason specific to this feature: a composed
+// document name is `<template name> — <street line>`, so it carries an em dash
+// as a matter of course and, on a packet named like "Listing agreement/SD agency
+// packet", a FORWARD SLASH. Storage reads that slash as a folder separator — the
+// document would be filed a level down, where the Documents tab lists one flat
+// prefix and would never show it. A `.pdf` already on the name is not doubled.
+//
+// Exported for tests: this is the one line between "filed on the deal" and
+// "uploaded somewhere nobody looks".
+export function dealFilingName(documentName) {
+  const base = String(documentName || 'document')
+    .replace(/\.pdf$/i, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')   // spaces, the em dash, and the slash
+    .replace(/-{2,}/g, '-')              // no runs, so the name stays readable
+    .replace(/^[-._]+|[-._]+$/g, '')     // never lead or trail with a separator
+  return `${base || 'document'}-filled.pdf`
+}
+
 // ─── Document bytes ───────────────────────────────────────────────────────────
 // A send used to carry its PDF as base64 inside the JSON request body. Vercel
 // caps a serverless request at 4.5 MB and base64 adds ~33%, so anything over
@@ -2380,13 +2401,18 @@ async function handler(req, res) {
     // Returns a short-lived signed storage URL, never base64: a serverless response
     // is capped at 4.5 MB and a scanned packet is bigger than that, so base64 would
     // work in testing and fail on exactly the documents worth printing.
-    if (body.action === 'document-print') {
-      const id = body.envelopeId || body.documentId
-      if (!id) return res.status(400).json({ error: 'documentId required' })
-      const svc    = getServiceClient()
-      const record = await resolveDocumentRecord(svc, id, { verb: 'print' })
-      if (!record.deal_id) return res.status(400).json({ error: 'This document is not attached to a deal' })
-
+    // The document as it stands, composed into one readable PDF: BoldSign's own
+    // pages, every filled field value drawn on, the source form flattened, and a
+    // signing summary appended (buildPrintablePdf).
+    //
+    // SHARED BY `document-print` AND `document-file` deliberately. They differ only
+    // in where the bytes go — a throwaway link, or the deal's filing cabinet — and
+    // if they composed separately the copy an agent files could drift from the copy
+    // they reviewed, which is the one thing a filed document must never do.
+    //
+    // Throws an Error carrying `.status` (and `.documentStatus` where it helps), so
+    // each caller answers with the same words for the same failure.
+    const composeFilledPdf = async (svc, { id, record }) => {
       const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
 
       // BoldSign's /document/download is the only source of the current bytes. It is
@@ -2406,7 +2432,7 @@ async function handler(req, res) {
         }
       } catch (err) {
         downloadStatus = err.status || null
-        console.warn(`[boldsign] print: /document/download refused ${id} (${err.message}) — trying the deal's own copy`)
+        console.warn(`[boldsign] compose: /document/download refused ${id} (${err.message}) — trying the deal's own copy`)
       }
       if (!pdfBytes) {
         const stored = record.signed_storage_path
@@ -2418,17 +2444,29 @@ async function handler(req, res) {
       if (!pdfBytes) {
         // Name the door that was locked. "Could not print" sent agents to their
         // admin; a status code tells them whether to wait, retry, or fix the draft.
-        return res.status(downloadStatus === 429 ? 429 : 400).json({
-          error: downloadStatus === 429
-            ? 'BoldSign is rate-limiting this account, so the PDF could not be built right now. Wait a minute and try again — the draft is untouched.'
-            : 'BoldSign will not release this document\'s pages yet, and no copy is stored on the deal. '
-              + 'This usually means the document is still being created — wait a moment and try again. '
-              + 'If it persists, open Edit Fields and use Preview inside BoldSign to check the document is intact.',
-          documentStatus: normalizeStatus(props?.status) || null,
-        })
+        const e = new Error(downloadStatus === 429
+          ? 'BoldSign is rate-limiting this account, so the PDF could not be built right now. Wait a minute and try again — the draft is untouched.'
+          : 'BoldSign will not release this document\'s pages yet, and no copy is stored on the deal. '
+            + 'This usually means the document is still being created — wait a moment and try again. '
+            + 'If it persists, open Edit Fields and use Preview inside BoldSign to check the document is intact.')
+        e.status = downloadStatus === 429 ? 429 : 400
+        e.documentStatus = normalizeStatus(props?.status) || null
+        throw e
       }
 
-      const printable = await buildPrintablePdf({ pdfBytes, props, documentName: record.document_name })
+      return { printable: await buildPrintablePdf({ pdfBytes, props, documentName: record.document_name }), props }
+    }
+
+    if (body.action === 'document-print') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+      const svc    = getServiceClient()
+      const record = await resolveDocumentRecord(svc, id, { verb: 'print' })
+      if (!record.deal_id) return res.status(400).json({ error: 'This document is not attached to a deal' })
+
+      let printable, props
+      try { ({ printable, props } = await composeFilledPdf(svc, { id, record })) }
+      catch (err) { return res.status(err.status || 400).json({ error: err.message, documentStatus: err.documentStatus || null }) }
       // A print artifact is a convenience copy, not a deal document: kept under a
       // `print/` prefix so it never appears in the Documents tab as if it were a
       // real filing, and overwritten each time rather than accumulating.
@@ -2463,6 +2501,65 @@ async function handler(req, res) {
         previewUrl,
         filename,
         status:     normalizeStatus(props?.status),
+        fieldCount: buildSigningSummary(props).total,
+      })
+    }
+
+    // FILE THE DOCUMENT ONTO THE DEAL — the deliberate counterpart to
+    // `document-print`.
+    //
+    // WHAT THIS FIXES. Save PDF downloads to the agent's own machine and nothing
+    // else, and the print artifact it builds is written under a `print/` prefix the
+    // Documents tab filters out on purpose ("a convenience copy, not a deal
+    // document"). That reasoning is right for a throwaway review copy — but it left
+    // NO way to keep the filled packet on the deal at all. An agent who prepared an
+    // agreement, filled it from the CRM and wanted it on the file had to download it
+    // and upload it back through the Documents tab by hand, and the CRM held no
+    // record of the document it had itself composed.
+    //
+    // So this writes the same composed bytes to `deal-<id>/<timestamp>-<name>`, the
+    // flat path the Documents tab lists and `upload()` already uses, and the filing
+    // shows up beside everything else on the deal.
+    //
+    // ACCUMULATES, never overwrites (`upsert: false` under a timestamp): a filed
+    // document is a record of what the packet said at a moment, and silently
+    // replacing yesterday's copy would destroy exactly the history filing it is for.
+    if (body.action === 'document-file') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+      const svc    = getServiceClient()
+      const record = await resolveDocumentRecord(svc, id, { verb: 'file' })
+      if (!record.deal_id) return res.status(400).json({ error: 'This document is not attached to a deal, so there is nowhere to file it' })
+
+      let printable, props
+      try { ({ printable, props } = await composeFilledPdf(svc, { id, record })) }
+      catch (err) { return res.status(err.status || 400).json({ error: err.message, documentStatus: err.documentStatus || null }) }
+
+      // Sanitized the same way the Documents tab's own upload does. It matters more
+      // here than it looks: a composed document name is `<template> — <street>`, so
+      // it routinely carries an em dash and, on a packet like
+      // "Listing agreement/SD agency packet", a FORWARD SLASH — which storage would
+      // read as a folder separator and quietly file the document one level down,
+      // where the Documents tab (which lists a single flat prefix) would never
+      // show it.
+      const filename = dealFilingName(record.document_name)
+      const path     = `deal-${record.deal_id}/${Date.now()}-${filename}`
+      const { error: upErr } = await svc.storage.from(DEAL_BUCKET)
+        .upload(path, printable, { contentType: 'application/pdf', upsert: false })
+      if (upErr) return res.status(500).json({ error: `Could not file the PDF on this deal: ${upErr.message}` })
+
+      // Best-effort: the document IS filed at this point, and failing the request
+      // over a missing audit row would tell the agent it didn't happen.
+      await logSignatureAudit(svc, {
+        dealId: record.deal_id, actorId: actor.agent.id, documentId: id, action: 'file',
+        documentName: record.document_name, templateId: record.boldsign_template_id,
+        recordId: record.id,
+      })
+
+      return res.json({
+        filed:      true,
+        filename,
+        path,
         fieldCount: buildSigningSummary(props).total,
       })
     }

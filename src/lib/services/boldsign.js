@@ -85,6 +85,14 @@ export const captureLayout    = (documentId) => call({ action: 'layout-capture',
 // it. The wire action is still `document-print` — it fed a Print button before the
 // browser's print dialog turned out to render these blank (see src/lib/savePdf.js).
 export const documentPdfUrl   = (documentId) => call({ action: 'document-print', documentId })
+// FILE the same composed copy onto the deal, in the deal's own Documents tab,
+// rather than downloading it. `document-print` writes its bytes under a `print/`
+// prefix the Documents tab deliberately hides (a review copy is not a filing),
+// which left no way to keep a prepared packet on the deal at all — the agent had
+// to download it and upload it back by hand. Resolves { filed, filename, path,
+// fieldCount }; accumulates rather than overwriting, because a filed document
+// records what the packet said at a moment.
+export const fileDocumentToDeal = (documentId) => call({ action: 'document-file', documentId })
 // Put a prepared DRAFT in front of its signers — BoldSign's `draftSend`. This is
 // the ONLY call in this file that sends anything: creating a draft, filling it,
 // downloading it and reopening it are all deliberately non-sending, so an agent
