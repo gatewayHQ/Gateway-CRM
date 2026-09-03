@@ -648,6 +648,22 @@ template with the template's defaults and the agent re-did the work from memory.
   repositioned (`Update`) or created (`Add`), and a field the new draft has that the
   layout does *not* name is `Remove`d — otherwise a field the agent deliberately
   deleted would reappear on every send.
+- **A removal needs positive evidence, because a capture is lossy.** Absence from the
+  saved layout has two causes, and only one of them is a deletion: the agent removed
+  the field, or *we could not store it*. `normalizeCapturedField()` returns null for
+  any type outside `EDITABLE_FIELD_TYPES` — **`Name`, `Email` and `Phone` among them**,
+  which is most of a signature block on an agency packet — and for any field with no
+  usable bounds. Treating that gap as a deletion deleted those fields from the next
+  draft, on a 200 that reported success, and it was a **one-way ratchet**: the next
+  capture read a document that no longer had them, so they never came back and each
+  prepare stripped the packet further. A packet degraded this way is also a plausible
+  trigger for BoldSign's own editor to throw its generic "unexpected error" page.
+  Capture now records `layout.unrestorableIds`, and `canRemove()` refuses to delete
+  an id in that list, an id in `commonFields` (sender-filled Labels are captured
+  outside `signers`, so all of them looked deleted), or **anything at all** on a
+  layout stored before this list existed. Conservative on purpose: a stale field
+  creeping back is a nuisance, a deleted signature block is a broken agreement. Rows
+  written before the fix self-heal on their next capture.
 - **Values are not clobbered.** A field that already has a value on the new draft
   keeps it (that's the CRM's fresh prefill — price, dates, names); the saved value
   only fills a field the new draft left empty, which is the hand-typed-label case

@@ -1048,14 +1048,42 @@ export function normalizeCapturedField(f) {
 // A BoldSign document's properties → the layout we store on the deal.
 // `dropped` is reported (not swallowed) so a form full of types we can't restore
 // is visible in the logs instead of looking like a successful empty capture.
+//
+// UNRESTORABLE IDS ARE RECORDED, NOT JUST COUNTED, and that is the point of this
+// function's shape. A capture is LOSSY: normalizeCapturedField returns null for
+// any type outside EDITABLE_FIELD_TYPES — Name, Email and Phone among them, which
+// every signature block on an agency packet is full of — and for any field with
+// no usable bounds.
+//
+// buildLayoutEditPayload() decides what to REMOVE from the next draft by asking
+// "is this live field absent from the saved layout?". Absence had exactly two
+// causes and it could not tell them apart:
+//
+//   1. the agent deleted the field last time  → removing it is correct
+//   2. WE could not store the field           → removing it destroys the form
+//
+// So every Name and Phone box on the packet was deleted from the next draft,
+// silently, on a 200. It is a one-way ratchet: the next capture reads a document
+// that no longer has them, so they never come back, and each prepare strips the
+// packet further.
+//
+// Listing the ids makes case 2 knowable, so removal can be limited to case 1.
 export function normalizeCapturedLayout(props) {
   const signers = []
   let dropped = 0
+  // Ids of fields this capture could NOT represent. Anything in here is ours to
+  // leave alone, never ours to delete.
+  const unrestorableIds = []
+  const note = (f) => {
+    dropped++
+    const id = f?.id || f?.formFieldId
+    if (id) unrestorableIds.push(String(id))
+  }
   for (const [i, s] of (props?.signerDetails || []).entries()) {
     const fields = []
     for (const f of (s?.formFields || [])) {
       const n = normalizeCapturedField(f)
-      if (n) fields.push(n); else dropped++
+      if (n) fields.push(n); else note(f)
     }
     signers.push({
       signerRole:  s?.signerRole || '',
@@ -1074,10 +1102,14 @@ export function normalizeCapturedLayout(props) {
   const commonFields = []
   for (const f of (props?.commonFields || [])) {
     const n = normalizeCapturedField(f)
-    if (n) commonFields.push(n); else dropped++
+    if (n) commonFields.push(n); else note(f)
   }
   const fieldCount = signers.reduce((t, s) => t + s.formFields.length, 0)
-  return { layout: { signers, commonFields }, fieldCount, dropped }
+  // `unrestorableIds` is ALWAYS present, even when empty. Its presence is what
+  // tells buildLayoutEditPayload this layout was captured by a version that knows
+  // the difference — a row stored before this fix has no such list, and is
+  // treated as "cannot prove any deletion" rather than "nothing was lost".
+  return { layout: { signers, commonFields, unrestorableIds }, fieldCount, dropped }
 }
 
 // Match a saved signer entry to a signer on the NEW document. Role first (the
@@ -1129,6 +1161,32 @@ export function matchLayoutSigner(saved, signerDetails = []) {
 // entire arrangement (see applyFieldLayout).
 //
 // Returns null when there is nothing to do, so callers can skip the API call.
+// May this live field be deleted from the new draft because the saved layout does
+// not carry it?
+//
+// Only when the layout can ACCOUNT for its absence. Three ways it cannot, and
+// each one used to cost the agent a real field:
+//
+//   • The layout predates unrestorableIds (every row written before this fix).
+//     It cannot distinguish loss from deletion, so it proves nothing and NOTHING
+//     is removed. Stale fields creeping back is a nuisance; a deleted signature
+//     block is a broken agreement, and BoldSign's own editor throws on a document
+//     stripped this way rather than telling anyone what happened.
+//   • The id is one the capture could not represent. That is our limitation, not
+//     the agent's intent.
+//   • The id is a sender-filled COMMON field. Those are captured into
+//     `commonFields` and never into `signers`, so every one of them looks deleted
+//     to a check that only reads `signers` — and our own sends put every Label on
+//     the anchor signer, so this is the common case, not a corner.
+//
+// Deliberately conservative: this returns false whenever it is unsure.
+export function canRemove(layout, id) {
+  if (!Array.isArray(layout?.unrestorableIds)) return false   // legacy row — prove nothing
+  const key = String(id)
+  if (layout.unrestorableIds.some(u => String(u) === key)) return false
+  return !(layout.commonFields || []).some(f => f?.id && String(f.id) === key)
+}
+
 export function buildLayoutEditPayload({ layout, signerDetails = [], confirmedOnly = false } = {}) {
   const savedSigners = layout?.signers || []
   if (!savedSigners.length && !(layout?.commonFields || []).length) return null
@@ -1142,6 +1200,8 @@ export function buildLayoutEditPayload({ layout, signerDetails = [], confirmedOn
     const byId       = new Map(existing.filter(f => f?.id).map(f => [String(f.id), f]))
     const savedIds   = new Set((saved.formFields || []).map(f => f.id).filter(Boolean))
     const formFields = []
+    // Removal needs POSITIVE EVIDENCE — see canRemove above.
+    const removable  = (id) => canRemove(layout, id)
 
     for (const f of (saved.formFields || [])) {
       const live = f.id ? byId.get(String(f.id)) : null
@@ -1161,9 +1221,16 @@ export function buildLayoutEditPayload({ layout, signerDetails = [], confirmedOn
       if (live?.value != null && live.value !== '') field.value = String(live.value)
       formFields.push(field)
     }
-    // Fields on the new draft the agent had removed last time.
+    // Fields on the new draft the agent had removed last time — and ONLY those.
+    // A live field absent from the saved layout is not proof of a deletion: it is
+    // equally what a lossy capture leaves behind, and deleting on that guess is
+    // how the Name and Phone boxes disappeared off an agency packet one prepare
+    // at a time. canRemove() insists the layout can actually account for the id.
     for (const f of existing) {
-      if (f?.id && !savedIds.has(String(f.id))) formFields.push({ editAction: 'Remove', id: f.id })
+      const id = f?.id && String(f.id)
+      if (!id || savedIds.has(id)) continue
+      if (!removable(id)) continue
+      formFields.push({ editAction: 'Remove', id: f.id })
     }
     if (formFields.length) signers.push({ editAction: 'Update', id: target.id, formFields })
   }

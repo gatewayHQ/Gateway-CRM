@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -758,6 +758,94 @@ describe('normalizeCapturedLayout', () => {
     expect(normalizeCapturedLayout({}).fieldCount).toBe(0)
     expect(normalizeCapturedLayout(null).fieldCount).toBe(0)
   })
+
+  it('names the fields it could not store, not just how many', () => {
+    const { layout, dropped } = normalizeCapturedLayout({
+      signerDetails: [{ id: 's1', formFields: [field(), field({ id: 'x', type: 'QuantumFlux' })] }],
+      commonFields:  [field({ id: 'c9', type: 'AlsoUnknown' })],
+    })
+    expect(dropped).toBe(2)
+    expect(layout.unrestorableIds).toEqual(['x', 'c9'])
+  })
+
+  it('always carries the list, even when nothing was lost', () => {
+    // Presence is the marker that this layout can be reasoned about at all.
+    expect(normalizeCapturedLayout(props).layout.unrestorableIds).toEqual([])
+  })
+})
+
+// THE SEAM THAT HAD NO TEST. Capture and restore were each covered alone, on
+// hand-written fixtures, and the bug lived in the space between them: capture
+// dropped a type, restore read the gap as a deletion, and the field was gone.
+// This drives a realistic /document/properties payload through both halves.
+describe('capture → restore, on a packet full of types a capture cannot store', () => {
+  // What an agency packet's signature block actually looks like: a signature, a
+  // date, and the Name/Email/Phone fields BoldSign will not take back through
+  // /document/edit — Name and Email are types this CRM handles all over
+  // boldsignFields.js, so they are not exotic.
+  const packet = {
+    signerDetails: [{
+      id: 's1', signerRole: 'Seller', signerEmail: 'seller@x.com', order: 1,
+      formFields: [
+        field({ id: 'sig1',   type: 'Signature' }),
+        field({ id: 'date1',  type: 'DateSigned' }),
+        field({ id: 'name1',  type: 'Name' }),
+        field({ id: 'email1', type: 'Email' }),
+        field({ id: 'phone1', type: 'Phone' }),
+      ],
+    }],
+  }
+
+  it('does not delete the signature block it could not store', () => {
+    const { layout, fieldCount, dropped } = normalizeCapturedLayout(packet)
+    // Two of the five survive the capture. That is the lossiness the restore has
+    // to account for rather than act on.
+    expect(fieldCount).toBe(2)
+    expect(dropped).toBe(3)
+
+    // The next prepare hands back a fresh draft carrying the template's full set.
+    const payload = buildLayoutEditPayload({
+      layout,
+      signerDetails: [{ id: 'n1', signerRole: 'Seller', formFields: packet.signerDetails[0].formFields.map(f => ({ id: f.id })) }],
+    })
+    const removed = (payload?.signers?.[0]?.formFields || []).filter(f => f.editAction === 'Remove')
+    expect(removed, 'a lossy capture must never delete what it could not represent').toEqual([])
+  })
+
+  it('is stable across repeated prepares rather than stripping the form each time', () => {
+    // The ratchet: capture → restore → capture again. Before the fix the second
+    // capture read a document three fields shorter than the first.
+    let live = packet.signerDetails[0].formFields.map(f => ({ ...f }))
+    for (let round = 0; round < 3; round++) {
+      const { layout } = normalizeCapturedLayout({ signerDetails: [{ ...packet.signerDetails[0], formFields: live }] })
+      const payload = buildLayoutEditPayload({
+        layout, signerDetails: [{ id: 'n1', signerRole: 'Seller', formFields: live.map(f => ({ id: f.id })) }],
+      })
+      const removedIds = new Set((payload?.signers?.[0]?.formFields || [])
+        .filter(f => f.editAction === 'Remove').map(f => String(f.id)))
+      live = live.filter(f => !removedIds.has(String(f.id)))
+    }
+    expect(live.map(f => f.id)).toEqual(['sig1', 'date1', 'name1', 'email1', 'phone1'])
+  })
+})
+
+describe('canRemove — the evidence a deletion needs', () => {
+  it('refuses on a layout captured before unrestorableIds existed', () => {
+    expect(canRemove({ signers: [] }, 'anything')).toBe(false)
+    expect(canRemove(null, 'anything')).toBe(false)
+  })
+
+  it('refuses for an id the capture could not represent', () => {
+    expect(canRemove({ unrestorableIds: ['name1'] }, 'name1')).toBe(false)
+  })
+
+  it('refuses for a sender-filled common field', () => {
+    expect(canRemove({ unrestorableIds: [], commonFields: [{ id: 'listPrice' }] }, 'listPrice')).toBe(false)
+  })
+
+  it('allows a genuine deletion', () => {
+    expect(canRemove({ unrestorableIds: [], commonFields: [] }, 'unwantedDate')).toBe(true)
+  })
 })
 
 describe('matchLayoutSigner — the saved arrangement finds the new document\'s signers', () => {
@@ -795,6 +883,10 @@ describe('buildLayoutEditPayload — restoring a layout onto a fresh draft', () 
         { id: 'agentAdded', fieldType: 'Initial', pageNumber: 3, bounds: { x: 20, y: 30, width: 60, height: 25 } },
       ],
     }],
+    // Captured by a version that records what it could not store, so an absent
+    // field really is an absent field. Without this the restore refuses to
+    // delete anything — see the legacy test below.
+    unrestorableIds: [],
   }
 
   it('UPDATES a field the new draft already has, and ADDS one it lacks', () => {
@@ -821,6 +913,56 @@ describe('buildLayoutEditPayload — restoring a layout onto a fresh draft', () 
     })
     const removed = payload.signers[0].formFields.filter(f => f.editAction === 'Remove')
     expect(removed).toEqual([{ editAction: 'Remove', id: 'unwantedDate' }])
+  })
+
+  // THE BUG THIS FILE SHIPPED WITH. Absence from the saved layout was read as
+  // "the agent deleted it", but a capture cannot store a Name/Email/Phone field,
+  // so every one of them was deleted from the next draft on a 200 that reported
+  // success. On an agency packet that is the signature block.
+  it('does NOT remove a field the capture could not store', () => {
+    const lossy = {
+      ...savedLayout,
+      unrestorableIds: ['sellerName', 'sellerPhone'],
+    }
+    const payload = buildLayoutEditPayload({
+      layout: lossy,
+      signerDetails: [{
+        id: 'n1', signerRole: 'Seller',
+        formFields: [{ id: 'tplSig' }, { id: 'sellerName' }, { id: 'sellerPhone' }, { id: 'unwantedDate' }],
+      }],
+    })
+    const removed = payload.signers[0].formFields.filter(f => f.editAction === 'Remove').map(f => f.id)
+    // The genuine deletion still goes; the two we simply could not represent stay.
+    expect(removed).toEqual(['unwantedDate'])
+  })
+
+  // Our own sends put every Label on the anchor signer, so these are the common
+  // case. They are captured into `commonFields` and never into `signers`, which
+  // made all of them look deleted to a check that only read `signers`.
+  it('does NOT remove a sender-filled common field', () => {
+    const withCommon = {
+      ...savedLayout,
+      commonFields: [{ id: 'listPrice', fieldType: 'Label', pageNumber: 1, bounds: { x: 1, y: 2, width: 80, height: 20 } }],
+    }
+    const payload = buildLayoutEditPayload({
+      layout: withCommon,
+      signerDetails: [{ id: 'n1', signerRole: 'Seller', formFields: [{ id: 'tplSig' }, { id: 'listPrice' }] }],
+    })
+    expect(payload.signers[0].formFields.filter(f => f.editAction === 'Remove')).toEqual([])
+  })
+
+  // Every row already in the database was written without unrestorableIds. It
+  // cannot tell loss from deletion, so it gets no say: a stale field creeping
+  // back is a nuisance, a deleted signature block is a broken agreement.
+  it('removes NOTHING from a layout captured before this was recorded', () => {
+    const { unrestorableIds, ...legacy } = savedLayout
+    const payload = buildLayoutEditPayload({
+      layout: legacy,
+      signerDetails: [{ id: 'n1', signerRole: 'Seller', formFields: [{ id: 'tplSig' }, { id: 'unwantedDate' }] }],
+    })
+    expect(payload.signers[0].formFields.filter(f => f.editAction === 'Remove')).toEqual([])
+    // …and it still restores, which is the point of not simply disabling the feature.
+    expect(payload.signers[0].formFields.some(f => f.editAction === 'Update')).toBe(true)
   })
 
   it('does NOT clobber a value the new draft already carries (fresh CRM prefill)', () => {
@@ -987,7 +1129,9 @@ describe('applyFieldLayout — the request BoldSign actually accepts', () => {
       return Promise.resolve(bodies.length === 1 ? rejectOnce : okResp('{}'))
     }))
 
-    const layout = { signers: [{ signerRole: 'Seller', order: 1, formFields: [
+    // unrestorableIds present and empty: this capture lost nothing, so f1's
+    // absence really is the agent having deleted it and the Remove is genuine.
+    const layout = { unrestorableIds: [], signers: [{ signerRole: 'Seller', order: 1, formFields: [
       { id: 'f0',        fieldType: 'Signature', pageNumber: 1, bounds: { x: 1, y: 2, width: 80, height: 20 } },
       { id: 'CheckBox2', fieldType: 'CheckBox',  pageNumber: 1, bounds: { x: 9, y: 9, width: 12, height: 12 } },
     ] }] }
