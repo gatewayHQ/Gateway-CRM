@@ -2916,6 +2916,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         const rows  = selectionRows({ fields: fields.filter(f => isTickableField(f.type) && !owned.has(f.id)) })
         setSelectionList(rows)
         setSelections(seedSelectionValues(rows, { inherit: true }))
+        // OPEN WHEN THERE IS NO PANEL, and this is not cosmetic — it was a
+        // regression. With a panel, these genuinely are the "other" boxes: the
+        // panel presents the decisions the packet declares and this list is the
+        // long tail, so collapsed is right. With NO panel (the common case until
+        // a packet declares one — a built-in that cannot be verified is
+        // deliberately not applied) this list is the ONLY way to tick anything,
+        // and leaving it collapsed read as "the checkboxes are gone".
+        setShowSelections(!resolved.panel && rows.length > 0)
       })
       // A FAILED LOAD MUST NOT LOOK LIKE A LOADED TEMPLATE. This used to fall back to
       // a single generic "Signer" row — which, next to "Roles left blank are removed
@@ -3736,12 +3744,13 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
               )
             })}
 
-            {/* EVERY OTHER TICK BOX on the form. Not decisions this packet
-                declares, so they are collapsed and every one starts at "as the
-                form is set up" — sending no value, leaving the form's own
-                setting alone. That is what makes opening this screen safe on a
-                template nobody has configured: it cannot change a box by
-                itself, and the agent can still tick one deliberately. */}
+            {/* EVERY TICK BOX THE PANEL DOES NOT OWN. Each starts at "as the form
+                is set up" — sending no value, leaving the form's own setting
+                alone — which is what makes opening this screen safe on a template
+                nobody has configured: it cannot change a box by itself.
+                Collapsed only when a panel is presenting the packet's declared
+                decisions; with no panel these are the only boxes there are, and
+                hiding them behind a disclosure read as losing them. */}
             {selectionList.length > 0 && (
               <div className="form-group">
                 <button
@@ -3751,7 +3760,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                   onClick={() => setShowSelections(v => !v)}
                   aria-expanded={showSelections}
                 >
-                  Other boxes on this form ({selectionList.length}) {showSelections ? '▾' : '▸'}
+                  {panel ? 'Other boxes' : 'Boxes'} on this form ({selectionList.length}) {showSelections ? '▾' : '▸'}
                 </button>
                 {showSelections && (
                   <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'var(--gw-bone)', padding:'10px 12px', marginTop:6 }}>
