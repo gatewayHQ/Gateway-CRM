@@ -27,6 +27,10 @@ import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
 import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, fileDocumentToDeal, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, emptyLabelsToRemove, partyNameGaps, describeFieldMapping, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import {
+  readTemplateWork, saveTemplateWork, clearTemplateWork, isUnsentDraft,
+  applySavedTemplateWork, templateWorkEdits, describeTemplateWorkEdits, countFilledWork,
+} from '../lib/services/templateWork.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { readDealTerms, termsForDeal, termsFilled, buildTermsPatch, normalizeTermValue, derivedTermHint } from '../lib/services/dealTerms.js'
 import SignerPicker, { buildCandidates, isValidEmail } from '../components/SignerPicker.jsx'
@@ -2948,8 +2952,15 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const matched   = templates.filter(t => !t.state || normalizeState(t.state) === dealState)
   const visible   = (dealState && matched.length) ? matched : templates
 
+  // The defaults live in constants because they are also the BASELINE the
+  // "has this agent changed anything?" comparison runs against (see `seeded`
+  // below). Inlining them in useState and re-typing them in the baseline is how
+  // a screen reports itself as edited before anybody has touched it.
+  const defaultSubject = `Please sign: ${deal?.title || 'Document'}`
+  const defaultMessage = 'Please review and sign.'
+
   const [templateId, setTemplateId] = React.useState(visible[0]?.template_id || '')
-  const [subject,    setSubject]    = React.useState(`Please sign: ${deal?.title || 'Document'}`)
+  const [subject,    setSubject]    = React.useState(defaultSubject)
   const [embedUrl,   setEmbedUrl]   = React.useState(null)   // BoldSign prepare/send iframe URL
   const [embedDocId, setEmbedDocId] = React.useState(null)   // its document id — needed to capture the field layout
   const [sending,    setSending]    = React.useState(false)
@@ -2970,7 +2981,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // mean two systems emailing the same client on two schedules, which is how a
   // client learns to filter you out. One reminder authority, and it is ours.
   const [showOptions, setShowOptions] = React.useState(false)
-  const [message,     setMessage]     = React.useState('Please review and sign.')
+  const [message,     setMessage]     = React.useState(defaultMessage)
   const [ccInput,     setCcInput]     = React.useState('')
   const [cc,          setCc]          = React.useState([])
   const [expiryDays,  setExpiryDays]  = React.useState('')
@@ -3007,6 +3018,24 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const [inOrder,    setInOrder]    = React.useState(true)
   const [values,     setValues]     = React.useState({})     // fieldId → value
 
+  // ── WORK IN PROGRESS ──────────────────────────────────────────────────────
+  // Everything above used to exist only for as long as this modal was mounted.
+  // An agent who ticked the boxes and corrected the buyer's name, then closed
+  // the screen — the X, Escape, the backdrop, Cancel — lost all of it, silently,
+  // and reopening the template re-seeded from the deal as if they had never been
+  // there. Preparing a packet that is not needed until next week is a normal
+  // thing to do, so it has to survive leaving.
+  //
+  // `seeded` is what SEEDING put on the screen, kept so "what did the agent
+  // change" is answerable — the seeded values are the deal's, not their work, and
+  // a close prompt that fires on those is a prompt that fires every time.
+  // `savedWork` is the row this screen was restored from, if there was one.
+  const [seeded,     setSeeded]     = React.useState(null)
+  const [savedWork,  setSavedWork]  = React.useState(null)
+  const [restored,   setRestored]   = React.useState(null)
+  const [savingWork, setSavingWork] = React.useState(false)
+  const [closeAsk,   setCloseAsk]   = React.useState(false)
+
   const tpl = templates.find(t => t.template_id === templateId)
 
   // Load the template's roles + fields whenever the selection changes, and seed
@@ -3016,8 +3045,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     let cancelled = false
     setLoadingDet(true)
     setDetailsErr('')
-    templateDetails(templateId)
-      .then(det => {
+    // The template AND this deal's saved work on it, together: the merge below
+    // needs both, and reading them in sequence would flash a freshly seeded
+    // screen before replacing it with the agent's own answers.
+    // readTemplateWork() never rejects — a database that has not run migration
+    // 0044 logs and returns null — so this cannot turn a missing table into a
+    // template that "could not be read".
+    Promise.all([templateDetails(templateId), readTemplateWork({ dealId: deal?.id, templateId })])
+      .then(([det, savedRow]) => {
         if (cancelled) return
         const roles  = det.roles?.length ? det.roles : [{ index: 1, name: 'Signer' }]
         const fields = (det.fields || []).filter(f => isPrefillableField(f.type))
@@ -3044,7 +3079,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         })
         // On a both-sided deal the per-side lists decide which party fills a row
         // captioned "Buyer" and which fills "Seller" — see seedSignersFromDeal.
-        setSigners(seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, ...(sideClients || {}), activeAgent, dealAgents }))
+        const seededSigners = seedSignersFromDeal({ roles, contact, additionalContacts: extraContacts, ...(sideClients || {}), activeAgent, dealAgents })
 
         const seededValues = {}
         for (const f of fields) {
@@ -3069,7 +3104,6 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           // sent for it, so this panel can never flip a box it does not show.
           seededValues[f.id] = isTickableField(f.type) ? null : fieldTokenValue(tokenVals, f)
         }
-        setValues(seededValues)
 
         // WHICH DECISIONS THIS PACKET ASKS FOR. Resolved from the packet row —
         // never from a map that applies to every template. `resolvePanel`
@@ -3078,7 +3112,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         // template, or nothing at all. See boldsignPacketPanel.js.
         const resolved = resolvePanel({ packet: tpl, fields })
         setPanelInfo(resolved)
-        setPanelState(seedPanelState({ panel: resolved.panel, fields }))
+        const seededPanelState = seedPanelState({ panel: resolved.panel, fields })
 
         // Any tick box the panel does NOT own stays available to the sender as
         // a plain selection, named by the words printed beside it on the page.
@@ -3087,7 +3121,45 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         const owned = panelFieldIds(resolved.panel)
         const rows  = selectionRows({ fields: fields.filter(f => isTickableField(f.type) && !owned.has(f.id)) })
         setSelectionList(rows)
-        setSelections(seedSelectionValues(rows, { inherit: true }))
+        const seededSelections = seedSelectionValues(rows, { inherit: true })
+
+        // ── THE SEED, AND THEN THE AGENT'S OWN WORK ON TOP OF IT ────────────
+        // Everything above is what this deal says. `seedState` is kept as the
+        // baseline the close prompt compares against, so opening this screen and
+        // closing it again closes — silently, because nothing on it was theirs.
+        const seedState = {
+          signers:    seededSigners,
+          values:     seededValues,
+          selections: seededSelections,
+          panelState: seededPanelState,
+          inOrder:    true,
+          subject:    defaultSubject,
+          message:    defaultMessage,
+          cc:         [],
+          expiryDays: '',
+        }
+        setSeeded(seedState)
+
+        // A MERGE onto that seed, never a replacement of it: the template can
+        // have been edited since the save, and a value for a field BoldSign no
+        // longer has would be rejected outright when the draft is created. See
+        // applySavedTemplateWork.
+        const merged = applySavedTemplateWork({ saved: savedRow?.work, seeded: seedState, fields, roles })
+        setSavedWork(savedRow || null)
+        setRestored(savedRow ? merged.restored : null)
+
+        setSigners(merged.state.signers)
+        setValues(merged.state.values)
+        setSelections(merged.state.selections)
+        setPanelState(merged.state.panelState)
+        setInOrder(merged.state.inOrder)
+        setSubject(merged.state.subject)
+        setMessage(merged.state.message)
+        setCc(merged.state.cc)
+        setExpiryDays(merged.state.expiryDays)
+        if (savedRow && merged.dropped.length) {
+          console.info('[boldsign] saved template work: dropped keys the template no longer has', merged.dropped)
+        }
         // OPEN WHEN THERE IS NO PANEL, and this is not cosmetic — it was a
         // regression. With a panel, these genuinely are the "other" boxes: the
         // panel presents the decisions the packet declares and this list is the
@@ -3095,7 +3167,9 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         // a packet declares one — a built-in that cannot be verified is
         // deliberately not applied) this list is the ONLY way to tick anything,
         // and leaving it collapsed read as "the checkboxes are gone".
-        setShowSelections(!resolved.panel && rows.length > 0)
+        // …and open it regardless when a save brought ticks back, so the agent
+        // can SEE their own answers rather than take a banner's word for it.
+        setShowSelections((!resolved.panel && rows.length > 0) || merged.restored.selections > 0)
       })
       // A FAILED LOAD MUST NOT LOOK LIKE A LOADED TEMPLATE. This used to fall back to
       // a single generic "Signer" row — which, next to "Roles left blank are removed
@@ -3200,29 +3274,33 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // The payload both actions below send. Returns null (having said why) when the
   // modal isn't ready — the two buttons must agree exactly on what is valid, so
   // this is built once rather than duplicated per action.
-  const buildArgs = () => {
-    if (!templateId) { pushToast('Pick a template', 'error'); return null }
+  // `quiet` suppresses the toasts and returns null instead. Save-for-later needs
+  // that: a half-prepared packet with no signer yet is not an error to shout
+  // about, it is the whole reason the agent is saving it for later — and the work
+  // is still stored either way. `reason` names what stopped it so the one toast
+  // that IS shown can say so.
+  const buildArgs = ({ quiet = false, reason = null } = {}) => {
+    const stop = (msg, code) => { if (reason) reason.code = code; if (!quiet) pushToast(msg, 'error'); return null }
+    if (!templateId) return stop('Pick a template', 'no-template')
     const roleList = details?.roles || []
     const filled   = roleList.filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())
-    if (!filled.length) { pushToast('At least one signer needs a name and email', 'error'); return null }
+    if (!filled.length) return stop('At least one signer needs a name and email', 'no-signer')
     // Caught here rather than at the API, because a malformed address is the
     // one send failure nobody ever sees: BoldSign accepts it, delivers nowhere,
     // and the document sits at "waiting" looking exactly like a client who is
     // ignoring you.
     const badEmail = filled.find(r => !isValidEmail(signers[r.index]?.email))
     if (badEmail) {
-      pushToast(`"${signers[badEmail.index].email}" is not a valid email address — check the ${badEmail.name} row.`, 'error')
-      return null
+      return stop(`"${signers[badEmail.index].email}" is not a valid email address — check the ${badEmail.name} row.`, 'bad-email')
     }
     // A declared panel that no longer matches its form stops here rather than
     // writing a term onto the wrong box. The on-screen error names the field;
     // this is the belt to that braces, so neither button can slip past it.
     if (panelBlocked) {
-      pushToast('This form no longer matches the terms panel set up for it — see the message above. Nothing was created.', 'error')
-      return null
+      return stop('This form no longer matches the terms panel set up for it — see the message above. Nothing was created.', 'panel-blocked')
     }
     const missing = panelMissing({ panel, state: panelState })
-    if (missing.length) { pushToast(`Choose ${missing.join(' and ')} first`, 'error'); return null }
+    if (missing.length) return stop(`Choose ${missing.join(' and ')} first`, 'panel-missing')
 
     // Split the prefilled values in two — this is the whole point of Label
     // fields. `sharedFormFields` (the template's Labels) go out as ONE common,
@@ -3324,6 +3402,191 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     if (data.layoutWarning) pushToast(data.layoutWarning, 'info')
   }
 
+  // ── SAVING WORK THAT IS NOT READY TO SEND ─────────────────────────────────
+  // The screen as it stands right now, in the shape templateWork.js stores.
+  const currentWork = { signers, values, selections, panelState, inOrder, subject, message, cc, expiryDays }
+
+  // What the agent has changed since the screen seeded itself. This is what
+  // decides whether closing asks — see requestClose. `seeded` is null until the
+  // template has loaded, and nothing typed before that is possible.
+  const edits = React.useMemo(
+    () => templateWorkEdits({ current: currentWork, seeded }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [signers, values, selections, panelState, inOrder, subject, message, cc, expiryDays, seeded],
+  )
+  const dirty = Boolean(seeded) && edits.count > 0
+
+  // Closing the TAB or reloading bypasses every in-app guard — requestClose
+  // never runs and the work is simply gone. Only beforeunload reaches that path.
+  // Registered only while there is real work outstanding, so an agent who has
+  // saved isn't nagged for closing their browser. (The browser shows its own
+  // generic wording; the point is the pause.)
+  React.useEffect(() => {
+    if (!dirty) return
+    const warn = (e) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [dirty])
+
+  // The draft SAVE FOR LATER left on the Signatures tab, if any. A REF, not
+  // state: it has to survive "start fresh" clearing the saved row, or the next
+  // save would leave a second half-finished draft on the tab beside the first.
+  // Never cleared by a reload — only ever pointed at a newer save.
+  //
+  // ONLY save-for-later drafts are tracked here, and that is the whole reason
+  // this is narrower than "the last document this screen created". A draft made
+  // by Review Draft or Place Fields is a document the agent deliberately asked
+  // for — two of them on one deal can be two real packets for two different
+  // signers — and nothing here may delete one. A save-for-later copy is by
+  // definition the single latest state of one piece of unfinished work.
+  const priorDocRef = React.useRef(null)
+  React.useEffect(() => {
+    if (savedWork?.document_id) priorDocRef.current = savedWork.document_id
+  }, [savedWork])
+
+  // ONE WORK-IN-PROGRESS DRAFT PER PACKET, not one per save. An agent who saves
+  // four times over a week must not find four near-identical unsent drafts on
+  // the Signatures tab — the newest is the only one that reflects what they have
+  // typed, and the older ones are traps to send by mistake.
+  //
+  // Only ever removes a draft THIS work row created and that is still 'draft' in
+  // the CRM (see isUnsentDraft): anything a signer has been told about is not
+  // ours to remove on the way to saving a newer copy. Best-effort — a failure
+  // leaves an extra draft, which is untidy, never lost work.
+  const supersedePriorSave = async (newDocumentId) => {
+    const prior = priorDocRef.current
+    if (!prior || prior === newDocumentId) return
+    try {
+      if (!await isUnsentDraft({ dealId: deal.id, documentId: prior })) return
+      await apiDeleteDocument(prior)
+      console.info('[boldsign] save for later: superseded the previous saved draft', { prior, now: newDocumentId })
+    } catch (err) {
+      console.warn(`[boldsign] could not remove the superseded draft ${prior}: ${err.message}`)
+    }
+  }
+
+  // Store the screen's own state against (deal, template). Rebaselines `seeded`
+  // to what was just saved, because at that instant nothing is outstanding and
+  // the close prompt must not fire on work that is safely stored.
+  const persistWork = async ({ documentId = null } = {}) => {
+    const row = await saveTemplateWork({
+      dealId:       deal.id,
+      templateId,
+      templateName: tpl?.name || null,
+      work:         currentWork,
+      documentId:   documentId || priorDocRef.current || null,
+      agentId:      activeAgent?.id || null,
+    })
+    if (documentId) priorDocRef.current = documentId
+    setSavedWork(prev => ({ ...(prev || {}), ...(row || {}), template_id: templateId, work: currentWork }))
+    setSeeded({ ...currentWork })
+    setRestored(null)
+    return row
+  }
+
+  // SAVE FOR LATER — the button this screen did not have.
+  //
+  // Two saves, in the order that matters. The agent's own answers go to the CRM
+  // FIRST and unconditionally: they are the thing that was being lost, and they
+  // must survive a packet too incomplete to become a document (no signer yet, a
+  // term still unanswered) as well as a BoldSign outage. Then, when the packet IS
+  // complete enough, the filled draft goes onto the Signatures tab — because
+  // "saved" has to mean a document somebody else can find, not just a screen this
+  // agent can reopen.
+  const saveForLater = async () => {
+    if (!templateId) { pushToast('Pick a template first.', 'error'); return false }
+    setSavingWork(true)
+    try {
+      const reason = {}
+      const args   = buildArgs({ quiet: true, reason })
+      const filled = countFilledWork(currentWork)
+
+      try { await persistWork() }
+      catch (err) {
+        // Nothing else is worth attempting: the typing is the point of this
+        // button, and a draft saved without it would look like a success.
+        pushToast(`Could not save your work on this form: ${err.message}`, 'error')
+        return false
+      }
+
+      if (!args) {
+        // Stored, and honest about what is missing. Named per cause, because
+        // "add a signer" and "answer the term" are different next actions.
+        const why = reason.code === 'no-signer'
+          ? 'Add a signer and save again to put a draft on the Signatures tab.'
+          : reason.code === 'bad-email'
+          ? 'Fix the signer’s email address and save again to put a draft on the Signatures tab.'
+          : reason.code === 'panel-missing'
+          ? 'Answer the terms above and save again to put a draft on the Signatures tab.'
+          : 'It is not complete enough to put a draft on the Signatures tab yet.'
+        pushToast(`Saved your work on this form — reopen this template on this deal any time. ${why}`, 'success')
+        onSaved()
+        return true
+      }
+
+      try {
+        const data = await saveTemplateDraft(args)
+        reportLayout(data)
+        if (data.documentId) {
+          await supersedePriorSave(data.documentId)
+          await persistWork({ documentId: data.documentId })
+        }
+        pushToast(
+          'Saved — your work is kept on this template, and the filled draft is on the Signatures tab'
+          + `${filled ? ` with ${filled} field${filled === 1 ? '' : 's'} filled in` : ''}. Nothing was sent.`,
+          'success',
+        )
+        onSaved()
+        return true
+      } catch (err) {
+        // The half that matters is already stored, so this is a warning and not
+        // a failure — and it says which half went where, so an agent does not go
+        // looking on the Signatures tab for something that is not there.
+        pushToast(`Your work on this form is saved, but the draft could not be put on the Signatures tab: ${err.message}`, 'error')
+        return false
+      }
+    } finally {
+      setSavingWork(false)
+    }
+  }
+
+  // A SENT PACKET IS NOT WORK IN PROGRESS ANY MORE. Left behind, the saved row
+  // would restore last week's answers onto the next packet built from the same
+  // template on this deal — and its `document_id` would point at a document that
+  // has gone out, which supersedePriorSave must never touch (it wouldn't: the
+  // status is no longer 'draft'). Cleared instead, on the way out.
+  const finishSent = async () => {
+    await clearTemplateWork({ dealId: deal.id, templateId })
+    onSent()
+  }
+
+  // Closing. Silent when nothing on the screen is the agent's — the seeded
+  // values are the deal's, and a confirm on every close is a confirm nobody
+  // reads. With real work outstanding it asks, and offers all three answers
+  // rather than folding "throw it away" into Cancel.
+  const requestClose = () => {
+    if (savingWork || savingDraft) return
+    if (!dirty) { onClose(); return }
+    setCloseAsk(true)
+  }
+
+  // Forget the save and reseed from the deal. The draft it may already have put
+  // on the Signatures tab is left alone — it is a real document the agent asked
+  // for — but `priorDocRef` still points at it, so the next save supersedes it
+  // rather than leaving two.
+  const startFresh = async () => {
+    setSavingWork(true)
+    try {
+      await clearTemplateWork({ dealId: deal.id, templateId })
+      setSavedWork(null)
+      setRestored(null)
+      setReloadKey(k => k + 1)
+      pushToast('Started fresh — this form is filled in from the deal again.', 'info')
+    } finally {
+      setSavingWork(false)
+    }
+  }
+
   // REVIEW DRAFT — the one action this screen has, and a sequence rather than a
   // fork. It creates the document with every value above already written into
   // it, and then SHOWS IT: the composed packet, on screen, with adjust /
@@ -3358,6 +3621,20 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     try {
       const data = await saveTemplateDraft(args)
       reportLayout(data)
+      // THE SCREEN'S OWN STATE IS SAVED HERE TOO, not just by Save for Later.
+      // Reviewing a draft and closing the review used to lose the radio buttons
+      // and tick boxes that produced it — the document survived, the decisions
+      // behind it did not, so reopening the template to change one thing meant
+      // making every choice again. Best-effort: a draft that exists must not be
+      // reported as a failure because remembering the screen failed.
+      //
+      // The new document is deliberately NOT recorded as the supersedable
+      // work-in-progress copy (see priorDocRef): the agent asked for this one,
+      // and a later Save for Later must not quietly delete it.
+      try { await persistWork() }
+      catch (err) {
+        console.warn(`[boldsign] the draft was created but this screen's state could not be saved: ${err.message}`)
+      }
       if (!data.documentId) {
         pushToast('The draft was created but could not be opened — it is on the Signatures tab.', 'info')
         onSaved()
@@ -3647,7 +3924,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         eyebrow="Adjust field placement"
         heading={review?.documentName || 'Place fields'}
         onClose={backToReview}
-        onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
+        onDone={() => { pushToast('Sent for signature', 'success'); finishSent() }}
         onDraft={() => pushToast('Saved — nothing has been sent yet. The draft is on this deal\u2019s Signatures tab.', 'info')}
       />
     )
@@ -3660,22 +3937,47 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         {...review}
         adjusting={sending}
         onAdjust={adjustFields}
-        onSent={onSent}
+        onSent={finishSent}
         onClose={onSaved}
       />
     )
   }
 
   return (
-    <Modal open={true} onClose={onClose} width={520}>
+    // Escape and the backdrop go through requestClose for the same reason the X
+    // does: they are the ways this screen was actually being closed when the
+    // work went missing, and a guard only the X respects is not a guard.
+    <Modal open={true} onClose={requestClose} width={520}>
       <div className="modal__head">
         <div>
           <div className="eyebrow-label">BoldSign · Prepare from Template</div>
           <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Prepare Draft Agreement</h3>
         </div>
-        <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
+        <button className="drawer__close" onClick={requestClose}><Icon name="x" size={18}/></button>
       </div>
       <div className="modal__body">
+        {/* PICKED UP WHERE THEY LEFT OFF. Said out loud, with a way back to the
+            deal's own values: a form that silently differs from the template is
+            a form an agent cannot trust, and "why does this say that" is not a
+            question to leave them holding. */}
+        {restored && restored.count > 0 && (
+          <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:12, fontSize:12, lineHeight:1.6 }}>
+            <div style={{ display:'flex', gap:8, alignItems:'baseline' }}>
+              <Icon name="check" size={12} style={{ color:'var(--gw-green)', flexShrink:0 }}/>
+              <span style={{ flex:1 }}>
+                <strong>Picked up where you left off.</strong>{' '}
+                Your saved work on this form is back
+                {savedWork?.updated_at
+                  ? <> — saved {new Date(savedWork.updated_at).toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' })}</>
+                  : null}.
+                {savedWork?.document_id ? ' The draft it created is on the Signatures tab.' : ''}
+              </span>
+            </div>
+            <button type="button" className="btn btn--link btn--sm" style={{ padding:0, marginTop:4 }} onClick={startFresh} disabled={savingWork}>
+              Start fresh from the deal instead
+            </button>
+          </div>
+        )}
         <div className="form-group">
           <label className="form-label required">Template</label>
           <select className="form-control" value={templateId} onChange={e => setTemplateId(e.target.value)}>
@@ -4161,16 +4463,33 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
         </div>
 
         <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px' }}>
-          <strong>Neither button sends anything.</strong> Both fill the form in from this deal and save it as a dray —
-          <strong>Review Draft</strong> shows you the packet, <strong>Place Fields</strong> opens it in BoldSign to move
-          boxes first. You can get to either from the other.
+          <strong>Nothing here sends anything.</strong> All three buttons fill the form in from this deal and save it as
+          a draft — <strong>Review Draft</strong> shows you the packet, <strong>Place Fields</strong> opens it in
+          BoldSign to move boxes first, and <strong>Save for Later</strong> just keeps it. You can get to either of the
+          first two from the other.
+          <br/>
+          <strong>Save for Later</strong> is for a packet you are not ready to send: it remembers this screen — the
+          boxes you ticked, the names you corrected, your send options — and leaves the filled draft on the Signatures
+          tab. Reopen this template on this deal and you are back where you were.
           <br/>
           Fill values in <em>here</em>, not on the placement screen: anything typed there is a preview and never
           reaches the signers.
         </div>
       </div>
       <div className="modal__foot">
-        <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
+        <button className="btn btn--secondary" onClick={requestClose} disabled={savingWork || savingDraft}>Cancel</button>
+        {/* SAVE FOR LATER — a packet an agent is working on that is not needed
+            yet. It was the missing third answer on this screen: every other
+            button was a step toward sending, so "I'll finish this on Thursday"
+            had no button and closing threw the work away. */}
+        <button
+          className="btn btn--secondary"
+          onClick={saveForLater}
+          disabled={savingWork || savingDraft || loadingDet || Boolean(detailsErr) || !details}
+          title="Keep this form as it stands — the boxes you ticked and the values you filled in — and leave the filled draft on the Signatures tab. Nothing is sent."
+        >
+          {savingWork ? 'Saving…' : 'Save for Later'}
+        </button>
         {/* TWO ROUTES INTO THE SAME DRAFT, not two ways to create one. Both
             buttons run the identical creation step and then land somewhere
             different — review the packet, or go straight to moving fields.
@@ -4195,6 +4514,46 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           {savingDraft ? 'Preparing…' : 'Review Draft'}
         </button>
       </div>
+
+      {/* THREE ANSWERS, because there are three. Save the work, throw it away,
+          or go back to it — and the one that used to happen on every X was the
+          middle one, chosen by nobody. Naming what is at stake (a count of the
+          agent's own changes, not "unsaved changes") is what makes Discard a
+          button somebody can press deliberately. */}
+      {closeAsk && (
+        <ConfirmDialog
+          eyebrow="BoldSign · Prepare from Template"
+          title="Save what you have done on this form?"
+          confirmLabel="Save for Later"
+          busyLabel="Saving…"
+          confirmVariant="btn--primary"
+          cancelLabel="Keep editing"
+          busy={savingWork}
+          onCancel={() => setCloseAsk(false)}
+          onConfirm={saveForLater}
+          extraAction={{
+            label: 'Discard changes',
+            variant: 'btn--danger',
+            onClick: () => { setCloseAsk(false); onClose() },
+          }}
+          message={
+            <>
+              <p style={{ margin:'0 0 10px', color:'var(--gw-ink)' }}>
+                You have changed {describeTemplateWorkEdits(edits) || 'this form'} on this packet.
+              </p>
+              <p style={{ margin:'0 0 10px' }}>
+                <strong style={{ color:'var(--gw-ink)' }}>Save for Later</strong> keeps this screen exactly as it is —
+                reopen this template on this deal and it comes back — and leaves the filled draft on the Signatures
+                tab. Nothing is sent either way.
+              </p>
+              <p style={{ margin:0 }}>
+                <strong style={{ color:'var(--gw-ink)' }}>Discard changes</strong> throws away what you have changed
+                here{savedWork ? ' since your last save' : ''}.
+              </p>
+            </>
+          }
+        />
+      )}
     </Modal>
   )
 }
