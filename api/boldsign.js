@@ -1,6 +1,6 @@
 import { applyJsonCors, requireAgent, errorResponse, getServiceClient, getUserClient, SUPABASE_URL } from './_lib/auth.js'
 import closingPacketHandler from './_handlers/closing-packet.js'
-import { wrap } from './_lib/observability.js'
+import { wrap, log } from './_lib/observability.js'
 import crypto from 'node:crypto'
 import { extractPdfWords } from './_lib/pdfText.js'
 import { captionFields, detectSelectionCues } from '../src/lib/services/boldsignCaptions.js'
@@ -675,6 +675,53 @@ export function buildSigningSummary(props) {
   }).sort((a, b) => a.order - b.order)
   const total = signers.reduce((t, s) => t + s.fields.length, 0)
   return { signers, total }
+}
+
+// ─── Save-path logging ────────────────────────────────────────────────────────
+// What a document actually HOLDS, in one loggable line: every field BoldSign
+// reports for it, by signer, with the value it carries right now.
+//
+// This exists because the failure mode it diagnoses is invisible from the
+// outside: a draft that saved "successfully" but empty looks exactly like a
+// draft that saved with everything on it, and the only difference is in the
+// payload BoldSign hands back. Logged on every compose (Save PDF / Save to
+// Deal) and every layout capture, so "the filed copy came back blank" can be
+// answered from the log rather than reproduced.
+//
+// Values are TRUNCATED to 60 characters. Field values are client data — names,
+// addresses, dates — and the question a log answers is "did the value arrive",
+// not "what was it in full".
+export function summarizeFieldValues(props) {
+  const trim = (v) => {
+    const s = v == null ? '' : String(v)
+    return s.length > 60 ? `${s.slice(0, 60)}…` : s
+  }
+  const rows = []
+  for (const sd of (props?.signerDetails || [])) {
+    for (const f of (sd?.formFields || [])) {
+      rows.push({
+        id:     f?.id || f?.fieldId || '',
+        type:   normalizeFieldType(f?.type || f?.fieldType) || String(f?.type || ''),
+        label:  trim(f?.label || f?.placeholder || ''),
+        value:  trim(f?.value),
+        filled: !(f?.value == null || String(f.value).trim() === ''),
+        signer: sd?.signerEmail || sd?.signerRole || '',
+        page:   Number(f?.pageNumber) || 1,
+      })
+    }
+  }
+  for (const f of (props?.commonFields || [])) {
+    rows.push({
+      id:     f?.id || f?.fieldId || '',
+      type:   normalizeFieldType(f?.type || f?.fieldType) || String(f?.type || ''),
+      label:  trim(f?.label || f?.placeholder || ''),
+      value:  trim(f?.value),
+      filled: !(f?.value == null || String(f.value).trim() === ''),
+      signer: '(common)',
+      page:   Number(f?.pageNumber) || 1,
+    })
+  }
+  return { total: rows.length, filled: rows.filter(r => r.filled).length, fields: rows }
 }
 
 // A checkbox/radio value comes back in several spellings depending on how it was
@@ -1458,6 +1505,16 @@ async function postTemplatePayload(path, payload) {
   try {
     return { data: await boldsign(path, { method: 'POST', json: payload }), unlocked: false }
   } catch (err) {
+    // `showSaveButton` asks the embedded editor for its Save button, without which
+    // nothing the agent types can be committed (see createDraftEditUrl). It is a
+    // toolbar preference, though — never worth failing a draft over. If BoldSign
+    // refuses the payload BECAUSE of it, drop it and create the draft anyway: an
+    // editor with the old toolbar beats no draft at all.
+    if (err.status === 400 && /showsavebutton/i.test(err?.message || '') && 'showSaveButton' in payload) {
+      console.warn(`[boldsign] ${path}: BoldSign refused showSaveButton, retrying without it — ${err.message}`)
+      const { showSaveButton: _dropped, ...rest } = payload
+      return { data: await boldsign(path, { method: 'POST', json: rest }), unlocked: false }
+    }
     if (!isReadOnlyRejection(err)) throw err
     console.warn(`[boldsign] ${path}: BoldSign refused IsReadOnly, retrying with every lock dropped — ${err.message}`)
     const data = await boldsign(path, { method: 'POST', json: { ...payload, roles: stripRoleReadOnly(payload.roles) } })
@@ -1591,6 +1648,10 @@ export async function applyFieldLayout(supabase, { documentId, dealId, templateI
 // un-editable document still reports itself).
 const EDIT_VIEW_OPTIONS = ['FillingPage', 'PreparePage']
 const isViewOptionRefusal = (err) => /sendviewoption/i.test(err?.message || '')
+// A refusal aimed at the Save button itself. Getting back into a draft matters
+// more than the toolbar it opens with, so this is retried without it rather than
+// reported — see the retry in the loop below.
+const isSaveButtonRefusal = (err) => /showsavebutton/i.test(err?.message || '')
 
 export async function createDraftEditUrl({ documentId, redirectUrl, onBehalfOf, sendViewOption } = {}) {
   // Caller-preferred view first (if any), then the remaining option as fallback.
@@ -1599,12 +1660,22 @@ export async function createDraftEditUrl({ documentId, redirectUrl, onBehalfOf, 
     : EDIT_VIEW_OPTIONS
 
   const editPath = `/document/createEmbeddedEditUrl?documentId=${encodeURIComponent(documentId)}`
-  const ask = (view) => boldsign(editPath, {
+  const ask = (view, { withSaveButton = true } = {}) => boldsign(editPath, {
     method: 'POST',
     json: {
       redirectUrl:           redirectUrl || '',
       sendViewOption:        view,
       showToolbar:           true,
+      // THE SAVE BUTTON HAS TO BE ASKED FOR. This request enumerates the toolbar
+      // buttons it wants, and BoldSign renders that enumeration — a button this
+      // payload never names is not on the toolbar. Send, Preview and the page
+      // navigation were named here; SAVE WAS NOT, so an agent who reopened a draft
+      // got an editor with no way to commit what they typed. Everything downstream
+      // is built from BoldSign's SAVED copy (/document/properties → composeFilledPdf),
+      // so with no Save the modal's `unsaved` guard could never clear: Save PDF and
+      // Save to Deal both refused with "Click Save inside BoldSign first" and there
+      // was no Save to click. Naming it here is the whole fix for that.
+      ...(withSaveButton ? { showSaveButton: true } : {}),
       showSendButton:        true,
       showPreviewButton:     true,          // agents want to eyeball it before it goes
       showNavigationButtons: true,
@@ -1630,6 +1701,13 @@ export async function createDraftEditUrl({ documentId, redirectUrl, onBehalfOf, 
       if (err.status !== 400) throw err
       lastErr = err
       if (isViewOptionRefusal(err)) continue            // wrong page for this state — try the other
+      // Refused over the Save button: ask again without it. An editor with the
+      // old toolbar is worse than one with Save, and far better than an agent
+      // who cannot reopen their draft at all.
+      if (isSaveButtonRefusal(err)) {
+        console.warn(`[boldsign] createEmbeddedEditUrl: BoldSign refused showSaveButton, retrying without it — ${err.message}`)
+        return pick(await ask(view, { withSaveButton: false }))
+      }
       if (!await clearEditLock()) throw err             // not a lock we can clear — report as-is
       try {
         return pick(await ask(view))
@@ -2302,6 +2380,9 @@ async function handler(req, res) {
       appendSendOptions(form, body)
       form.append('SendViewOption',     'PreparePage')
       form.append('ShowToolbar',        'true')
+      // See createDraftEditUrl: a toolbar button that isn't named isn't rendered,
+      // and without Save nothing the agent types reaches /document/properties.
+      form.append('ShowSaveButton',     'true')
       if (useTextTags) {
         form.append('UseTextTags', 'true')
         if (textTagDefinitions) form.append('TextTagDefinitions', JSON.stringify(textTagDefinitions))
@@ -2384,6 +2465,18 @@ async function handler(req, res) {
       const svc    = getServiceClient()
       const record = await resolveDocumentRecord(svc, id, { verb: 'save the field layout for' })
       const result = await captureFieldLayout(svc, { documentId: id, record, agentId: actor.agent.id })
+      // Called every time an editing session ends (BoldSign save, send, or close),
+      // so this is the log line that says whether a save inside BoldSign was
+      // actually observed and what it left behind.
+      log.info('boldsign.layout-capture: field arrangement stored for the deal', {
+        documentId:  id,
+        dealId:      record.deal_id || null,
+        templateId:  record.boldsign_template_id || null,
+        saved:       Boolean(result.saved),
+        fieldCount:  result.fieldCount || 0,
+        unavailable: Boolean(result.unavailable),
+        reason:      result.reason || null,
+      })
       return res.json({
         saved:      result.saved,
         fieldCount: result.fieldCount,
@@ -2414,6 +2507,24 @@ async function handler(req, res) {
     // each caller answers with the same words for the same failure.
     const composeFilledPdf = async (svc, { id, record }) => {
       const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+
+      // THE ONE LINE THAT ANSWERS "why did the filed copy come back empty?".
+      // Everything below composes from `props`, and `props` is BoldSign's SAVED
+      // copy — so if the values an agent typed are missing here, they were never
+      // saved inside BoldSign and no amount of composing will recover them.
+      // Logged before the compose, with the document id, so the log shows what
+      // was on the document at the instant the save path ran.
+      const held = summarizeFieldValues(props)
+      log.info('boldsign.compose: document as BoldSign holds it', {
+        action:       body.action,
+        documentId:   id,
+        dealId:       record.deal_id || null,
+        documentName: record.document_name || null,
+        boldsignStatus: props?.status || null,
+        fieldsTotal:  held.total,
+        fieldsFilled: held.filled,
+        fields:       held.fields,
+      })
 
       // BoldSign's /document/download is the only source of the current bytes. It is
       // NOT guaranteed to serve a document that hasn't been sent, so a refusal falls
@@ -2454,7 +2565,7 @@ async function handler(req, res) {
         throw e
       }
 
-      return { printable: await buildPrintablePdf({ pdfBytes, props, documentName: record.document_name }), props }
+      return { printable: await buildPrintablePdf({ pdfBytes, props, documentName: record.document_name }), props, held }
     }
 
     if (body.action === 'document-print') {
@@ -2531,8 +2642,8 @@ async function handler(req, res) {
       const record = await resolveDocumentRecord(svc, id, { verb: 'file' })
       if (!record.deal_id) return res.status(400).json({ error: 'This document is not attached to a deal, so there is nowhere to file it' })
 
-      let printable, props
-      try { ({ printable, props } = await composeFilledPdf(svc, { id, record })) }
+      let printable, props, held
+      try { ({ printable, props, held } = await composeFilledPdf(svc, { id, record })) }
       catch (err) { return res.status(err.status || 400).json({ error: err.message, documentStatus: err.documentStatus || null }) }
 
       // Sanitized the same way the Documents tab's own upload does. It matters more
@@ -2556,11 +2667,26 @@ async function handler(req, res) {
         recordId: record.id,
       })
 
+      const fieldCount = buildSigningSummary(props).total
+      // The final draft as filed: which bytes landed where, and how much of the
+      // document they carried. Pairs with the compose line above — same
+      // documentId — so one log read covers "what BoldSign held" → "what we filed".
+      log.info('boldsign.file: draft filed on the deal', {
+        documentId:   id,
+        dealId:       record.deal_id,
+        documentName: record.document_name || null,
+        path,
+        filename,
+        bytes:        printable?.length || printable?.byteLength || null,
+        fieldCount,
+        fieldsFilled: held.filled,
+      })
+
       return res.json({
         filed:      true,
         filename,
         path,
-        fieldCount: buildSigningSummary(props).total,
+        fieldCount,
       })
     }
 
@@ -3287,6 +3413,10 @@ async function handler(req, res) {
         enableSigningOrder: rolesWantSigningOrder(roles),
         sendViewOption: 'PreparePage',   // land on the field-placement editor
         showToolbar:    true,
+        // Named explicitly for the same reason as in createDraftEditUrl: the
+        // filled copy this whole workflow files onto the deal is composed from
+        // what BoldSign has SAVED, so the editor must offer a Save.
+        showSaveButton: true,
         redirectUrl:    redirectUrl || '',
         ...(Array.isArray(roleRemovalIndices) && roleRemovalIndices.length ? { roleRemovalIndices } : {}),
         ...(cc ? { cc } : {}),

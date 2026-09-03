@@ -1224,6 +1224,10 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
     if (alive.current) setSavingLayout(true)
     try {
       const res = await captureLayout(documentId)
+      // The client half of the save-path log (the server logs the same documentId
+      // — see boldsign.layout-capture in api/boldsign.js). Between the two, a
+      // "nothing was saved" report can be traced without reproducing it.
+      console.info('[boldsign] layout capture', { documentId, silent, ...(res || {}) })
       if (res?.saved) { setLastSavedAt(new Date()) }
       if (res?.saved && res.fieldCount) {
         pushToast(`Field layout saved for this deal — ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} will come back next time.`, 'success')
@@ -1276,7 +1280,9 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
     if (everFocused && !force) { setStale('pdf'); return }
     setSavingPdf(true)
     try {
+      console.info('[boldsign] save PDF: composing from BoldSign\u2019s saved copy', { documentId, force, lastSavedAt })
       const res = await saveBoldSignDocumentPdf(documentId)
+      console.info('[boldsign] save PDF: composed', { documentId, fieldCount: res.fieldCount })
       pushToast(res.fieldCount
         ? `PDF saved — ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} included.`
         : 'PDF saved.', 'success')
@@ -1307,7 +1313,11 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
     if (everFocused && !force) { setStale('file'); return }
     setFiling(true)
     try {
+      console.info('[boldsign] save to deal: filing BoldSign\u2019s saved copy as a draft', { documentId, force, lastSavedAt })
       const res = await fileDocumentToDeal(documentId)
+      // The final draft written to the deal, named. Pairs with the server's
+      // boldsign.file line (same documentId) for the whole picture.
+      console.info('[boldsign] save to deal: filed', { documentId, path: res.path, filename: res.filename, fieldCount: res.fieldCount })
       pushToast(res.fieldCount
         ? `Filed on this deal — ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} included. Find it in the Documents tab.`
         : 'Filed on this deal — find it in the Documents tab.', 'success')
@@ -1393,7 +1403,14 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
           // only this instant. It cannot tell us about the next keystroke, because
           // focus is already inside the frame and our blur will not fire again.
           // `everFocused` carries that uncertainty forward; see savePdf/fileToDeal.
-          onDraft={(e) => { setUnsaved(false); setLastSavedAt(new Date()); saveLayout(); onDraft?.(e) }}
+          onDraft={(e) => {
+            // BoldSign has confirmed a save. This is the only moment the CRM can
+            // be certain its saved copy matches what the agent typed, so it is
+            // worth a log line: it is what "Save to Deal filed an empty document"
+            // is diagnosed against.
+            console.info('[boldsign] BoldSign reported a save', { documentId, event: e })
+            setUnsaved(false); setLastSavedAt(new Date()); saveLayout(); onDraft?.(e)
+          }}
           onError={() => pushToast('BoldSign reported the send was cancelled — the draft is still on this deal.', 'info')}
           returnUrlMarker={returnUrlMarker}
         />
@@ -2461,7 +2478,10 @@ create policy "agent_notifications_policy" on agent_notifications
           onLayoutSaved={loadLayouts}
           onClose={() => { setEditDraft(null); loadEnvelopes(); loadLayouts() }}
           onDone={() => { pushToast('Sent for signature', 'success'); setEditDraft(null); loadEnvelopes(); loadLayouts() }}
-          onDraft={() => pushToast('Draft saved — nothing sent. Reopen it here any time to finish.', 'info')}
+          // Reload the rows too: the draft the agent just saved is what this tab
+          // lists, and leaving the list stale is how "it didn't save" gets
+          // reported for a save that worked.
+          onDraft={() => { pushToast('Draft saved — nothing sent. Reopen it here any time to finish.', 'info'); loadEnvelopes() }}
         />
       )}
 
@@ -2711,7 +2731,9 @@ function DraftReviewStep({ documentId, documentName, previewUrl, downloadUrl, fi
   const fileToDeal = async () => {
     setFiling(true)
     try {
+      console.info('[boldsign] review: save to deal', { documentId, documentName, fieldCount })
       const res = await fileDocumentToDeal(documentId)
+      console.info('[boldsign] review: filed', { documentId, path: res.path, filename: res.filename, fieldCount: res.fieldCount })
       pushToast(res.fieldCount
         ? `Filed on this deal — ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} included. Find it in the Documents tab.`
         : 'Filed on this deal — find it in the Documents tab.', 'success')
