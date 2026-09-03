@@ -323,14 +323,14 @@ Signatures tab → Prepare from Template
           (when the agent already    the embedded editor; leaving it lands on the
            knows a box must move)    review with the preview re-fetched)
    │
-   ▼  the draft row on the Signatures tab, with three distinct actions:
-       ┌───────────────────────┬───────────────┬─────────────────────┐
-       │ Download Filled PDF   │ Edit Fields   │ Send for Signature  │
-       │ document-print        │ document-edit │ draft-send          │
-       │ → print, take to      │ -url          │ → confirm → signers │
-       │   the client          │ → keep as a   │   are emailed       │
-       │ (NOT a signed doc)    │   draft       │ (irreversible)      │
-       └───────────────────────┴───────────────┴─────────────────────┘
+   ▼  the draft row on the Signatures tab, with four distinct actions:
+       ┌───────────────────┬───────────────┬───────────────┬───────────────────┐
+       │ Download Filled   │ Save to Deal  │ Edit Fields   │ Send for Signature│
+       │ document-print    │ document-file │ document-edit │ draft-send        │
+       │ → print, take to  │ → filed in    │ -url          │ → confirm →       │
+       │   the client      │   the deal's  │ → keep as a   │   signers emailed │
+       │ (NOT a signed doc)│   Documents   │   draft       │ (irreversible)    │
+       └───────────────────┴───────────────┴───────────────┴───────────────────┘
 ```
 
 The loop is deliberate: **print → client marks it up → Edit Fields → print
@@ -605,6 +605,64 @@ paying for it.
   editor — the same BoldSign editor, the same people, the same page to read.
 - Keyboard and mouse behavior is unchanged: `Modal`'s Escape and backdrop handling
   were not touched, so Escape still routes through the confirm-before-close guard.
+
+## Filing a composed document onto the deal (`document-file`)
+
+**What this fixes.** `document-print` downloads to the agent's own machine, and the
+copy it builds is written under a `print/` prefix the Documents tab filters out on
+purpose — *"a print artifact is a convenience copy, not a deal document"*. That
+reasoning is right for a throwaway review copy, but it left **no way to keep the
+filled packet on the deal at all**: an agent who prepared an agreement, filled it
+from the CRM and wanted it on the file had to download it and upload it back
+through the Documents tab by hand, and the CRM held no record of a document it had
+itself composed.
+
+- **Same bytes as the review copy.** `composeFilledPdf()` is shared by
+  `document-print` and `document-file`; they differ only in where the bytes go. Two
+  composition paths could drift, and the copy an agent *files* must be the copy they
+  *reviewed*.
+- **Written where the Documents tab actually looks** — `deal-<id>/<timestamp>-<name>`,
+  the same flat prefix `upload()` uses. The tab lists one prefix and drops
+  sub-folder entries, which is why the `print/` copy is invisible and why the
+  filename must not contain a slash (below).
+- **`dealFilingName()` sanitizes hard, and it is load-bearing.** A composed name is
+  `<template> — <street line>`, so it always carries an em dash and — on a packet
+  named like *"Listing agreement/SD agency packet"* — a **forward slash**. Storage
+  reads that slash as a folder separator: the document would be filed a level down
+  where the Documents tab would never show it. Path traversal is neutralized by the
+  same rule. Unit-tested.
+- **Accumulates, never overwrites** (`upsert: false` under a timestamp). A filed
+  document records what the packet said at a moment; replacing yesterday's copy
+  would destroy the history filing it is for. `document-print`, by contrast,
+  upserts one throwaway object.
+- Logged to `audit_log` as `file`, best-effort — the document is already filed by
+  then, and failing the request over a missing audit row would report a success as
+  a failure.
+
+### "Saved everything inside BoldSign?"
+
+Both Save PDF and Save to Deal build from **what BoldSign has saved**
+(`/document/properties`) — never from what is sitting typed but uncommitted in the
+iframe. The old guard was a single `unsaved` flag, and **it under-reported after
+the first save**: `onInteract` rides our window's `blur`, which fires when focus
+moves *into* the frame, once. Keep typing after a save and focus never leaves, so
+no second blur fires, the flag stays false, and the copy was built silently from
+the last save — **missing exactly the fields the agent had just filled in.** The
+code even carried a comment asserting the opposite ("any further work sets the flag
+again via onInteract"), which was never true.
+
+Nothing inside a cross-origin frame is observable, so the fix does not pretend
+otherwise:
+
+| State | What happens |
+|---|---|
+| Focus never entered the editor | Proceeds — no edits were possible |
+| Entered, BoldSign never reported a save | **Blocked**: we know the copy is stale |
+| Entered, saved at least once | **Asks**, naming the last-saved time |
+
+Blocking outright once the editor had been touched would make the button useless;
+building silently is what caused the bug. The confirm states that we cannot see
+inside BoldSign and gives the agent the one fact they need to decide.
 
 ## Per-deal field layouts (placements that stick)
 Field placement happens inside BoldSign's embedded editor, and BoldSign keeps it on

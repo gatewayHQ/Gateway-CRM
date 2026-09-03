@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds, buildSendOptions, appendSendOptions, normalizeCc, normalizeReminders } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, dealFilingName, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds, buildSendOptions, appendSendOptions, normalizeCc, normalizeReminders } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -826,6 +826,46 @@ describe('capture → restore, on a packet full of types a capture cannot store'
       live = live.filter(f => !removedIds.has(String(f.id)))
     }
     expect(live.map(f => f.id)).toEqual(['sig1', 'date1', 'name1', 'email1', 'phone1'])
+  })
+})
+
+// The one line between "filed on the deal" and "uploaded somewhere nobody looks".
+// The Documents tab lists ONE FLAT PREFIX (`deal-<id>/`) and filters out anything
+// that is a sub-folder, so a slash surviving into this name files the document a
+// level down where it is invisible — which is exactly the shape composed document
+// names have: `<template name> — <street line>`.
+describe('dealFilingName', () => {
+  it('strips the slash a composed packet name routinely carries', () => {
+    const out = dealFilingName('Listing agreement/SD agency packet — 79 Northshore Drive')
+    expect(out).not.toContain('/')
+    expect(out).toBe('Listing-agreement-SD-agency-packet-79-Northshore-Drive-filled.pdf')
+  })
+
+  it('strips the em dash and spaces the name always has', () => {
+    expect(dealFilingName('Buyer Agency — 123 Main St')).toBe('Buyer-Agency-123-Main-St-filled.pdf')
+  })
+
+  it('never doubles the extension', () => {
+    expect(dealFilingName('disclosure.pdf')).toBe('disclosure-filled.pdf')
+    expect(dealFilingName('disclosure.PDF')).toBe('disclosure-filled.pdf')
+  })
+
+  it('always yields a usable name, never an empty one', () => {
+    for (const empty of [null, undefined, '', '   ', '///', '— —']) {
+      expect(dealFilingName(empty), JSON.stringify(empty)).toBe('document-filled.pdf')
+    }
+  })
+
+  it('cannot be walked out of the deal’s own folder', () => {
+    expect(dealFilingName('../../etc/passwd')).toBe('etc-passwd-filled.pdf')
+    expect(dealFilingName('../../../secret')).not.toContain('..')
+  })
+
+  it('stays readable — no runs of separators, none on either end', () => {
+    const out = dealFilingName('  A  //  B —— C  ')
+    expect(out).toBe('A-B-C-filled.pdf')
+    expect(out).not.toMatch(/--/)
+    expect(out).not.toMatch(/^[-._]/)
   })
 })
 

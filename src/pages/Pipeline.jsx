@@ -26,7 +26,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, fileDocumentToDeal, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { readDealTerms, termsForDeal, termsFilled, buildTermsPatch, normalizeTermValue, derivedTermHint } from '../lib/services/dealTerms.js'
 import { isOfficeAdmin } from '../lib/officeAdmins.js'
@@ -1175,14 +1175,30 @@ async function fetchDraftPreview(documentId) {
 function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone, onDraft, onLayoutSaved, returnUrlMarker = 'boldsign-return' }) {
   const [savingLayout, setSavingLayout] = React.useState(false)
   const [savingPdf,    setSavingPdf]    = React.useState(false)
+  const [filing,       setFiling]       = React.useState(false)
   const [leaveAsk,     setLeaveAsk]     = React.useState(false)
   // Work may exist that BoldSign hasn't been told to save. Set when focus enters the
   // editor (see BoldSignFrame's onInteract — the only honest cross-origin signal),
   // cleared when BoldSign reports a save, because at that instant nothing is
   // outstanding. This is what keeps the leave prompt meaningful: an agent who opened
   // the editor and immediately closed it is not warned about losing nothing.
+  //
+  // IT UNDER-REPORTS AFTER THE FIRST SAVE, and that is why `everFocused` exists
+  // below. `onInteract` rides our window's BLUR, which fires when focus moves INTO
+  // the frame — once. Keep typing in there after a save and focus never leaves, so
+  // no second blur fires and this flag stays false while real work piles up. The
+  // note that used to sit on onDraft ("any further work sets the flag again via
+  // onInteract") was simply not true.
   const [unsaved,      setUnsaved]      = React.useState(false)
   const [lastSavedAt,  setLastSavedAt]  = React.useState(null)
+  // Has focus EVER entered the editor? Unlike `unsaved` this is never cleared, so
+  // it stays true across saves — which is what makes "they may have typed since"
+  // answerable at all. Nothing inside a cross-origin frame is observable, so the
+  // only honest answer is "we cannot know", and the copy below says so.
+  const [everFocused,  setEverFocused]  = React.useState(false)
+  // Which action a "you may have unsaved work" confirm is standing in front of:
+  // 'pdf' (download) or 'file' (put it on the deal). Null when nothing is asking.
+  const [stale,        setStale]        = React.useState(null)
   // Set before an async close so a late unmount can't push state into a dead
   // component (React logs that as a leak, and it hides real errors).
   const alive = React.useRef(true)
@@ -1239,7 +1255,7 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
   // written — values typed in the frame and not yet saved there cannot reach the
   // server. So an agent with outstanding work is told, rather than handed a PDF
   // that quietly misses the last thing they typed.
-  const savePdf = async () => {
+  const savePdf = async ({ force = false } = {}) => {
     if (!documentId) { pushToast('This document has to exist in BoldSign before it can be saved as a PDF.', 'info'); return }
     // The print copy is built from whatever BoldSign has actually SAVED
     // (/document/properties) — never from what's sitting typed but uncommitted
@@ -1250,10 +1266,15 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
     // that way forces the save to complete first. Blocking here instead of just
     // warning is what makes Save PDF match Save & Close: neither can produce an
     // incomplete copy once this stands.
+    // Never saved at all, and they have been in there: we KNOW the copy is stale.
     if (unsaved) {
       pushToast('Click Save inside BoldSign first — the PDF is built from BoldSign’s saved copy, and it would come back missing whatever you just typed.', 'error')
       return
     }
+    // Saved at least once, but they have been typing in a frame we cannot see into
+    // since. Ask rather than guess: silently building from the last save is what
+    // produced a PDF missing the fields the agent had just filled in.
+    if (everFocused && !force) { setStale('pdf'); return }
     setSavingPdf(true)
     try {
       const res = await saveBoldSignDocumentPdf(documentId)
@@ -1264,6 +1285,37 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
       pushToast(`Could not save the PDF: ${err.message}`, 'error')
     } finally {
       setSavingPdf(false)
+    }
+  }
+
+  // SAVE TO THE DEAL — the same composed copy, filed in the CRM instead of
+  // downloaded. Save PDF puts the packet on the agent's own machine and leaves the
+  // deal with no record of a document the CRM itself built; this is the half that
+  // was missing.
+  //
+  // Guarded by `unsaved` for exactly the same reason Save PDF is, and it matters
+  // more here: a download is a copy an agent can look at and discard, while a
+  // FILED document is what the brokerage will read back months later. Filing one
+  // that quietly missed the last thing typed is worse than not filing at all.
+  const fileToDeal = async ({ force = false } = {}) => {
+    if (!documentId) { pushToast('This document has to exist in BoldSign before it can be filed on the deal.', 'info'); return }
+    if (unsaved) {
+      pushToast('Click Save inside BoldSign first — the filed copy is built from BoldSign’s saved copy, and it would be missing whatever you just typed.', 'error')
+      return
+    }
+    // Same uncertainty as savePdf, and it matters more: a filed document is what
+    // the brokerage reads back months later.
+    if (everFocused && !force) { setStale('file'); return }
+    setFiling(true)
+    try {
+      const res = await fileDocumentToDeal(documentId)
+      pushToast(res.fieldCount
+        ? `Filed on this deal — ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} included. Find it in the Documents tab.`
+        : 'Filed on this deal — find it in the Documents tab.', 'success')
+    } catch (err) {
+      pushToast(`Could not file it on the deal: ${err.message}`, 'error')
+    } finally {
+      setFiling(false)
     }
   }
 
@@ -1311,6 +1363,14 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
             <Icon name="document" size={13}/> {savingPdf ? 'Preparing…' : 'Save PDF'}
           </button>
           <button
+            className="btn btn--secondary btn--sm"
+            onClick={fileToDeal}
+            disabled={filing || !documentId}
+            title="File this document on the deal — it appears in the deal's Documents tab, filled values included"
+          >
+            <Icon name="upload" size={13}/> {filing ? 'Filing…' : 'Save to Deal'}
+          </button>
+          <button
             className="drawer__close"
             onClick={requestClose}
             disabled={savingLayout}
@@ -1324,14 +1384,16 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
         <BoldSignFrame
           fill
           url={url}
-          onInteract={() => setUnsaved(true)}
+          onInteract={() => { setUnsaved(true); setEverFocused(true) }}
           onDone={(e) => { setUnsaved(false); saveLayout({ silent: true }); onDone?.(e) }}
           // Saved-as-draft is NOT sent. Reporting it as sent (which is what
           // happened when both events shared one handler) left the agent
           // believing the client had the document. It IS the natural moment to
           // record the layout, though — the agent explicitly saved their work.
-          // A BoldSign save means nothing is outstanding as of this instant. Any
-          // further work in the frame sets the flag again via onInteract.
+          // A BoldSign save means nothing is outstanding as of THIS INSTANT — and
+          // only this instant. It cannot tell us about the next keystroke, because
+          // focus is already inside the frame and our blur will not fire again.
+          // `everFocused` carries that uncertainty forward; see savePdf/fileToDeal.
           onDraft={(e) => { setUnsaved(false); setLastSavedAt(new Date()); saveLayout(); onDraft?.(e) }}
           onError={() => pushToast('BoldSign reported the send was cancelled — the draft is still on this deal.', 'info')}
           returnUrlMarker={returnUrlMarker}
@@ -1345,8 +1407,47 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
       <div style={{ padding:'8px 12px', borderTop:'1px solid var(--gw-border)', fontSize:11, color:'var(--gw-mist)', lineHeight:1.5, flexShrink:0 }}>
         {savingLayout
           ? <span aria-live="polite">Saving this deal’s field layout…</span>
-          : <>Not ready to send? Use <strong>Preview</strong> inside BoldSign, or <strong>Save PDF</strong> above to download the document as it stands — filled values included, with a summary of who signs what — to print or take to the client. Nothing goes out until you click Send. Fields you place are remembered for this deal.</>}
+          : <>Not ready to send? Use <strong>Preview</strong> inside BoldSign, <strong>Save PDF</strong> to download the document as it stands — filled values included, with a summary of who signs what — or <strong>Save to Deal</strong> to keep that copy on this deal's Documents tab. Nothing goes out until you click Send. Fields you place are remembered for this deal.</>}
       </div>
+
+            {/* WE CANNOT SEE INSIDE BOLDSIGN, so this says so rather than pretending
+          either way. Building silently from the last save is what handed agents a
+          PDF missing the fields they had just filled in; blocking outright would
+          make the button useless once they had touched the editor at all. The
+          last-saved time is the fact they need to decide. */}
+      {stale && (
+        <ConfirmDialog
+          eyebrow={stale === 'file' ? 'Save to Deal' : 'Save PDF'}
+          title="Saved everything inside BoldSign?"
+          confirmLabel={stale === 'file' ? 'File it anyway' : 'Build it anyway'}
+          cancelLabel="Let me save first"
+          confirmVariant="btn--primary"
+          onCancel={() => setStale(null)}
+          onConfirm={() => {
+            const which = stale
+            setStale(null)
+            if (which === 'file') fileToDeal({ force: true })
+            else savePdf({ force: true })
+          }}
+          message={
+            <>
+              <p style={{ margin: '0 0 10px', color: 'var(--gw-ink)' }}>
+                This copy is built from what <strong>BoldSign has saved</strong> — anything typed
+                in the editor and not saved there cannot reach it, and we have no way to see
+                inside BoldSign to check.
+              </p>
+              <p style={{ margin: '0 0 10px', color: 'var(--gw-ink)' }}>
+                {lastSavedAt
+                  ? <>BoldSign last reported a save at <strong>{lastSavedAt.toLocaleTimeString()}</strong>. If you have typed anything since, click <strong>Save</strong> in BoldSign first.</>
+                  : <>BoldSign has not reported a save in this session. Click <strong>Save</strong> in BoldSign first if you have filled anything in.</>}
+              </p>
+              <p style={{ margin: 0, fontSize: 12, color: 'var(--gw-mist)' }}>
+                Nothing is sent either way.
+              </p>
+            </>
+          }
+        />
+      )}
 
       {leaveAsk && (
         <ConfirmDialog
@@ -1684,6 +1785,7 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
   const [editDraft,   setEditDraft]   = React.useState(null)  // { url, env } — draft reopened in BoldSign
   const [layouts,     setLayouts]     = React.useState([])    // saved per-deal field arrangements
   const [savingPdf,   setSavingPdf]   = React.useState({})    // env.id → building its PDF copy
+  const [filing,      setFiling]      = React.useState({})    // env.id → filing a copy onto the deal
   const [sendingDraft, setSendingDraft] = React.useState({})  // env.id → draftSend in flight
   const [sendAsk,     setSendAsk]     = React.useState(null)  // env awaiting "yes, send it" confirmation
 
@@ -1942,6 +2044,24 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
       pushToast(`Could not save the PDF: ${err.message}`, 'error')
     } finally {
       setSavingPdf(p => ({ ...p, [env.id]: false }))
+    }
+  }
+
+  // File a copy onto the deal from the row. Available at every status, not just
+  // draft: filing the version that actually went out — or the one that came back
+  // signed — is the point of a filing cabinet, and a signed document filed here
+  // sits beside the rest of the deal's paperwork instead of only inside BoldSign.
+  const fileToDeal = async (env) => {
+    setFiling(p => ({ ...p, [env.id]: true }))
+    try {
+      const res = await fileDocumentToDeal(env.document_id)
+      pushToast(res.fieldCount
+        ? `Filed on this deal — ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} included. Find it in the Documents tab.`
+        : 'Filed on this deal — find it in the Documents tab.', 'success')
+    } catch (err) {
+      pushToast(`Could not file it on the deal: ${err.message}`, 'error')
+    } finally {
+      setFiling(p => ({ ...p, [env.id]: false }))
     }
   }
 
@@ -2267,6 +2387,15 @@ create policy "agent_notifications_policy" on agent_notifications
                       <button
                         className="btn btn--secondary btn--sm"
                         style={{ fontSize:11, flexShrink:0 }}
+                        onClick={() => fileToDeal(env)}
+                        disabled={filing[env.id]}
+                        title="File this document on the deal — it appears in the deal's Documents tab, filled values included"
+                      >
+                        <Icon name="upload" size={12}/> {filing[env.id] ? 'Filing…' : 'Save to Deal'}
+                      </button>
+                      <button
+                        className="btn btn--secondary btn--sm"
+                        style={{ fontSize:11, flexShrink:0 }}
                         onClick={() => openDraft(env)}
                         disabled={opening[env.id]}
                         title="Reopen this draft in BoldSign to change values, signers or field placement"
@@ -2562,6 +2691,7 @@ function DealTermsTab({ deal }) {
 function DraftReviewStep({ documentId, documentName, previewUrl, downloadUrl, fieldCount, signers = [], onAdjust, onSent, onClose, adjusting }) {
   const [sending, setSending] = React.useState(false)
   const [confirm, setConfirm] = React.useState(false)
+  const [filing,  setFiling]  = React.useState(false)
 
   const people = signerRows({ signers })
 
@@ -2573,6 +2703,24 @@ function DraftReviewStep({ documentId, documentName, previewUrl, downloadUrl, fi
     a.target = '_blank'
     a.rel = 'noopener'
     document.body.appendChild(a); a.click(); a.remove()
+  }
+
+  // The review is where an agent decides what happens to the packet, so filing it
+  // on the deal belongs here beside downloading it. No `unsaved` guard is needed on
+  // this path — unlike the editor, nothing is sitting typed in a cross-origin frame:
+  // the draft was composed server-side from values already written to it.
+  const fileToDeal = async () => {
+    setFiling(true)
+    try {
+      const res = await fileDocumentToDeal(documentId)
+      pushToast(res.fieldCount
+        ? `Filed on this deal — ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} included. Find it in the Documents tab.`
+        : 'Filed on this deal — find it in the Documents tab.', 'success')
+    } catch (err) {
+      pushToast(`Could not file it on the deal: ${err.message}`, 'error')
+    } finally {
+      setFiling(false)
+    }
   }
 
   const send = async () => {
@@ -2643,6 +2791,9 @@ function DraftReviewStep({ documentId, documentName, previewUrl, downloadUrl, fi
         </button>
         <button className="btn btn--secondary" onClick={download} disabled={!downloadUrl || sending}>
           <Icon name="document" size={13}/> Download PDF
+        </button>
+        <button className="btn btn--secondary" onClick={fileToDeal} disabled={filing || sending || !documentId}>
+          <Icon name="upload" size={13}/> {filing ? 'Filing…' : 'Save to Deal'}
         </button>
         <button className="btn btn--primary" onClick={() => setConfirm(true)} disabled={sending}>
           <Icon name="send" size={13}/> Send for Signature
