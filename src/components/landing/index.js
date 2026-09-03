@@ -10,6 +10,7 @@
  */
 export { Reveal, ScrollProgress, Button, Field, Skeleton, StatePanel } from './primitives.jsx'
 export { LandingShell, Hero, Section, DetailGrid, Gallery, Lightbox, LeadForm, AgentCard, AgentTeam } from './sections.jsx'
+export { OmGate } from './OmGate.jsx'
 export {
   usePrefersReducedMotion, useReveal, useCountUp, useParallax,
   useScrollProgress, useStuck, useLockBodyScroll,

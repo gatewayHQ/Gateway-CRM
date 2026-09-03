@@ -12,7 +12,8 @@
  *     images:      ["url1","url2",...],     // up to 6, rendered as a mosaic
  *     highlights:  [{label:"Avg Cap Rate", value:"6.1%"}, ...],
  *     cta_text:    "Get my free valuation",
- *     accent:      "#c9a961"                 // optional gold/brand accent
+ *     accent:      "#c9a961",                // optional gold/brand accent
+ *     om:          { filename, title, size, available }  // gated OM download
  *   }
  *
  * Required form fields: name, phone, property address.
@@ -23,6 +24,8 @@ import { supabase } from '../lib/supabase.js'
 import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
 import { fetchPublicMailing } from '../lib/publicMailing.js'
 import AdvisorDark from '../components/landing/AdvisorDark.jsx'
+import { OmGate } from '../components/landing/OmGate.jsx'
+import { normalizeOm, requestOm } from '../lib/om.js'
 
 const UNIT_RANGES = [
   { value: '2-4',     label: '2–4 units' },
@@ -123,6 +126,14 @@ export default function LandingMultifamily({ mailingId }) {
 
   // Hook must run on every render — call before any early returns
   const mosaic = useMosaicLayout(images.length)
+
+  // The OM download gate — rendered only when the builder attached a PDF. It
+  // captures name + phone + email (all required) in exchange for a short-lived
+  // signed URL; the page itself never holds a link to the file.
+  const om = normalizeOm(cfg.om)
+  const unlockOm = (fields) => requestOm(
+    withVisitId({ mailing_id: mailingId, source_landing: 'multifamily', ...fields })
+  )
 
   const submit = async (e) => {
     e.preventDefault()
@@ -251,8 +262,15 @@ export default function LandingMultifamily({ mailingId }) {
             </ul>
           </div>
 
-          {/* Right — form card */}
+          {/* Right — OM gate (when attached) then the valuation form */}
           <div style={{ position:'sticky', top:24 }}>
+            {/* Above the valuation form on purpose: an owner who came for the
+                deal package converts on the OM, not on a valuation request. */}
+            {om && (
+              <div style={{ marginBottom:16 }}>
+                <OmGate om={om} onUnlock={unlockOm} accent={accent} theme="dark" />
+              </div>
+            )}
             <div style={{
               background:'#1a1a1a',
               border:`1px solid #2f2f2f`,

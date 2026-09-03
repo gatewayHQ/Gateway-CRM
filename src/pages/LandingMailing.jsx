@@ -33,6 +33,8 @@ import { supabase } from '../lib/supabase.js'
 import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
 import { fetchPublicMailing } from '../lib/publicMailing.js'
 import { useReveal, useCountUp, useScrollProgress, useParallax, usePrefersReducedMotion } from '../components/landing/hooks.js'
+import { OmGate } from '../components/landing/OmGate.jsx'
+import { normalizeOm, requestOm } from '../lib/om.js'
 
 // Light / dark luxury palettes. Everything else is derived from `accent`.
 const THEMES = {
@@ -152,6 +154,14 @@ export default function LandingMailing({ mailingId }) {
   const consent  = cfg.consent_text || 'By subscribing you agree to receive occasional emails. We never sell your data.'
 
   const parallaxRef = useParallax(0.12)
+
+  // Optional gated download (a deal package or market report attached in the
+  // builder). Unlike the newsletter form below, the gate requires name + phone
+  // + email — it is trading a document, not a subscription.
+  const om = normalizeOm(cfg.om)
+  const unlockOm = (fields) => requestOm(
+    withVisitId({ mailing_id: mailingId, source_landing: 'mailing', ...fields })
+  )
 
   const submit = async (e) => {
     e.preventDefault()
@@ -288,8 +298,14 @@ export default function LandingMailing({ mailingId }) {
             {highlights.length > 0 && <Highlights highlights={highlights} theme={theme} reduced={reduced} />}
           </div>
 
-          {/* Right — subscribe card (sticky on desktop) */}
+          {/* Right — gated download (when attached), then the subscribe card */}
           <div className="ml-sticky" style={{ position: 'sticky', top: 26 }}>
+            {om && (
+              <Reveal reduced={reduced} delay={70} style={{ display: 'block', marginBottom: 16 }}>
+                <OmGate om={om} onUnlock={unlockOm} accent={accent}
+                        theme={cfg.theme === 'light' ? 'light' : 'dark'} />
+              </Reveal>
+            )}
             <Reveal reduced={reduced} delay={90}>
               <div style={{ background: theme.card, backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)',
                             border: `1px solid ${theme.cardBorder}`, borderRadius: 16, padding: 30,
