@@ -686,8 +686,26 @@ export function crmTokenValues({ deal, property, contact, additionalContacts = [
     // under one consistent family covering both sides, because `seller_2_name`
     // was already taken by the side-AGNOSTIC alias and could not be reused
     // without changing what it means for templates already in production.
-    party_buyer_1:      buyerParties[0]?.name  || '',
-    party_buyer_2:      buyerParties[1]?.name  || '',
+    // `Buyer1NameLabel` IS THE CLIENT LABEL ON BOTH SIDES. That is the templates'
+    // own convention, stated by the brokerage: a buyer packet and a listing
+    // packet both name the client's line `Buyer1NameLabel` (with
+    // `Buyer1NameLabel_2`, `_3` for the same name printed again). So a
+    // strictly side-scoped value blanks it on every seller deal, every
+    // lease, and every deal whose transaction_type was never recorded — which
+    // is what printed the literal word "Label" where the client's name belongs.
+    //
+    // Preference, not replacement: this side's own party when we have one, and
+    // the deal's client only as a fallback. `sided` (a BOTH-sided deal, where
+    // the CRM stores each side's people explicitly) keeps the strict reading,
+    // because there we genuinely know who the buyer is and falling back would
+    // print the wrong party on a form that names both.
+    //
+    // The seller tokens deliberately DO NOT get this fallback. `Seller1NameLabel`
+    // is not used as a universal client label, so filling it from the client
+    // would print our buyer as "the seller" on a buyer packet — the wrong-name
+    // failure described above, which a blank is better than.
+    party_buyer_1:      buyerParties[0]?.name  || (sided ? '' : clients[0]?.name) || '',
+    party_buyer_2:      buyerParties[1]?.name  || (sided ? '' : clients[1]?.name) || '',
     party_seller_1:     sellerParties[0]?.name || '',
     party_seller_2:     sellerParties[1]?.name || '',
 
@@ -1127,6 +1145,36 @@ export function partyNameGaps({ fields = [], values = {} } = {}) {
   const named = (fields || []).filter(f => f?.id && isFillableField(f.type) && PARTY_NAME_TOKENS.has(fieldTokenKey(f)))
   const empty = named.filter(f => !String(values?.[f.id] ?? '').trim())
   return { empty, noneNamed: named.length === 0, named }
+}
+
+/**
+ * What this send is about to write into each of the template's fields, as rows
+ * for a log line: the field's id, the CRM token it matched, and the value.
+ *
+ * Exists because the label→value step is the one part of a send that is
+ * invisible when it goes wrong. A Label whose id matches no token, or matches
+ * one that resolved to nothing, is indistinguishable on the send screen from a
+ * Label that is meant to be blank — and it reaches the client as BoldSign's
+ * placeholder text. `matched: false` is the row worth grepping for.
+ *
+ * Pure and side-effect free: the caller decides whether and how to log it.
+ */
+export function describeFieldMapping({ fields = [], values = {} } = {}) {
+  return (fields || [])
+    .filter(f => f?.id && isPrefillableField(f.type))
+    .map((f) => {
+      const token = fieldTokenKey(f)
+      const value = values?.[f.id]
+      return {
+        id:      String(f.id),
+        type:    String(f.type || ''),
+        shared:  isSharedField(f.type),
+        token:   token || null,
+        matched: Boolean(token),
+        value:   value == null ? '' : String(value),
+        filled:  String(value ?? '').trim() !== '',
+      }
+    })
 }
 
 // ── Empty Labels must not reach the client ───────────────────────────────────

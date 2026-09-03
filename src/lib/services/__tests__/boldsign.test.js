@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, dealClientSides, CANONICAL_LABEL_TOKENS, supportsReadOnly, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES, conditionalFieldsToRemove, emptyLabelsToRemove, partyNameGaps } from '../boldsign.js'
+import { describeTransportFailure, normalizeState, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, signerBoundPrefillFields, partitionPrefillFields, buildPrefillFields, sharedDataOnSignerFields, SHARED_PREFILL_TOKENS, dealClientList, joinNames, appointedAgent, tokenValueFor, fieldTokenValue, fieldTokenKey, prefillFieldEntry, seedSignersFromDeal, dealAgentList, orderAgentSigners, buildTemplateRoles, dealClientSide, dealClientSides, CANONICAL_LABEL_TOKENS, supportsReadOnly, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, READONLY_SUPPORTED_FIELD_TYPES, FILLABLE_FIELD_TYPES, TICKABLE_FIELD_TYPES, conditionalFieldsToRemove, emptyLabelsToRemove, partyNameGaps, describeFieldMapping } from '../boldsign.js'
 
 describe('normalizeState', () => {
   it('passes through a 2-letter code', () => { expect(normalizeState('ia')).toBe('IA') })
@@ -1141,6 +1141,101 @@ describe('additional_agent_date — only meaningful once there is an additional 
 // agent filled in correctly — because those two were named with separators and
 // the client's Label was not. normalizeTokenKey only turns SEPARATORS into
 // underscores, so "Client Name" matched and `ClientName` could never match.
+// `Buyer1NameLabel` IS the client label on both sides — the brokerage's own
+// template convention, with `Buyer1NameLabel_2`/`_3` for the same name printed
+// again. It resolves to `party_buyer_1`, which was strictly side-scoped, so it
+// blanked on every seller deal, every lease, and every deal whose
+// transaction_type was never recorded.
+describe('Buyer1NameLabel — the client label, whichever side the deal is', () => {
+  const nic = { first_name: 'nic', last_name: 'madsen' }
+  const label = (args, name = 'Buyer1NameLabel') =>
+    fieldTokenValue(crmTokenValues(args), { id: 'L', name })
+
+  it('fills on a buyer deal, as it always did', () => {
+    expect(label({ contact: { ...nic, type: 'buyer' }, deal: { comp_data: { transaction_type: 'buyer' } } }))
+      .toBe('nic madsen')
+  })
+
+  // The reported failure: a listing packet whose client line is Buyer1NameLabel.
+  it('fills on a SELLER deal — the case that printed "Label"', () => {
+    expect(label({ contact: { ...nic, type: 'seller' }, deal: { comp_data: { transaction_type: 'seller' } } }))
+      .toBe('nic madsen')
+  })
+
+  it('fills on a lease, and on a deal with no transaction_type recorded', () => {
+    expect(label({ contact: nic, deal: { comp_data: { transaction_type: 'lease' } } })).toBe('nic madsen')
+    expect(label({ contact: nic, deal: { comp_data: {} } })).toBe('nic madsen')
+    expect(label({ contact: nic, deal: {} })).toBe('nic madsen')
+  })
+
+  it('_2 is the same name again, not the second party', () => {
+    const args = { contact: { ...nic, type: 'seller' }, deal: { comp_data: { transaction_type: 'seller' } } }
+    expect(label(args, 'Buyer1NameLabel_2')).toBe('nic madsen')
+    expect(label(args, 'Buyer1NameLabel_3')).toBe('nic madsen')
+  })
+
+  it('Buyer2NameLabel is the second client', () => {
+    const args = {
+      contact: { ...nic, type: 'seller' },
+      additionalContacts: [{ first_name: 'Ann', last_name: 'Madsen', type: 'seller' }],
+      deal: { comp_data: { transaction_type: 'seller' } },
+    }
+    expect(label(args, 'Buyer1NameLabel')).toBe('nic madsen')
+    expect(label(args, 'Buyer2NameLabel')).toBe('Ann Madsen')
+  })
+
+  // THE FALLBACK MUST NOT REACH A DEAL WHERE WE KNOW BOTH SIDES. Printing our
+  // client on the buyer line of a form that also names the seller is the
+  // wrong-name failure a blank exists to prevent.
+  it('stays strictly per-side on a two-sided deal', () => {
+    const args = {
+      contact: nic,
+      deal: { comp_data: { transaction_type: 'both' } },
+      buyerClients:  [{ first_name: 'Bob', last_name: 'Buyer' }],
+      sellerClients: [{ first_name: 'Sue', last_name: 'Seller' }],
+    }
+    expect(label(args, 'Buyer1NameLabel')).toBe('Bob Buyer')
+    expect(label(args, 'Seller1NameLabel')).toBe('Sue Seller')
+  })
+
+  // Seller1NameLabel deliberately gets NO fallback: it is not used as a
+  // universal client label, so filling it from the client would print our buyer
+  // as "the seller".
+  it('does not put a buyer-side client on the seller line', () => {
+    expect(label({ contact: { ...nic, type: 'buyer' }, deal: { comp_data: { transaction_type: 'buyer' } } }, 'Seller1NameLabel'))
+      .toBe('')
+  })
+
+  it('is blank when the deal has no client at all', () => {
+    expect(label({ deal: { comp_data: { transaction_type: 'seller' } } })).toBe('')
+  })
+})
+
+// The label->value step is the one part of a send that fails invisibly.
+describe('describeFieldMapping — what is about to be sent', () => {
+  const fields = [
+    { id: 'Buyer1NameLabel', type: 'label' },
+    { id: 'Label7',          type: 'label' },      // matches no token
+    { id: 'LenderNameLabel', type: 'label' },      // matches, resolves to nothing
+    { id: 'Sig1',            type: 'signature' },  // not prefillable
+  ]
+  const rows = describeFieldMapping({ fields, values: { Buyer1NameLabel: 'nic madsen' } })
+
+  it('reports the token and value per field, skipping what cannot be prefilled', () => {
+    expect(rows.map(r => r.id)).toEqual(['Buyer1NameLabel', 'Label7', 'LenderNameLabel'])
+    expect(rows[0]).toMatchObject({ token: 'party_buyer_1', matched: true, filled: true, shared: true })
+  })
+
+  it('separates "nothing recognised this id" from "the token resolved to nothing"', () => {
+    expect(rows.find(r => r.id === 'Label7')).toMatchObject({ matched: false, filled: false })
+    expect(rows.find(r => r.id === 'LenderNameLabel')).toMatchObject({ matched: true, filled: false })
+  })
+
+  it('is empty rather than broken with nothing to describe', () => {
+    expect(describeFieldMapping()).toEqual([])
+  })
+})
+
 describe('fieldTokenKey — a Label named the way a person would name it', () => {
   const vals = crmTokenValues({
     contact: { first_name: 'nic', last_name: 'madsen', type: 'buyer' },
@@ -1603,11 +1698,16 @@ describe('the expanded canonical vocabulary', () => {
     expect(crmTokenValues({ property: {} }).property_city_state_zip).toBe('')
   })
 
-  it('seller ids stay blank on a buyer deal, and swap over on a seller deal', () => {
+  it('seller ids stay blank on a buyer deal, and fill on a seller deal', () => {
+    // The guard that matters, unchanged: our BUYER client must never be printed
+    // as "the seller".
     expect(val('Seller1NameLabel')).toBe('')
     const seller = { ...ctx, deal: { ...ctx.deal, comp_data: { ...ctx.deal.comp_data, transaction_type: 'seller' } } }
     expect(fieldTokenValue(crmTokenValues(seller), { id: 'Seller1NameLabel' })).toBe('Daniel Stilson')
-    expect(fieldTokenValue(crmTokenValues(seller), { id: 'Buyer1NameLabel' })).toBe('')
+    // Buyer1NameLabel is THE CLIENT label on both sides — the templates' own
+    // convention — so on a seller deal it names the client rather than going
+    // blank. It used to be blank, which printed "Label" on every listing packet.
+    expect(fieldTokenValue(crmTokenValues(seller), { id: 'Buyer1NameLabel' })).toBe('Daniel Stilson')
   })
 
   it('agreement_date falls back to today only when the deal has no start date', () => {
@@ -1973,12 +2073,20 @@ describe('party tokens on a both-sided deal', () => {
       .toBe('Janet Hala, Jason Beck, Hope Cerda and Nathan Miss')
   })
 
-  it('still leaves the other side blank on a ONE-SIDED deal', () => {
+  it('still leaves the counterparty blank on a ONE-SIDED deal', () => {
     // The CRM stores nothing about the party across the table there, and a blank
-    // the agent can see and fill beats a plausible wrong name.
+    // the agent can see and fill beats a plausible wrong name. `buyer_1_name` is
+    // the side-scoped token and keeps that reading exactly.
     const v = crmTokenValues({ deal: { comp_data: { transaction_type: 'seller' } }, contact: JANET })
     expect(v.party_seller_1).toBe('Janet Hala')
-    expect(v.party_buyer_1).toBe('')
     expect(v.buyer_1_name).toBe('')
+    // `party_buyer_1` is what Buyer1NameLabel addresses, and that label is the
+    // CLIENT label on both sides, so it names the client here. The distinction
+    // is deliberate: `buyer_1_name` answers "who is the buyer", `party_buyer_1`
+    // answers "what goes on the line the template calls Buyer1NameLabel".
+    expect(v.party_buyer_1).toBe('Janet Hala')
+    // And the reverse still never happens — no buyer-side client on a seller line.
+    const buyerDeal = crmTokenValues({ deal: { comp_data: { transaction_type: 'buyer' } }, contact: JANET })
+    expect(buyerDeal.party_seller_1).toBe('')
   })
 })

@@ -26,7 +26,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, emptyLabelsToRemove, partyNameGaps, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, emptyLabelsToRemove, partyNameGaps, describeFieldMapping, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { readDealTerms, termsForDeal, termsFilled, buildTermsPatch, normalizeTermValue, derivedTermHint } from '../lib/services/dealTerms.js'
 import SignerPicker, { buildCandidates, isValidEmail } from '../components/SignerPicker.jsx'
@@ -3091,6 +3091,30 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     // The second subsumes most of the first, but the first is kept: it says WHY
     // in the code for the three fields the CRM has a token for, and a Set makes
     // the overlap free.
+    // WHAT IS ACTUALLY GOING TO BOLDSIGN, in one place, before it goes. The
+    // label→value step is the only part of a send that fails invisibly: a Label
+    // whose id matches no CRM token looks exactly like a Label meant to be
+    // blank, right up until it reaches the client as the word "Label". Grep
+    // `matched: false` for an id nothing recognised, and `filled: false` for a
+    // token that resolved to nothing.
+    const mapping = describeFieldMapping({ fields: details.fields || [], values })
+    const unmatched = mapping.filter(r => !r.matched)
+    const unfilled  = mapping.filter(r => r.matched && !r.filled)
+    console.info(
+      `[boldsign] prepare "${tpl?.name || templateId}" — ${mapping.length} prefillable field(s): `
+      + `${mapping.filter(r => r.filled).length} filled, ${unfilled.length} matched-but-empty, `
+      + `${unmatched.length} matched no CRM token`,
+    )
+    if (mapping.length) console.table?.(mapping)
+    if (unmatched.length) {
+      console.warn('[boldsign] these fields matched no CRM token — they go out blank:',
+        unmatched.map(r => `${r.id}${r.shared ? ' (Label)' : ''}`).join(', '))
+    }
+    if (unfilled.length) {
+      console.warn('[boldsign] these fields matched a token that resolved to nothing:',
+        unfilled.map(r => `${r.id} → ${r.token}`).join(', '))
+    }
+
     const fieldRemovalIds = [...new Set([
       ...conditionalFieldsToRemove({ fields: details.fields || [], values }),
       ...emptyLabelsToRemove({ fields: details.fields || [], values }),
