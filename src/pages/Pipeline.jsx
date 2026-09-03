@@ -29,7 +29,6 @@ import { streetLine, propertyLabel } from '../lib/address.js'
 import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, emptyLabelsToRemove, partyNameGaps, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { readDealTerms, termsForDeal, termsFilled, buildTermsPatch, normalizeTermValue, derivedTermHint } from '../lib/services/dealTerms.js'
-import { isOfficeAdmin } from '../lib/officeAdmins.js'
 import SignerPicker, { buildCandidates, isValidEmail } from '../components/SignerPicker.jsx'
 import { savePdfFromUrl } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -2968,9 +2967,14 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   // ever seen a field id, and "Label" is a BoldSign implementation detail that
   // had leaked as far as the person trying to send a listing agreement.
   //
-  // The information is not wrong. It was on the wrong screen. Same computation,
-  // shown only to whoever can act on it.
-  const showDiagnostics = isOfficeAdmin(activeAgent)
+  // The information is not wrong, and F-05 put it behind an admin gate on the
+  // reasoning that only an admin can fix a template. REVERTED, because the gate
+  // cost more than it saved: a real Appointed Agency Agreement went out with the
+  // word "Label" on both client-name lines, and the readout below — the field's
+  // id, its type, and the CRM token it matched — is the only thing on any screen
+  // that shows a Label carrying an id nothing matched. Gating it left the agent
+  // who hit the problem with no way to see it and no way to describe it, which is
+  // worse than a line of jargon they can ignore.
 
   // WHO CAN SIGN. The deal's own people first — on a listing agreement the
   // signer is nearly always already on the deal — then agents, then the rest of
@@ -3384,12 +3388,13 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
             </span>
           )}
         </span>
-        {/* Plumbing, for whoever can fix it. See showDiagnostics. */}
-        {showDiagnostics && (
-          <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7 }} title="The field id BoldSign uses, its type, and the CRM token it matched">
-            {fieldOrigin(f)} · {fieldType(f)}
-          </span>
-        )}
+        {/* The field's id, type and matched token. Shown to everyone: it is how
+            anybody notices a Label whose name matches no CRM value, which is
+            exactly the failure that put the word "Label" on a signed-ready
+            agreement. */}
+        <span style={{ fontFamily:'var(--font-mono, monospace)', fontSize:10, opacity:0.7 }} title="The field id BoldSign uses, its type, and the CRM token it matched">
+          {fieldOrigin(f)} · {fieldType(f)}
+        </span>
       </div>
       {info?.optional && (
         <div style={{ fontSize:10, color:'var(--gw-mist)', marginBottom:3 }}>
@@ -3638,12 +3643,10 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                       name, but nothing on this template asks for it. You can still type it in below
                       if a box is offered.
                     </div>
-                    {showDiagnostics && (
-                      <div style={{ marginTop:6, color:'var(--gw-mist)' }}>
-                        Admin: name a <strong>Label</strong> on the template <code>client_names</code>
-                        {' '}(or <code>party_buyer_1</code> / <code>party_seller_1</code> for a single line each).
-                      </div>
-                    )}
+                    <div style={{ marginTop:6, color:'var(--gw-mist)' }}>
+                      To fix it: name a <strong>Label</strong> on the template <code>client_names</code>
+                      {' '}(or <code>party_buyer_1</code> / <code>party_seller_1</code> for a single line each).
+                    </div>
                   </>
                 ) : (
                   <>
@@ -3677,18 +3680,21 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                       <li key={f.id}>
                         \u201c{f.caption || f.label || f.name || prettyLabel(f.id)}\u201d — will show {roleNameFor(f.roleIndex)}\u2019s name
                         {want ? <>, not \u201c{want}\u201d</> : ''}
-                        {showDiagnostics && token ? <> <code style={{ fontSize:10 }}>{f.id} \u2192 {token}</code></> : ''}
+                        {token ? <> <code style={{ fontSize:10 }}>{f.id} \u2192 {token}</code></> : ''}
                       </li>
                     )
                   })}
                 </ul>
                 <div style={{ color:'var(--gw-mist)', marginTop:6 }}>
-                  {showDiagnostics
-                    ? <>Fix the template: delete each of these and place a <strong>Label</strong> in the same spot (BoldSign
-                       cannot change a placed field\u2019s type), naming the Label after the token above so it fills
-                       automatically. A Label is also read by every signer immediately, whatever the signing order.</>
-                    : <>You can still send this — just correct those lines by hand on the printed copy, and ask your admin
-                       to fix the form so the next one is right.</>}
+                  {/* Both halves, to everyone. The workaround is what the agent
+                      needs right now; the template fix is what stops it
+                      recurring, and an agent who can read it is an agent who can
+                      tell their admin precisely what to change. */}
+                  <>You can still send this — just correct those lines by hand on the printed copy.
+                     To fix it for good: delete each of these in the template and place a <strong>Label</strong> in
+                     the same spot (BoldSign cannot change a placed field\u2019s type), naming the Label after the
+                     token above so it fills automatically. A Label is also read by every signer immediately,
+                     whatever the signing order.</>
                 </div>
               </div>
             )}
@@ -3867,7 +3873,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
             {showAllFields && (
               <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:12 }}>
                 Showing every box on this form, including the ones the page gives no name to.
-                {showDiagnostics && ' Name a field in BoldSign\u2019s template editor (a CRM token, or just a caption) and it will show here by default.'}{' '}
+                {' Name a field in BoldSign\u2019s template editor (a CRM token, or just a caption) and it will show here by default.'}{' '}
                 <button type="button" className="btn btn--link btn--sm" onClick={() => setShowAllFields(false)}>Show fewer</button>
               </div>
             )}
