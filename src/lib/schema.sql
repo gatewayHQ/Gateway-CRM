@@ -657,8 +657,16 @@ create table if not exists deal_field_layouts (
   template_id   text not null default '',
   document_name text,
   -- { signers: [{ signerRole, signerName, signerEmail, order, formFields: [...] }],
-  --   commonFields: [...] } — shape defined by normalizeCapturedLayout() in
-  --   api/boldsign.js. JSON because it is read and written whole.
+  --   commonFields: [...], unrestorableIds: [...] } — shape defined by
+  --   normalizeCapturedLayout() in api/boldsign.js. JSON because it is read and
+  --   written whole.
+  -- `unrestorableIds` names the fields a capture could NOT represent (types
+  -- outside EDITABLE_FIELD_TYPES — Name, Email, Phone — and fields with no
+  -- bounds). The restore needs it to tell "the agent deleted this" apart from
+  -- "we lost this"; without it, it deleted both. Rows written before it existed
+  -- have no such key and the restore removes nothing from them, which is the
+  -- safe reading. No migration: additive within an existing jsonb, and every
+  -- row heals on its next capture.
   layout        jsonb not null default '{}'::jsonb,
   field_count   integer not null default 0,
   captured_from text,                                    -- BoldSign document id it was read from
