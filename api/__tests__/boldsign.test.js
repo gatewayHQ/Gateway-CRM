@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, dealFilingName, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds, buildSendOptions, appendSendOptions, normalizeCc, normalizeReminders } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, dealFilingName, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds, buildSendOptions, appendSendOptions, normalizeCc, normalizeReminders, summarizeFieldValues } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -549,11 +549,38 @@ describe('createDraftEditUrl — getting an agent back into an abandoned draft',
       // A draft MUST open on FillingPage — BoldSign refuses PreparePage outright
       // for a draft ("...because the document is in the draft state").
       sendViewOption:    'FillingPage',
+      // The button whose absence made the whole flow a dead end: the editor
+      // rendered no Save, so nothing typed there could reach
+      // /document/properties — and everything the CRM composes is built from
+      // that. Asserted so it cannot quietly go missing again.
+      showSaveButton:    true,
       showSendButton:    true,
       showPreviewButton: true,
       redirectUrl:       'https://crm/x',
       onBehalfOf:        'agent@x.com',
     })
+  })
+
+  // The Save button is what makes the draft workflow work at all, but it is still
+  // only a toolbar preference: an agent who cannot reopen their draft is a worse
+  // outcome than one whose editor opens with the old toolbar.
+  it('retries without the Save button if BoldSign refuses that option', async () => {
+    const bodies = []
+    vi.stubGlobal('fetch', vi.fn((_u, opts) => {
+      const parsed = JSON.parse(opts.body)
+      bodies.push(parsed)
+      return Promise.resolve(parsed.showSaveButton
+        ? status(400, "The ShowSaveButton option is not supported for this document.")
+        : editResp('https://app.boldsign.com/edit/nosave'))
+    }))
+    const url = await createDraftEditUrl({ documentId: 'd1' })
+
+    expect(url).toBe('https://app.boldsign.com/edit/nosave')
+    expect(bodies).toHaveLength(2)
+    expect(bodies[0].showSaveButton).toBe(true)
+    expect(bodies[1]).not.toHaveProperty('showSaveButton')
+    // Not mistaken for a stale edit lock — cancelEditing must never be called.
+    expect(bodies.every(b => b.sendViewOption)).toBe(true)
   })
 
   it('falls back to the other view option when BoldSign refuses this one', async () => {
@@ -2026,5 +2053,43 @@ describe('appendSendOptions (multipart)', () => {
     const form = new FormData()
     appendSendOptions(form, {})
     expect(form.get('ExpiryDays')).toBeNull()
+  })
+})
+
+describe('summarizeFieldValues — the log line that says whether the save landed', () => {
+  const props = {
+    signerDetails: [{
+      signerEmail: 'buyer@x.com',
+      formFields: [
+        { id: 'buyer_name', type: 'TextBox', label: 'Buyer name', value: 'Dana Reyes', pageNumber: 2 },
+        { id: 'buyer_init', type: 'CheckBox', label: 'Agrees',    value: '',           pageNumber: 2 },
+      ],
+    }],
+    commonFields: [{ id: 'eff_date', type: 'TextBox', label: 'Effective date', value: '2026-09-03' }],
+  }
+
+  it('counts filled fields separately from total, so an empty save is obvious', () => {
+    const out = summarizeFieldValues(props)
+    expect(out.total).toBe(3)
+    expect(out.filled).toBe(2)
+  })
+
+  it('carries the id, page, signer and value of every field', () => {
+    const { fields } = summarizeFieldValues(props)
+    expect(fields[0]).toMatchObject({ id: 'buyer_name', value: 'Dana Reyes', signer: 'buyer@x.com', page: 2, filled: true })
+    expect(fields[1]).toMatchObject({ id: 'buyer_init', value: '', filled: false })
+    // A sender-filled common field is attributed, not silently dropped.
+    expect(fields[2]).toMatchObject({ id: 'eff_date', signer: '(common)', filled: true })
+  })
+
+  it('truncates a value rather than logging client data in full', () => {
+    const long = 'x'.repeat(200)
+    const { fields } = summarizeFieldValues({ commonFields: [{ id: 'f', value: long }] })
+    expect(fields[0].value).toHaveLength(61)   // 60 chars + the ellipsis
+    expect(fields[0].value.endsWith('\u2026')).toBe(true)
+  })
+
+  it('is safe on a properties payload with nothing on it', () => {
+    expect(summarizeFieldValues(null)).toEqual({ total: 0, filled: 0, fields: [] })
   })
 })

@@ -664,6 +664,50 @@ Blocking outright once the editor had been touched would make the button useless
 building silently is what caused the bug. The confirm states that we cannot see
 inside BoldSign and gives the agent the one fact they need to decide.
 
+### The Save button has to be asked for — it was not
+
+The guard above is only honest if a Save exists to point at. It did not.
+
+**`createDraftEditUrl` enumerates the toolbar buttons it wants** — BoldSign renders
+that enumeration, and a button the payload never names is not on the toolbar. Send,
+Preview and the page navigation were named. **Save was not.** So an agent who opened
+a Buyer Agreement or the IA agency packet got an editor with no way to commit what
+they typed, and the guard's message — *"Click Save inside BoldSign first"* — named a
+button that was not there. Both Save PDF and Save to Deal refused permanently, and
+the draft on the Signatures tab stayed as the API had created it: the CRM's prefill,
+with none of the agent's own typing on it.
+
+`showSaveButton: true` is now named there, and `ShowSaveButton`/`showSaveButton`
+alongside `ShowToolbar` at the two create-time doors (`document-embed-url`,
+`createTemplateDraft`), so no path into the editor can be missing it. Asserted in
+`api/__tests__/boldsign.test.js`.
+
+**The save event was also misread.** BoldSign's document editor fires
+`onSaveClick` for the click and **`onDraftSavedSuccess`** once the save is
+committed. Only the first was in `BoldSignFrame`'s `DRAFT` set; the confirmation
+ends in `success`, so it fell through to `SUCCESS` and a *saved draft* was reported
+as a completed **send** — the iframe torn down mid-prep and the agent told the client
+had it. `ondraftsaved` (substring, so it also covers `onDraftSavedSuccess`) and
+`onsavesuccess` are now draft events.
+
+### Logging the save path
+
+The failure this whole section is about is invisible from the outside: a draft that
+saved empty looks exactly like one that saved with everything on it. So the save path
+logs, with the same `documentId` on every line:
+
+| Line | Where | What it answers |
+|---|---|---|
+| `[boldsign] BoldSign reported a save` | browser | Did a save event arrive at all, and which one |
+| `[boldsign] layout capture` | browser | What the capture that rides along with it stored |
+| `boldsign.compose: document as BoldSign holds it` | server | **Every field and its value, as BoldSign has it saved** — if the agent's typing is missing here it was never saved, and nothing downstream can recover it |
+| `boldsign.file: draft filed on the deal` | server | The final draft: storage path, filename, bytes, field count |
+| `boldsign.layout-capture: field arrangement stored` | server | Whether the capture saved, and why not when it didn't |
+
+`summarizeFieldValues()` builds the field rows. **Values are truncated to 60
+characters** — they are client data, and the question a log answers is "did the value
+arrive", not "what was it in full".
+
 ## Per-deal field layouts (placements that stick)
 Field placement happens inside BoldSign's embedded editor, and BoldSign keeps it on
 the **document**. So the arrangement an agent builds for a deal — the co-seller's
@@ -796,7 +840,7 @@ template with the template's defaults and the agent re-did the work from memory.
 
 ## Embedded signing/sending (iFrame)
 - `<BoldSignFrame>` (`src/components/BoldSignFrame.jsx`) renders the URL and relays completion to `onDone`/`onError`. Completion is detected three ways (see the header comment), because **the embedded template editor and the document flows emit different events**:
-  - Document send/sign → `onCreateSuccess` / `onDraftSuccess` / `onSendSuccess` / `onSuccessfullySigned` / `onSigningComplete` / `onDocumentSigned`.
+  - Document send/sign → `onCreateSuccess` / `onDraftSuccess` / **`onDraftSavedSuccess`** / `onSendSuccess` / `onSuccessfullySigned` / `onSigningComplete` / `onDocumentSigned`. The saved-but-not-sent ones (`onDraftSuccess`, `onDraftSavedSuccess`, `onSaveClick`) route to `onDraft`, not `onDone` — see "The Save button has to be asked for" above.
   - **Template editor → `onCreateClick` / `onSaveClick` / `onSaveAndCloseClick`** (the data arrives as `{ status }` from `https://app.boldsign.com`). These were *not* in the original success set, which is why a saved template silently never wrote back to the Form Library — the "done" signal was dropped and the iframe's `RedirectUrl` (pointed at `window.location.href`, i.e. the CRM) loaded the whole CRM inside the popup instead.
   - The event/origin rules are a pure exported function, `classifyBoldSignMessage()`, unit-tested in `src/components/__tests__/BoldSignFrame.test.js`.
 - **Return-page fallback.** The template editor's `RedirectUrl` now points at `public/boldsign-return.html` — a tiny same-origin page (so the CRM doesn't re-render inside the iframe). `BoldSignFrame` detects the return two ways: the page posts a `gwTemplateEditorDone` message, and the iframe's `load` event reads the same-origin URL and matches the `returnUrlMarker` prop. `FormLibrary` guards against the two signals double-saving with a ref.

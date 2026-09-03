@@ -45,6 +45,17 @@ describe('classifyBoldSignMessage — saved-but-not-sent is NOT a send', () => {
   it('classifies an intermediate template editor save as draft', () => {
     expect(from(BOLDSIGN, 'onSaveClick')).toBe('draft')
   })
+
+  // The DOCUMENT editor's save CONFIRMATION. onSaveClick is the click;
+  // onDraftSavedSuccess is BoldSign saying the values are committed. It was
+  // absent from DRAFT, and because the name ends in 'success' it fell through to
+  // SUCCESS — reporting a saved draft as a completed send and tearing the editor
+  // down mid-prep.
+  it('classifies the document editor save confirmation as draft', () => {
+    expect(from(BOLDSIGN, 'onDraftSavedSuccess')).toBe('draft')
+    expect(from(BOLDSIGN, 'onDraftSavedSuccess')).not.toBe('done')
+    expect(from(BOLDSIGN, 'onSaveSuccess')).toBe('draft')
+  })
 })
 
 describe('classifyBoldSignMessage — origin trust', () => {

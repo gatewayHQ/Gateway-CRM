@@ -9,7 +9,8 @@
 //   1. postMessage from https://app.boldsign.com. Event names vary by flow:
 //        • document send/sign → onCreateSuccess | onSendSuccess |
 //          onSuccessfullySigned | onSigningComplete | onDocumentSigned
-//          ("saved but not sent" events go to onDraft instead — see DRAFT below)
+//          ("saved but not sent" events go to onDraft instead — see DRAFT below:
+//          onDraftSuccess | onDraftSavedSuccess | onSaveClick)
 //        • TEMPLATE editor    → onCreateClick | onSaveClick | onSaveAndCloseClick
 //          (these are what the embedded *template* editor emits — NOT the
 //          *Success events above; missing them was why template saves looked
@@ -40,6 +41,17 @@ const SUCCESS = new Set([
 // persist without claiming delivery, and without tearing the iframe down.
 const DRAFT = new Set([
   'ondraftsuccess',   // document flow: saved as a draft
+  // The event BoldSign's DOCUMENT editor actually fires once a Save has been
+  // COMMITTED (onSaveClick is the click; this is the confirmation). Matching is
+  // by substring, so 'ondraftsaved' also covers 'ondraftsavedsuccess'.
+  //
+  // It was missing, and missing it was silent in the worst way: the name ends in
+  // 'success', so it fell through to SUCCESS below and a saved draft was reported
+  // as a completed SEND — the frame torn down, the agent told the client had it.
+  // The modal's `unsaved` flag was cleared by that path too, which is why this
+  // looked like "the save sort of worked" rather than a misread event.
+  'ondraftsaved',
+  'onsavesuccess',    // same save, spelled the other way in some flows
   'onsaveclick',      // template editor: intermediate save, editor stays open
 ])
 const FAILURE = new Set([
