@@ -167,6 +167,13 @@ export function ConfirmDialog({
   // this started as, wrong (and briefly alarming) on a dialog whose button sends
   // a binding agreement to a client.
   confirmVariant = 'btn--danger', cancelLabel = 'Cancel', busy = false, busyLabel = 'Saving…',
+  // A THIRD DOOR, for the dialogs where "cancel or confirm" is a false choice.
+  // Leaving a half-prepared agreement is the case that needs it: save the work,
+  // throw it away, or go back to it are three different answers, and folding
+  // "throw it away" into Cancel is how work gets lost by someone who read the
+  // buttons correctly. { label, onClick, variant } — omitted, nothing renders
+  // and every existing dialog is unchanged.
+  extraAction = null,
 }) {
   return (
     <Modal open={true} onClose={onCancel} width={420}>
@@ -182,6 +189,15 @@ export function ConfirmDialog({
       </div>
       <div className="modal__foot">
         <button className="btn btn--secondary" onClick={onCancel} disabled={busy}>{cancelLabel}</button>
+        {extraAction && (
+          <button
+            className={`btn ${extraAction.variant || 'btn--secondary'}`}
+            onClick={extraAction.onClick}
+            disabled={busy || extraAction.disabled}
+          >
+            {extraAction.label}
+          </button>
+        )}
         <button className={`btn ${confirmVariant}`} onClick={onConfirm} disabled={busy}>
           {busy ? busyLabel : confirmLabel}
         </button>

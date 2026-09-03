@@ -66,6 +66,8 @@ Nightly:  /api/cron?task=boldsign-sync
 | `boldsign_documents` | one row per send: `document_id`, `deal_id`, `agent_id`, `status`, `signer_*`, `signers` jsonb, `completed_at`, `audit_trail_saved`, `signed_storage_path`, `audit_storage_path`, `last_reminded_at`, `reminder_count` |
 | `form_packets` | **the template/form catalog.** `state`, `transaction_type`, `name`, `storage_path` (plain downloadable forms) plus `boldsign_template_id`, `doc_type`, `field_tokens`, `active` (e-sign-ready entries) |
 | `boldsign_sender_identities` | per-agent send-on-behalf: `agent_id`, `email`, `status` (pending/approved/declined) |
+| `deal_field_layouts` | one row per (deal, template): the normalized placement of every field, captured out of BoldSign when an editing session ends and re-applied to the next draft built for that deal — where fields **sit** |
+| `deal_template_drafts` | one row per (deal, template): the saved state of the prepare-from-template screen — signer rows, prefilled values, tri-state tick boxes, the packet's declared terms, send options — what the agent **answered**, before any document exists (migration 0044) |
 | `boldsign_templates` | **superseded** by `form_packets` (0019 backfills it in) — kept, not dropped, for rollback safety. Don't write new rows here. |
 
 Signed PDFs + audit-trail PDFs are archived to the `deal-documents` bucket.
@@ -339,6 +341,91 @@ again**, as many times as it takes. The document stays a draft, on the same
 layout is preserved, and the audit trail is one document rather than five
 abandoned ones.
 
+### Save for Later — a packet an agent is working on that is not needed yet
+
+Reported symptom: *"I had filled out the checkboxes and the buyer name on this
+template. I then went to X out of it and save the template, but it didn't keep
+those filled in."*
+
+Preparing a packet is where an agent decides what the agreement **says** — who
+signs it, which boxes are ticked (the representation, the term, the policy: these
+are terms of a contract, not decoration), the client's name where the deal record
+needs correcting, an expiry, a copy to the lender. Until migration 0044 none of
+it was stored anywhere. It lived in React state and nowhere else, so closing the
+prepare modal — the X, Escape, the backdrop, Cancel, a browser reload — discarded
+every one of those decisions **silently**, and reopening the same template on the
+same deal re-seeded from the deal as if the agent had never been there.
+
+Every button on that screen was a step toward sending, so "I'll finish this
+Thursday" had no button at all, and the only way out was the one that threw the
+work away.
+
+**Two things are saved now, and they are not the same thing.**
+
+| | Where it lives | What it is for |
+|---|---|---|
+| The filled **draft** | BoldSign + `boldsign_documents` (status `draft`) | A real document on the Signatures tab, every value written into it. Anyone on the deal can find it, print it, send it. This already existed — it just only happened when one of the two send-ward buttons was pressed. |
+| The **screen's own state** | `deal_template_drafts` (migration 0044) | The radio buttons, the tri-state tick boxes, the corrected names, the send options. Reopening the template brings them back. Without this half, "reopen the draft" means BoldSign's editor — where, as the modal itself says, anything typed is a preview that never reaches the signers. |
+
+`Save for Later` writes both, **in that order and for that reason**: the agent's
+own answers go to the CRM first and unconditionally, because they are the thing
+that was being lost. They survive a packet too incomplete to become a document
+(no signer yet, a term still unanswered) and they survive a BoldSign outage — the
+toast then says the work is kept and names what is missing before a draft can
+reach the Signatures tab. `Review Draft` and `Place Fields` save the screen state
+too, so reviewing a packet and closing the review no longer loses the decisions
+that produced it.
+
+**Closing asks, and only when there is something to ask about.** `templateWorkEdits()`
+compares the screen against what *seeding* put there, so opening the modal and
+closing it again closes with no dialog — the seeded values are the deal's, not
+the agent's work. With real changes outstanding the dialog offers all three
+answers rather than folding "throw it away" into Cancel:
+
+```
+Save what you have done on this form?
+  You have changed 1 filled-in value and 2 boxes or terms on this packet.
+  [ Keep editing ]  [ Discard changes ]  [ Save for Later ]
+```
+
+`beforeunload` covers the path no in-app guard can reach (closing the tab,
+reloading), registered only while work is outstanding.
+
+**A restore is a MERGE, never a replacement.** A template can be edited between
+the save and the reopen: fields renamed, boxes deleted, roles added. So
+`applySavedTemplateWork()` overlays the save onto a freshly seeded screen —
+anything the template no longer has is dropped (sending a value for a field
+BoldSign no longer carries is rejected outright by `assertPayloadFieldsExist`),
+and anything it has gained arrives seeded from the deal. The screen says it
+restored, with the time and a **Start fresh from the deal** link, because a form
+that silently differs from its template is a form an agent cannot trust.
+
+**One work-in-progress draft per packet, not one per save.** An agent who saves
+four times over a week must not find four near-identical unsent drafts on the
+Signatures tab — the newest is the only one that reflects their answers, and the
+older ones are traps to send by mistake. So a save supersedes the draft the
+*previous save* left, and only ever that one: it must still be `draft` in the CRM
+(`isUnsentDraft()`), and drafts created by `Review Draft` / `Place Fields` are
+never touched, because two of those on one deal can be two real packets for two
+different signers. Superseding is best-effort — a failure leaves an extra draft,
+which is untidy, never lost work.
+
+**Sending clears the save.** A sent packet is not work in progress; left behind,
+the row would restore last week's answers onto the next packet built from the
+same template on this deal.
+
+Why not `deal_field_layouts`: that table records where fields **sit** on a
+document, read back out of BoldSign after an editing session. This records what
+the agent **answered** on the CRM's own screen, before any document exists —
+different lifecycle, different writer. Why not `form_packets`: those rows are
+brokerage-wide and compliance-relevant, and one agent's in-progress answers on
+one deal must never rewrite the form every other deal sends from (same reasoning
+as migration 0026).
+
+Code: `src/lib/services/templateWork.js` (+ its tests),
+`SendFromTemplateModal` in `src/pages/Pipeline.jsx`,
+`migrations/0044_deal_template_drafts.sql`.
+
 ### Why creating the draft doesn't need the editor
 
 `POST /template/createEmbeddedRequestUrl` is the API's draft-from-template door.
@@ -413,7 +500,9 @@ signatures and no audit trail; the button and its tooltip say so.
 | No draft yet | — | **Prepare from Template** / Send for Signature (ad-hoc) |
 | Modal, template loading | "Loading template…" | both buttons disabled |
 | Modal, template unreadable | red panel + **Try again** | both buttons disabled — a failed load must never look like a loaded template |
-| Modal, ready | signer rows + a control per prefillable field | **Review Draft** (primary) · **Place Fields in BoldSign** (secondary) — both create the same draft, and differ only in where the agent lands |
+| Modal, ready | signer rows + a control per prefillable field | **Review Draft** (primary) · **Place Fields in BoldSign** · **Save for Later** — all three create the same filled draft; the first two differ only in where the agent lands, the third just keeps it |
+| Modal, restored from a save | "Picked up where you left off", with the save time and **Start fresh from the deal instead** | as above; the tick-box list opens itself when a save brought ticks back |
+| Modal, closing with changes | three-way dialog naming what changed | **Keep editing** · **Discard changes** · **Save for Later** |
 | Review | the composed packet in an iframe, field count, recipients in signing order | **Adjust Field Placement** · **Download PDF** · **Send for Signature** (confirmed) |
 | Review, preview unavailable | "the pages are not ready yet" | the other actions still work — a missing preview is never a failed draft |
 | `draft` | amber strip, "Draft — nothing sent." | **Download Filled PDF** · **Edit Fields** · **Send for Signature** |

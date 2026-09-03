@@ -696,6 +696,48 @@ alter table deal_field_layouts enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- DEAL TEMPLATE DRAFTS  (saved work-in-progress on the prepare-from-template
+-- screen — migration 0044)
+-- Preparing a packet is where an agent decides what the agreement SAYS: who
+-- signs it, which boxes are ticked, the client's name where the deal record
+-- needs correcting, the expiry, the copy to the lender. All of it used to live
+-- in React state and nowhere else, so closing the modal discarded every one of
+-- those decisions with no warning, and reopening the template re-seeded from the
+-- deal. One row per (deal, template), holding the screen's own state; shape
+-- defined by serializeTemplateWork() in src/lib/services/templateWork.js.
+-- Distinct from deal_field_layouts on purpose: that records where fields SIT on
+-- a document read back out of BoldSign, this records what the agent ANSWERED on
+-- our screen before any document exists.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists deal_template_drafts (
+  id            uuid primary key default uuid_generate_v4(),
+  deal_id       uuid not null references deals(id) on delete cascade,
+  -- '' is never used here in practice (this screen always has a template), but
+  -- the column is NOT NULL for the same reason as deal_field_layouts: the unique
+  -- key below is (deal_id, template_id) and Postgres treats every NULL as
+  -- distinct, which would add a row per save instead of updating the one there.
+  template_id   text not null default '',
+  template_name text,
+  work          jsonb not null default '{}'::jsonb,
+  field_count   integer not null default 0,
+  -- The BoldSign draft this work last produced. Every save also puts a real,
+  -- filled draft on the Signatures tab; this is how the next save supersedes
+  -- that one instead of leaving a second half-finished row behind.
+  document_id   text,
+  saved_by      uuid references agents(id) on delete set null,
+  created_at    timestamptz default now(),
+  updated_at    timestamptz default now()
+);
+create unique index if not exists idx_deal_template_drafts_key
+  on deal_template_drafts(deal_id, template_id);
+create index if not exists idx_deal_template_drafts_document
+  on deal_template_drafts(document_id)
+  where document_id is not null;
+
+alter table deal_template_drafts enable row level security;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- BOLDSIGN SENDER IDENTITIES  (one per agent — "send on behalf of" delegation)
 -- Each agent is registered in BoldSign so their signature requests come from
 -- them. Approval is out-of-band (agent clicks an emailed link); we track status.
@@ -2167,6 +2209,12 @@ create policy audit_log_scope on audit_log for all to authenticated
 -- deal_field_layouts — per-deal BoldSign field placement (deal-scoped child)
 drop policy if exists deal_field_layouts_deal_scope on deal_field_layouts;
 create policy deal_field_layouts_deal_scope on deal_field_layouts for all to authenticated
+  using      (app_is_admin() or deal_id in (select app_visible_deal_ids()))
+  with check (app_is_admin() or deal_id in (select app_visible_deal_ids()));
+
+-- deal_template_drafts — saved prepare-screen work (deal-scoped child)
+drop policy if exists deal_template_drafts_deal_scope on deal_template_drafts;
+create policy deal_template_drafts_deal_scope on deal_template_drafts for all to authenticated
   using      (app_is_admin() or deal_id in (select app_visible_deal_ids()))
   with check (app_is_admin() or deal_id in (select app_visible_deal_ids()));
 
