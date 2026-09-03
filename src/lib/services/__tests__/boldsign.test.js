@@ -1136,6 +1136,67 @@ describe('additional_agent_date — only meaningful once there is an additional 
 // BoldSign renders an unfilled Label as the literal word "Label" ON THE PAGE. An
 // Appointed Agency Agreement came back from a real send with "Label" printed on
 // both lines where the client's name belongs.
+// THE REPORTED FAILURE. An Appointed Agency Agreement went out with the literal
+// word "Label" on both client-name lines while the brokerage and the appointed
+// agent filled in correctly — because those two were named with separators and
+// the client's Label was not. normalizeTokenKey only turns SEPARATORS into
+// underscores, so "Client Name" matched and `ClientName` could never match.
+describe('fieldTokenKey — a Label named the way a person would name it', () => {
+  const vals = crmTokenValues({
+    contact: { first_name: 'nic', last_name: 'madsen', type: 'buyer' },
+    deal:    { comp_data: { transaction_type: 'buyer' } },
+    agent:   { name: 'Daniel Stillson' },
+    property:{ address: '79 Northshore Drive', city: 'Sioux City', state: 'IA' },
+  })
+  const fill = (name) => fieldTokenValue(vals, { id: 'Label1', name })
+
+  it('matches with no separator at all — the case that failed', () => {
+    for (const n of ['ClientName', 'clientname', 'CLIENTNAME', 'Client-Name']) {
+      expect(fill(n), n).toBe('nic madsen')
+    }
+  })
+
+  it('still matches the spellings that already worked', () => {
+    expect(fill('client_name')).toBe('nic madsen')
+    expect(fill('Client Name')).toBe('nic madsen')
+    expect(fill('agent_name')).toBe('Daniel Stillson')
+    expect(fill('Agent1NameLabel')).toBe('Daniel Stillson')
+    expect(fill('property_address')).toBe('79 Northshore Drive')
+  })
+
+  it('drops a trailing Label/Field the author added to say what the thing is', () => {
+    expect(fill('ClientNameLabel')).toBe('nic madsen')
+    expect(fill('BuyerNameLabel')).toBe('nic madsen')
+    expect(fill('PropertyAddressLabel')).toBe('79 Northshore Drive')
+  })
+
+  // client_2_name IS a token, so naming two Labels client_1_name / client_2_name
+  // used to fill the second and leave the first blank, which reads as random.
+  it('closes the client_1_name trap', () => {
+    expect(fill('client_1_name')).toBe('nic madsen')
+    expect(fill('client_2_name')).toBe('')      // genuinely no second client
+  })
+
+  it('accepts the obvious human words for the party', () => {
+    for (const n of ['Client', 'Clients', 'Buyer Name', 'BuyerName', 'Purchaser']) {
+      expect(fill(n), n).toBe('nic madsen')
+    }
+  })
+
+  // The whole point of the strictness: an unnamed field must stay unnamed.
+  it('still refuses a field nobody named', () => {
+    for (const n of ['Label', 'Label1', 'CheckBox2', '', null]) {
+      expect(fill(n), String(n)).toBe('')
+    }
+  })
+
+  it('does not invent a match for an unrelated word', () => {
+    for (const n of ['Witness', 'Notary', 'Escrow Officer']) {
+      expect(fill(n), n).toBe('')
+    }
+  })
+})
+
 describe('emptyLabelsToRemove — an empty Label must not print "Label"', () => {
   const fields = [
     { id: 'Label1', type: 'label',   name: 'client_names' },

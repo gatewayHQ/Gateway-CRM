@@ -953,6 +953,50 @@ const CANONICAL_ALIASES = Object.fromEntries(
 // that happens to end in a digit — `RetainerDate1`, `Agent2NameLabel` — is never
 // ambiguous with a repeat instance. Bare-digit suffixes are not supported and
 // should not be authored.
+
+// ── Naming a Label the way a person would ────────────────────────────────────
+// `normalizeTokenKey` only turns SEPARATORS into underscores, so it matches a
+// field named "Client Name" (→ `client_name`) and misses one named `ClientName`
+// (→ `clientname`) — the same word, authored without a space. That asymmetry is
+// invisible from the template editor and produced a real, reported failure: an
+// Appointed Agency Agreement went out with the literal word "Label" on both
+// client-name lines while the brokerage and agent names filled in correctly,
+// because those two happened to be spelled with separators and the client's was
+// not.
+//
+// Two rules, both last-resort (after every exact and canonical-alias attempt, so
+// a real id is never reinterpreted):
+//
+//   SQUASHED — compare with every separator removed on BOTH sides, which makes
+//     matching separator-insensitive. `ClientName`, `clientname`, `CLIENT-NAME`
+//     and `Client Name` all reach `client_name`.
+//   SUFFIX   — drop a trailing `Label` / `Field` / `Text`, the words a template
+//     author appends to say what the thing IS rather than what it holds, so
+//     `ClientNameLabel` resolves to the same token as `ClientName`.
+const NAMEY_SUFFIX_RE = /(label|field|text|txt|input|box)$/
+const squashToken = (token) => String(token).replace(/[^a-z0-9]+/g, '')
+
+// Human spellings that are not a squash away from any token. Deliberately short
+// and only for PARTY NAMES, which is where the reported failure was: each entry
+// is a phrase that can only mean the person's name on an agreement.
+//
+// `client_1_name` earns its place by being an outright trap — `client_2_name` IS
+// a token, so an admin who names two Labels `client_1_name` / `client_2_name`
+// gets the second one filling and the first one blank, which reads as random.
+const HUMAN_TOKEN_ALIASES = Object.freeze({
+  client:            'client_name',
+  clients:           'client_names',
+  clientfullname:    'client_name',
+  client1name:       'client_name',
+  buyername:         'buyer_1_name',
+  buyersname:        'buyer_1_name',
+  buyer1name:        'buyer_1_name',
+  sellersname:       'seller_name',
+  seller1name:       'seller_name',
+  purchaser:         'client_name',
+  purchasername:     'client_name',
+})
+
 const REPEAT_SUFFIX_RE = /_\d+$/
 
 // Which CRM token this field means, or '' when it is not one of ours. Accepts a
@@ -983,6 +1027,23 @@ export function fieldTokenKey(field, tokenKeys = SHARED_PREFILL_TOKENS) {
     if (key && tokenKeys.has(key)) return key
     const alias = CANONICAL_ALIASES[squashFieldKey(base)]
     if (alias && tokenKeys.has(alias)) return alias
+  }
+
+  // SEPARATOR-INSENSITIVE, and a trailing `Label`/`Field` dropped. Last of all,
+  // so nothing above is ever second-guessed. See the note at NAMEY_SUFFIX_RE.
+  for (const c of candidates) {
+    let squashed = squashFieldKey(c)
+    if (!squashed) continue
+    for (const attempt of [squashed, squashed.replace(NAMEY_SUFFIX_RE, '')]) {
+      if (!attempt) continue
+      const human = HUMAN_TOKEN_ALIASES[attempt]
+      if (human && tokenKeys.has(human)) return human
+      for (const token of tokenKeys) {
+        if (squashToken(token) === attempt) return token
+      }
+      const alias = CANONICAL_ALIASES[attempt]
+      if (alias && tokenKeys.has(alias)) return alias
+    }
   }
   return ''
 }
@@ -1059,7 +1120,11 @@ const PARTY_NAME_TOKENS = new Set([
  *                 docs/boldsign-integration.md.
  */
 export function partyNameGaps({ fields = [], values = {} } = {}) {
-  const named = (fields || []).filter(f => f?.id && PARTY_NAME_TOKENS.has(fieldTokenKey(f)))
+  // Fields that PRINT text only. The human aliases in HUMAN_TOKEN_ALIASES mean a
+  // tick box captioned "Buyer" now resolves to a name token too — correct for
+  // matching, wrong here: a checkbox is not a blank name line, and warning about
+  // one would be a false alarm on the very form this warning was written for.
+  const named = (fields || []).filter(f => f?.id && isFillableField(f.type) && PARTY_NAME_TOKENS.has(fieldTokenKey(f)))
   const empty = named.filter(f => !String(values?.[f.id] ?? '').trim())
   return { empty, noneNamed: named.length === 0, named }
 }
