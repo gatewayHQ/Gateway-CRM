@@ -1409,6 +1409,57 @@ describe('buildPrintablePdf — the document, plus a summary that cannot be subt
     expect(out.toString('latin1')).toContain('/Subtype /Form')
   })
 
+  it('takes BoldSign\u2019s diagonal DRAFT off every page it hands back', async () => {
+    // BoldSign stamps a document that has not been sent, and Save PDF is what an
+    // agent puts in front of a client. The stamp is the one mark on that paper
+    // that is ours to remove \u2014 the pages themselves must come through
+    // untouched, at their own size, with their own text.
+    const { PDFDocument, StandardFonts, degrees, rgb } = await import('pdf-lib')
+    const src  = await PDFDocument.create()
+    const font = await src.embedFont(StandardFonts.Helvetica)
+    for (let i = 0; i < 2; i++) {
+      const page = src.addPage([612, 792])
+      page.drawText(`AGREEMENT PAGE ${i + 1}`, { x: 40, y: 720, size: 12, font })
+      page.drawText('DRAFT', { x: 120, y: 250, size: 72, font, rotate: degrees(45), color: rgb(0.85, 0.85, 0.85) })
+    }
+    const bytes = Buffer.from(await src.save())
+    const { removeDraftWatermark } = await import('../_lib/pdfWatermark.js')
+    // The stamp really is on both pages of the source this test hands in.
+    expect(await removeDraftWatermark(await PDFDocument.load(bytes)))
+      .toMatchObject({ pages: 2, blocks: 2 })
+
+    const out = await buildPrintablePdf({ pdfBytes: bytes, props: { status: 'Draft' }, documentName: 'Iowa Listing' })
+    const doc = await PDFDocument.load(out)
+    expect(doc.getPageCount()).toBe(3)                                   // 2 source + summary
+    expect(doc.getPage(0).getSize()).toEqual({ width: 612, height: 792 })
+    expect(doc.getPage(1).getSize()).toEqual({ width: 612, height: 792 })
+
+    // Nothing left to remove: the pages come out of the print path clean.
+    expect(await removeDraftWatermark(await PDFDocument.load(out))).toMatchObject({ blocks: 0, annotations: 0 })
+  })
+
+  it('removes the stamp even on a source that had to be flattened first', async () => {
+    // Order-of-operations regression: flattening rewrites the page's content
+    // streams, and reading only the file's ORIGINAL streams would find nothing
+    // to remove on exactly the county forms that need both passes.
+    const { PDFDocument, StandardFonts, degrees, rgb } = await import('pdf-lib')
+    const src   = await PDFDocument.create()
+    const page  = src.addPage([612, 792])
+    const field = src.getForm().createTextField('county')
+    field.setText('Polk')
+    field.addToPage(page, { x: 60, y: 600, width: 160, height: 20 })
+    const font = await src.embedFont(StandardFonts.Helvetica)
+    page.drawText('DRAFT', { x: 120, y: 250, size: 72, font, rotate: degrees(45), color: rgb(0.85, 0.85, 0.85) })
+    const bytes = Buffer.from(await src.save())
+
+    const out = await buildPrintablePdf({ pdfBytes: bytes, props: { status: 'Draft' }, documentName: 'County form' })
+    const { removeDraftWatermark } = await import('../_lib/pdfWatermark.js')
+    const flat = await PDFDocument.load(out)
+    expect(flat.getForm().getFields()).toHaveLength(0)          // still flattened
+    expect(flat.getPage(0).getSize()).toEqual({ width: 612, height: 792 })
+    expect(await removeDraftWatermark(await PDFDocument.load(out))).toMatchObject({ blocks: 0 })
+  })
+
   it('prints a filled draft with its values on the pages, not just in the summary', async () => {
     // The bug this covers: BoldSign hands back the ORIGINAL file for an unsent
     // document, so a draft an agent had filled out printed completely blank.

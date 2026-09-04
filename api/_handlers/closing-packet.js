@@ -8,6 +8,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib'
 import { requireAdmin, errorResponse } from '../_lib/auth.js'
+import { removeDraftWatermark } from '../_lib/pdfWatermark.js'
 
 const DEAL_BUCKET   = 'deal-documents'
 const PACKET_BUCKET = 'closing-packets'
@@ -69,6 +70,12 @@ export default async function closingPacketHandler(req, res) {
           return { ok: true, skipped: true }
         }
         const src   = await PDFDocument.load(bytes, { ignoreEncryption: true })
+        // A document bundled before it was signed still carries BoldSign's
+        // diagonal DRAFT across every page. The packet is what goes to closing,
+        // so the stamp comes off here too — pages are copied at their own size
+        // and nothing else about them changes.
+        try { await removeDraftWatermark(src) }
+        catch (e) { console.warn(`[closing-packet] could not remove the DRAFT watermark from ${label} (${e.message})`) }
         const pages = await merged.copyPages(src, src.getPageIndices())
         pages.forEach(p => merged.addPage(p))
         return { ok: true }
