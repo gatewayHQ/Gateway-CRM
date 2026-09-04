@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, dealFilingName, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds, buildSendOptions, appendSendOptions, normalizeCc, normalizeReminders, summarizeFieldValues } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, dealFilingName, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds, buildSendOptions, appendSendOptions, normalizeCc, normalizeReminders, summarizeFieldValues, templateMatchesDocument } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -2091,5 +2091,71 @@ describe('summarizeFieldValues — the log line that says whether the save lande
 
   it('is safe on a properties payload with nothing on it', () => {
     expect(summarizeFieldValues(null)).toEqual({ total: 0, filled: 0, fields: [] })
+  })
+})
+
+// ── The base layer a printable copy is drawn on ─────────────────────────────
+// The watermark fix substitutes the template's PDF for BoldSign's watermarked
+// render of a draft. That is only safe while the two still describe the same
+// pages, and these are the cases that decide it.
+describe('templateMatchesDocument', () => {
+  const letter = { width: 612, height: 792 }
+  const legal  = { width: 612, height: 1008 }
+  const sizes  = (...pages) => new Map(pages.map((p, i) => [i + 1, p]))
+
+  it('accepts a template whose pages match the document', () => {
+    expect(templateMatchesDocument({
+      pdfPageSizes: [letter, letter, letter],
+      boldsignSizes: sizes(letter, letter, letter),
+    })).toBe(true)
+  })
+
+  it('accepts sizes reported in another unit — it compares ratios, not dimensions', () => {
+    // BoldSign's bounds are not necessarily points (see resolveBoundsScale), so a
+    // page reported at 1/4 scale is the same page.
+    expect(templateMatchesDocument({
+      pdfPageSizes: [letter],
+      boldsignSizes: sizes({ width: 153, height: 198 }),
+    })).toBe(true)
+  })
+
+  it('rejects a template that gained or lost a page', () => {
+    // The case that matters most: same page size, different count, so every value
+    // after the inserted page would be drawn on the wrong one.
+    expect(templateMatchesDocument({
+      pdfPageSizes: [letter, letter, letter],
+      boldsignSizes: sizes(letter, letter),
+    })).toBe(false)
+  })
+
+  it('rejects a page whose shape changed', () => {
+    expect(templateMatchesDocument({
+      pdfPageSizes: [letter, legal],
+      boldsignSizes: sizes(letter, letter),
+    })).toBe(false)
+  })
+
+  it('rejects when BoldSign reported no page details — there is nothing to check', () => {
+    expect(templateMatchesDocument({ pdfPageSizes: [letter], boldsignSizes: new Map() })).toBe(false)
+    expect(templateMatchesDocument({ pdfPageSizes: [letter] })).toBe(false)
+    expect(templateMatchesDocument({})).toBe(false)
+  })
+
+  it('rejects unusable numbers rather than dividing by zero into a pass', () => {
+    expect(templateMatchesDocument({
+      pdfPageSizes: [{ width: 612, height: 0 }],
+      boldsignSizes: sizes(letter),
+    })).toBe(false)
+    expect(templateMatchesDocument({
+      pdfPageSizes: [letter],
+      boldsignSizes: sizes({ width: null, height: 792 }),
+    })).toBe(false)
+  })
+
+  it('tolerates rounding between systems', () => {
+    expect(templateMatchesDocument({
+      pdfPageSizes: [letter],
+      boldsignSizes: sizes({ width: 611.6, height: 792.4 }),
+    })).toBe(true)
   })
 })

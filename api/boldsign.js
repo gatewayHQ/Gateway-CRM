@@ -948,6 +948,52 @@ async function appendSigningSummary(pdfDoc, { summary, documentName, status, val
   return pdfDoc
 }
 
+// ─── The base layer a printable copy is drawn on ─────────────────────────────
+// `/document/download` renders BoldSign's own presentation of a document, and for
+// one that has not been completed that presentation carries a large DRAFT
+// watermark burned into the page content. Nothing downstream can remove it — the
+// values we draw and the summary we append land ON TOP of it — so an agent taking
+// a filled listing packet to a kitchen table got a watermarked sheet.
+//
+// The template's own PDF is the same pages without it. A draft created from a
+// template is generated FROM that file, so its geometry is identical and the
+// field bounds BoldSign reports line up on either one.
+//
+// "Identical" is an assumption, though, and a template edited after this draft was
+// created breaks it — pages inserted, a page resized. That would put values on the
+// wrong pages, which is far worse than a watermark, so the substitution only
+// happens when the shapes actually agree.
+//
+// Compares ASPECT RATIOS, not dimensions: BoldSign's page sizes are not
+// necessarily in points (the whole reason resolveBoundsScale exists), and a ratio
+// is the same number whatever the unit.
+export function templateMatchesDocument({ pdfPageSizes = [], boldsignSizes = new Map() } = {}) {
+  // No page details from BoldSign means nothing to check against, and an unchecked
+  // substitution is exactly what this guard exists to prevent.
+  if (!pdfPageSizes.length || !boldsignSizes?.size) return false
+  if (pdfPageSizes.length !== boldsignSizes.size) return false
+  for (const [i, size] of pdfPageSizes.entries()) {
+    const bs = boldsignSizes.get(i + 1)
+    if (!bs) return false
+    const a = num(size?.width) / num(size?.height)
+    const b = num(bs?.width) / num(bs?.height)
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b <= 0) return false
+    // 2% — enough for rounding between systems, nowhere near enough to let a
+    // letter page pass for a legal one (0.77 vs 0.61).
+    if (Math.abs(a - b) / Math.max(a, b) > 0.02) return false
+  }
+  return true
+}
+
+// Page sizes of a PDF, in points. Separate from buildPrintablePdf's own load
+// because the shape has to be checked BEFORE deciding which bytes to compose
+// from; the second parse costs a few milliseconds against a wrong printout.
+export async function readPdfPageSizes(bytes) {
+  const { PDFDocument } = await import('pdf-lib')
+  const doc = await PDFDocument.load(bytes, { ignoreEncryption: true })
+  return doc.getPages().map(p => ({ width: p.getWidth(), height: p.getHeight() }))
+}
+
 // Build the print copy: the document exactly as BoldSign holds it, plus the
 // summary. Returns a Buffer. Throws with a usable message if BoldSign won't hand
 // over the bytes.
@@ -2526,30 +2572,68 @@ async function handler(req, res) {
         fields:       held.fields,
       })
 
+      const docStatus = normalizeStatus(props?.status)
+      let pdfBytes = null
+      let baseSource = null
+      let downloadStatus = null
+
+      // FIRST CHOICE, FOR A DRAFT ONLY: the template's own PDF — the same pages
+      // without the DRAFT watermark BoldSign burns into /document/download.
+      // See templateMatchesDocument() for why the shapes are checked first.
+      //
+      // DRAFT ONLY, and this is the important half of the rule. Once a document
+      // has gone out, BoldSign's copy is the one carrying whatever signatures and
+      // initials have been collected; the template is a blank form. Composing a
+      // 'sent' or 'completed' document from the template would silently drop real
+      // signatures out of a copy the brokerage files. A watermark on a document
+      // that is genuinely still a draft is the only thing being removed here.
+      if (docStatus === 'draft' && record.boldsign_template_id) {
+        const tid = record.boldsign_template_id
+        try {
+          const r = await boldsign(`/template/download?templateId=${encodeURIComponent(tid)}`, { raw: true })
+          if (r.ok) {
+            const buf = Buffer.from(await r.arrayBuffer())
+            const sizes = buf.length ? await readPdfPageSizes(buf) : []
+            if (templateMatchesDocument({ pdfPageSizes: sizes, boldsignSizes: boldsignPageSizes(props) })) {
+              pdfBytes = buf
+              baseSource = 'template'
+            } else {
+              // Not an error: the draft simply no longer matches the template it
+              // came from, so the watermarked copy is the honest one. Logged
+              // because it is also the signal that a template was edited under a
+              // deal's open draft.
+              console.warn(`[boldsign] compose: template ${tid} no longer matches draft ${id} — composing from BoldSign's copy instead`)
+            }
+          }
+        } catch (err) {
+          console.warn(`[boldsign] compose: /template/download unavailable for ${tid} (${err.message}) — composing from BoldSign's copy`)
+        }
+      }
+
       // BoldSign's /document/download is the only source of the current bytes. It is
       // NOT guaranteed to serve a document that hasn't been sent, so a refusal falls
       // back to the copy this deal already holds — for an ad-hoc send that is the
       // exact PDF that was uploaded, and for a completed document it's the archived
       // signed copy. Only when neither exists does this fail, and then it says which
       // door was locked rather than "could not print".
-      let pdfBytes = null
-      let downloadStatus = null
-      try {
-        const r = await boldsign(`/document/download?documentId=${encodeURIComponent(id)}`, { raw: true })
-        downloadStatus = r.status
-        if (r.ok) {
-          const buf = await r.arrayBuffer()
-          if (buf.byteLength) pdfBytes = Buffer.from(buf)
+      if (!pdfBytes) {
+        try {
+          const r = await boldsign(`/document/download?documentId=${encodeURIComponent(id)}`, { raw: true })
+          downloadStatus = r.status
+          if (r.ok) {
+            const buf = await r.arrayBuffer()
+            if (buf.byteLength) { pdfBytes = Buffer.from(buf); baseSource = 'document' }
+          }
+        } catch (err) {
+          downloadStatus = err.status || null
+          console.warn(`[boldsign] compose: /document/download refused ${id} (${err.message}) — trying the deal's own copy`)
         }
-      } catch (err) {
-        downloadStatus = err.status || null
-        console.warn(`[boldsign] compose: /document/download refused ${id} (${err.message}) — trying the deal's own copy`)
       }
       if (!pdfBytes) {
         const stored = record.signed_storage_path
         if (stored) {
           const { data } = await svc.storage.from(DEAL_BUCKET).download(stored)
-          if (data) pdfBytes = Buffer.from(await data.arrayBuffer())
+          if (data) { pdfBytes = Buffer.from(await data.arrayBuffer()); baseSource = 'deal-copy' }
         }
       }
       if (!pdfBytes) {
@@ -2565,7 +2649,13 @@ async function handler(req, res) {
         throw e
       }
 
-      return { printable: await buildPrintablePdf({ pdfBytes, props, documentName: record.document_name }), props, held }
+      // Which pages the copy was drawn on. This is the line that answers "why does
+      // this printout have a DRAFT watermark" — 'template' means it does not.
+      log.info('boldsign.compose: base layer chosen', {
+        action: body.action, documentId: id, baseSource, boldsignStatus: docStatus || null,
+      })
+
+      return { printable: await buildPrintablePdf({ pdfBytes, props, documentName: record.document_name }), props, held, baseSource }
     }
 
     if (body.action === 'document-print') {

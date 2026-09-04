@@ -34,7 +34,7 @@ import {
 import BoldSignFrame from '../components/BoldSignFrame.jsx'
 import { readDealTerms, termsForDeal, termsFilled, buildTermsPatch, normalizeTermValue, derivedTermHint } from '../lib/services/dealTerms.js'
 import SignerPicker, { buildCandidates, isValidEmail } from '../components/SignerPicker.jsx'
-import { savePdfFromUrl } from '../lib/savePdf.js'
+import { savePdfFromUrl, openPrintTab, showPdfInPrintTab, closePrintTab } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 import AgentMultiSelect from '../components/AgentMultiSelect.jsx'
@@ -1175,9 +1175,34 @@ async function fetchDraftPreview(documentId) {
   return { previewUrl: previewUrl || null, url: url || null, filename, fieldCount: fieldCount || 0 }
 }
 
+// PRINT — the same composed copy, shown in the browser's own PDF viewer so the
+// agent can print it from there.
+//
+// The CRM does not print. It cannot: a PDF in an iframe is rendered by a plugin
+// the page has no access to, so calling print() on it succeeded and produced blank
+// paper (the whole reason Print became Save PDF — see src/lib/savePdf.js). Handing
+// the document to a real viewer sidesteps that entirely; the print button the agent
+// ends up using is Chrome's, wired to the document's actual pages.
+//
+// `previewUrl` and not `url`: the two are the same object, but `url` is signed with
+// Content-Disposition: attachment and a tab pointed at it downloads a file instead
+// of showing one. Only the inline signature renders.
+//
+// `tab` must already be open — see openPrintTab. Opening it here, after the await
+// below, is too late for the browser to count it as user-initiated.
+async function printBoldSignDocument(documentId, tab) {
+  const { previewUrl } = await documentPdfUrl(documentId)
+  if (!previewUrl) {
+    closePrintTab(tab)
+    throw new Error('the on-screen copy could not be built. Use Save PDF and print from your PDF viewer')
+  }
+  return showPdfInPrintTab(tab, previewUrl)
+}
+
 function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone, onDraft, onLayoutSaved, returnUrlMarker = 'boldsign-return' }) {
   const [savingLayout, setSavingLayout] = React.useState(false)
   const [savingPdf,    setSavingPdf]    = React.useState(false)
+  const [printing,     setPrinting]     = React.useState(false)
   const [filing,       setFiling]       = React.useState(false)
   const [leaveAsk,     setLeaveAsk]     = React.useState(false)
   // Work may exist that BoldSign hasn't been told to save. Set when focus enters the
@@ -1297,6 +1322,33 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
     }
   }
 
+  // PRINT — the same composed copy, opened in a tab the agent can print from.
+  // Guarded exactly like savePdf: it is built from BoldSign's saved copy, so a
+  // printout taken before BoldSign has been told to save would be missing the
+  // last thing typed — and unlike a download, that one walks out of the office.
+  const printPdf = async ({ force = false } = {}) => {
+    if (!documentId) { pushToast('This document has to exist in BoldSign before it can be printed.', 'info'); return }
+    if (unsaved) {
+      pushToast('Click Save inside BoldSign first — the printed copy is built from BoldSign\u2019s saved copy, and it would come back missing whatever you just typed.', 'error')
+      return
+    }
+    if (everFocused && !force) { setStale('print'); return }
+    // OPENED HERE, synchronously, while this is still the click the agent made.
+    // Everything below is asynchronous, and a tab opened after an await is a
+    // pop-up as far as the browser is concerned.
+    const tab = openPrintTab()
+    setPrinting(true)
+    try {
+      console.info('[boldsign] print: opening the composed copy', { documentId, force, lastSavedAt })
+      await printBoldSignDocument(documentId, tab)
+    } catch (err) {
+      closePrintTab(tab)
+      pushToast(`Could not open a printable copy \u2014 ${err.message}.`, 'error')
+    } finally {
+      setPrinting(false)
+    }
+  }
+
   // SAVE TO THE DEAL — the same composed copy, filed in the CRM instead of
   // downloaded. Save PDF puts the packet on the agent's own machine and leaves the
   // deal with no record of a document the CRM itself built; this is the half that
@@ -1377,6 +1429,14 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
           </button>
           <button
             className="btn btn--secondary btn--sm"
+            onClick={printPdf}
+            disabled={printing || !documentId}
+            title="Open this document in a new tab and print it from there \u2014 every filled value, no draft watermark"
+          >
+            <Icon name="document" size={13}/> {printing ? 'Opening\u2026' : 'Print'}
+          </button>
+          <button
+            className="btn btn--secondary btn--sm"
             onClick={fileToDeal}
             disabled={filing || !documentId}
             title="File this document on the deal — it appears in the deal's Documents tab, filled values included"
@@ -1437,9 +1497,9 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
           last-saved time is the fact they need to decide. */}
       {stale && (
         <ConfirmDialog
-          eyebrow={stale === 'file' ? 'Save to Deal' : 'Save PDF'}
+          eyebrow={stale === 'file' ? 'Save to Deal' : stale === 'print' ? 'Print' : 'Save PDF'}
           title="Saved everything inside BoldSign?"
-          confirmLabel={stale === 'file' ? 'File it anyway' : 'Build it anyway'}
+          confirmLabel={stale === 'file' ? 'File it anyway' : stale === 'print' ? 'Print it anyway' : 'Build it anyway'}
           cancelLabel="Let me save first"
           confirmVariant="btn--primary"
           onCancel={() => setStale(null)}
@@ -1447,6 +1507,9 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
             const which = stale
             setStale(null)
             if (which === 'file') fileToDeal({ force: true })
+            // Still inside the confirm button's own click, so the print tab this
+            // opens is user-initiated and survives the pop-up blocker.
+            else if (which === 'print') printPdf({ force: true })
             else savePdf({ force: true })
           }}
           message={
@@ -1805,6 +1868,7 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
   const [editDraft,   setEditDraft]   = React.useState(null)  // { url, env } — draft reopened in BoldSign
   const [layouts,     setLayouts]     = React.useState([])    // saved per-deal field arrangements
   const [savingPdf,   setSavingPdf]   = React.useState({})    // env.id → building its PDF copy
+  const [printingPdf, setPrintingPdf] = React.useState({})    // env.id → opening its printable copy
   const [filing,      setFiling]      = React.useState({})    // env.id → filing a copy onto the deal
   const [sendingDraft, setSendingDraft] = React.useState({})  // env.id → draftSend in flight
   const [sendAsk,     setSendAsk]     = React.useState(null)  // env awaiting "yes, send it" confirmation
@@ -2064,6 +2128,21 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
       pushToast(`Could not save the PDF: ${err.message}`, 'error')
     } finally {
       setSavingPdf(p => ({ ...p, [env.id]: false }))
+    }
+  }
+
+  // Print a filled copy from the row. The tab is opened before the await for the
+  // same reason it is in the editor — see openPrintTab in src/lib/savePdf.js.
+  const printPdf = async (env) => {
+    const tab = openPrintTab()
+    setPrintingPdf(p => ({ ...p, [env.id]: true }))
+    try {
+      await printBoldSignDocument(env.document_id, tab)
+    } catch (err) {
+      closePrintTab(tab)
+      pushToast(`Could not open a printable copy \u2014 ${err.message}.`, 'error')
+    } finally {
+      setPrintingPdf(p => ({ ...p, [env.id]: false }))
     }
   }
 
@@ -2407,6 +2486,15 @@ create policy "agent_notifications_policy" on agent_notifications
                       <button
                         className="btn btn--secondary btn--sm"
                         style={{ fontSize:11, flexShrink:0 }}
+                        onClick={() => printPdf(env)}
+                        disabled={printingPdf[env.id]}
+                        title="Open this draft in a new tab and print it from there \u2014 filled values included, no draft watermark"
+                      >
+                        <Icon name="document" size={12}/> {printingPdf[env.id] ? 'Opening\u2026' : 'Print'}
+                      </button>
+                      <button
+                        className="btn btn--secondary btn--sm"
+                        style={{ fontSize:11, flexShrink:0 }}
                         onClick={() => fileToDeal(env)}
                         disabled={filing[env.id]}
                         title="File this document on the deal — it appears in the deal's Documents tab, filled values included"
@@ -2728,6 +2816,18 @@ function DraftReviewStep({ documentId, documentName, previewUrl, downloadUrl, fi
     document.body.appendChild(a); a.click(); a.remove()
   }
 
+  // `previewUrl` is already in hand here, so there is no round-trip to lose the
+  // user gesture to — the tab is opened and pointed at the document in one go.
+  const printCopy = () => {
+    const tab = openPrintTab()
+    try {
+      showPdfInPrintTab(tab, previewUrl)
+    } catch (err) {
+      closePrintTab(tab)
+      pushToast(`Could not open a printable copy \u2014 ${err.message}.`, 'error')
+    }
+  }
+
   // The review is where an agent decides what happens to the packet, so filing it
   // on the deal belongs here beside downloading it. No `unsaved` guard is needed on
   // this path — unlike the editor, nothing is sitting typed in a cross-origin frame:
@@ -2816,6 +2916,9 @@ function DraftReviewStep({ documentId, documentName, previewUrl, downloadUrl, fi
         </button>
         <button className="btn btn--secondary" onClick={download} disabled={!downloadUrl || sending}>
           <Icon name="document" size={13}/> Download PDF
+        </button>
+        <button className="btn btn--secondary" onClick={printCopy} disabled={!previewUrl || sending} title="Open this copy in a new tab and print it from there">
+          <Icon name="document" size={13}/> Print
         </button>
         <button className="btn btn--secondary" onClick={fileToDeal} disabled={filing || sending || !documentId}>
           <Icon name="upload" size={13}/> {filing ? 'Filing…' : 'Save to Deal'}
