@@ -3,6 +3,7 @@ import closingPacketHandler from './_handlers/closing-packet.js'
 import { wrap, log } from './_lib/observability.js'
 import crypto from 'node:crypto'
 import { extractPdfWords } from './_lib/pdfText.js'
+import { removeDraftWatermark } from './_lib/pdfWatermark.js'
 import { captionFields, detectSelectionCues } from '../src/lib/services/boldsignCaptions.js'
 import { normalizeSigners, outstandingSigners } from '../src/lib/services/boldsignSigners.js'
 
@@ -967,6 +968,26 @@ export async function buildPrintablePdf({ pdfBytes, props, documentName }) {
     if (form.getFields().length) form.flatten()
   } catch (err) {
     console.warn(`[boldsign] print: could not flatten the source form (${err.message}) — using the pages as-is`)
+  }
+
+  // Take BoldSign's DRAFT stamp off the pages. A document that has not been
+  // sent comes back with a large diagonal DRAFT across every page, and an agent
+  // prints this copy to put it in front of a client — the stamp is the one mark
+  // on the paper that is ours to remove. Only that block is cut out (see
+  // _lib/pdfWatermark.js): no page is cropped, resized or redrawn, and nothing
+  // is stamped back on in its place. Best-effort, like the flatten above.
+  try {
+    const stripped = await removeDraftWatermark(doc)
+    if (stripped.blocks || stripped.annotations) {
+      log.info('boldsign.print: removed the DRAFT watermark', {
+        documentName: documentName || null,
+        pages: stripped.pages,
+        blocks: stripped.blocks,
+        annotations: stripped.annotations,
+      })
+    }
+  } catch (err) {
+    console.warn(`[boldsign] print: could not remove the DRAFT watermark (${err.message}) — using the pages as-is`)
   }
 
   // Values next, onto the document's OWN pages — the summary is appended after,

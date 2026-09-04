@@ -640,6 +640,20 @@ arrives as a file or fails loudly, and the agent prints it from their own PDF vi
   printing. Written to `deal-<id>/print/` and overwritten per document; the Documents
   tab and the send picker now filter storage **folder** rows (entries with no `id`),
   so a review copy never appears as if it were a filing.
+- **The DRAFT stamp is removed.** BoldSign paints a large diagonal DRAFT across
+  every page of a document that has not been sent, and those are the bytes
+  `/document/download` returns — so the copy an agent hands a client came out
+  slashed with it. `removeDraftWatermark()` (`api/_lib/pdfWatermark.js`) cuts
+  **only** the drawing block that paints the stamp out of each page's content
+  stream (also inside a form XObject, and a `/Watermark` or DRAFT `/Stamp`
+  annotation). Nothing is cropped, resized, re-paged or re-rendered, and nothing
+  is stamped back on: every other glyph, rule, logo, checkbox and value is left
+  exactly as it was, at the source file's own print quality. The test is
+  deliberately narrow — the block must paint the word DRAFT *and nothing else*,
+  and be either rotated or set at 24pt+ — so prose containing the word, a typed
+  value and a small upright label all survive; leaving a stamp is the better
+  failure. Best-effort, like the flatten below. The closing-packet bundler runs
+  the same pass over each PDF it merges.
 - **Interactive forms in the source are flattened.** Many county/board PDFs ship as
   AcroForms whose widgets carry no appearance streams (`NeedAppearances`): they look
   filled on screen and render blank through a print driver. `buildPrintablePdf()`
