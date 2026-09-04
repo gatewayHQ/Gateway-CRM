@@ -1211,22 +1211,41 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
   // outstanding. This is what keeps the leave prompt meaningful: an agent who opened
   // the editor and immediately closed it is not warned about losing nothing.
   //
-  // IT UNDER-REPORTS AFTER THE FIRST SAVE, and that is why `everFocused` exists
-  // below. `onInteract` rides our window's BLUR, which fires when focus moves INTO
-  // the frame — once. Keep typing in there after a save and focus never leaves, so
-  // no second blur fires and this flag stays false while real work piles up. The
-  // note that used to sit on onDraft ("any further work sets the flag again via
-  // onInteract") was simply not true.
+  // IT UNDER-REPORTS AFTER THE FIRST SAVE. `onInteract` rides our window's BLUR,
+  // which fires when focus moves INTO the frame — once. Keep typing in there after
+  // a save and focus never leaves, so no second blur fires and this flag stays
+  // false while real work piles up.
+  //
+  // That is tolerable for what it is still used for — the leave prompt and
+  // beforeunload, where a false negative means one missing warning — and it is
+  // exactly why it must NOT gate Save PDF, Print or Save to Deal. A flag that
+  // cannot see the work it is guarding can only block honest presses; see the note
+  // below on the confirm that used to sit in front of them.
   const [unsaved,      setUnsaved]      = React.useState(false)
   const [lastSavedAt,  setLastSavedAt]  = React.useState(null)
-  // Has focus EVER entered the editor? Unlike `unsaved` this is never cleared, so
-  // it stays true across saves — which is what makes "they may have typed since"
-  // answerable at all. Nothing inside a cross-origin frame is observable, so the
-  // only honest answer is "we cannot know", and the copy below says so.
-  const [everFocused,  setEverFocused]  = React.useState(false)
-  // Which action a "you may have unsaved work" confirm is standing in front of:
-  // 'pdf' (download) or 'file' (put it on the deal). Null when nothing is asking.
-  const [stale,        setStale]        = React.useState(null)
+  // WHAT USED TO BE HERE, AND WHY IT IS GONE. `everFocused` (has focus ever
+  // entered the editor?) gated a "Saved everything inside BoldSign?" confirm in
+  // front of Save PDF, Print and Save to Deal, and `unsaved` blocked them
+  // outright with an error toast telling the agent to click Save inside BoldSign
+  // first.
+  //
+  // Both assumed a Save button was there to click. In BoldSign's PREVIEW there is
+  // not one: the agent has to Exit preview, go back to field placement, save, and
+  // come back — so the guard's advice was to start over, in front of the button
+  // they had just pressed. `everFocused` was never cleared either, so from the
+  // second interaction onward the confirm fired unconditionally and asked a
+  // question nobody could answer: what is inside a cross-origin frame is not
+  // observable from here, by the agent or by us.
+  //
+  // A guard that fires every time and cannot be answered is not a safety feature,
+  // it is a wall. The copy is built and the TRUTH IS REPORTED instead — the field
+  // count that actually came back, and the time of BoldSign's last save. An agent
+  // who sees "9 fields included" on a packet they filled with thirty knows to save
+  // and rebuild, which is the judgement the confirm was asking them to make blind.
+  //
+  // `unsaved` stays, for the two places it is still honest: the leave prompt and
+  // beforeunload, where the question is "might work be lost" rather than "is this
+  // copy current".
   // Set before an async close so a late unmount can't push state into a dead
   // component (React logs that as a leak, and it hides real errors).
   const alive = React.useRef(true)
@@ -1287,34 +1306,27 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
   // written — values typed in the frame and not yet saved there cannot reach the
   // server. So an agent with outstanding work is told, rather than handed a PDF
   // that quietly misses the last thing they typed.
-  const savePdf = async ({ force = false } = {}) => {
+  // Every one of the three actions below composes from BoldSign's SAVED copy, and
+  // none of them can see whether the agent has typed since. So each says what it
+  // actually got. A field count that looks too low, or a save time from before the
+  // last ten minutes of work, is the signal to save in BoldSign and do it again —
+  // and it is a signal the agent can act on, unlike a confirm dialog asking them to
+  // certify something they cannot check.
+  const asOf = () => lastSavedAt
+    ? ` (as of BoldSign's save at ${lastSavedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })})`
+    : ''
+
+  const savePdf = async () => {
     if (!documentId) { pushToast('This document has to exist in BoldSign before it can be saved as a PDF.', 'info'); return }
-    // The print copy is built from whatever BoldSign has actually SAVED
-    // (/document/properties) — never from what's sitting typed but uncommitted
-    // in the iframe. This used to just warn and build the PDF anyway, so filling
-    // a field and immediately clicking Save PDF (without saving inside BoldSign
-    // first) raced BoldSign's own save and came back with those fields blank —
-    // the exact gap "More Actions → Save & Close" doesn't have, because closing
-    // that way forces the save to complete first. Blocking here instead of just
-    // warning is what makes Save PDF match Save & Close: neither can produce an
-    // incomplete copy once this stands.
-    // Never saved at all, and they have been in there: we KNOW the copy is stale.
-    if (unsaved) {
-      pushToast('Click Save inside BoldSign first — the PDF is built from BoldSign’s saved copy, and it would come back missing whatever you just typed.', 'error')
-      return
-    }
-    // Saved at least once, but they have been typing in a frame we cannot see into
-    // since. Ask rather than guess: silently building from the last save is what
-    // produced a PDF missing the fields the agent had just filled in.
-    if (everFocused && !force) { setStale('pdf'); return }
     setSavingPdf(true)
     try {
-      console.info('[boldsign] save PDF: composing from BoldSign\u2019s saved copy', { documentId, force, lastSavedAt })
+      console.info('[boldsign] save PDF: composing from BoldSign\u2019s saved copy', { documentId, lastSavedAt })
       const res = await saveBoldSignDocumentPdf(documentId)
       console.info('[boldsign] save PDF: composed', { documentId, fieldCount: res.fieldCount })
       pushToast(res.fieldCount
-        ? `PDF saved — ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} included.`
-        : 'PDF saved.', 'success')
+        ? `PDF saved \u2014 ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} included${asOf()}.`
+        : `PDF saved \u2014 no filled fields came back${asOf()}. If that looks wrong, save inside BoldSign and try again.`,
+        res.fieldCount ? 'success' : 'info')
     } catch (err) {
       pushToast(`Could not save the PDF: ${err.message}`, 'error')
     } finally {
@@ -1323,23 +1335,15 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
   }
 
   // PRINT — the same composed copy, opened in a tab the agent can print from.
-  // Guarded exactly like savePdf: it is built from BoldSign's saved copy, so a
-  // printout taken before BoldSign has been told to save would be missing the
-  // last thing typed — and unlike a download, that one walks out of the office.
-  const printPdf = async ({ force = false } = {}) => {
+  const printPdf = async () => {
     if (!documentId) { pushToast('This document has to exist in BoldSign before it can be printed.', 'info'); return }
-    if (unsaved) {
-      pushToast('Click Save inside BoldSign first — the printed copy is built from BoldSign\u2019s saved copy, and it would come back missing whatever you just typed.', 'error')
-      return
-    }
-    if (everFocused && !force) { setStale('print'); return }
     // OPENED HERE, synchronously, while this is still the click the agent made.
     // Everything below is asynchronous, and a tab opened after an await is a
     // pop-up as far as the browser is concerned.
     const tab = openPrintTab()
     setPrinting(true)
     try {
-      console.info('[boldsign] print: opening the composed copy', { documentId, force, lastSavedAt })
+      console.info('[boldsign] print: opening the composed copy', { documentId, lastSavedAt })
       await printBoldSignDocument(documentId, tab)
     } catch (err) {
       closePrintTab(tab)
@@ -1353,30 +1357,19 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
   // downloaded. Save PDF puts the packet on the agent's own machine and leaves the
   // deal with no record of a document the CRM itself built; this is the half that
   // was missing.
-  //
-  // Guarded by `unsaved` for exactly the same reason Save PDF is, and it matters
-  // more here: a download is a copy an agent can look at and discard, while a
-  // FILED document is what the brokerage will read back months later. Filing one
-  // that quietly missed the last thing typed is worse than not filing at all.
-  const fileToDeal = async ({ force = false } = {}) => {
+  const fileToDeal = async () => {
     if (!documentId) { pushToast('This document has to exist in BoldSign before it can be filed on the deal.', 'info'); return }
-    if (unsaved) {
-      pushToast('Click Save inside BoldSign first — the filed copy is built from BoldSign’s saved copy, and it would be missing whatever you just typed.', 'error')
-      return
-    }
-    // Same uncertainty as savePdf, and it matters more: a filed document is what
-    // the brokerage reads back months later.
-    if (everFocused && !force) { setStale('file'); return }
     setFiling(true)
     try {
-      console.info('[boldsign] save to deal: filing BoldSign\u2019s saved copy as a draft', { documentId, force, lastSavedAt })
+      console.info('[boldsign] save to deal: filing BoldSign\u2019s saved copy as a draft', { documentId, lastSavedAt })
       const res = await fileDocumentToDeal(documentId)
       // The final draft written to the deal, named. Pairs with the server's
       // boldsign.file line (same documentId) for the whole picture.
       console.info('[boldsign] save to deal: filed', { documentId, path: res.path, filename: res.filename, fieldCount: res.fieldCount })
       pushToast(res.fieldCount
-        ? `Filed on this deal — ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} included. Find it in the Documents tab.`
-        : 'Filed on this deal — find it in the Documents tab.', 'success')
+        ? `Filed on this deal \u2014 ${res.fieldCount} field${res.fieldCount === 1 ? '' : 's'} included${asOf()}. Find it in the Documents tab.`
+        : `Filed on this deal \u2014 no filled fields came back${asOf()}. If that looks wrong, save inside BoldSign and file it again.`,
+        res.fieldCount ? 'success' : 'info')
     } catch (err) {
       pushToast(`Could not file it on the deal: ${err.message}`, 'error')
     } finally {
@@ -1457,7 +1450,7 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
         <BoldSignFrame
           fill
           url={url}
-          onInteract={() => { setUnsaved(true); setEverFocused(true) }}
+          onInteract={() => setUnsaved(true)}
           onDone={(e) => { setUnsaved(false); saveLayout({ silent: true }); onDone?.(e) }}
           // Saved-as-draft is NOT sent. Reporting it as sent (which is what
           // happened when both events shared one handler) left the agent
@@ -1466,7 +1459,8 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
           // A BoldSign save means nothing is outstanding as of THIS INSTANT — and
           // only this instant. It cannot tell us about the next keystroke, because
           // focus is already inside the frame and our blur will not fire again.
-          // `everFocused` carries that uncertainty forward; see savePdf/fileToDeal.
+          // That uncertainty is now REPORTED (the save time rides along with every
+          // toast, and shows in the footer) rather than used to block a button.
           onDraft={(e) => {
             // BoldSign has confirmed a save. This is the only moment the CRM can
             // be certain its saved copy matches what the agent typed, so it is
@@ -1487,50 +1481,21 @@ function BoldSignStepModal({ url, documentId, eyebrow, heading, onClose, onDone,
       <div style={{ padding:'8px 12px', borderTop:'1px solid var(--gw-border)', fontSize:11, color:'var(--gw-mist)', lineHeight:1.5, flexShrink:0 }}>
         {savingLayout
           ? <span aria-live="polite">Saving this deal’s field layout…</span>
-          : <>Not ready to send? Use <strong>Preview</strong> inside BoldSign, <strong>Save PDF</strong> to download the document as it stands — filled values included, with a summary of who signs what — or <strong>Save to Deal</strong> to keep that copy on this deal's Documents tab. Nothing goes out until you click Send. Fields you place are remembered for this deal.</>}
-      </div>
-
-            {/* WE CANNOT SEE INSIDE BOLDSIGN, so this says so rather than pretending
-          either way. Building silently from the last save is what handed agents a
-          PDF missing the fields they had just filled in; blocking outright would
-          make the button useless once they had touched the editor at all. The
-          last-saved time is the fact they need to decide. */}
-      {stale && (
-        <ConfirmDialog
-          eyebrow={stale === 'file' ? 'Save to Deal' : stale === 'print' ? 'Print' : 'Save PDF'}
-          title="Saved everything inside BoldSign?"
-          confirmLabel={stale === 'file' ? 'File it anyway' : stale === 'print' ? 'Print it anyway' : 'Build it anyway'}
-          cancelLabel="Let me save first"
-          confirmVariant="btn--primary"
-          onCancel={() => setStale(null)}
-          onConfirm={() => {
-            const which = stale
-            setStale(null)
-            if (which === 'file') fileToDeal({ force: true })
-            // Still inside the confirm button's own click, so the print tab this
-            // opens is user-initiated and survives the pop-up blocker.
-            else if (which === 'print') printPdf({ force: true })
-            else savePdf({ force: true })
-          }}
-          message={
-            <>
-              <p style={{ margin: '0 0 10px', color: 'var(--gw-ink)' }}>
-                This copy is built from what <strong>BoldSign has saved</strong> — anything typed
-                in the editor and not saved there cannot reach it, and we have no way to see
-                inside BoldSign to check.
-              </p>
-              <p style={{ margin: '0 0 10px', color: 'var(--gw-ink)' }}>
+          : <>
+              {/* THE FACT THE OLD CONFIRM DIALOG WAS ASKING FOR, shown instead of
+                  asked for. Save PDF, Print and Save to Deal all build from
+                  BoldSign's saved copy, so "when did BoldSign last save" is the
+                  one thing worth knowing before pressing them — and it belongs on
+                  screen, not behind a modal that interrupts the press. */}
+              <span aria-live="polite" style={{ color: lastSavedAt ? 'var(--gw-green)' : 'var(--gw-amber)', fontWeight: 600 }}>
                 {lastSavedAt
-                  ? <>BoldSign last reported a save at <strong>{lastSavedAt.toLocaleTimeString()}</strong>. If you have typed anything since, click <strong>Save</strong> in BoldSign first.</>
-                  : <>BoldSign has not reported a save in this session. Click <strong>Save</strong> in BoldSign first if you have filled anything in.</>}
-              </p>
-              <p style={{ margin: 0, fontSize: 12, color: 'var(--gw-mist)' }}>
-                Nothing is sent either way.
-              </p>
-            </>
-          }
-        />
-      )}
+                  ? `BoldSign saved at ${lastSavedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`
+                  : 'BoldSign hasn’t reported a save yet'}
+              </span>
+              {' — '}
+              <strong>Save PDF</strong>, <strong>Print</strong> and <strong>Save to Deal</strong> all build from that saved copy, so save in BoldSign first if you have just typed something. Nothing goes out until you click Send. Fields you place are remembered for this deal.
+            </>}
+      </div>
 
       {leaveAsk && (
         <ConfirmDialog
