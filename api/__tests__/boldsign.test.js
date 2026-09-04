@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, dealFilingName, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds, buildSendOptions, appendSendOptions, normalizeCc, normalizeReminders, summarizeFieldValues } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, dealFilingName, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds, buildSendOptions, appendSendOptions, normalizeCc, normalizeReminders, summarizeFieldValues, templateMatchesDocument, boldsignPageList } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -2091,5 +2091,98 @@ describe('summarizeFieldValues — the log line that says whether the save lande
 
   it('is safe on a properties payload with nothing on it', () => {
     expect(summarizeFieldValues(null)).toEqual({ total: 0, filled: 0, fields: [] })
+  })
+})
+
+// ── The base layer a printable copy is drawn on ─────────────────────────────
+// The watermark fix substitutes the template's PDF for BoldSign's watermarked
+// render of a draft. That is only safe while the two still describe the same
+// pages, and these are the cases that decide it.
+describe('templateMatchesDocument', () => {
+  const letter = { width: 612, height: 792 }
+  const legal  = { width: 612, height: 1008 }
+
+  it('accepts a template whose pages match the document', () => {
+    expect(templateMatchesDocument({
+      templatePages: [letter, letter, letter],
+      documentPages: [letter, letter, letter],
+    })).toBe(true)
+  })
+
+  it('accepts a reference reported in another unit — it compares ratios, not dimensions', () => {
+    // The reference falls back to BoldSign's own page sizes, which are not
+    // necessarily points (see resolveBoundsScale). A page at 1/4 scale is the
+    // same page.
+    expect(templateMatchesDocument({
+      templatePages: [letter],
+      documentPages: [{ width: 153, height: 198 }],
+    })).toBe(true)
+  })
+
+  it('rejects a template that gained or lost a page', () => {
+    // The case that matters most: same page size, different count, so every value
+    // after the inserted page would be drawn on the wrong one.
+    expect(templateMatchesDocument({
+      templatePages: [letter, letter, letter],
+      documentPages: [letter, letter],
+    })).toBe(false)
+  })
+
+  it('rejects a page whose shape changed', () => {
+    expect(templateMatchesDocument({
+      templatePages: [letter, legal],
+      documentPages: [letter, letter],
+    })).toBe(false)
+  })
+
+  it('rejects when either side is empty — there is nothing to check', () => {
+    expect(templateMatchesDocument({ templatePages: [letter], documentPages: [] })).toBe(false)
+    expect(templateMatchesDocument({ templatePages: [], documentPages: [letter] })).toBe(false)
+    expect(templateMatchesDocument({})).toBe(false)
+  })
+
+  it('rejects unusable numbers rather than dividing by zero into a pass', () => {
+    expect(templateMatchesDocument({
+      templatePages: [{ width: 612, height: 0 }],
+      documentPages: [letter],
+    })).toBe(false)
+    expect(templateMatchesDocument({
+      templatePages: [letter],
+      documentPages: [{ width: null, height: 792 }],
+    })).toBe(false)
+  })
+
+  it('tolerates rounding between systems', () => {
+    expect(templateMatchesDocument({
+      templatePages: [letter],
+      documentPages: [{ width: 611.6, height: 792.4 }],
+    })).toBe(true)
+  })
+
+  // THE REGRESSION THIS GUARD SHIPPED WITH. It used to require BoldSign's reported
+  // page details as the reference, so on a document whose properties payload
+  // carries none it could never return true — the substitution no-opped and every
+  // printout kept its watermark. A real PDF is now the reference, and page details
+  // are only a fallback.
+  it('does not depend on BoldSign reporting page details', () => {
+    expect(boldsignPageList({})).toEqual([])
+    expect(templateMatchesDocument({
+      templatePages: [letter, letter],
+      documentPages: [letter, letter],   // read from BoldSign's PDF, not its metadata
+    })).toBe(true)
+  })
+})
+
+describe('boldsignPageList', () => {
+  it('orders by page number, whatever order the payload lists them in', () => {
+    expect(boldsignPageList({ documentPageDetails: [
+      { pageNumber: 2, width: 10, height: 20 },
+      { pageNumber: 1, width: 30, height: 40 },
+    ] })).toEqual([{ width: 30, height: 40 }, { width: 10, height: 20 }])
+  })
+
+  it('is empty when the payload carries no page details', () => {
+    expect(boldsignPageList({})).toEqual([])
+    expect(boldsignPageList(null)).toEqual([])
   })
 })

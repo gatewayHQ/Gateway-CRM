@@ -67,3 +67,67 @@ export async function savePdfFromUrl(url, filename, { fetchImpl = fetch, doc = d
 
   return { saved: true, bytes: blob.size, filename: name }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRINTING — hand the PDF to the browser's own viewer and let IT print.
+//
+// The CRM must never call print() itself. That is what the retired helper did
+// (see the note at the top of this file): print() on an iframe holding a PDF is
+// driven by a plugin the parent frame has no access to, so the call returned
+// success and the printer produced BLANK paper, silently.
+//
+// A new tab has none of that. The browser renders the PDF in its built-in viewer,
+// which has a working print button wired to the document's real pages. We are not
+// printing — we are getting out of the way of the one thing that already works.
+//
+// The tab has to be opened SYNCHRONOUSLY inside the click handler, before the
+// round-trip that composes the PDF: a window.open() that happens after an await
+// has lost the user gesture and pop-up blockers eat it. So the flow is two steps —
+// openPrintTab() on the click, showPdfInPrintTab() once the URL is known.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Open a blank tab to hold the printable copy. Call this FIRST, in the click
+ * handler, before any await. Returns the window handle, or null if it was
+ * blocked — showPdfInPrintTab() turns that into a message worth reading.
+ */
+export function openPrintTab(win = (typeof window !== 'undefined' ? window : undefined)) {
+  if (!win?.open) return null
+  let tab = null
+  // NOT window.open(url, '_blank', 'noopener'): with 'noopener' Chrome returns
+  // null by design, and the handle is the whole point — we navigate this tab
+  // ourselves once the PDF exists. `opener` is cleared below instead, which gets
+  // the same isolation without giving up the reference.
+  try { tab = win.open('', '_blank') } catch { return null }
+  if (!tab) return null
+  try { tab.opener = null } catch { /* already detached in some browsers */ }
+  // Composing a scanned packet takes a moment, and a blank white tab in the
+  // meantime reads as a broken button.
+  try {
+    tab.document.write('<!doctype html><title>Preparing your copy…</title>'
+      + '<body style="margin:0;padding:32px;font:14px/1.6 system-ui,sans-serif;color:#4a4a4a">'
+      + 'Preparing your copy…</body>')
+    tab.document.close()
+  } catch { /* about:blank is not always writable — cosmetic only */ }
+  return tab
+}
+
+/** Point an opened print tab at `url`. Throws with a message worth showing an agent. */
+export function showPdfInPrintTab(tab, url) {
+  if (!tab) {
+    throw new Error('your browser blocked the new tab. Allow pop-ups for this site, or use Save PDF and print from your PDF viewer')
+  }
+  if (!url) {
+    closePrintTab(tab)
+    throw new Error('no printable copy was returned')
+  }
+  // replace() rather than assigning href: the placeholder above should not become
+  // a back-button destination inside the agent's new tab.
+  tab.location.replace(url)
+  return { opened: true }
+}
+
+/** Close a print tab that will never receive a document. Safe on null. */
+export function closePrintTab(tab) {
+  try { tab?.close?.() } catch { /* already closed, or never opened */ }
+}
