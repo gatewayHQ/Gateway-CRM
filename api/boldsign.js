@@ -1002,6 +1002,32 @@ export function boldsignPageList(props) {
   return [...sizes.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v)
 }
 
+// The source files a Form Library packet is built from, in the order BoldSign was
+// given them. `storage_paths` is the multi-file column (migration 0022); the
+// single `storage_path` is its back-compat predecessor.
+export function packetFilePaths(packet) {
+  const list  = Array.isArray(packet?.storage_paths) ? packet.storage_paths : []
+  const paths = list.map(f => (typeof f === 'string' ? f : f?.path)).filter(Boolean)
+  if (paths.length) return paths
+  return packet?.storage_path ? [packet.storage_path] : []
+}
+
+// Concatenate PDFs into one, preserving order. A packet is several files
+// (agreement + disclosures) and BoldSign combines them into a single document in
+// exactly this order, so the merged copy lines up page-for-page with it.
+export async function mergePdfBuffers(buffers = []) {
+  if (!buffers.length) return null
+  if (buffers.length === 1) return buffers[0]
+  const { PDFDocument } = await import('pdf-lib')
+  const out = await PDFDocument.create()
+  for (const buf of buffers) {
+    const src   = await PDFDocument.load(buf, { ignoreEncryption: true })
+    const pages = await out.copyPages(src, src.getPageIndices())
+    for (const page of pages) out.addPage(page)
+  }
+  return Buffer.from(await out.save({ useObjectStreams: true }))
+}
+
 // Page sizes of a PDF, in points. Separate from buildPrintablePdf's own load
 // because the shape has to be checked BEFORE deciding which bytes to compose
 // from; the second parse costs a few milliseconds against a wrong printout.
@@ -2612,7 +2638,71 @@ async function handler(req, res) {
       let pdfBytes = null
       let baseSource = null
 
-      // PREFERRED BASE, FOR A DRAFT ONLY: the template's own PDF — the same pages
+      // BEST BASE OF ALL, FOR A DRAFT: the CRM's OWN source files for this packet.
+      //
+      // These are the PDFs an admin uploaded to the form-packets bucket — the
+      // county and board forms themselves. BoldSign has never rendered them, so
+      // they carry none of what BoldSign adds on the way out: no DRAFT watermark,
+      // no "BoldSign Document ID" header, and no "test document generated using
+      // the BoldSign developer sandbox" banner. That banner is stamped by the
+      // account the key belongs to and survives into /template/download, which is
+      // why preferring the template alone still printed it.
+      //
+      // It is also the only base that does not depend on a BoldSign id resolving:
+      // Sandbox and Live keep separate templates, so a boldsign_template_id valid
+      // under one key 404s under the other. The bucket does not care which key is
+      // configured.
+      //
+      // Multi-file packets are the normal case here (agreement + disclosures +
+      // dual agency), and BoldSign concatenates its `Files` in the order the CRM
+      // sent them — the same order stored in storage_paths — so the merged copy
+      // lines up page-for-page. The shape check below still has the final say.
+      if (docStatus === 'draft' && record.boldsign_template_id) {
+        const tid = record.boldsign_template_id
+        try {
+          let packet = null
+          try {
+            const { data } = await svc.from('form_packets')
+              .select('storage_path, storage_paths').eq('boldsign_template_id', tid).limit(1)
+            packet = data?.[0] || null
+          } catch (err) {
+            // A database without migration 0022 has no storage_paths column. Fall
+            // back to the single-file column rather than losing the whole path.
+            console.warn(`[boldsign] compose: form_packets read fell back to storage_path (${err.message})`)
+            const { data } = await svc.from('form_packets')
+              .select('storage_path').eq('boldsign_template_id', tid).limit(1)
+            packet = data?.[0] || null
+          }
+          const paths = packetFilePaths(packet)
+          if (paths.length) {
+            const buffers = []
+            for (const path of paths) {
+              const { data, error } = await svc.storage.from(PACKET_BUCKET).download(path)
+              // A packet missing one of its files must not compose as a SHORTER
+              // document — that would drop a disclosure out of the middle of an
+              // agreement. All of them or none.
+              if (error || !data) { buffers.length = 0; console.warn(`[boldsign] compose: packet file ${path} unreadable — not using the CRM's own copy`); break }
+              buffers.push(Buffer.from(await data.arrayBuffer()))
+            }
+            if (buffers.length) {
+              const merged       = await mergePdfBuffers(buffers)
+              const packetPages  = await readPdfPageSizes(merged)
+              const documentPages = docBytes ? await readPdfPageSizes(docBytes) : boldsignPageList(props)
+              if (templateMatchesDocument({ templatePages: packetPages, documentPages })) {
+                pdfBytes = merged
+                baseSource = 'packet'
+              } else {
+                console.warn(`[boldsign] compose: packet files for template ${tid} do not match draft ${id} `
+                  + `(packet ${packetPages.length}pp vs document ${documentPages.length}pp) — trying the template`)
+              }
+            }
+          }
+        } catch (err) {
+          console.warn(`[boldsign] compose: could not use the CRM's own packet files for ${tid} (${err.message}) — trying the template`)
+        }
+      }
+
+      // NEXT BEST, FOR A DRAFT ONLY: the template's own PDF — the same pages
       // without the DRAFT watermark and document-ID header BoldSign burns into the
       // render above. Nothing downstream can remove those: the filled values and
       // the signing summary are drawn ON TOP of them.
@@ -2622,7 +2712,7 @@ async function handler(req, res) {
       // collected and the template is a blank form. Composing a 'sent' or
       // 'completed' document from the template would silently drop real signatures
       // out of a copy the brokerage files.
-      if (docStatus === 'draft' && record.boldsign_template_id) {
+      if (!pdfBytes && docStatus === 'draft' && record.boldsign_template_id) {
         const tid = record.boldsign_template_id
         try {
           const r = await boldsign(`/template/download?templateId=${encodeURIComponent(tid)}`, { raw: true })
@@ -2654,11 +2744,10 @@ async function handler(req, res) {
         }
       }
 
-      else if (docStatus === 'draft') {
-        // The other way a draft keeps its watermark, and the one nothing used to
-        // report: no template recorded on the row, so there is no unwatermarked
-        // source to compose from. Named here so the logs distinguish it from a
-        // template that drifted.
+      if (!pdfBytes && docStatus === 'draft' && !record.boldsign_template_id) {
+        // The other way a draft keeps its watermark: no template recorded on the
+        // row, so neither the packet files nor the template can be found. Named
+        // here so the logs distinguish it from a source that drifted.
         console.warn(`[boldsign] compose: draft ${id} has no template on its row — composing from BoldSign's watermarked copy`)
       }
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, dealFilingName, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds, buildSendOptions, appendSendOptions, normalizeCc, normalizeReminders, summarizeFieldValues, templateMatchesDocument, boldsignPageList } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, dealFilingName, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds, buildSendOptions, appendSendOptions, normalizeCc, normalizeReminders, summarizeFieldValues, templateMatchesDocument, boldsignPageList, packetFilePaths, mergePdfBuffers } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -2184,5 +2184,69 @@ describe('boldsignPageList', () => {
   it('is empty when the payload carries no page details', () => {
     expect(boldsignPageList({})).toEqual([])
     expect(boldsignPageList(null)).toEqual([])
+  })
+})
+
+// ── The CRM's own packet files as the print base layer ──────────────────────
+// Preferred over anything BoldSign renders, because BoldSign stamps its own
+// output: a DRAFT watermark, a document-ID header, and on a sandbox account a
+// "test document" banner. The bucket copies are the originals an admin uploaded.
+describe('packetFilePaths', () => {
+  it('reads the multi-file column, in order', () => {
+    expect(packetFilePaths({ storage_paths: [
+      { path: 'IA/buyer/appointed.pdf', name: 'Appointed Agency Agreement.pdf' },
+      { path: 'IA/buyer/disclosure.pdf', name: 'Agency Disc.pdf' },
+    ] })).toEqual(['IA/buyer/appointed.pdf', 'IA/buyer/disclosure.pdf'])
+  })
+
+  it('accepts bare strings as well as { path } entries', () => {
+    expect(packetFilePaths({ storage_paths: ['IA/buyer/a.pdf', { path: 'IA/buyer/b.pdf' }] }))
+      .toEqual(['IA/buyer/a.pdf', 'IA/buyer/b.pdf'])
+  })
+
+  it('falls back to the single-file column on a pre-0022 database', () => {
+    expect(packetFilePaths({ storage_path: 'IA/buyer/only.pdf' })).toEqual(['IA/buyer/only.pdf'])
+    // An empty multi-file column must not mask the back-compat one.
+    expect(packetFilePaths({ storage_paths: [], storage_path: 'IA/buyer/only.pdf' }))
+      .toEqual(['IA/buyer/only.pdf'])
+  })
+
+  it('is empty when the packet names no files at all', () => {
+    expect(packetFilePaths({})).toEqual([])
+    expect(packetFilePaths(null)).toEqual([])
+    // Entries with no usable path are dropped rather than becoming undefined.
+    expect(packetFilePaths({ storage_paths: [{ name: 'no path.pdf' }] })).toEqual([])
+  })
+})
+
+describe('mergePdfBuffers', () => {
+  // Page counts are what the shape guard compares, so the merge has to preserve
+  // every page of every file — a packet that composes short would drop a
+  // disclosure out of the middle of an agreement.
+  const pdfOf = async (pages) => {
+    const { PDFDocument } = await import('pdf-lib')
+    const doc = await PDFDocument.create()
+    for (let i = 0; i < pages; i++) doc.addPage([612, 792])
+    return Buffer.from(await doc.save())
+  }
+  const pageCount = async (buf) => {
+    const { PDFDocument } = await import('pdf-lib')
+    return (await PDFDocument.load(buf)).getPageCount()
+  }
+
+  it('concatenates every page, in order', async () => {
+    // The packet in the report: 3 + 3 + 3 + 5 pages.
+    const merged = await mergePdfBuffers([await pdfOf(3), await pdfOf(3), await pdfOf(3), await pdfOf(5)])
+    expect(await pageCount(merged)).toBe(14)
+  })
+
+  it('returns a single file untouched rather than rewriting it', async () => {
+    const one = await pdfOf(3)
+    expect(await mergePdfBuffers([one])).toBe(one)
+  })
+
+  it('returns null when there is nothing to merge', async () => {
+    expect(await mergePdfBuffers([])).toBeNull()
+    expect(await mergePdfBuffers()).toBeNull()
   })
 })
