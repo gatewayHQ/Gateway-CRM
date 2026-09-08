@@ -11,7 +11,7 @@
  *  • Per-mailing analytics + agent-filtered org dashboard
  */
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { Icon, Modal, pushToast, EmptyState, ConfirmDialog } from '../components/UI.jsx'
@@ -2456,6 +2456,62 @@ function MailingDetail({ mailing, agents, properties, contacts, activeAgent, onC
   )
 }
 
+// ─── Collapsible sections ─────────────────────────────────────────────────────
+// The page stacks a stat row, five quick-start cards and then the campaign
+// list, which pushes the list itself below the fold. These let an agent fold
+// the top of the page away so the whole list slides up into view — and the
+// choice sticks between visits.
+
+const COLLAPSE_KEY = 'gw.campaigns.sections'
+
+export function readCollapsePrefs() {
+  try {
+    const raw = localStorage.getItem(COLLAPSE_KEY)
+    const parsed = raw ? JSON.parse(raw) : null
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch { return {} }
+}
+
+/** Open/closed state for one section, remembered in localStorage. */
+function useSectionToggle(id, defaultOpen = true) {
+  const [open, setOpen] = useState(() => {
+    const saved = readCollapsePrefs()[id]
+    return typeof saved === 'boolean' ? saved : defaultOpen
+  })
+  const set = useCallback(next => {
+    setOpen(prev => {
+      const value = typeof next === 'function' ? next(prev) : next
+      try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify({ ...readCollapsePrefs(), [id]: value })) } catch { /* private mode */ }
+      return value
+    })
+  }, [id])
+  return [open, set]
+}
+
+/**
+ * A section header that slides its children open and closed. Content stays
+ * mounted so scroll position, filters and in-flight edits survive a collapse.
+ */
+function CollapsibleSection({ id, title, count, hint, open, onToggle, children, style }) {
+  const bodyId = `section-${id}`
+  return (
+    <div style={style}>
+      <button type="button" className="collapse-head" aria-expanded={open} aria-controls={bodyId}
+              onClick={() => onToggle(!open)}>
+        <span className={`collapse-head__chevron${open ? ' is-open' : ''}`}>
+          <Icon name="chevronDown" size={14} />
+        </span>
+        <span>{title}</span>
+        {count != null && <span className="collapse-head__count">({count})</span>}
+        {hint && <span className="collapse-head__hint">{hint}</span>}
+      </button>
+      <div id={bodyId} className={`collapse${open ? ' is-open' : ''}`} aria-hidden={!open}>
+        <div className="collapse__inner" {...(open ? {} : { inert: '' })}>{children}</div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function CampaignsPage({ db, isAdmin, activeAgent }) {
@@ -2472,6 +2528,11 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
   const [dashboard, setDashboard]   = useState(null)
   const [setupNeeded, setSetupNeeded] = useState(false)
   const [setupError,  setSetupError]  = useState('')
+
+  // Collapsible page sections + the anchor the "All campaigns" jump scrolls to
+  const [quickOpen, setQuickOpen]   = useSectionToggle('quickStart', true)
+  const [listOpen,  setListOpen]    = useSectionToggle('list', true)
+  const listRef                     = useRef(null)
 
   // Filters
   const [search, setSearch]         = useState('')
@@ -2526,6 +2587,18 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
   const handleDelete = (id) => {
     setMailings(m => m.filter(x => x.id !== id))
     setSelected(null)
+  }
+
+  // Fold the quick-start cards away and slide the campaign list up into view.
+  const jumpToList = () => {
+    setQuickOpen(false)
+    setListOpen(true)
+    // Wait out the collapse (260ms) so we scroll to where the list actually
+    // lands, not to where it was before the quick-start cards folded away.
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    setTimeout(() => {
+      listRef.current?.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
+    }, reduced ? 0 : 300)
   }
 
   const filtered = useMemo(() => {
@@ -2586,9 +2659,15 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
             Track postcards, flyers, and direct mail with per-piece QR codes
           </div>
         </div>
-        <button className="btn btn--primary" onClick={() => setCreating(true)}>
-          <Icon name="plus" size={14} /> New Mailing
-        </button>
+        <div style={{ display:'flex', gap:8 }}>
+          <button className="btn" onClick={jumpToList}
+                  title="Collapse the quick-start cards and slide the full campaign list into view">
+            All Campaigns <Icon name="chevronDown" size={14} />
+          </button>
+          <button className="btn btn--primary" onClick={() => setCreating(true)}>
+            <Icon name="plus" size={14} /> New Mailing
+          </button>
+        </div>
       </div>
 
       {dashboard && (
@@ -2601,13 +2680,12 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
         </div>
       )}
 
-      {/* Quick-start templates */}
-      <div style={{ marginBottom:20 }}>
-        <div style={{ fontSize:11, textTransform:'uppercase', letterSpacing:0.8, color:'var(--gw-mist)',
-                      fontWeight:700, marginBottom:8 }}>
-          Quick start
-        </div>
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(220px, 1fr))', gap:10 }}>
+      {/* Quick-start templates — collapsible so the list can move up the page */}
+      <CollapsibleSection id="quickStart" title="Quick start" open={quickOpen} onToggle={setQuickOpen}
+                          hint={quickOpen ? null : `${TEMPLATES.length + 1} templates`}
+                          style={{ marginBottom:20 }}>
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(220px, 1fr))', gap:10,
+                      paddingBottom:2 }}>
           {TEMPLATES.map(t => (
             <button key={t.id} type="button"
                     onClick={() => { setTemplateSel(t); setCreating(true) }}
@@ -2645,95 +2723,104 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
             </div>
           </button>
         </div>
-      </div>
+      </CollapsibleSection>
 
-      <div style={{ display:'flex', gap:8, marginBottom:14, flexWrap:'wrap' }}>
-        <input className="input" placeholder="Search mailings…" value={search}
-               onChange={e => setSearch(e.target.value)} style={{ flex:1, minWidth:200 }} />
-        <select className="input" value={statusFilter} onChange={e => setStatus(e.target.value)} style={{ width:160 }}>
-          <option value="all">All statuses</option>
-          <option value="draft">Draft</option>
-          <option value="active">Active</option>
-          <option value="sent">Sent</option>
-          <option value="archived">Archived</option>
-        </select>
-        {isAdmin && (
-          <select className="input" value={agentFilter} onChange={e => setAgentF(e.target.value)} style={{ width:180 }}>
-            <option value="all">All agents</option>
-            {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
-        )}
-        <select className="input" value={sort} onChange={e => setSort(e.target.value)} style={{ width:170 }}>
-          <option value="newest">Newest first</option>
-          <option value="oldest">Oldest first</option>
-          <option value="scans">Most scans</option>
-          <option value="leads">Most leads</option>
-          <option value="recipients">Most recipients</option>
-        </select>
-      </div>
+      {/* All campaigns — header slides the filters + full list open and closed */}
+      <div ref={listRef} style={{ scrollMarginTop:16 }}>
+        <CollapsibleSection id="list" title="All campaigns" count={filtered.length}
+                            open={listOpen} onToggle={setListOpen}
+                            hint={filtered.length !== mailings.length
+                                    ? `${filtered.length} of ${mailings.length} shown`
+                                    : (listOpen ? null : 'Click to expand')}>
+          <div style={{ display:'flex', gap:8, marginBottom:14, flexWrap:'wrap' }}>
+            <input className="input" placeholder="Search mailings…" value={search}
+                   onChange={e => setSearch(e.target.value)} style={{ flex:1, minWidth:200 }} />
+            <select className="input" value={statusFilter} onChange={e => setStatus(e.target.value)} style={{ width:160 }}>
+              <option value="all">All statuses</option>
+              <option value="draft">Draft</option>
+              <option value="active">Active</option>
+              <option value="sent">Sent</option>
+              <option value="archived">Archived</option>
+            </select>
+            {isAdmin && (
+              <select className="input" value={agentFilter} onChange={e => setAgentF(e.target.value)} style={{ width:180 }}>
+                <option value="all">All agents</option>
+                {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            )}
+            <select className="input" value={sort} onChange={e => setSort(e.target.value)} style={{ width:170 }}>
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+              <option value="scans">Most scans</option>
+              <option value="leads">Most leads</option>
+              <option value="recipients">Most recipients</option>
+            </select>
+          </div>
 
-      {filtered.length === 0 ? (
-        <EmptyState title={mailings.length === 0 ? 'No mailings yet' : 'No mailings match these filters'}
-                    message={mailings.length === 0 ? 'Create your first mailing to get a unique trackable QR code.' : 'Try clearing the filters.'}
-                    action={mailings.length === 0 && <button className="btn btn--primary" onClick={() => setCreating(true)}>Create First Mailing</button>} />
-      ) : (
-        <div style={{ display:'grid', gap:10 }}>
-          {filtered.map(m => {
-            const agent    = agents.find(a => a.id === m.agent_id)
-            const property = properties.find(p => p.id === m.property_id)
-            const mailed   = m.recipient_count || 0
-            const scans    = m.scan_count || 0
-            const leads    = m.lead_count || 0
-            const scanRate = mailed > 0 ? Math.min(100, (scans / mailed) * 100) : 0
-            const leadRate = mailed > 0 ? Math.min(100, (leads / mailed) * 100) : 0
-            return (
-              <div key={m.id} onClick={() => setSelected(m)}
-                   style={{ background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)',
-                            padding:'14px 18px', cursor:'pointer', display:'grid',
-                            gridTemplateColumns:'1fr 220px 80px 80px 80px 56px', gap:14, alignItems:'center',
-                            transition:'all 150ms' }}
-                   onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--gw-azure)'}
-                   onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--gw-border)'}>
-                <div style={{ minWidth:0 }}>
-                  <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                    <div style={{ fontWeight:700, fontSize:15, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{m.name}</div>
-                    <StatusBadge status={m.status} />
-                    <LandingTypeChip type={m.landing_type} />
+          {filtered.length === 0 ? (
+            <EmptyState title={mailings.length === 0 ? 'No mailings yet' : 'No mailings match these filters'}
+                        message={mailings.length === 0 ? 'Create your first mailing to get a unique trackable QR code.' : 'Try clearing the filters.'}
+                        action={mailings.length === 0 && <button className="btn btn--primary" onClick={() => setCreating(true)}>Create First Mailing</button>} />
+          ) : (
+            <div style={{ display:'grid', gap:10 }}>
+              {filtered.map(m => {
+                const agent    = agents.find(a => a.id === m.agent_id)
+                const property = properties.find(p => p.id === m.property_id)
+                const mailed   = m.recipient_count || 0
+                const scans    = m.scan_count || 0
+                const leads    = m.lead_count || 0
+                const scanRate = mailed > 0 ? Math.min(100, (scans / mailed) * 100) : 0
+                const leadRate = mailed > 0 ? Math.min(100, (leads / mailed) * 100) : 0
+                return (
+                  <div key={m.id} onClick={() => setSelected(m)}
+                       style={{ background:'#fff', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)',
+                                padding:'14px 18px', cursor:'pointer', display:'grid',
+                                gridTemplateColumns:'1fr 220px 80px 80px 80px 56px', gap:14, alignItems:'center',
+                                transition:'all 150ms' }}
+                       onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--gw-azure)'}
+                       onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--gw-border)'}>
+                    <div style={{ minWidth:0 }}>
+                      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                        <div style={{ fontWeight:700, fontSize:15, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{m.name}</div>
+                        <StatusBadge status={m.status} />
+                        <LandingTypeChip type={m.landing_type} />
+                      </div>
+                      <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4, display:'flex', gap:10, flexWrap:'wrap' }}>
+                        {agent && <span>{agent.name}</span>}
+                        {property && <span>· {streetLine(property)}</span>}
+                        {m.send_date && <span>· {m.send_date}</span>}
+                        <span>· {m.mailing_type}</span>
+                      </div>
+                    </div>
+
+                    {/* Conversion funnel mini-viz */}
+                    <div title={`${mailed} mailed → ${scans} scans → ${leads} leads`}>
+                      <FunnelBar scanRate={scanRate} leadRate={leadRate} />
+                    </div>
+
+                    <div style={{ textAlign:'center' }}>
+                      <div style={{ fontSize:17, fontWeight:700 }}>{mailed.toLocaleString()}</div>
+                      <div style={{ fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase' }}>Mailed</div>
+                    </div>
+                    <div style={{ textAlign:'center' }}>
+                      <div style={{ fontSize:17, fontWeight:700, color:'var(--gw-azure)' }}>{scans}</div>
+                      <div style={{ fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase' }}>Scans</div>
+                    </div>
+                    <div style={{ textAlign:'center' }}>
+                      <div style={{ fontSize:17, fontWeight:700, color:'var(--gw-green)' }}>{leads}</div>
+                      <div style={{ fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase' }}>Leads</div>
+                    </div>
+                    <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end' }}>
+                      <QrCode token={m.qr_token} size={38} alt=""
+                              style={{ width:38, height:38, border:'1px solid var(--gw-border)', borderRadius:4 }} />
+                    </div>
                   </div>
-                  <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:4, display:'flex', gap:10, flexWrap:'wrap' }}>
-                    {agent && <span>{agent.name}</span>}
-                    {property && <span>· {streetLine(property)}</span>}
-                    {m.send_date && <span>· {m.send_date}</span>}
-                    <span>· {m.mailing_type}</span>
-                  </div>
-                </div>
-
-                {/* Conversion funnel mini-viz */}
-                <div title={`${mailed} mailed → ${scans} scans → ${leads} leads`}>
-                  <FunnelBar scanRate={scanRate} leadRate={leadRate} />
-                </div>
-
-                <div style={{ textAlign:'center' }}>
-                  <div style={{ fontSize:17, fontWeight:700 }}>{mailed.toLocaleString()}</div>
-                  <div style={{ fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase' }}>Mailed</div>
-                </div>
-                <div style={{ textAlign:'center' }}>
-                  <div style={{ fontSize:17, fontWeight:700, color:'var(--gw-azure)' }}>{scans}</div>
-                  <div style={{ fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase' }}>Scans</div>
-                </div>
-                <div style={{ textAlign:'center' }}>
-                  <div style={{ fontSize:17, fontWeight:700, color:'var(--gw-green)' }}>{leads}</div>
-                  <div style={{ fontSize:10, color:'var(--gw-mist)', textTransform:'uppercase' }}>Leads</div>
-                </div>
-                <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end' }}>
-                  <QrCode token={m.qr_token} size={38} alt=""
-                          style={{ width:38, height:38, border:'1px solid var(--gw-border)', borderRadius:4 }} />
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
+                )
+              })}
+            </div>
+          )}
+        </CollapsibleSection>
+      </div>
 
       {creating && (
         <Modal open={true} onClose={() => { setCreating(false); setTemplateSel(null) }} width={680}>

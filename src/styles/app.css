@@ -1514,3 +1514,66 @@ select.form-control { cursor: pointer; }
 }
 .coagent-item span:first-of-type { flex: 1; }
 .lp__404-sub { font-size: 15px; color: var(--gw-mist); margin-bottom: 28px; }
+
+/* ---------------------------------------------------------------------------
+   Collapsible sections — a header row that slides its content open/closed.
+   The grid-template-rows 0fr → 1fr trick animates to the content's natural
+   height without measuring it, so lists of any length slide smoothly.
+--------------------------------------------------------------------------- */
+.collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 260ms ease;
+}
+.collapse.is-open { grid-template-rows: 1fr; }
+.collapse > .collapse__inner {
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+.collapse.is-open > .collapse__inner { opacity: 1; }
+
+.collapse-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  margin-bottom: 8px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  color: var(--gw-mist);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  font-family: inherit;
+}
+.collapse-head:hover { color: var(--gw-slate); }
+.collapse-head__chevron {
+  display: flex;
+  transition: transform 260ms ease;
+}
+.collapse-head__chevron.is-open { transform: rotate(180deg); }
+.collapse-head__count {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+  color: var(--gw-mist);
+}
+.collapse-head__hint {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  font-size: 11.5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .collapse,
+  .collapse > .collapse__inner,
+  .collapse-head__chevron { transition: none; }
+}
