@@ -562,7 +562,7 @@ export default function App() {
             title="Dashboard"
             aria-label="The Wolf CRM — go to dashboard"
           >
-            <BrandLogo size={36} />
+            <BrandLogo size={48} />
           </button>
           {!collapsed && (
             <div className="sidebar__brand-text">
@@ -664,7 +664,7 @@ export default function App() {
             title="Dashboard"
             aria-label="The Wolf CRM — go to dashboard"
           >
-            <BrandLogo size={32} />
+            <BrandLogo size={40} />
           </button>
           <div>
             <div className="topbar__title">{TITLES[route]?.title}</div>

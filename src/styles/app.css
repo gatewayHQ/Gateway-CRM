@@ -56,13 +56,16 @@ body { font-family: var(--font-body); font-size: 14px; color: var(--gw-ink); bac
 
 .sidebar__brand {
   display: flex; align-items: center; gap: 10px;
-  padding: 16px 12px; border-bottom: 1px solid rgba(255,255,255,0.06); min-height: 64px;
+  padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.06); min-height: 72px;
 }
 .sidebar__brand-mark {
-  width: 36px; height: 36px; min-width: 36px; padding: 0;
+  width: 48px; height: 48px; min-width: 48px; padding: 0;
   background: none; border: none; border-radius: 50%; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
 }
+/* The collapsed rail is 60px wide and the slot keeps its 12px gutters, so the
+   seal has to come back down to fit — 48px would clip against the edges. */
+.sidebar.collapsed .sidebar__brand-mark { width: 36px; height: 36px; min-width: 36px; }
 .sidebar__brand-mark:focus-visible { outline: 2px solid var(--gw-gold); outline-offset: 2px; }
 .sidebar__wordmark { font-family: var(--font-display); font-size: 17px; font-weight: 600; color: #fff; letter-spacing: 0.04em; }
 .sidebar__sub { font-size: 10px; color: rgba(255,255,255,0.4); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 1px; }
@@ -518,7 +521,7 @@ select.form-control { cursor: pointer; }
 
 /* Topbar brand slot — phones only; the sidebar carries it from 769px up. */
 .topbar__brand {
-  display: none; width: 32px; height: 32px; min-width: 32px; padding: 0;
+  display: none; width: 40px; height: 40px; min-width: 40px; padding: 0;
   background: none; border: none; border-radius: 50%; cursor: pointer;
 }
 .topbar__brand:focus-visible { outline: 2px solid var(--gw-gold); outline-offset: 2px; }
