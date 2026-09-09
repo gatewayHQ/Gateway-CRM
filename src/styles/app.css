@@ -15,6 +15,9 @@
   --gw-mist:     #9aa3b2;
   --gw-border:   #e2e0db;
   --gw-gold:     #c9a84c;
+  /* Outer field of the Wolf CRM seal — the boot screen and the light-header
+     plate match it so the artwork never sits on a lighter rectangle. */
+  --gw-seal-field: #0b0b0b;
   --gw-gold-light: #f0e4c0;
   --gw-green:    #2e7d5e;
   --gw-green-light: #d4ede5;
@@ -56,10 +59,11 @@ body { font-family: var(--font-body); font-size: 14px; color: var(--gw-ink); bac
   padding: 16px 12px; border-bottom: 1px solid rgba(255,255,255,0.06); min-height: 64px;
 }
 .sidebar__brand-mark {
-  width: 36px; height: 36px; min-width: 36px; background: var(--gw-gold);
-  color: var(--gw-slate); border-radius: var(--radius); display: flex; align-items: center;
-  justify-content: center; font-family: var(--font-display); font-size: 20px; font-weight: 700;
+  width: 36px; height: 36px; min-width: 36px; padding: 0;
+  background: none; border: none; border-radius: 50%; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
 }
+.sidebar__brand-mark:focus-visible { outline: 2px solid var(--gw-gold); outline-offset: 2px; }
 .sidebar__wordmark { font-family: var(--font-display); font-size: 17px; font-weight: 600; color: #fff; letter-spacing: 0.04em; }
 .sidebar__sub { font-size: 10px; color: rgba(255,255,255,0.4); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 1px; }
 .sidebar__collapse {
@@ -494,6 +498,36 @@ select.form-control { cursor: pointer; }
 .loading { display: flex; align-items: center; justify-content: center; height: 200px; color: var(--gw-mist); font-size: 13px; gap: 8px; }
 .spinner { width: 18px; height: 18px; border: 2px solid var(--gw-border); border-top-color: var(--gw-azure); border-radius: 50%; animation: spin 600ms linear infinite; }
 
+/* ── Brand seal ───────────────────────────────────────────────────────────────
+   Square artwork. `contain` guarantees the circle stays a circle whatever box
+   the caller gives it, and the transparent background means no JPEG halo. */
+.brand-seal { display: block; object-fit: contain; background: none; border-radius: 50%; }
+
+/* Boot / splash screen — dark field matched to the seal's outer ring. */
+.boot {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 28px; height: 100vh; height: 100dvh; background: var(--gw-seal-field);
+}
+.boot__seal { width: 220px; height: 220px; animation: boot-in 320ms ease-out both; }
+.boot__spinner {
+  width: 20px; height: 20px; border-radius: 50%;
+  border: 2px solid rgba(201, 168, 76, 0.22); border-top-color: var(--gw-gold);
+  animation: spin 700ms linear infinite;
+}
+@keyframes boot-in { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: none; } }
+
+/* Topbar brand slot — phones only; the sidebar carries it from 769px up. */
+.topbar__brand {
+  display: none; width: 32px; height: 32px; min-width: 32px; padding: 0;
+  background: none; border: none; border-radius: 50%; cursor: pointer;
+}
+.topbar__brand:focus-visible { outline: 2px solid var(--gw-gold); outline-offset: 2px; }
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
 /* MERGE TAG */
 .merge-tag { display: inline-block; background: var(--gw-sky); color: var(--gw-azure); padding: 1px 6px; border-radius: 3px; font-size: 11px; font-family: var(--font-mono); cursor: pointer; }
 .merge-tag:hover { background: var(--gw-azure); color: #fff; }
@@ -537,6 +571,16 @@ select.form-control { cursor: pointer; }
 
   /* ── Topbar ── */
   .topbar { padding: 0 14px; gap: 10px; }
+  /* The topbar is white here, so the seal gets a charcoal plate to sit on —
+     the gold ring has nothing to read against on bone/chalk otherwise. */
+  .topbar__brand {
+    display: flex; align-items: center; justify-content: center;
+    background: var(--gw-seal-field);
+  }
+
+  /* ── Boot screen ── */
+  .boot { gap: 22px; }
+  .boot__seal { width: 160px; height: 160px; }
   /* Search stays on mobile — hiding it left the phone with no way to find a
      record at all. The agent badge is what gives up the space. */
   .topbar__search { max-width: none; flex: 1; }
@@ -1576,4 +1620,5 @@ select.form-control { cursor: pointer; }
   .collapse,
   .collapse > .collapse__inner,
   .collapse-head__chevron { transition: none; }
+  .boot__seal { animation: none; }
 }
