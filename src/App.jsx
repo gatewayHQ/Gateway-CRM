@@ -562,7 +562,7 @@ export default function App() {
             title="Dashboard"
             aria-label="The Wolf CRM — go to dashboard"
           >
-            <BrandLogo size={48} />
+            <BrandLogo size={72} />
           </button>
           {!collapsed && (
             <div className="sidebar__brand-text">

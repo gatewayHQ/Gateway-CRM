@@ -54,26 +54,42 @@ body { font-family: var(--font-body); font-size: 14px; color: var(--gw-ink); bac
 }
 .sidebar.collapsed { width: 60px; min-width: 60px; }
 
+/* Stacked rather than a horizontal lockup: at 220px the sidebar cannot fit a
+   seal worth looking at *and* the wordmark on one line — past ~48px the
+   "Real Estate Advisors" line wraps. Centring the seal above the text buys it
+   the full width. */
 .sidebar__brand {
-  display: flex; align-items: center; gap: 10px;
-  padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.06); min-height: 72px;
+  position: relative;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 16px 12px 14px; border-bottom: 1px solid rgba(255,255,255,0.06);
+  text-align: center;
 }
 .sidebar__brand-mark {
-  width: 48px; height: 48px; min-width: 48px; padding: 0;
+  width: 72px; height: 72px; min-width: 72px; padding: 0;
   background: none; border: none; border-radius: 50%; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
 }
-/* The collapsed rail is 60px wide and the slot keeps its 12px gutters, so the
-   seal has to come back down to fit — 48px would clip against the edges. */
-.sidebar.collapsed .sidebar__brand-mark { width: 36px; height: 36px; min-width: 36px; }
 .sidebar__brand-mark:focus-visible { outline: 2px solid var(--gw-gold); outline-offset: 2px; }
+/* BrandLogo stamps width/height attributes from its `size` prop, so the image
+   has to be told to follow the slot instead — otherwise collapsing the rail
+   shrinks the button and leaves the seal spilling out of it at full size. */
+.sidebar__brand-mark .brand-seal { width: 100%; height: 100%; }
 .sidebar__wordmark { font-family: var(--font-display); font-size: 17px; font-weight: 600; color: #fff; letter-spacing: 0.04em; }
 .sidebar__sub { font-size: 10px; color: rgba(255,255,255,0.4); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 1px; }
 .sidebar__collapse {
-  margin-left: auto; background: none; border: none; cursor: pointer;
+  position: absolute; top: 10px; right: 10px;
+  background: none; border: none; cursor: pointer;
   color: rgba(255,255,255,0.3); padding: 4px; border-radius: 4px;
   display: flex; align-items: center; transition: color 200ms ease, background 200ms ease;
 }
+
+/* Collapsed rail: 60px wide, so the seal comes back down and the chevron
+   returns to the flow beneath it. Absolutely positioned it would sit on top of
+   the seal — and pinned right of a 36px mark it overflowed the rail entirely,
+   where `overflow: hidden` on .sidebar swallowed it. */
+.sidebar.collapsed .sidebar__brand { padding: 12px 8px; gap: 8px; }
+.sidebar.collapsed .sidebar__brand-mark { width: 36px; height: 36px; min-width: 36px; }
+.sidebar.collapsed .sidebar__collapse { position: static; }
 .sidebar__collapse:hover { color: rgba(255,255,255,0.7); background: rgba(255,255,255,0.06); }
 
 .sidebar__nav { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 8px 0; }

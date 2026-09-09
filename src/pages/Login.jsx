@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { supabase } from '../lib/supabase.js'
+import { BrandLogo } from '../components/UI.jsx'
 
 export default function LoginPage() {
   const [email, setEmail] = useState('')
@@ -26,19 +27,16 @@ export default function LoginPage() {
         border: '1px solid var(--gw-border)', borderRadius: 'var(--radius-lg)',
         boxShadow: 'var(--shadow-modal)', padding: '40px 36px',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 32 }}>
-          <div style={{
-            width: 40, height: 40, background: 'var(--gw-slate)', borderRadius: 'var(--radius)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontFamily: 'var(--font-display)', fontSize: 22, fontWeight: 700, color: 'var(--gw-gold)',
-          }}>G</div>
-          <div>
-            <div style={{ fontFamily: 'var(--font-display)', fontSize: 20, fontWeight: 600, color: 'var(--gw-slate)' }}>Gateway</div>
-            <div style={{ fontSize: 11, color: 'var(--gw-mist)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Real Estate Advisors</div>
-          </div>
+        {/* The seal leads the card — it is the first thing anyone sees of the
+            product, and it carries the name, so it sits above the company
+            lockup rather than beside it as the old "G" tile did. */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: 28 }}>
+          <BrandLogo size={96} priority />
+          <div style={{ fontFamily: 'var(--font-display)', fontSize: 20, fontWeight: 600, color: 'var(--gw-slate)', marginTop: 16 }}>Gateway</div>
+          <div style={{ fontSize: 11, color: 'var(--gw-mist)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Real Estate Advisors</div>
         </div>
 
-        <div style={{ marginBottom: 24 }}>
+        <div style={{ marginBottom: 24, textAlign: 'center' }}>
           <div style={{ fontFamily: 'var(--font-display)', fontSize: 26, fontWeight: 600, color: 'var(--gw-ink)', marginBottom: 4 }}>Welcome back</div>
           <div style={{ fontSize: 13, color: 'var(--gw-mist)' }}>Sign in to access your workspace</div>
         </div>
