@@ -15,6 +15,9 @@
   --gw-mist:     #9aa3b2;
   --gw-border:   #e2e0db;
   --gw-gold:     #c9a84c;
+  /* Outer field of the Wolf CRM seal — the boot screen and the light-header
+     plate match it so the artwork never sits on a lighter rectangle. */
+  --gw-seal-field: #0b0b0b;
   --gw-gold-light: #f0e4c0;
   --gw-green:    #2e7d5e;
   --gw-green-light: #d4ede5;
@@ -51,22 +54,42 @@ body { font-family: var(--font-body); font-size: 14px; color: var(--gw-ink); bac
 }
 .sidebar.collapsed { width: 60px; min-width: 60px; }
 
+/* Stacked rather than a horizontal lockup: at 220px the sidebar cannot fit a
+   seal worth looking at *and* the wordmark on one line — past ~48px the
+   "Real Estate Advisors" line wraps. Centring the seal above the text buys it
+   the full width. */
 .sidebar__brand {
-  display: flex; align-items: center; gap: 10px;
-  padding: 16px 12px; border-bottom: 1px solid rgba(255,255,255,0.06); min-height: 64px;
+  position: relative;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 16px 12px 14px; border-bottom: 1px solid rgba(255,255,255,0.06);
+  text-align: center;
 }
 .sidebar__brand-mark {
-  width: 36px; height: 36px; min-width: 36px; background: var(--gw-gold);
-  color: var(--gw-slate); border-radius: var(--radius); display: flex; align-items: center;
-  justify-content: center; font-family: var(--font-display); font-size: 20px; font-weight: 700;
+  width: 72px; height: 72px; min-width: 72px; padding: 0;
+  background: none; border: none; border-radius: 50%; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
 }
+.sidebar__brand-mark:focus-visible { outline: 2px solid var(--gw-gold); outline-offset: 2px; }
+/* BrandLogo stamps width/height attributes from its `size` prop, so the image
+   has to be told to follow the slot instead — otherwise collapsing the rail
+   shrinks the button and leaves the seal spilling out of it at full size. */
+.sidebar__brand-mark .brand-seal { width: 100%; height: 100%; }
 .sidebar__wordmark { font-family: var(--font-display); font-size: 17px; font-weight: 600; color: #fff; letter-spacing: 0.04em; }
 .sidebar__sub { font-size: 10px; color: rgba(255,255,255,0.4); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 1px; }
 .sidebar__collapse {
-  margin-left: auto; background: none; border: none; cursor: pointer;
+  position: absolute; top: 10px; right: 10px;
+  background: none; border: none; cursor: pointer;
   color: rgba(255,255,255,0.3); padding: 4px; border-radius: 4px;
   display: flex; align-items: center; transition: color 200ms ease, background 200ms ease;
 }
+
+/* Collapsed rail: 60px wide, so the seal comes back down and the chevron
+   returns to the flow beneath it. Absolutely positioned it would sit on top of
+   the seal — and pinned right of a 36px mark it overflowed the rail entirely,
+   where `overflow: hidden` on .sidebar swallowed it. */
+.sidebar.collapsed .sidebar__brand { padding: 12px 8px; gap: 8px; }
+.sidebar.collapsed .sidebar__brand-mark { width: 36px; height: 36px; min-width: 36px; }
+.sidebar.collapsed .sidebar__collapse { position: static; }
 .sidebar__collapse:hover { color: rgba(255,255,255,0.7); background: rgba(255,255,255,0.06); }
 
 .sidebar__nav { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 8px 0; }
@@ -494,6 +517,36 @@ select.form-control { cursor: pointer; }
 .loading { display: flex; align-items: center; justify-content: center; height: 200px; color: var(--gw-mist); font-size: 13px; gap: 8px; }
 .spinner { width: 18px; height: 18px; border: 2px solid var(--gw-border); border-top-color: var(--gw-azure); border-radius: 50%; animation: spin 600ms linear infinite; }
 
+/* ── Brand seal ───────────────────────────────────────────────────────────────
+   Square artwork. `contain` guarantees the circle stays a circle whatever box
+   the caller gives it, and the transparent background means no JPEG halo. */
+.brand-seal { display: block; object-fit: contain; background: none; border-radius: 50%; }
+
+/* Boot / splash screen — dark field matched to the seal's outer ring. */
+.boot {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 28px; height: 100vh; height: 100dvh; background: var(--gw-seal-field);
+}
+.boot__seal { width: 220px; height: 220px; animation: boot-in 320ms ease-out both; }
+.boot__spinner {
+  width: 20px; height: 20px; border-radius: 50%;
+  border: 2px solid rgba(201, 168, 76, 0.22); border-top-color: var(--gw-gold);
+  animation: spin 700ms linear infinite;
+}
+@keyframes boot-in { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: none; } }
+
+/* Topbar brand slot — phones only; the sidebar carries it from 769px up. */
+.topbar__brand {
+  display: none; width: 40px; height: 40px; min-width: 40px; padding: 0;
+  background: none; border: none; border-radius: 50%; cursor: pointer;
+}
+.topbar__brand:focus-visible { outline: 2px solid var(--gw-gold); outline-offset: 2px; }
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
 /* MERGE TAG */
 .merge-tag { display: inline-block; background: var(--gw-sky); color: var(--gw-azure); padding: 1px 6px; border-radius: 3px; font-size: 11px; font-family: var(--font-mono); cursor: pointer; }
 .merge-tag:hover { background: var(--gw-azure); color: #fff; }
@@ -537,6 +590,16 @@ select.form-control { cursor: pointer; }
 
   /* ── Topbar ── */
   .topbar { padding: 0 14px; gap: 10px; }
+  /* The topbar is white here, so the seal gets a charcoal plate to sit on —
+     the gold ring has nothing to read against on bone/chalk otherwise. */
+  .topbar__brand {
+    display: flex; align-items: center; justify-content: center;
+    background: var(--gw-seal-field);
+  }
+
+  /* ── Boot screen ── */
+  .boot { gap: 22px; }
+  .boot__seal { width: 160px; height: 160px; }
   /* Search stays on mobile — hiding it left the phone with no way to find a
      record at all. The agent badge is what gives up the space. */
   .topbar__search { max-width: none; flex: 1; }
@@ -1576,4 +1639,5 @@ select.form-control { cursor: pointer; }
   .collapse,
   .collapse > .collapse__inner,
   .collapse-head__chevron { transition: none; }
+  .boot__seal { animation: none; }
 }

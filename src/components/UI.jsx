@@ -343,9 +343,54 @@ export function HeatBadge({ score }) {
   )
 }
 
+// ─── BRAND ────────────────────────────────────────────────────────────────────
+// The Wolf CRM seal — the only place the artwork path is spelled out. Both
+// spots that show the mark (the boot screen and the top-left brand slot in the
+// app chrome) render this, so the asset moves in one edit.
+//
+// The artwork is square, so width === height and `object-fit: contain` keeps
+// the circle circular at any size. Two raster widths ship: 128px covers the
+// header up to 3x, 512px covers the boot screen up to 2x — the browser picks
+// from `sizes`, which is just the CSS size the caller asked for.
+const BRAND_SRCSET = (ext) =>
+  `/brand/wolf-crm-logo-128.${ext} 128w, /brand/wolf-crm-logo-512.${ext} 512w`
+
+export function BrandLogo({ size = 32, className = '', priority = false }) {
+  return (
+    <picture>
+      <source type="image/webp" srcSet={BRAND_SRCSET('webp')} sizes={`${size}px`} />
+      <img
+        src="/brand/wolf-crm-logo-512.png"
+        srcSet={BRAND_SRCSET('png')}
+        sizes={`${size}px`}
+        width={size}
+        height={size}
+        alt="The Wolf CRM"
+        className={`brand-seal${className ? ' ' + className : ''}`}
+        draggable={false}
+        decoding={priority ? 'sync' : 'async'}
+        fetchPriority={priority ? 'high' : 'auto'}
+      />
+    </picture>
+  )
+}
+
 // ─── LOADING ──────────────────────────────────────────────────────────────────
 export function Loading() {
   return <div className="loading"><div className="spinner" /> Loading…</div>
+}
+
+// Full-screen boot state, shown while the session and the initial dataset are
+// still in flight. Dark field so the seal's own charcoal ground disappears
+// into the page instead of sitting on a bright rectangle.
+export function BootScreen() {
+  return (
+    <div className="boot" role="status" aria-live="polite">
+      <BrandLogo size={220} className="boot__seal" priority />
+      <div className="boot__spinner" aria-hidden="true" />
+      <span className="sr-only">Loading…</span>
+    </div>
+  )
 }
 
 // ─── TABS ─────────────────────────────────────────────────────────────────────

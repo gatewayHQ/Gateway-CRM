@@ -7,7 +7,7 @@ import { resolveStageLabels } from './lib/stageLabels.js'
 import { isOfficeAdmin } from './lib/officeAdmins.js'
 import { teamVisibleAgentIds } from './lib/teamVisibility.js'
 import { StageLabelContext } from './lib/stageLabelContext.js'
-import { Icon, Avatar, Modal, Badge, ToastHost, Loading, ErrorBoundary, pushToast } from './components/UI.jsx'
+import { Icon, Avatar, Modal, Badge, ToastHost, Loading, BootScreen, BrandLogo, ErrorBoundary, pushToast } from './components/UI.jsx'
 // All pages are lazy-loaded — only the current route's bundle downloads
 const Dashboard        = React.lazy(() => import('./pages/Dashboard.jsx'))
 const ContactsPage     = React.lazy(() => import('./pages/Contacts.jsx'))
@@ -536,12 +536,7 @@ export default function App() {
     announce: (propertyId) => { setAnnounceProperty(propertyId); setRoute('mass-email') },
   }
 
-  if (loading) return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', flexDirection: 'column', gap: 16 }}>
-      <div style={{ fontFamily: 'var(--font-display)', fontSize: 32, fontWeight: 600, color: 'var(--gw-slate)' }}>Gateway</div>
-      <Loading />
-    </div>
-  )
+  if (loading) return <BootScreen />
 
   return (
     <StageLabelContext.Provider value={stageLabels}>
@@ -560,7 +555,15 @@ export default function App() {
 
       <aside className={`sidebar${collapsed ? ' collapsed' : ''}`}>
         <div className="sidebar__brand">
-          <div className="sidebar__brand-mark">G</div>
+          <button
+            type="button"
+            className="sidebar__brand-mark"
+            onClick={() => setRoute('dashboard')}
+            title="Dashboard"
+            aria-label="The Wolf CRM — go to dashboard"
+          >
+            <BrandLogo size={72} />
+          </button>
           {!collapsed && (
             <div className="sidebar__brand-text">
               <div className="sidebar__wordmark">Gateway</div>
@@ -652,6 +655,17 @@ export default function App() {
 
       <div className="main">
         <header className="topbar">
+          {/* The sidebar — and with it the brand slot — is hidden under 768px,
+              so the seal moves into the top-left of the bar on phones. */}
+          <button
+            type="button"
+            className="topbar__brand"
+            onClick={() => setRoute('dashboard')}
+            title="Dashboard"
+            aria-label="The Wolf CRM — go to dashboard"
+          >
+            <BrandLogo size={40} />
+          </button>
           <div>
             <div className="topbar__title">{TITLES[route]?.title}</div>
             <div className="topbar__breadcrumb">{TITLES[route]?.crumb}</div>
