@@ -1640,7 +1640,7 @@ go enter one rather than a silent `0%` on a signed agreement.
 ## Environment variables
 | Var | Purpose |
 |---|---|
-| `BOLDSIGN_API_KEY` | API key (Sandbox in preview/staging, Live in prod) |
+| `BOLDSIGN_API_KEY` | API key — the **only** Sandbox/Live switch, sent as `X-API-KEY` on every call: document create, download, and the Save PDF/Print compose. Vercel Production must hold the **Live** key and nothing else (the sandbox banner on a printout is stamped by the account the key belongs to); Preview/Development keep the Sandbox key |
 | `BOLDSIGN_WEBHOOK_SECRET` | Webhook HMAC signing secret. **Required** — without it `/api/boldsign` answers 503 and processes nothing (an unverified endpoint lets anyone who knows the URL mark a real document completed or declined) |
 | `BOLDSIGN_WEBHOOK_AUDIT_ONLY` | Go-live safety valve: verify, log the verdict, process anyway. On for the first hours on Live, then off |
 | `BOLDSIGN_WEBHOOK_INSECURE` | Local dev only — process events with no secret configured |
@@ -1692,6 +1692,17 @@ Order matters. Each step is safe to stop at.
 3. **Create the Live API key** (app.boldsign.com → Settings → API → API Keys)
    and set `BOLDSIGN_API_KEY` in Vercel → Production only. Leave Preview on the
    Sandbox key so preview deploys can never email a real client.
+
+   `BOLDSIGN_API_KEY` is the *only* switch, and it is the same one for every
+   direction of traffic: creating a document (`/document/send`, `/document/…`),
+   downloading it (`/document/download`), and the pages Save PDF / Print compose
+   from (`/document/properties`, `/document/download`, `/template/download`) all
+   send it as the `X-API-KEY` header from the one client in `api/boldsign.js`.
+   There is no separate download key and no per-request test flag. The
+   "This is a test document generated using the BoldSign developer sandbox"
+   banner an agent sees on a printout is stamped by the ACCOUNT the key belongs
+   to, so it disappears only for documents created after the Production scope
+   holds the Live key — Production must carry the Live key and nothing else.
 4. **Register the Live webhook** → `https://<your-domain>/api/boldsign`,
    subscribed to Sent, Viewed/Delivered, Completed, Declined, Revoked, Expired.
    Reveal its signing secret and set `BOLDSIGN_WEBHOOK_SECRET`.
@@ -1740,6 +1751,27 @@ Order matters. Each step is safe to stop at.
     check the function log for `[boldsign] rate limit` and signature-verification
     lines.
 11. **Revoke the Sandbox key** so nothing can accidentally send from it again.
+
+### Documents that were already sent under the Sandbox key
+
+They stay Sandbox, permanently. A document id belongs to the account that
+created it, so once Production holds the Live key those ids resolve on no
+account this CRM can reach: BoldSign answers 404 (sometimes 401/403) to
+`/document/properties` and `/document/download` for them, forever. Their pages —
+and their sandbox banner — are not recoverable, and no re-print can strip the
+banner off a document that was created in the sandbox.
+
+The CRM says exactly that rather than pretending the file is still coming: Save
+PDF / Print and the signed/audit downloads answer **409** with "BoldSign does not
+have this document on the account this CRM is connected to … send this deal a new
+signature request" (`isForeignAccountStatus` / `foreignAccountMessage` in
+`api/boldsign.js`). Anything already archived into `deal-documents` — signed PDFs
+and audit trails from completed Sandbox documents — keeps working, because those
+downloads are served from Supabase storage and never touch BoldSign again.
+
+So for any deal still needing a signature on a pre-switch document: **send a new
+signature request under the Live key.** That is a new envelope, a new document
+id, and the only copy that will print clean.
 
 Rollback: put the Sandbox key back and re-point the webhook. Documents created
 on Live stay on Live — they are real signed records and are not portable.

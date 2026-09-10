@@ -256,6 +256,48 @@ export async function boldsign(path, { method = 'GET', form, json, raw = false, 
 
 const DEAL_BUCKET = 'deal-documents'
 
+// ─── Documents created on a different BoldSign account ───────────────────────
+// Sandbox and Live are SEPARATE ACCOUNTS, and which one this deploy talks to is
+// decided entirely by the BOLDSIGN_API_KEY it is configured with. So the day
+// production's key is switched from the Sandbox key to the Live key, every
+// document id created before the switch stops resolving: BoldSign answers 404
+// (sometimes 401/403) because that id does not exist on the account the new key
+// belongs to. The rows stay in `boldsign_documents`, the buttons stay on the
+// Signatures tab, and the document is gone.
+//
+// Those documents are not recoverable and never will be — their pages, their
+// fields, and their sandbox-account banner ("This is a test document generated
+// using the BoldSign developer sandbox") live on the old account. The only way
+// forward for a deal holding one is a NEW signature request under the live key.
+//
+// Without this the agent got "the document is still being created — wait a
+// moment and try again", which is wrong in a way that costs an afternoon: there
+// is nothing to wait for.
+const FOREIGN_ACCOUNT_STATUS = new Set([401, 403, 404])
+
+export function isForeignAccountStatus(status) {
+  return FOREIGN_ACCOUNT_STATUS.has(Number(status))
+}
+
+// The one sentence an agent needs, plus what to do about it.
+export function foreignAccountMessage(verb = 'open') {
+  return 'BoldSign does not have this document on the account this CRM is connected to. '
+    + 'It was almost certainly created before the BoldSign API key was switched from the '
+    + 'developer sandbox to the live account — sandbox and live are separate accounts and '
+    + `nothing carries over, so the old copy cannot be ${verb}ed. `
+    + 'Send this deal a new signature request; the new one will be a live document.'
+}
+
+// Turn a BoldSign 401/403/404 on a document the CRM has a row for into that
+// message, carrying a status the UI shows as an explanation rather than a retry.
+export function foreignAccountError(verb = 'open') {
+  const e = new Error(foreignAccountMessage(verb))
+  e.status = 409
+  e.foreignAccount = true
+  return e
+}
+
+
 // The storage object name for a composed document filed onto a deal.
 //
 // Sanitized the same way the Documents tab's own upload path is
@@ -477,9 +519,16 @@ export function archivePath({ dealId, documentId, baseName, kind }) {
   return `deal-${dealId}/${kind}-${slug}-${String(documentId).slice(0, 8)}.pdf`
 }
 
-async function archiveBoldsignPdf(supabase, { path, storagePath }) {
+// `report` is an out-parameter: this function stays best-effort (it returns null
+// rather than throwing, because the webhook archives on a path where a failure
+// must not fail the delivery), but the CALLER still needs to know WHY BoldSign
+// refused — a 404 after the sandbox→live key switch means "this document is on
+// the other account", not "not ready yet". Callers that answer an agent pass an
+// object and read `report.status`.
+async function archiveBoldsignPdf(supabase, { path, storagePath, report = {} }) {
   try {
     const r = await boldsign(path, { raw: true })
+    report.status = r.status
     if (!r.ok) return null
     const buf = await r.arrayBuffer()
     if (!buf.byteLength) return null
@@ -492,6 +541,7 @@ async function archiveBoldsignPdf(supabase, { path, storagePath }) {
     }
     return { storagePath, size: buf.byteLength }
   } catch (e) {
+    report.status = e.status || null
     console.error(`[boldsign] archive failed for ${storagePath}: ${e.message}`)
     return null
   }
@@ -2595,7 +2645,22 @@ async function handler(req, res) {
     // Throws an Error carrying `.status` (and `.documentStatus` where it helps), so
     // each caller answers with the same words for the same failure.
     const composeFilledPdf = async (svc, { id, record }) => {
-      const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+      // A document the CRM tracks but the configured account has never heard of
+      // is the sandbox→live key switch, not a transient failure. Say so here,
+      // before any compose work, so the agent is told to send a new request
+      // instead of retrying something that will never come back.
+      let props
+      try {
+        props = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+      } catch (err) {
+        if (isForeignAccountStatus(err.status)) {
+          console.warn(`[boldsign] compose: ${id} is not on the configured account (HTTP ${err.status}) — created under a different BoldSign API key`)
+          const e = foreignAccountError('printed')
+          e.documentStatus = record.status || null
+          throw e
+        }
+        throw err
+      }
 
       // THE ONE LINE THAT ANSWERS "why did the filed copy come back empty?".
       // Everything below composes from `props`, and `props` is BoldSign's SAVED
@@ -2791,7 +2856,7 @@ async function handler(req, res) {
 
       let printable, props
       try { ({ printable, props } = await composeFilledPdf(svc, { id, record })) }
-      catch (err) { return res.status(err.status || 400).json({ error: err.message, documentStatus: err.documentStatus || null }) }
+      catch (err) { return res.status(err.status || 400).json({ error: err.message, documentStatus: err.documentStatus || null, ...(err.foreignAccount ? { foreignAccount: true } : {}) }) }
       // A print artifact is a convenience copy, not a deal document: kept under a
       // `print/` prefix so it never appears in the Documents tab as if it were a
       // real filing, and overwritten each time rather than accumulating.
@@ -2858,7 +2923,7 @@ async function handler(req, res) {
 
       let printable, props, held
       try { ({ printable, props, held } = await composeFilledPdf(svc, { id, record })) }
-      catch (err) { return res.status(err.status || 400).json({ error: err.message, documentStatus: err.documentStatus || null }) }
+      catch (err) { return res.status(err.status || 400).json({ error: err.message, documentStatus: err.documentStatus || null, ...(err.foreignAccount ? { foreignAccount: true } : {}) }) }
 
       // Sanitized the same way the Documents tab's own upload does. It matters more
       // here than it looks: a composed document name is `<template> — <street>`, so
@@ -3116,13 +3181,22 @@ async function handler(req, res) {
         dealId: record.deal_id, documentId: id,
         baseName: record.document_name, kind: isAudit ? 'audit' : 'signed',
       })
+      const report = {}
       const archived = await archiveBoldsignPdf(svc, {
         path: isAudit
           ? `/document/downloadAuditLog?documentId=${encodeURIComponent(id)}`
           : `/document/download?documentId=${encodeURIComponent(id)}`,
         storagePath,
+        report,
       })
       if (!archived) {
+        // Nothing stored on the deal AND the account does not have the document:
+        // this is a pre-key-switch sandbox document, and no amount of waiting
+        // will produce the file.
+        if (isForeignAccountStatus(report.status)) {
+          console.warn(`[boldsign] download: ${id} is not on the configured account (HTTP ${report.status}) — created under a different BoldSign API key`)
+          return res.status(409).json({ error: foreignAccountMessage('downloaded'), foreignAccount: true })
+        }
         return res.status(400).json({
           error: isAudit
             ? 'Audit trail not available yet — BoldSign generates it shortly after the last signature.'

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import crypto from 'node:crypto'
-import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, dealFilingName, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds, buildSendOptions, appendSendOptions, normalizeCc, normalizeReminders, summarizeFieldValues, templateMatchesDocument, boldsignPageList, packetFilePaths, mergePdfBuffers } from '../boldsign.js'
+import { boldsign, betaBase, sendDraftDocument, describeDraftSendFailure, backoffMs, verifyWebhookSignature, normalizeKnownStatus, shouldApplyStatus, buildSignerPayload, requiresExplicitFieldPlacement, normalizeTemplateRoles, mergeSharedFormFields, resolveOnBehalfOf, archivePath, listAllTemplates, isOwnSignedStorageUrl, createDraftEditUrl, isMissingLayoutStorage, formatByteSize, buildSigningSummary, buildPrintablePdf, optimizePdfLossless, fitForBoldSign, normalizeFieldType, normalizeCapturedField, normalizeCapturedLayout, matchLayoutSigner, buildLayoutEditPayload, canRemove, dealFilingName, applyFieldLayout, describeLayoutFailure, countPayloadFields, isFieldLevelRejection, supportsFieldReadOnly, isReadOnlyRejection, rolesWantSigningOrder, stripRoleReadOnly, stripLayoutReadOnly, collectFilledFields, resolveBoundsScale, boldsignPageSizes, isCheckedValue, startingFontSize, collectTemplateFieldIds, payloadFieldIds, buildSendOptions, appendSendOptions, normalizeCc, normalizeReminders, summarizeFieldValues, templateMatchesDocument, boldsignPageList, packetFilePaths, mergePdfBuffers, isForeignAccountStatus, foreignAccountMessage, foreignAccountError } from '../boldsign.js'
 
 // Minimal chainable Supabase-client stub: .from(table).select(...).eq(col, val).maybeSingle()
 // resolves { data } from `rows` keyed by `${col}=${val}`.
@@ -1551,6 +1551,41 @@ describe('startingFontSize — a short box must not shrink a correct fontSize', 
 // ─────────────────────────────────────────────────────────────────────────────
 // Go-live hardening (Sandbox → Live)
 // ─────────────────────────────────────────────────────────────────────────────
+
+// A document created under the Sandbox key does not exist on the Live account:
+// after the key switch its id answers 404 (or 401/403) forever. The agent must
+// be told to send a NEW request, not to wait — "still being created, try again"
+// is a wrong answer that costs an afternoon.
+describe('documents left behind by the Sandbox → Live key switch', () => {
+  it('treats the statuses that mean "not on this account" as exactly that', () => {
+    expect(isForeignAccountStatus(404)).toBe(true)
+    expect(isForeignAccountStatus(401)).toBe(true)
+    expect(isForeignAccountStatus(403)).toBe(true)
+  })
+
+  it('does NOT claim a rate limit or a server error is a foreign account', () => {
+    expect(isForeignAccountStatus(429)).toBe(false)
+    expect(isForeignAccountStatus(500)).toBe(false)
+    expect(isForeignAccountStatus(200)).toBe(false)
+    expect(isForeignAccountStatus(undefined)).toBe(false)
+  })
+
+  it('tells the agent the remedy — a new signature request, not a retry', () => {
+    const msg = foreignAccountMessage('printed')
+    expect(msg).toMatch(/sandbox/i)
+    expect(msg).toMatch(/new signature request/i)
+    expect(msg).toMatch(/cannot be printed/i)
+    expect(msg).not.toMatch(/try again/i)
+  })
+
+  it('carries a 409 so the UI shows an explanation instead of a retry', () => {
+    const err = foreignAccountError('downloaded')
+    expect(err.status).toBe(409)
+    expect(err.foreignAccount).toBe(true)
+    expect(err.message).toMatch(/cannot be downloaded/i)
+  })
+})
+
 
 describe('verifyWebhookSignature', () => {
   const secret = 'whsec_test_key'
