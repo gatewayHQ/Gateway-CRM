@@ -6,6 +6,12 @@ signs them embedded in-app, and archives the signed record + audit trail.
 Vendor history: **DocuSign → SignWell → BoldSign**. BoldSign is the current and
 only e-signature provider.
 
+> **Signature Packets** — composing several forms into one request, fixing a
+> packet that is already out for signature, correcting one that has been signed,
+> and packaging the results for MLS — are documented separately in
+> [`signature-packets.md`](./signature-packets.md). This file covers the
+> integration underneath: auth, webhooks, templates, and prepare-and-print.
+
 ---
 
 ## Architecture at a glance
@@ -63,7 +69,8 @@ Nightly:  /api/cron?task=boldsign-sync
 ## Data model
 | Table | Purpose |
 |---|---|
-| `boldsign_documents` | one row per send: `document_id`, `deal_id`, `agent_id`, `status`, `signer_*`, `signers` jsonb, `completed_at`, `audit_trail_saved`, `signed_storage_path`, `audit_storage_path`, `last_reminded_at`, `reminder_count` |
+| `boldsign_documents` | one row per send: `document_id`, `deal_id`, `agent_id`, `status`, `signer_*`, `signers` jsonb, `completed_at`, `audit_trail_saved`, `signed_storage_path`, `audit_storage_path`, `last_reminded_at`, `reminder_count`. **The row is also the packet** — migration 0046 adds `mode`, `template_ids`, `file_ids`, `mls_number`, `correction_of_document_id`, `download_option`, `local_files`, `edit_pending_since`, `raw_status`; see [`signature-packets.md`](./signature-packets.md) |
+| `signature_packet_events` | the deal's **signing timeline** — one row per webhook delivery (Sent, Viewed, Signed, Completed, …) plus our own Edited / SignerChanged / Revoked entries, deduped so a redelivery updates rather than duplicates (migration 0046) |
 | `form_packets` | **the template/form catalog.** `state`, `transaction_type`, `name`, `storage_path` (plain downloadable forms) plus `boldsign_template_id`, `doc_type`, `field_tokens`, `active` (e-sign-ready entries) |
 | `boldsign_sender_identities` | per-agent send-on-behalf: `agent_id`, `email`, `status` (pending/approved/declined) |
 | `deal_field_layouts` | one row per (deal, template): the normalized placement of every field, captured out of BoldSign when an editing session ends and re-applied to the next draft built for that deal — where fields **sit** |
@@ -88,7 +95,20 @@ Signed PDFs + audit-trail PDFs are archived to the `deal-documents` bucket.
 | `template-draft` | agent | **Create a draft from a template — no editor, nothing sent.** Same payload as `template-embed-url` but `deal_id` is required. Returns `{ documentId, status:'draft', prepareUrl }`. Both share `createTemplateDraft()`. |
 | `template-editor-url` | admin | Embedded template create/edit URL. Requires `roles` (defaults to Seller/Listing Agent) and a document title on create — see "Fixing 'Roles cannot be null or empty'" below. `useTextTags` + `textTagDefinitions` supported. |
 | `identity-create` / `identity-details` / `identity-update` / `identity-delete` / `identity-set-default` / `identity-sync` / `identity-resend` | admin | Full sender-identity lifecycle — see "Sender Identity Management" below |
+| `packet-edit-url` | agent (sender) / admin | **Fix packet** — reopen a draft *or an in-progress* document in the embedded editor. Unlike `document-edit-url`, which only ever opens a draft. Refuses a settled packet with a 409 naming the correction instead. |
+| `packet-add-initials` | agent (sender) / admin | Add an acknowledgement Label + required Initial for the party who has not finished, without opening the designer (`PUT /document/edit`). Refuses to address anyone who has already signed. |
+| `packet-change-signer` | agent (sender) / admin | Replace a recipient who has not signed. Refused for one who has. |
+| `packet-clone-url` | agent (sender) / admin | **Send correction packet** — `createEmbeddedCloneUrl` on a settled packet. The only thing that can be done to a completed envelope; the original signed PDF is untouched. |
+| `packet-sync` | agent (sender) / admin | Re-read `/document/properties` and write the packet facts (file list, download option, a settled Queued edit) onto the row. |
+| `document-revoke` | agent (sender) / admin | Recall a packet from its signers, keeping the row and its timeline. Distinct from `document-delete`, which removes the record too. |
+| `template-merge-send` / `template-merge-embed-url` | agent | Several templates → one envelope (`mergeAndSend` / `mergeCreateEmbeddedRequestUrl`), asking for `DocumentDownloadOption: Individually`. |
+| `packet-split-send` | agent | One `template/send` per form, same signers, labelled `[dealId, formSlug]`. A partial failure is reported, never rolled back. |
+| `mls-pack` | agent | Assemble the deal's signed forms into a zip or a merged PDF — **locally, never through BoldSign**. Co-hosted in `api/_handlers/mls-pack.js`. |
 | _(no `action`)_ | webhook | BoldSign lifecycle events (HMAC-verified) |
+
+The packet actions are documented in full in
+[`signature-packets.md`](./signature-packets.md), including the spec-route →
+action mapping and the rules each one enforces.
 
 `getEmbeddedSignLink` for clients is minted via `GET /api/portal?action=sign-link`.
 

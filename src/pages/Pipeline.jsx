@@ -26,7 +26,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, fileDocumentToDeal, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, emptyLabelsToRemove, partyNameGaps, describeFieldMapping, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { packetEditUrl, packetAddInitials, packetCloneUrl, packetSync, packetChangeSigner, revokeDocument as apiRevokeDocument, packetState, canFixPacket, fixPacketBlockedReason, canSendCorrection, canRevoke, canChangeSigner, isInFlight, isEditPending, editPendingMs, documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, fileDocumentToDeal, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, emptyLabelsToRemove, partyNameGaps, describeFieldMapping, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import {
   readTemplateWork, saveTemplateWork, clearTemplateWork, isUnsentDraft,
   applySavedTemplateWork, templateWorkEdits, describeTemplateWorkEdits, countFilledWork,
@@ -36,6 +36,8 @@ import { readDealTerms, termsForDeal, termsFilled, buildTermsPatch, normalizeTer
 import SignerPicker, { buildCandidates, isValidEmail } from '../components/SignerPicker.jsx'
 import { savePdfFromUrl, openPrintTab, showPdfInPrintTab, closePrintTab } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import MlsPackModal from '../components/MlsPackModal.jsx'
+import ComposePacketModal from '../components/ComposePacketModal.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 import AgentMultiSelect from '../components/AgentMultiSelect.jsx'
 
@@ -941,8 +943,14 @@ const DS_STATUS = {
   draft:     { bg: '#fff3cd', color: '#856404' },
   sent:      { bg: '#e8f4fd', color: 'var(--gw-azure)' },
   delivered: { bg: '#fff3cd', color: '#856404' },
+  // Red, not amber. BoldSign raises this when a recipient cannot get in at all —
+  // a bounced address, a failed authentication — and the packet will sit there
+  // forever until somebody fixes the recipient. It looks like "waiting" and is
+  // not, so it must not wear the colour of one.
+  needs_attention: { bg: 'var(--gw-red-light)', color: 'var(--gw-red)' },
   completed: { bg: 'var(--gw-green-light)', color: 'var(--gw-green)' },
   declined:  { bg: 'var(--gw-red-light)',   color: 'var(--gw-red)' },
+  expired:   { bg: 'var(--gw-bone)',         color: 'var(--gw-mist)' },
   voided:    { bg: 'var(--gw-bone)',         color: 'var(--gw-mist)' },
 }
 
@@ -1815,6 +1823,119 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   )
 }
 
+// ── Add acknowledgement + initials ───────────────────────────────────────────
+// The sanctioned correction for a packet people are already signing, and the
+// one screen it needs.
+//
+// It asks for the PAGE and nothing else. Everything else is either known (who
+// has not finished — the API resolves that from BoldSign's own properties, not
+// from this tab's possibly-stale row) or fixed (the wording, the two fields, the
+// fact that the Initial box is required). The page is the one thing the CRM
+// cannot know and the one thing that is visibly wrong if guessed.
+//
+// It names WHO will be asked, because on a four-party packet that is the fact
+// that decides whether this is the right action at all: if the person who needs
+// to acknowledge the change has already signed, no edit can reach them and the
+// answer is a correction packet instead.
+function AcknowledgementDialog({ env, busy, onCancel, onConfirm }) {
+  const [page, setPage] = React.useState(1)
+  const people  = signerRows(env)
+  const pending = outstandingSigners(people).filter(p => p.status !== 'queued')
+  const target  = pending[0] || null
+  const signed  = people.filter(p => p.status === 'signed')
+
+  return (
+    <ConfirmDialog
+      eyebrow="BoldSign · Correction"
+      title="Add an acknowledgement to initial?"
+      confirmLabel="Add to packet"
+      busyLabel="Adding…"
+      confirmVariant="btn--primary"
+      busy={busy}
+      onCancel={onCancel}
+      onConfirm={() => onConfirm(page)}
+      message={
+        <>
+          <p style={{ margin:'0 0 10px', color:'var(--gw-ink)' }}>
+            Adds a line reading <strong>“Acknowledged correction — initial here”</strong> and a required
+            Initials box beside it, on the page you choose.
+          </p>
+          <label style={{ display:'flex', alignItems:'center', gap:8, margin:'0 0 12px' }}>
+            <span style={{ fontSize:12, color:'var(--gw-mist)' }}>Page</span>
+            <input
+              type="number" min={1} className="form-control" style={{ width:90 }}
+              value={page}
+              onChange={e => setPage(Math.max(1, Number(e.target.value) || 1))}
+            />
+            <span style={{ fontSize:12, color:'var(--gw-mist)' }}>the page the change is on</span>
+          </label>
+          <p style={{ margin:'0 0 10px', color:'var(--gw-ink)' }}>
+            {target
+              ? <>It goes to <strong>{target.name || target.email}</strong>{target.role ? ` (${target.role})` : ''}, who has not finished signing.</>
+              : <>Everyone on this packet has already finished, so nothing can be added — use <strong>Send correction packet</strong> instead.</>}
+          </p>
+          {signed.length > 0 && (
+            <p style={{ margin:0 }}>
+              {signed.length === 1 ? 'One signature is' : `${signed.length} signatures are`} already on this packet
+              ({signed.map(s => s.name || s.email).join(', ')}). {signed.length === 1 ? 'It is' : 'They are'} untouched —
+              a change they need to agree to has to go out as a correction packet.
+            </p>
+          )}
+        </>
+      }
+    />
+  )
+}
+
+// ── Change signer ────────────────────────────────────────────────────────────
+// Swap a recipient who has not finished. Offered only for someone still
+// outstanding (canChangeSigner), and the API checks again against BoldSign's own
+// properties before it writes — this tab's row can be a missed webhook behind
+// the truth, and replacing someone who signed two minutes ago is the one thing
+// this must never do.
+//
+// The dialog says what the swap costs the client, because it is not obvious:
+// the person being replaced loses their link immediately, and the replacement
+// gets a fresh one. Nobody's completed signature is affected.
+function ChangeSignerDialog({ env, signer, candidates, busy, onCancel, onConfirm }) {
+  const [value, setValue] = React.useState({ name: '', email: '' })
+  const bad = value.email && !isValidEmail(value.email)
+  const ready = Boolean(value.name.trim() && value.email.trim() && !bad)
+
+  return (
+    <ConfirmDialog
+      eyebrow="BoldSign · Change signer"
+      title={`Send this to someone else instead of ${signer.name || signer.email}?`}
+      confirmLabel="Change signer"
+      busyLabel="Changing…"
+      confirmVariant="btn--primary"
+      busy={busy || !ready}
+      onCancel={onCancel}
+      onConfirm={() => ready && onConfirm({ name: value.name.trim(), email: value.email.trim() })}
+      message={
+        <>
+          <p style={{ margin:'0 0 12px', color:'var(--gw-ink)' }}>
+            <strong>{env.document_name || 'This packet'}</strong> will go to the person below instead.
+            {signer.status === 'viewed' ? ' The current recipient has already opened it; their link stops working immediately.' : ''}
+          </p>
+          <div style={{ marginBottom:12 }}>
+            <SignerPicker
+              order={signer.order}
+              roleLabel={signer.role || 'Replacement signer'}
+              candidates={candidates}
+              value={value}
+              onChange={setValue}
+            />
+          </div>
+          <p style={{ margin:0 }}>
+            Signatures already collected on this packet are untouched — only this recipient changes.
+          </p>
+        </>
+      }
+    />
+  )
+}
+
 function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideClients = null, agents = [], activeAgent }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
@@ -1837,6 +1958,21 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
   const [filing,      setFiling]      = React.useState({})    // env.id → filing a copy onto the deal
   const [sendingDraft, setSendingDraft] = React.useState({})  // env.id → draftSend in flight
   const [sendAsk,     setSendAsk]     = React.useState(null)  // env awaiting "yes, send it" confirmation
+  // ── Signature packets ──────────────────────────────────────────────────────
+  const [composeOpen, setComposeOpen] = React.useState(false) // several forms, one screen
+  const [mlsOpen,     setMlsOpen]     = React.useState(false) // Pack for MLS
+  const [fixing,      setFixing]      = React.useState({})    // env.id → fetching its Fix packet URL
+  const [fixFrame,    setFixFrame]    = React.useState(null)  // { url, env } — packet reopened in BoldSign
+  const [correcting,  setCorrecting]  = React.useState({})    // env.id → minting its clone URL
+  const [cloneFrame,  setCloneFrame]  = React.useState(null)  // { url, env } — the correction being prepared
+  const [correctAsk,  setCorrectAsk]  = React.useState(null)  // env awaiting the correction explainer
+  const [revokeAsk,   setRevokeAsk]   = React.useState(null)  // env awaiting "yes, recall it"
+  const [revoking,    setRevoking]    = React.useState({})    // env.id → revoke in flight
+  const [ackFor,      setAckFor]      = React.useState(null)  // env whose acknowledgement is being placed
+  const [signerSwap,  setSignerSwap]  = React.useState(null)  // { env, signer } being replaced
+  const [swapping,    setSwapping]    = React.useState(false)
+  const [timelineFor, setTimelineFor] = React.useState(null)  // env.id whose timeline is expanded
+  const [timeline,    setTimeline]    = React.useState({})    // env.id → rows
 
   React.useEffect(() => {
     if (!deal?.id) return
@@ -2158,6 +2294,146 @@ function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideCli
     }
   }
 
+  // ── Signature packets ──────────────────────────────────────────────────────
+
+  // FIX PACKET — reopen a packet that is out for signature (or still a draft) in
+  // BoldSign's editor.
+  //
+  // The button only renders when canFixPacket() says so, but the API is asked
+  // again anyway: the CRM's row can be a missed webhook behind the truth, and a
+  // packet the client finished signing two minutes ago must not be reopened just
+  // because this tab has not heard yet. A refusal corrects the row, so reload.
+  const fixPacket = async (env) => {
+    setFixing(p => ({ ...p, [env.id]: true }))
+    try {
+      const data = await packetEditUrl({ documentId: env.document_id, redirectUrl: boldSignReturnUrl() })
+      if (!data?.url) { pushToast('This packet could not be reopened right now. Try again in a moment — nothing has been sent.', 'error'); return }
+      setFixFrame({ url: data.url, env })
+    } catch (err) {
+      pushToast(err.message, 'error')
+      loadEnvelopes()
+    } finally {
+      setFixing(p => ({ ...p, [env.id]: false }))
+    }
+  }
+
+  // ADD ACKNOWLEDGEMENT + INITIALS — the correction that does not need the
+  // designer. One call: a label saying a change was made and a required Initial
+  // beside it, for whoever has not finished signing.
+  const addAcknowledgement = async (env, pageNumber) => {
+    setFixing(p => ({ ...p, [env.id]: true }))
+    try {
+      const res = await packetAddInitials({ documentId: env.document_id, pageNumber })
+      pushToast(
+        res.queued
+          ? `Acknowledgement added for ${res.signer?.name || res.signer?.email || 'the outstanding signer'}. BoldSign is still applying it — the packet will be ready in a moment.`
+          : `Acknowledgement and initials added for ${res.signer?.name || res.signer?.email || 'the outstanding signer'}.`,
+        res.queued ? 'info' : 'success',
+      )
+      if (res.warning) pushToast(res.warning, 'info')
+      setAckFor(null)
+      loadEnvelopes()
+    } catch (err) {
+      pushToast(err.message, 'error')
+      loadEnvelopes()
+    } finally {
+      setFixing(p => ({ ...p, [env.id]: false }))
+    }
+  }
+
+  // SEND CORRECTION PACKET — the only thing that can be done to a signed packet.
+  // A clone, prefilled with everything already agreed; the original signed PDF is
+  // untouched and stays on the deal, because that is the file MLS receives.
+  const startCorrection = async (env) => {
+    setCorrecting(p => ({ ...p, [env.id]: true }))
+    try {
+      const data = await packetCloneUrl({ documentId: env.document_id, redirectUrl: boldSignReturnUrl() })
+      if (!data?.url) { pushToast('BoldSign did not return a screen for the correction packet. Try again in a moment.', 'error'); return }
+      setCorrectAsk(null)
+      setCloneFrame({ url: data.url, env })
+    } catch (err) {
+      pushToast(err.message, 'error')
+      loadEnvelopes()
+    } finally {
+      setCorrecting(p => ({ ...p, [env.id]: false }))
+    }
+  }
+
+  // RECALL — pull a packet back from its signers. Keeps the row and its
+  // timeline: a recall is a thing that happened on the deal, and the correction
+  // that follows should read as a sequence rather than appearing from nowhere.
+  const revokePacket = async (env) => {
+    setRevoking(p => ({ ...p, [env.id]: true }))
+    try {
+      await apiRevokeDocument(env.document_id)
+      pushToast('Packet recalled — the signers can no longer open it.', 'info')
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setRevoking(p => ({ ...p, [env.id]: false }))
+      setRevokeAsk(null)
+      loadEnvelopes()
+    }
+  }
+
+  // Replace a recipient who has not signed. The API re-checks against BoldSign's
+  // own properties before it writes — this tab's row can be a missed webhook
+  // behind, and swapping out someone who signed in the last two minutes is the
+  // one thing this must never do.
+  const changeSigner = async ({ env, signer }, next) => {
+    setSwapping(true)
+    try {
+      const res = await packetChangeSigner({
+        documentId: env.document_id, signerId: signer.id, name: next.name, email: next.email,
+      })
+      pushToast(`${res.replaced?.name || res.replaced?.email || 'That signer'} replaced with ${next.name}.`, 'success')
+      setSignerSwap(null)
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setSwapping(false)
+      loadEnvelopes()
+    }
+  }
+
+  // Ask BoldSign what this packet actually is and write it down — the file list,
+  // the download option, and whether a queued file edit has settled. Distinct
+  // from Refresh status, which only reads the lifecycle.
+  const syncPacket = async (env) => {
+    try {
+      const res = await packetSync(env.document_id)
+      loadEnvelopes()
+      pushToast(
+        res.queued
+          ? 'BoldSign is still applying a file change to this packet.'
+          : `Up to date — ${res.status}${res.files?.length ? ` · ${res.files.length} file${res.files.length === 1 ? '' : 's'}` : ''}.`,
+        res.queued ? 'info' : 'info',
+      )
+    } catch (err) {
+      pushToast(err.message, 'error')
+    }
+  }
+
+  // The packet's own history, read straight from the timeline table (RLS-scoped,
+  // like the layouts read above). Loaded on demand: most rows are never expanded
+  // and a deal can carry a lot of events.
+  //
+  // Errors are swallowed for the same reason loadLayouts swallows its own: on a
+  // database without migration 0046 the table does not exist, and a signing tab
+  // that breaks over a missing timeline is worse than one with no timeline.
+  const loadTimeline = async (env) => {
+    if (timelineFor === env.id) { setTimelineFor(null); return }
+    setTimelineFor(env.id)
+    if (timeline[env.id]) return
+    const { data, error } = await supabase
+      .from('signature_packet_events')
+      .select('id, event, status, signer_name, signer_email, occurred_at')
+      .eq('document_id', env.document_id)
+      .order('occurred_at', { ascending: false })
+      .limit(50)
+    setTimeline(t => ({ ...t, [env.id]: error ? [] : (data || []) }))
+  }
+
   // Remove a draft/unsigned/expired document to keep this tab tidy. The API
   // refuses to delete a completed record (that's the signed legal record), so
   // this action is only ever offered for non-completed statuses (see render).
@@ -2239,7 +2515,27 @@ create policy "agent_notifications_policy" on agent_notifications
             <option value="all">All</option>
           </select>
         </div>
-        <div style={{ display:'flex', gap:8 }}>
+        <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+          {/* Pack for MLS is always available, even with nothing signed yet: the
+              modal explains what is missing far better than a hidden button
+              does, and "where do I get the forms for MLS?" is a question an
+              agent asks before they know the answer is "nothing is signed". */}
+          <button
+            className="btn btn--secondary btn--sm"
+            onClick={() => setMlsOpen(true)}
+            title="Build an MLS upload from this deal's signed forms — separate files or one merged PDF. Assembled here; nothing is re-sent through BoldSign."
+          >
+            <Icon name="download" size={13}/> Pack for MLS
+          </button>
+          {templates.length > 1 && (
+            <button
+              className="btn btn--secondary btn--sm"
+              onClick={() => setComposeOpen(true)}
+              title="Send several forms to the same signers — together as one document, or separately"
+            >
+              <Icon name="file" size={13}/> Compose packet
+            </button>
+          )}
           {templates.length > 0 && (
             <button
               className="btn btn--secondary btn--sm"
@@ -2299,10 +2595,23 @@ create policy "agent_notifications_policy" on agent_notifications
               const sc        = DS_STATUS[env.status] || DS_STATUS.sent
               const completed = env.status === 'completed'
               const isDraft   = env.status === 'draft'
-              // Chasing signatures is the job — surface how long this has been
-              // outstanding, and offer a nudge, right on the row.
+              // TWO FLAGS, because they answer different questions.
+              //
+              // `inFlight` — out with signers and not finished, which now
+              // includes `needs_attention`. Everything about WHERE the packet
+              // has got to hangs off this: how long it has been out, who is
+              // holding it up, and the Fix packet / acknowledgement actions. A
+              // packet BoldSign has flagged is exactly the one an agent needs
+              // those for, and gating them on the old two-status list hid them
+              // at the worst moment.
+              //
+              // `awaiting` — the narrower set the REMIND button belongs to.
+              // Reminding a signer whose link will not open, or whose address
+              // bounced, teaches a client to ignore the next email and fixes
+              // nothing. That is a recipient problem, not a nudge problem.
+              const inFlight  = isInFlight(env)
               const awaiting  = ['sent', 'delivered'].includes(env.status)
-              const daysOut   = awaiting && (env.sent_at || env.created_at)
+              const daysOut   = inFlight && (env.sent_at || env.created_at)
                 ? Math.floor((Date.now() - new Date(env.sent_at || env.created_at)) / 86400000)
                 : null
               // Who is on this document, and where each of them has got to.
@@ -2314,12 +2623,31 @@ create policy "agent_notifications_policy" on agent_notifications
                   <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px' }}>
                     <Icon name="file" size={18} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
                     <div style={{ flex:1, minWidth:0 }}>
-                      <div style={{ fontSize:13, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{env.document_name || 'Document'}</div>
+                      <div style={{ fontSize:13, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                        {env.document_name || 'Document'}
+                        {/* A correction is a separate envelope that only makes
+                            sense next to the thing it corrects — say so on the
+                            row, or it reads as a duplicate send. */}
+                        {env.correction_of_document_id && (
+                          <span
+                            style={{ marginLeft:6, fontSize:10, fontWeight:700, color:'var(--gw-amber)', textTransform:'uppercase' }}
+                            title="An acknowledgement packet correcting an earlier signed document. Both stay on the deal."
+                          >correction</span>
+                        )}
+                        {env.mode === 'merged' && (
+                          <span
+                            style={{ marginLeft:6, fontSize:10, fontWeight:700, color:'var(--gw-mist)', textTransform:'uppercase' }}
+                            title={env.download_option === 'Individually'
+                              ? 'Several forms in one document. Each form can be downloaded on its own for MLS.'
+                              : 'Several forms in one combined document. MLS gets one PDF — BoldSign cannot split a signed combined file afterwards.'}
+                          >{env.download_option === 'Individually' ? 'packet · per-form' : 'packet · combined'}</span>
+                        )}
+                      </div>
                       <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:2 }}>
                         {/* The sentence the old comma-joined string could never
                             say. On a four-party packet "waiting on John Doe" is
                             the only fact that decides what the agent does next. */}
-                        {awaiting ? waitingOnLabel(people) : `To: ${people.map(p => p.name || p.email).filter(Boolean).join(', ') || env.signer_name}`}
+                        {inFlight ? waitingOnLabel(people) : `To: ${people.map(p => p.name || p.email).filter(Boolean).join(', ') || env.signer_name}`}
                         {progress.total > 1 && ` · ${progress.signed}/${progress.total} signed`}
                         {' · '}{new Date(env.sent_at || env.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}
                         {completed && env.completed_at && (
@@ -2333,7 +2661,14 @@ create policy "agent_notifications_policy" on agent_notifications
                         )}
                       </div>
                     </div>
-                    <span style={{ padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:700, background:sc.bg, color:sc.color, flexShrink:0, textTransform:'capitalize' }}>{env.status}</span>
+                    {/* The state in the words the agent (and BoldSign) use, not
+                        the column's own value: `voided` is "Revoked" and
+                        `sent`/`delivered` are both "In progress". `Queued` is
+                        derived from an unsettled file edit and deliberately not
+                        stored — writing it into `status` would take a live
+                        document out of the portal, the reminder sweep and the
+                        closing gate for as long as the edit took to land. */}
+                    <span style={{ padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:700, background:sc.bg, color:sc.color, flexShrink:0 }}>{packetState(env)}</span>
                     {awaiting && (
                       <button
                         className="btn btn--secondary btn--sm"
@@ -2363,6 +2698,13 @@ create policy "agent_notifications_policy" on agent_notifications
                     <button className="btn btn--ghost btn--icon btn--sm" title="Refresh status" onClick={() => refreshStatus(env)}>
                       <Icon name="refresh" size={12}/>
                     </button>
+                    <button
+                      className="btn btn--ghost btn--icon btn--sm"
+                      title="What has happened to this packet — sent, viewed, signed, edited, recalled"
+                      onClick={() => loadTimeline(env)}
+                    >
+                      <Icon name="clock" size={12}/>
+                    </button>
                     {!completed && (
                       <button className="btn btn--ghost btn--icon btn--sm" title="Remove document" onClick={() => deleteEnvelope(env)} disabled={deleting[env.id]}>
                         <Icon name="trash" size={12}/>
@@ -2380,7 +2722,7 @@ create policy "agent_notifications_policy" on agent_notifications
                       on a sequential send it emails people BoldSign has not
                       asked yet — both of which teach a client to ignore the
                       next one. */}
-                  {awaiting && people.length > 1 && (
+                  {inFlight && people.length > 1 && (
                     <div style={{ borderTop:'1px solid var(--gw-border)', padding:'6px 12px 8px', background:'var(--gw-bone)' }}>
                       {people.map(p => {
                         const done = p.status === 'signed'
@@ -2414,6 +2756,23 @@ create policy "agent_notifications_policy" on agent_notifications
                                 title={`Email only ${p.name || p.email}`}
                               >
                                 {busy ? '…' : 'Nudge'}
+                              </button>
+                            )}
+                            {/* CHANGE SIGNER. Offered only for someone who has
+                                not finished — a signature already made is a
+                                legal act and the person who made it is not
+                                swapped out from under it. `p.id` is BoldSign's
+                                own recipient id; a packet sent before per-signer
+                                ids were recorded has none, and there is nothing
+                                honest to do but leave the button off. */}
+                            {canChangeSigner(env, p) && p.id && (
+                              <button
+                                className="btn btn--ghost btn--sm"
+                                style={{ fontSize:10, flexShrink:0, padding:'2px 6px' }}
+                                onClick={() => setSignerSwap({ env, signer: p })}
+                                title={`Send this one to someone else instead of ${p.name || p.email}`}
+                              >
+                                Change
                               </button>
                             )}
                           </div>
@@ -2486,10 +2845,129 @@ create policy "agent_notifications_policy" on agent_notifications
                       </button>
                     </div>
                   )}
+                  {/* A PACKET THAT IS OUT FOR SIGNATURE, and the two things that
+                      can be done to one.
+
+                      "Fix packet" is the whole point of this strip: before it,
+                      a packet the client had started signing was untouchable
+                      from here, and the only route to a correction was recalling
+                      it and rebuilding the whole thing. It is NOT offered on a
+                      settled packet — BoldSign will not edit one and it is right
+                      not to — and the tooltip there names the alternative rather
+                      than leaving a greyed button with no explanation.
+
+                      There is deliberately no strike-through tool. A drawing
+                      over the old text says nothing about who agreed to the
+                      change or when; an acknowledgement plus initials says
+                      exactly that, and is what the second button places. */}
+                  {inFlight && (
+                    <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'var(--gw-bone)', display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+                      <span style={{ fontSize:12, flex:1, minWidth:180, color:'var(--gw-mist)' }}>
+                        {isEditPending(env)
+                          ? <>
+                              <strong>Applying a change.</strong> BoldSign is still updating this packet's files — it is not
+                              safe to send or edit until that lands
+                              {/* How long, once it has been long enough to be worth
+                                  wondering about. A spinner with no elapsed time
+                                  leaves an agent unable to tell "in progress" from
+                                  "stuck", and the answer to the second is Check now. */}
+                              {editPendingMs(env) > 60_000 && ` (${Math.round(editPendingMs(env) / 60_000)} min so far)`}.
+                            </>
+                          : <>Out for signature. A change the client has asked for goes on as an acknowledgement they initial.</>}
+                      </span>
+                      {isEditPending(env) && (
+                        <button
+                          className="btn btn--secondary btn--sm"
+                          style={{ fontSize:11, flexShrink:0 }}
+                          onClick={() => syncPacket(env)}
+                          title="Ask BoldSign whether the file change has landed yet"
+                        >
+                          <Icon name="refresh" size={12}/> Check now
+                        </button>
+                      )}
+                      <button
+                        className="btn btn--secondary btn--sm"
+                        style={{ fontSize:11, flexShrink:0 }}
+                        onClick={() => setAckFor(env)}
+                        disabled={!canFixPacket(env) || fixing[env.id]}
+                        title={fixPacketBlockedReason(env) || 'Add a line saying what changed, plus a required Initial box for whoever has not signed yet'}
+                      >
+                        <Icon name="edit" size={12}/> {fixing[env.id] ? 'Working…' : 'Add acknowledgement'}
+                      </button>
+                      <button
+                        className="btn btn--secondary btn--sm"
+                        style={{ fontSize:11, flexShrink:0 }}
+                        onClick={() => fixPacket(env)}
+                        disabled={!canFixPacket(env) || fixing[env.id]}
+                        title={fixPacketBlockedReason(env) || 'Reopen this packet in BoldSign to change fields or placement. Anyone who has already signed is untouched.'}
+                      >
+                        <Icon name="edit" size={12}/> {fixing[env.id] ? 'Opening…' : 'Fix packet'}
+                      </button>
+                      {canRevoke(env) && (
+                        <button
+                          className="btn btn--ghost btn--sm"
+                          style={{ fontSize:11, flexShrink:0 }}
+                          onClick={() => setRevokeAsk(env)}
+                          disabled={revoking[env.id]}
+                          title="Recall this packet so the signers can no longer open it. It stays on the deal as a recalled packet."
+                        >
+                          {revoking[env.id] ? 'Recalling…' : 'Recall'}
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Declined, recalled or expired: nothing to fix, but the deal
+                      still needs the document. A correction packet clones it with
+                      every agreed value intact, which is far less work than
+                      rebuilding from the template. */}
+                  {!completed && !isDraft && !inFlight && canSendCorrection(env) && (
+                    <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'#fff8ec', display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+                      <Icon name="alert" size={13} style={{ color:'var(--gw-amber)', flexShrink:0 }}/>
+                      <span style={{ fontSize:12, flex:1, minWidth:180, color:'var(--gw-ink)' }}>
+                        <strong>{packetState(env)}.</strong> This packet can no longer be edited. Send a corrected copy instead — it keeps everything that was already filled in.
+                      </span>
+                      <button
+                        className="btn btn--primary btn--sm"
+                        style={{ fontSize:11, flexShrink:0 }}
+                        onClick={() => setCorrectAsk(env)}
+                        disabled={correcting[env.id]}
+                      >
+                        <Icon name="send" size={12}/> {correcting[env.id] ? 'Preparing…' : 'Send correction packet'}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* THE PACKET'S OWN HISTORY. `audit_log` records what an agent
+                      did; this records what happened to the document, which is
+                      the record a compliance question asks for. */}
+                  {timelineFor === env.id && (
+                    <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'var(--gw-bone)' }}>
+                      {!timeline[env.id] && <div style={{ fontSize:12, color:'var(--gw-mist)' }}>Loading…</div>}
+                      {timeline[env.id]?.length === 0 && (
+                        <div style={{ fontSize:12, color:'var(--gw-mist)', lineHeight:1.6 }}>
+                          No events recorded for this packet yet. BoldSign's webhook writes them as they happen; a packet
+                          sent before this deal's CRM was updated has none.
+                        </div>
+                      )}
+                      {timeline[env.id]?.map(ev => (
+                        <div key={ev.id} style={{ display:'flex', gap:8, fontSize:12, padding:'2px 0' }}>
+                          <span style={{ color:'var(--gw-mist)', minWidth:130, flexShrink:0 }}>
+                            {ev.occurred_at ? new Date(ev.occurred_at).toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }) : '—'}
+                          </span>
+                          <span style={{ fontWeight:600 }}>{ev.event}</span>
+                          {(ev.signer_name || ev.signer_email) && (
+                            <span style={{ color:'var(--gw-mist)' }}>· {ev.signer_name || ev.signer_email}</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
                   {completed && (
-                    <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'var(--gw-green-light)', display:'flex', alignItems:'center', gap:8 }}>
+                    <div style={{ borderTop:'1px solid var(--gw-border)', padding:'8px 12px', background:'var(--gw-green-light)', display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
                       <Icon name="check" size={13} style={{ color:'var(--gw-green)', flexShrink:0 }}/>
-                      <span style={{ fontSize:12, color:'var(--gw-green)', flex:1, fontWeight:600 }}>Fully signed — copy saved to Documents tab</span>
+                      <span style={{ fontSize:12, color:'var(--gw-green)', flex:1, fontWeight:600, minWidth:160 }}>Fully signed — copy saved to Documents tab</span>
                       <button
                         className="btn btn--sm"
                         style={{ background:'var(--gw-green)', color:'#fff', border:'none', fontSize:11 }}
@@ -2506,6 +2984,29 @@ create policy "agent_notifications_policy" on agent_notifications
                         title="Compliance audit trail — who signed, when, IP, and a tamper hash"
                       >
                         {downloading[`audit-${env.id}`] ? 'Fetching…' : 'Audit Trail'}
+                      </button>
+                      <button
+                        className="btn btn--sm btn--secondary"
+                        style={{ fontSize:11 }}
+                        onClick={() => setMlsOpen(true)}
+                        title="Build the MLS upload from this deal's signed forms — separate files or one merged PDF"
+                      >
+                        Pack for MLS
+                      </button>
+                      {/* THE ONLY THING THAT CAN BE DONE TO A SIGNED PACKET.
+                          Not "Edit signed document", which is not a thing:
+                          BoldSign will not change a completed envelope and this
+                          app does not pretend it can. A correction is a new
+                          request, and the modal says so before anything is
+                          created. */}
+                      <button
+                        className="btn btn--sm btn--secondary"
+                        style={{ fontSize:11 }}
+                        onClick={() => setCorrectAsk(env)}
+                        disabled={correcting[env.id]}
+                        title="Creates a new signature request with everything already filled in, plus an acknowledgement to initial. The original signed PDF stays on the deal."
+                      >
+                        {correcting[env.id] ? 'Preparing…' : 'Send correction packet'}
                       </button>
                     </div>
                   )}
@@ -2548,6 +3049,143 @@ create policy "agent_notifications_policy" on agent_notifications
           onClose={() => { setTplOpen(false); loadEnvelopes(); loadLayouts() }}
           onSent={() => { setTplOpen(false); loadEnvelopes(); loadLayouts() }}
           onSaved={() => { setTplOpen(false); loadEnvelopes(); loadLayouts() }}
+        />
+      )}
+
+      {/* ── Signature packets ─────────────────────────────────────────────── */}
+
+      {composeOpen && (
+        <ComposePacketModal
+          deal={deal} contacts={contacts} properties={properties} extraContacts={extraContacts}
+          sideClients={sideClients} dealAgents={dealAgents} templates={templates} activeAgent={activeAgent}
+          onClose={() => { setComposeOpen(false); loadEnvelopes() }}
+          onSent={() => { setComposeOpen(false); loadEnvelopes(); loadLayouts() }}
+        />
+      )}
+
+      {mlsOpen && (
+        <MlsPackModal
+          dealId={deal.id}
+          address={propertyLabel(properties.find(p => p.id === deal?.property_id)) || deal?.title || ''}
+          onClose={() => setMlsOpen(false)}
+        />
+      )}
+
+      {/* A packet reopened mid-signature. The same BoldSign editor the draft
+          flow uses — reopening a live document is the same screen, and giving it
+          a different one would be a second thing to keep working. */}
+      {fixFrame && (
+        <BoldSignStepModal
+          url={fixFrame.url}
+          documentId={fixFrame.env.document_id}
+          eyebrow="BoldSign · Fix packet"
+          heading={fixFrame.env.document_name || 'Fix packet'}
+          onLayoutSaved={loadLayouts}
+          onClose={() => { setFixFrame(null); loadEnvelopes(); loadLayouts() }}
+          onDone={() => { pushToast('Packet updated.', 'success'); setFixFrame(null); loadEnvelopes(); loadLayouts() }}
+          onDraft={() => { pushToast('Change saved in BoldSign.', 'info'); loadEnvelopes() }}
+        />
+      )}
+
+      {/* The correction packet being prepared. A different heading from Fix
+          packet on purpose: this frame is building a SECOND document, and an
+          agent who thinks they are editing the original will send it without
+          reading it. */}
+      {cloneFrame && (
+        <BoldSignStepModal
+          url={cloneFrame.url}
+          documentId={cloneFrame.env.document_id}
+          eyebrow="BoldSign · Correction packet"
+          heading={`Correction of ${cloneFrame.env.document_name || 'Document'}`}
+          onClose={() => { setCloneFrame(null); loadEnvelopes() }}
+          onDone={() => { pushToast('Correction packet sent. The original signed PDF is still on the deal.', 'success'); setCloneFrame(null); loadEnvelopes() }}
+          onDraft={() => { pushToast('Correction saved as a draft — nothing sent.', 'info'); loadEnvelopes() }}
+        />
+      )}
+
+      {/* Explains the correction BEFORE it exists, because the thing agents get
+          wrong here is thinking a correction replaces the original. It does not:
+          both stay on the deal, and the original is what MLS receives. */}
+      {correctAsk && (
+        <ConfirmDialog
+          eyebrow="BoldSign · Correction packet"
+          title="Send a correction packet?"
+          confirmLabel="Prepare correction"
+          busyLabel="Preparing…"
+          confirmVariant="btn--primary"
+          busy={Boolean(correcting[correctAsk.id])}
+          onCancel={() => setCorrectAsk(null)}
+          onConfirm={() => startCorrection(correctAsk)}
+          message={
+            <>
+              <p style={{ margin:'0 0 10px', color:'var(--gw-ink)' }}>
+                Creates a <strong>new signature request</strong>. The original signed PDF stays on the deal for MLS.
+              </p>
+              <p style={{ margin:'0 0 10px' }}>
+                <strong>{correctAsk.document_name || 'This packet'}</strong> is {packetState(correctAsk).toLowerCase()} and cannot be
+                changed — BoldSign will not edit a settled document. The copy opens with every value already filled in,
+                so all you add is the change itself.
+              </p>
+              <p style={{ margin:'0 0 6px', color:'var(--gw-ink)', fontWeight:600 }}>In the screen that opens:</p>
+              <ul style={{ margin:'0 0 10px 18px', padding:0 }}>
+                <li>leave <strong>Keep filled values</strong> on</li>
+                <li>add a <strong>Label</strong> reading “Acknowledged change”</li>
+                <li>add a required <strong>Initials</strong> box beside it</li>
+                <li>Send</li>
+              </ul>
+              <p style={{ margin:0 }}>Nothing is sent until you click Send inside BoldSign.</p>
+            </>
+          }
+        />
+      )}
+
+      {/* The acknowledgement, placed without opening the designer. Asks only for
+          the page, because that is the one thing the CRM cannot know and the one
+          thing that is wrong if guessed. */}
+      {ackFor && (
+        <AcknowledgementDialog
+          env={ackFor}
+          busy={Boolean(fixing[ackFor.id])}
+          onCancel={() => setAckFor(null)}
+          onConfirm={(page) => addAcknowledgement(ackFor, page)}
+        />
+      )}
+
+      {signerSwap && (
+        <ChangeSignerDialog
+          env={signerSwap.env}
+          signer={signerSwap.signer}
+          candidates={buildCandidates({
+            dealContacts: [contacts.find(c => c.id === deal?.contact_id), ...extraContacts].filter(Boolean),
+            dealAgents,
+          })}
+          busy={swapping}
+          onCancel={() => setSignerSwap(null)}
+          onConfirm={(next) => changeSigner(signerSwap, next)}
+        />
+      )}
+
+      {revokeAsk && (
+        <ConfirmDialog
+          eyebrow="BoldSign · Recall"
+          title="Recall this packet from its signers?"
+          confirmLabel="Recall"
+          busyLabel="Recalling…"
+          busy={Boolean(revoking[revokeAsk.id])}
+          onCancel={() => setRevokeAsk(null)}
+          onConfirm={() => revokePacket(revokeAsk)}
+          message={
+            <>
+              <p style={{ margin:'0 0 10px', color:'var(--gw-ink)' }}>
+                <strong>{revokeAsk.document_name || 'This packet'}</strong> will stop working for everyone who has not
+                finished, including anyone who has already opened it.
+              </p>
+              <p style={{ margin:0 }}>
+                Signatures already collected are not undone — they stay in BoldSign's record. The packet stays on this
+                deal, marked Revoked, and you can send a corrected copy from it.
+              </p>
+            </>
+          }
         />
       )}
 

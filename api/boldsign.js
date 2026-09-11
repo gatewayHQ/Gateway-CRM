@@ -1,10 +1,21 @@
 import { applyJsonCors, requireAgent, errorResponse, getServiceClient, getUserClient, SUPABASE_URL } from './_lib/auth.js'
 import closingPacketHandler from './_handlers/closing-packet.js'
+import mlsPackHandler from './_handlers/mls-pack.js'
 import { wrap, log } from './_lib/observability.js'
 import crypto from 'node:crypto'
 import { extractPdfWords } from './_lib/pdfText.js'
 import { captionFields, detectSelectionCues } from '../src/lib/services/boldsignCaptions.js'
 import { normalizeSigners, outstandingSigners } from '../src/lib/services/boldsignSigners.js'
+// The packet module's pure rules — status vocabulary, what each state allows,
+// the local-file manifest, and the MLS selection helpers. Imported the same way
+// boldsignSigners.js and boldsignCaptions.js are: it holds no browser or
+// Supabase dependency precisely so this function and the UI apply one rulebook.
+import {
+  nextUnfinishedSigner, stripLockedEditFields, isQueuedResponse, touchesFiles,
+  upsertLocalFile, normalizeLocalFiles, formNameFromFile, packetModeFor,
+  downloadOptionFor, isDownloadOptionRejection, packetLabels, formSlug,
+  DOWNLOAD_COMBINED, DOWNLOAD_INDIVIDUALLY,
+} from '../src/lib/services/signaturePackets.js'
 
 // We verify webhook signatures against the RAW request body, so the automatic
 // body parser must be off — we read the stream and parse it ourselves below.
@@ -547,6 +558,103 @@ async function archiveBoldsignPdf(supabase, { path, storagePath, report = {} }) 
   }
 }
 
+// ─── Archiving a COMPLETED packet ─────────────────────────────────────────────
+//
+// The signed download is one merged PDF when the document was created
+// `Combined`, and a ZIP with one entry per file when it was created
+// `Individually` — the setting BoldSign fixes at creation and the only reason
+// per-form files exist at all. Both shapes are handled here, because this is
+// the moment the deal stops being able to ask BoldSign for anything else:
+// BoldSign will not split pages out of a signed PDF later, and it will not
+// re-combine files into a new envelope. Whatever is not captured now is gone.
+//
+// So an Individually-downloaded packet is stored TWICE, and deliberately:
+//   • each part on its own, named after its form — what MLS uploads one at a
+//     time, and the thing that was impossible before;
+//   • the parts concatenated into one PDF — because the Signatures tab's
+//     "Download Signed PDF" resolves `signed_storage_path`, and a packet with
+//     no single signed file would show an agent a button that cannot work.
+// The concatenation is ours (pdf-lib, in page order), never a round trip
+// through BoldSign.
+//
+// Returns { signed, parts, localFiles } — `signed` in the shape
+// archiveBoldsignPdf returns, so the caller's existing handling is unchanged.
+// Best-effort like everything else on the webhook path: a failure returns nulls
+// and is logged, never thrown, because a throw here asks BoldSign to redeliver
+// the whole event (two more downloads, two more uploads).
+export async function archiveCompletedPacket(supabase, { dealId, documentId, baseName, report = {} }) {
+  const empty = { signed: null, parts: [], localFiles: [] }
+  let payload
+  try {
+    payload = await downloadDocumentParts(documentId)
+  } catch (e) {
+    report.status = e.status || null
+    console.error(`[boldsign] completed download failed for ${documentId}: ${e.message}`)
+    return empty
+  }
+
+  const upload = async (storagePath, bytes) => {
+    const { error } = await supabase.storage.from(DEAL_BUCKET).upload(
+      storagePath, bytes, { contentType: 'application/pdf', upsert: true },
+    )
+    if (error) {
+      console.error(`[boldsign] archive upload failed for ${storagePath}: ${error.message}`)
+      return null
+    }
+    return { storagePath, size: bytes.length }
+  }
+
+  const signedPath = archivePath({ dealId, documentId, baseName, kind: 'signed' })
+
+  // Combined: one file, one manifest entry, nothing to split.
+  if (payload.combined) {
+    const signed = await upload(signedPath, payload.combined)
+    if (!signed) return empty
+    return {
+      signed,
+      parts: [],
+      localFiles: [{ kind: 'signed_pdf', path: signed.storagePath, form_name: formNameFromFile(baseName) }],
+    }
+  }
+
+  // Individually: one object per form, plus the locally-assembled whole.
+  const localFiles = []
+  const parts = []
+  for (let i = 0; i < payload.parts.length; i++) {
+    const part = payload.parts[i]
+    const form = formNameFromFile(part.name)
+    // The index keeps the object names distinct and, more usefully, keeps them
+    // sorting into the order the packet was signed in — two disclosures with
+    // the same name would otherwise overwrite each other.
+    const path = archivePath({
+      dealId, documentId, kind: 'part',
+      baseName: `${String(i + 1).padStart(2, '0')}-${form}`,
+    })
+    const stored = await upload(path, part.bytes)
+    if (!stored) continue
+    let pages = null
+    try { pages = (await readPdfPageSizes(part.bytes)).length } catch { /* page count is a nicety */ }
+    parts.push({ ...stored, form })
+    localFiles.push({ kind: 'split_part', path: stored.storagePath, form_name: form, ...(pages ? { pages } : {}) })
+  }
+  if (!parts.length) {
+    console.error(`[boldsign] completed packet ${documentId} came back as an archive but none of its parts could be stored`)
+    return empty
+  }
+
+  let signed = null
+  try {
+    const merged = await mergePdfBuffers(payload.parts.map(p => p.bytes))
+    if (merged) signed = await upload(signedPath, merged)
+  } catch (e) {
+    console.error(`[boldsign] could not assemble the combined signed PDF for ${documentId}: ${e.message}`)
+  }
+  if (signed) {
+    localFiles.unshift({ kind: 'signed_pdf', path: signed.storagePath, form_name: formNameFromFile(baseName) })
+  }
+  return { signed, parts, localFiles }
+}
+
 // Record an archived BoldSign PDF in document_versions so it carries real CRM
 // metadata (signer, completion date) instead of being just a bare storage
 // object — mirrors what uploadDealDocument() does for manual uploads. Numbers
@@ -603,11 +711,64 @@ async function recordDocumentVersion(supabase, { dealId, documentName, storagePa
 // `signers` is the normalized signer array; both naming conventions are accepted
 // because the ad-hoc flow uses {name,email} and the template flow uses
 // {signerName,signerEmail}.
-export async function trackDocument(supabase, { dealId, agentId, documentId, signers, documentName, subject, status, templateId }) {
+// The columns added after the table shipped, in the order they were added.
+// Every one of them is optional by construction: a write that names a column the
+// database does not have yet fails the WHOLE statement, and losing a tracking
+// row over an additive column is the worst outcome in this file — an untracked
+// document reaches a client and then never updates, archives, or appears in the
+// Signatures tab. So a rejected write drops the newer columns and tries again.
+const OPTIONAL_PACKET_COLUMNS = Object.freeze([
+  'boldsign_template_id',                                            // migration 0026
+  'mode', 'template_ids', 'file_ids', 'mls_number',                  // migration 0046
+  'correction_of_document_id', 'download_option', 'local_files',
+  'edit_pending_since', 'raw_status',
+])
+
+/** Does this Postgres/PostgREST error name a column that isn't there? */
+export function missingColumnName(error, candidates = OPTIONAL_PACKET_COLUMNS) {
+  const msg = String(error?.message || '')
+  // 42703 is Postgres's own "undefined column"; PGRST204 is PostgREST's schema
+  // cache saying the same thing. Either way the column name is in the message.
+  if (error?.code && !['42703', 'PGRST204'].includes(error.code) && !/column/i.test(msg)) return null
+  return candidates.find(c => new RegExp(`\\b${c}\\b`).test(msg)) || null
+}
+
+/**
+ * Write a patch, dropping optional columns the database does not have yet.
+ *
+ * Returns { ok, dropped } — `dropped` names what could not be written, so a
+ * caller can say "the packet was sent but this deployment cannot remember how it
+ * was composed" instead of either failing or lying.
+ */
+export async function patchPacket(supabase, rowId, patch) {
+  let payload = { ...patch }
+  const dropped = []
+  for (let attempt = 0; attempt <= OPTIONAL_PACKET_COLUMNS.length; attempt++) {
+    if (!Object.keys(payload).length) return { ok: true, dropped }
+    const { error } = await supabase.from('boldsign_documents').update(payload).eq('id', rowId)
+    if (!error) return { ok: true, dropped }
+    const missing = missingColumnName(error)
+    if (!missing || !(missing in payload)) {
+      console.warn(`[boldsign] could not update packet ${rowId}: ${error.message}`)
+      return { ok: false, dropped, error }
+    }
+    console.warn(`[boldsign] boldsign_documents.${missing} is missing — updating ${rowId} without it; apply migration 0046`)
+    delete payload[missing]
+    dropped.push(missing)
+  }
+  return { ok: false, dropped }
+}
+
+export async function trackDocument(supabase, {
+  dealId, agentId, documentId, signers, documentName, subject, status, templateId,
+  mode, templateIds, files, mlsNumber, correctionOf, downloadOption, rawStatus,
+}) {
   const list  = Array.isArray(signers) ? signers : []
   const names = list.map(s => s?.name || s?.signerName).filter(Boolean)
   const mails = list.map(s => s?.email || s?.signerEmail).filter(Boolean)
-  const { error } = await supabase.from('boldsign_documents').insert([{
+  const ids   = (Array.isArray(templateIds) ? templateIds : []).filter(Boolean)
+
+  let row = {
     deal_id:       dealId,
     agent_id:      agentId || null,
     document_id:   documentId,
@@ -619,28 +780,34 @@ export async function trackDocument(supabase, { dealId, agentId, documentId, sig
     status:        status || 'sent',
     // Which template this came from — the key a per-deal field layout hangs on
     // (see captureFieldLayout). Null for an ad-hoc PDF send.
-    boldsign_template_id: templateId || null,
-  }])
-  if (error) {
-    // A database without the column yet (0026 not applied) must not lose the
-    // tracking row — an untracked document is the worst outcome in this file.
-    // Retry once without it; the layout feature degrades, the send does not.
-    if (/boldsign_template_id/.test(error.message || '')) {
-      console.warn(`[boldsign] boldsign_template_id column missing — tracking ${documentId} without it; apply migration 0026`)
-      const { error: retryErr } = await supabase.from('boldsign_documents').insert([{
-        deal_id: dealId, agent_id: agentId || null, document_id: documentId,
-        signer_name: names.join(', '), signer_email: mails.join(', '),
-        document_name: documentName || 'Document', subject: subject || null,
-        signers: list, status: status || 'sent',
-      }])
-      if (!retryErr) return true
-      console.error(`[boldsign] FAILED to track document ${documentId} on deal ${dealId}: ${retryErr.message}`)
+    boldsign_template_id: templateId || (ids.length === 1 ? ids[0] : null),
+    // ── Packet facts (migration 0046) ───────────────────────────────────────
+    // How it was composed, what went into it, and the two settings BoldSign
+    // fixes at creation and will never let us change afterwards. Recorded now
+    // because "afterwards" is exactly when the MLS packager needs to know them.
+    ...(mode ? { mode } : {}),
+    ...(ids.length ? { template_ids: ids } : {}),
+    ...(Array.isArray(files) && files.length ? { file_ids: files } : {}),
+    ...(mlsNumber ? { mls_number: mlsNumber } : {}),
+    ...(correctionOf ? { correction_of_document_id: correctionOf } : {}),
+    ...(downloadOption ? { download_option: downloadOption } : {}),
+    ...(rawStatus ? { raw_status: String(rawStatus) } : {}),
+  }
+
+  for (let attempt = 0; attempt <= OPTIONAL_PACKET_COLUMNS.length; attempt++) {
+    const { error } = await supabase.from('boldsign_documents').insert([row])
+    if (!error) return true
+    const missing = missingColumnName(error)
+    if (!missing || !(missing in row)) {
+      console.error(`[boldsign] FAILED to track document ${documentId} on deal ${dealId}: ${error.message}`)
       return false
     }
-    console.error(`[boldsign] FAILED to track document ${documentId} on deal ${dealId}: ${error.message}`)
-    return false
+    console.warn(`[boldsign] boldsign_documents.${missing} is missing — tracking ${documentId} without it; apply the matching migration`)
+    const { [missing]: _dropped, ...rest } = row
+    row = rest
   }
-  return true
+  console.error(`[boldsign] FAILED to track document ${documentId} on deal ${dealId} after dropping every optional column`)
+  return false
 }
 
 // Who sent what, to whom, and when — written for every signature request that
@@ -670,6 +837,62 @@ export async function logSignatureAudit(supabase, { dealId, actorId, documentId,
     }])
   } catch (e) {
     console.error(`[boldsign] audit write failed for ${documentId} (${action}): ${e.message}`)
+  }
+}
+
+// ─── The deal's signing timeline ─────────────────────────────────────────────
+// One row per lifecycle event worth remembering, keyed so a webhook redelivery
+// updates it instead of adding a duplicate. `audit_log` records what an AGENT
+// did; this records what HAPPENED to the document — "Jane viewed it at 14:02" —
+// which is the record a compliance question actually asks for and the one
+// nothing in this app kept.
+//
+// Best-effort by contract. A timeline write must never fail a webhook (BoldSign
+// would retry the whole delivery, re-downloading and re-uploading two PDFs) and
+// must never fail an agent's action either.
+export function packetEventKey({ documentId, event, occurredAt, signerEmail }) {
+  return [
+    String(documentId || ''),
+    String(event || '').toLowerCase(),
+    // Falls back to the event name alone rather than to `now`: a delivery that
+    // carries no timestamp would otherwise be unique on every retry, which is
+    // the duplicate this key exists to prevent.
+    occurredAt ? new Date(occurredAt).toISOString() : '',
+    String(signerEmail || '').toLowerCase(),
+  ].join('|')
+}
+
+export async function recordPacketEvent(supabase, {
+  dealId, packetId, documentId, event, status, signerName, signerEmail, occurredAt, payload,
+}) {
+  if (!documentId || !event) return false
+  try {
+    const { error } = await supabase.from('signature_packet_events').upsert([{
+      deal_id:      dealId || null,
+      packet_id:    packetId || null,
+      document_id:  String(documentId),
+      event:        String(event),
+      status:       status || null,
+      signer_name:  signerName || null,
+      signer_email: signerEmail || null,
+      occurred_at:  occurredAt || new Date().toISOString(),
+      dedupe_key:   packetEventKey({ documentId, event, occurredAt, signerEmail }),
+      payload:      payload || {},
+    }], { onConflict: 'dedupe_key' })
+    if (error) {
+      // 42P01 is "the table isn't there yet" — a deployment that hasn't had
+      // migration 0046 applied. Everything else is worth a louder line.
+      if (error.code === '42P01') {
+        console.warn('[boldsign] signature_packet_events is missing — timeline not recorded; apply migration 0046')
+      } else {
+        console.warn(`[boldsign] could not record timeline event for ${documentId}: ${error.message}`)
+      }
+      return false
+    }
+    return true
+  } catch (e) {
+    console.warn(`[boldsign] timeline write threw for ${documentId}: ${e.message}`)
+    return false
   }
 }
 
@@ -1516,8 +1739,25 @@ export async function captureFieldLayout(supabase, { documentId, record, agentId
 // path '/v1/document/edit'); the JSON body shape (signers[].formFields[] each with
 // an `editAction` and the EditFormField property names used in
 // buildLayoutEditPayload) comes from the same model definitions.
-export async function editDocumentFields(documentId, json) {
-  return boldsign(`/document/edit?documentId=${encodeURIComponent(documentId)}`, { method: 'PUT', json })
+//
+// WHICH HOST. `/v1` is the confirmed one (above) and stays the default. BoldSign's
+// edit-document reference documents the same call on `/v1-beta`, which is where
+// several document endpoints still live — draftSend is beta-only, see betaBase()
+// — and an account served one and not the other would otherwise dead-end on a
+// bare 404. So a 404/405 from the primary host is retried once on the other. A
+// 400 is NOT: that is BoldSign validating the payload, and asking the same
+// invalid question twice just gets the same answer.
+const EDIT_VERSION_MISS = new Set([404, 405])
+
+export async function editDocumentFields(documentId, json, { beta = false } = {}) {
+  const path = `/document/edit?documentId=${encodeURIComponent(documentId)}`
+  try {
+    return await boldsign(path, { method: 'PUT', json, beta })
+  } catch (err) {
+    if (!EDIT_VERSION_MISS.has(Number(err?.status))) throw err
+    console.warn(`[boldsign] document/edit not served on ${beta ? 'v1-beta' : 'v1'} (HTTP ${err.status}) — retrying on the other host`)
+    return boldsign(path, { method: 'PUT', json, beta: !beta })
+  }
 }
 
 // A BoldSign failure, in words an agent can act on. The raw message is kept for
@@ -1792,7 +2032,18 @@ const isViewOptionRefusal = (err) => /sendviewoption/i.test(err?.message || '')
 // reported — see the retry in the loop below.
 const isSaveButtonRefusal = (err) => /showsavebutton/i.test(err?.message || '')
 
-export async function createDraftEditUrl({ documentId, redirectUrl, onBehalfOf, sendViewOption } = {}) {
+// How long an embedded edit link stays usable. A day, because the workflow it
+// serves is "open the packet, walk the change through with the client, initial
+// it" — which routinely spans a lunch break — and because a link that outlives
+// the conversation it was minted for is a signing session someone can wander
+// back into next week.
+export const EDIT_LINK_HOURS = 24
+
+export function linkValidTill(hours = EDIT_LINK_HOURS, now = Date.now()) {
+  return new Date(now + Number(hours) * 3600_000).toISOString()
+}
+
+export async function createDraftEditUrl({ documentId, redirectUrl, onBehalfOf, sendViewOption, locale = 'EN', validHours = EDIT_LINK_HOURS } = {}) {
   // Caller-preferred view first (if any), then the remaining option as fallback.
   const views = sendViewOption
     ? [sendViewOption, ...EDIT_VIEW_OPTIONS.filter(v => v !== sendViewOption)]
@@ -1805,6 +2056,11 @@ export async function createDraftEditUrl({ documentId, redirectUrl, onBehalfOf, 
       redirectUrl:           redirectUrl || '',
       sendViewOption:        view,
       showToolbar:           true,
+      locale,
+      // An expiry, so a link that leaks (a shared screen, a copied URL, a stale
+      // browser tab) stops being a way into a live agreement. BoldSign's own
+      // default is longer than this workflow ever needs.
+      linkValidTill:         linkValidTill(validHours),
       // THE SAVE BUTTON HAS TO BE ASKED FOR. This request enumerates the toolbar
       // buttons it wants, and BoldSign renders that enumeration — a button this
       // payload never names is not on the toolbar. Send, Preview and the page
@@ -1920,6 +2176,277 @@ export function describeDraftSendFailure(err) {
       + `signature field has been placed for a signer. Open Edit Fields to place them. (BoldSign said: ${raw})`
   }
   return raw || `BoldSign refused the send (HTTP ${status || 'unknown'}).`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIGNATURE PACKETS — fixing a packet in flight, correcting one after signing,
+// and composing several forms into one send.
+//
+// THREE FACTS SHAPE EVERYTHING BELOW, and each of them is a thing BoldSign
+// either does or refuses to do. None of them is worked around.
+//
+//   1. AN IN-PROGRESS DOCUMENT CAN BE EDITED, NARROWLY. Fields can be added for
+//      a signer who has not finished; a signer who HAS finished, their fields,
+//      and the document's files-they-already-signed are off limits. Title,
+//      brand and signing order are fixed at creation. So "the client spotted a
+//      typo" is answered with an acknowledgement label plus required initials
+//      on the corrected page — never by drawing a strike-through, which is a
+//      different product's idea and carries no legal weight here.
+//
+//   2. A COMPLETED DOCUMENT CANNOT BE EDITED AT ALL. Not by us, not by BoldSign.
+//      A correction after signing is a CLONE — a new envelope, prefilled from
+//      the original, carrying the acknowledgement — and the original signed PDF
+//      stays exactly where it is, because that is the file MLS receives.
+//
+//   3. BOLDSIGN WILL NOT SPLIT PAGES OUT OF A SIGNED COMBINED PDF. If a packet
+//      needs to reach MLS as separate forms, that has to be decided BEFORE it
+//      is sent (DocumentDownloadOption: Individually, which BoldSign fixes at
+//      creation). Afterwards, all we can do is take what we hold and assemble
+//      it locally — see api/_handlers/mls-pack.js. Nothing in this file
+//      pretends otherwise.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// The document's files, as BoldSign reports them on /document/properties.
+// This is the list that makes "download the disclosures on their own"
+// answerable — and the reason a packet records it at send time rather than
+// asking every time it is rendered.
+export function documentFiles(props) {
+  const raw = props?.documentFiles || props?.files || props?.documentFileDetails || []
+  return (Array.isArray(raw) ? raw : [])
+    .map(f => ({
+      id:    String(f?.id ?? f?.fileId ?? f?.documentFileId ?? '').trim() || null,
+      name:  String(f?.name ?? f?.fileName ?? f?.documentName ?? '').trim() || null,
+      pages: Number(f?.pageCount ?? f?.pages) || null,
+    }))
+    .filter(f => f.id || f.name)
+}
+
+// BoldSign's Combined-vs-Individually setting as it comes back on properties.
+// Normalized to the two words the API itself uses, because that string is
+// written to the packet row and compared against on the way back out.
+export function readDownloadOption(props) {
+  const raw = String(props?.documentDownloadOption ?? props?.downloadOption ?? '').trim()
+  if (/individual/i.test(raw)) return 'Individually'
+  if (/combined/i.test(raw))   return 'Combined'
+  return null
+}
+
+// Everything a packet row wants to know from one properties read, in one shape.
+// Callers write this straight onto the row rather than each picking their own
+// subset out of the payload and drifting.
+export function packetSnapshot(props) {
+  return {
+    status:         normalizeKnownStatus(props?.status),
+    rawStatus:      props?.status ?? null,
+    files:          documentFiles(props),
+    downloadOption: readDownloadOption(props),
+    signers:        normalizeSigners(props?.signerDetails, {
+      inOrder: Boolean(props?.enableSigningOrder ?? props?.enableSigningOrderInfo),
+    }),
+    completedAt:    toIso(props?.completedDate || props?.signedDate || null),
+  }
+}
+
+// ─── The correction itself ────────────────────────────────────────────────────
+// The correction a signer is actually asked to make: a line of text saying what
+// changed, and a required Initial box beside it. Two fields, on the page the
+// change is on, for the one party who has not finished.
+//
+// The geometry is the caller's, not a guess. This file retired coordinate
+// auto-placement (see "RETIRED: pixel/point coordinate auto-placement") because
+// BoldSign's bounds origin could not be confirmed and the guesses drifted; the
+// defaults here are the ones the product spec fixed, and the UI passes explicit
+// bounds whenever an agent has chosen a spot.
+export const ACK_DEFAULT_LABEL  = 'Acknowledged correction — initial here'
+export const ACK_LABEL_BOUNDS   = Object.freeze({ X: 40,  Y: 700, Width: 360, Height: 28 })
+export const ACK_INITIAL_BOUNDS = Object.freeze({ X: 420, Y: 698, Width: 70,  Height: 28 })
+
+export function buildAcknowledgementEdit({
+  signerId,
+  pageNumber = 1,
+  message = 'Please initial the acknowledgement on the highlighted change.',
+  label = ACK_DEFAULT_LABEL,
+  labelBounds = ACK_LABEL_BOUNDS,
+  initialBounds = ACK_INITIAL_BOUNDS,
+  onBehalfOf = null,
+} = {}) {
+  if (!signerId) throw badRequest('An acknowledgement has to be addressed to a specific signer.')
+  const page = Math.max(1, Number(pageNumber) || 1)
+  return {
+    Message: message,
+    Signers: [{
+      // Update, never Add: the party is already on the document. Adding them
+      // again would be a second recipient with the same address, which BoldSign
+      // emails separately and which reads to the client as a duplicate request.
+      EditAction: 'Update',
+      Id: signerId,
+      FormFields: [
+        {
+          EditAction: 'Add',
+          FieldType:  'Label',
+          PageNumber: page,
+          Bounds:     { ...labelBounds },
+          Value:      label,
+        },
+        {
+          EditAction: 'Add',
+          FieldType:  'Initial',
+          PageNumber: page,
+          Bounds:     { ...initialBounds },
+          IsRequired: true,
+        },
+      ],
+    }],
+    ...(onBehalfOf ? { onBehalfOf } : {}),
+  }
+}
+
+/**
+ * The guard that makes an in-progress edit safe, checked against BoldSign's own
+ * properties rather than the CRM's copy of them.
+ *
+ * Three refusals, each of which is a thing the API would either reject or —
+ * worse — quietly accept:
+ *   • addressing a signer who has already finished;
+ *   • addressing somebody who is not on this document at all;
+ *   • editing a document that is no longer in flight.
+ *
+ * Returns the matched signer. Throws with a sentence an agent can act on.
+ */
+export function assertEditableSigner(props, signerId) {
+  const live = normalizeStatus(props?.status)
+  if (live === 'completed') {
+    const e = new Error('This packet is fully signed, so it can no longer be edited. Use Send correction packet instead.')
+    e.status = 409
+    throw e
+  }
+  const signers = normalizeSigners(props?.signerDetails)
+  const target  = signers.find(s => s.id && s.id === signerId)
+  if (!target) {
+    const e = new Error('That signer is not on this packet — refresh it and try again.')
+    e.status = 400
+    throw e
+  }
+  if (target.status === 'signed') {
+    const e = new Error(
+      `${target.name || target.email || 'That signer'} has already signed this packet, so nothing can be added for them. `
+      + 'A change they need to acknowledge has to go out as a correction packet.'
+    )
+    e.status = 409
+    throw e
+  }
+  if (target.status === 'declined') {
+    const e = new Error(
+      `${target.name || target.email || 'That signer'} declined this packet, so it cannot be edited for them. `
+      + 'Send a correction packet instead.'
+    )
+    e.status = 409
+    throw e
+  }
+  return target
+}
+
+// ─── Correction packets (clone an immutable, completed envelope) ─────────────
+//
+// POST /v1/document/createEmbeddedCloneUrl?documentId=… — multipart, like every
+// other embedded-URL mint that takes options rather than a JSON document.
+//
+// `IncludeFormFieldValues` is the whole reason this is a clone rather than a
+// fresh send from the template: everything the parties already filled in and
+// agreed carries over, so the only thing anybody has to look at is the change.
+export async function createEmbeddedCloneUrl({
+  documentId, redirectUrl, onBehalfOf, includeValues = true, validHours = EDIT_LINK_HOURS,
+} = {}) {
+  const form = new FormData()
+  form.append('ViewOption',             'PreparePage')
+  form.append('ShowSaveButton',         'true')
+  form.append('ShowSendButton',         'true')
+  form.append('ShowPreviewButton',      'true')
+  form.append('IncludeFormFieldValues', String(Boolean(includeValues)))
+  form.append('RedirectURL',            redirectUrl || '')
+  form.append('LinkValidTill',          linkValidTill(validHours))
+  if (onBehalfOf) form.append('OnBehalfOf', onBehalfOf)
+
+  const data = await boldsign(
+    `/document/createEmbeddedCloneUrl?documentId=${encodeURIComponent(documentId)}`,
+    // Minting a URL creates no document until the agent sends from inside it, so
+    // a repeat is harmless and the full retry policy applies.
+    { method: 'POST', form, idempotent: true },
+  )
+  return {
+    url:        data?.sendUrl || data?.editUrl || data?.cloneUrl || data?.url || null,
+    // BoldSign hands back the clone's own id here on the accounts that populate
+    // it. When it doesn't, the id arrives with the Sent webhook instead and the
+    // correction is stitched to its original then — see resolvePendingCorrection.
+    documentId: data?.documentId || null,
+  }
+}
+
+// ─── Merging templates into one envelope, before anything is sent ────────────
+//
+// Two doors, one shape. `mergeAndSend` puts the packet straight in front of the
+// signers; `mergeCreateEmbeddedRequestUrl` builds the same envelope as a draft
+// and hands back a prepare URL so an agent can look at it first. The CRM
+// defaults to the second for the same reason the rest of this file does: a send
+// is the one irreversible act, and it deserves a screen of its own.
+export function buildMergePayload({
+  templateIds = [], title, message, roles = [], enableSigningOrder = true,
+  downloadOption, cc, labels, onBehalfOf, redirectUrl, sendViewOption,
+} = {}) {
+  const ids = (Array.isArray(templateIds) ? templateIds : []).map(t => String(t || '').trim()).filter(Boolean)
+  if (ids.length < 2) {
+    throw badRequest('Merging needs at least two forms. Send a single form the ordinary way.')
+  }
+  return {
+    templateIds: ids,
+    title:   title   || 'Signature packet',
+    message: message || 'Please review and sign.',
+    roles,
+    enableSigningOrder: Boolean(enableSigningOrder),
+    // The setting that decides, forever, whether MLS can be handed one form at
+    // a time. See the DocumentDownloadOption note on the send actions below.
+    ...(downloadOption ? { documentDownloadOption: downloadOption } : {}),
+    ...(cc ? { cc } : {}),
+    ...(Array.isArray(labels) && labels.length ? { labels } : {}),
+    ...(onBehalfOf ? { onBehalfOf } : {}),
+    ...(redirectUrl ? { redirectUrl } : {}),
+    ...(sendViewOption ? { sendViewOption } : {}),
+  }
+}
+
+// ─── Downloading a completed packet, whole or in parts ───────────────────────
+//
+// `GET /v1/document/download` returns a single merged PDF for a document
+// created as Combined, and a ZIP with one entry per file for one created as
+// Individually. Which one is coming back is decided by a property fixed at
+// creation, so the bytes are sniffed rather than assumed: an account whose plan
+// silently downgraded the option would otherwise have its zip written to
+// storage as `signed-….pdf` and hand MLS a file no reader opens.
+export async function downloadDocumentParts(documentId) {
+  const r = await boldsign(`/document/download?documentId=${encodeURIComponent(documentId)}`, { raw: true })
+  if (!r.ok) {
+    const e = new Error(`BoldSign refused the download (HTTP ${r.status}).`)
+    e.status = r.status
+    throw e
+  }
+  const buf = Buffer.from(await r.arrayBuffer())
+  if (!buf.length) {
+    const e = new Error('BoldSign returned an empty file for this packet.')
+    e.status = 502
+    throw e
+  }
+  const { looksLikeZip, unzipPdfs } = await import('./_lib/zip.js')
+  if (!looksLikeZip(buf)) return { combined: buf, parts: [] }
+  const parts = await unzipPdfs(buf)
+  // A zip with nothing in it that reads as a PDF is not a packet — say so rather
+  // than filing an empty manifest and letting the MLS screen show no forms with
+  // no explanation.
+  if (!parts.length) {
+    const e = new Error('BoldSign returned an archive with no PDFs in it for this packet.')
+    e.status = 502
+    throw e
+  }
+  return { combined: null, parts }
 }
 
 // ─── Field placement ─────────────────────────────────────────────────────────
@@ -2152,6 +2679,15 @@ function normalizeStatus(s) {
   // written to remove. `expired` is already a documented value of this column.
   if (v === 'expired')                                     return 'expired'
   if (v === 'viewed' || v === 'delivered')                 return 'delivered'
+  // BoldSign's own "something is wrong with this in-flight document" state — an
+  // authentication failure, a bounced recipient address. It is NOT terminal and
+  // it is NOT folded into 'sent': the difference is the whole point. A document
+  // nobody can open looks identical to one nobody has got round to, and the
+  // agent's next action is different for each (fix the recipient vs. remind
+  // them). Kept out of the portal's signable allow-list and out of the nightly
+  // reminder sweep on purpose — chasing a signer whose link will not open is
+  // how a client learns to ignore us.
+  if (v.replace(/[\s_-]+/g, '') === 'needsattention')      return 'needs_attention'
   if (v === 'sent' || v === 'inprogress' || v === 'waitingforothers' || v === 'needtosign') return 'sent'
   if (v === 'draft' || v === 'none')                       return 'draft'
   // No `|| 'sent'` fallback: an event or properties payload carrying no status
@@ -2166,7 +2702,7 @@ function normalizeStatus(s) {
 // isn't a status, a payload shape change — is never stored. Storing one silently
 // removes the document from the portal, the reminder sweep and the compliance
 // gate, all of which filter on these exact strings.
-export const KNOWN_STATUSES = Object.freeze(['draft', 'sent', 'delivered', 'completed', 'declined', 'expired', 'voided'])
+export const KNOWN_STATUSES = Object.freeze(['draft', 'sent', 'delivered', 'needs_attention', 'completed', 'declined', 'expired', 'voided'])
 const KNOWN_STATUS_SET = new Set(KNOWN_STATUSES)
 export function normalizeKnownStatus(s) {
   const v = normalizeStatus(s)
@@ -2179,7 +2715,13 @@ export function normalizeKnownStatus(s) {
 // pushed a fully-signed agreement back to 'sent': it reappeared in the portal as
 // awaiting signature, re-entered the nightly reminder sweep (chasing a client who
 // had already signed), and dropped out of the closing compliance gate.
-const STATUS_RANK = { draft: 0, sent: 1, delivered: 2, declined: 3, expired: 3, voided: 3, completed: 4 }
+// `needs_attention` sits at the same rank as `delivered`: both mean "out with
+// signers, not finished". Ranking it ABOVE delivered would stop a genuine
+// "Jane viewed it" from ever landing after a transient authentication failure;
+// ranking it below would let a stale `sent` redelivery hide the fact that the
+// document is stuck. Same rank means either can be written over the other,
+// which is right — they are two readings of the same lifecycle position.
+const STATUS_RANK = { draft: 0, sent: 1, delivered: 2, needs_attention: 2, declined: 3, expired: 3, voided: 3, completed: 4 }
 const TERMINAL = new Set(['completed', 'declined', 'expired', 'voided'])
 
 // Should `next` be written over `current`? Terminal states are final; otherwise
@@ -2232,6 +2774,31 @@ export async function resolveOnBehalfOf(supabase, agentId) {
       .maybeSingle()
     return fallback?.status === 'approved' ? fallback.email : null
   } catch { return null }
+}
+
+// The deal's MLS number, snapshotted onto a packet at send time.
+//
+// Read through the deal's property rather than stored on the deal, because that
+// is where it lives — and taken ONCE, at the moment the packet is created, for
+// the reason the column exists: an MLS upload is a record of what was filed,
+// and a listing later re-keyed under a new number must not silently rewrite
+// what an already-filed packet says it was.
+//
+// Best-effort by contract. A packet without an MLS number is still a packet;
+// failing a send over a missing listing field would be absurd.
+export async function dealMlsNumber(supabase, dealId) {
+  if (!dealId) return null
+  try {
+    const { data } = await supabase
+      .from('deals')
+      .select('property_id, properties(mls_number)')
+      .eq('id', dealId)
+      .maybeSingle()
+    return data?.properties?.mls_number || null
+  } catch (e) {
+    console.warn(`[boldsign] could not read the MLS number for deal ${dealId}: ${e.message}`)
+    return null
+  }
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -2420,6 +2987,12 @@ async function handler(req, res) {
   // function). Admin auth is enforced inside the handler.
   if (body.action === 'closing-packet') return closingPacketHandler(req, res)
 
+  // Co-hosted MLS packager, same arrangement. Deliberately routed BEFORE the
+  // BOLDSIGN_API_KEY check below: it assembles files this app already holds on
+  // the deal and never calls BoldSign, so an account whose key is missing or
+  // mid-rotation can still hand an agent the forms they have.
+  if (body.action === 'mls-pack') return mlsPackHandler(req, res)
+
   if (!API_KEY) {
     return res.status(500).json({
       error: 'BoldSign environment variables not configured',
@@ -2567,9 +3140,9 @@ async function handler(req, res) {
     // branch the draft features would skip exactly the older documents agents are
     // stuck on. Throws a tagged error the catch below turns into a status code.
     const resolveDocumentRecord = async (svc, documentId, { verb }) => {
-      const base = 'id, deal_id, agent_id, status, document_name'
+      const base = 'id, deal_id, agent_id, status, document_name, signers'
       let { data: record, error } = await svc.from('boldsign_documents')
-        .select(`${base}, boldsign_template_id, signed_storage_path`)
+        .select(`${base}, boldsign_template_id, signed_storage_path, audit_storage_path, mode, template_ids, file_ids, mls_number, correction_of_document_id, download_option, local_files, edit_pending_since, raw_status`)
         .eq('document_id', documentId).order('created_at', { ascending: false }).limit(1)
         .maybeSingle()
       // A database missing one of the newer columns must not turn every draft
@@ -3101,6 +3674,445 @@ async function handler(req, res) {
       return res.json({ documentId: id, status: 'sent', advanced })
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // SIGNATURE PACKETS
+    //
+    // The deal-level module. Every action below reads BoldSign's live
+    // properties before it acts, for the reason the draft actions already do:
+    // the CRM's own row can be stale (a missed webhook), and a packet action
+    // taken on a stale reading is either refused by BoldSign with an opaque
+    // message or — much worse — quietly applied to a document that is no longer
+    // what the agent thought it was.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Write a live properties read onto the packet row. Shared by every action
+    // here so the row converges on the truth as a side effect of ordinary use,
+    // rather than only when someone presses Refresh.
+    const syncPacketFromProps = async (svc, record, props) => {
+      const snap  = packetSnapshot(props)
+      const patch = {
+        raw_status: snap.rawStatus == null ? null : String(snap.rawStatus),
+        ...(snap.files.length          ? { file_ids: snap.files } : {}),
+        ...(snap.downloadOption        ? { download_option: snap.downloadOption } : {}),
+        ...(snap.signers.length        ? { signers: snap.signers } : {}),
+      }
+      // Forward-only, exactly like the webhook: a properties read that lands
+      // after a completion must not push the row back to 'sent'.
+      if (snap.status && shouldApplyStatus(record.status, snap.status)) {
+        patch.status = snap.status
+        if (snap.completedAt) patch.completed_at = snap.completedAt
+      }
+      // BoldSign has finished applying an async file change: the packet is
+      // whole again and safe to send.
+      if (record.edit_pending_since && !isQueuedResponse(props)) patch.edit_pending_since = null
+      await patchPacket(svc, record.id, patch)
+      return snap
+    }
+
+    // FIX PACKET — reopen a draft OR an in-progress packet in BoldSign's
+    // embedded editor.
+    //
+    // The difference from `document-edit-url` is the whole feature: that action
+    // refuses anything that is not a draft, because the workflow it serves ends
+    // at the send. This one exists for the case that starts after it — the
+    // client is halfway through signing and something needs correcting.
+    //
+    // Still refused on a settled packet, and the refusal names the alternative:
+    // BoldSign cannot edit a completed, declined, revoked or expired document,
+    // and a correction to one is a clone. There is deliberately no button
+    // anywhere in this app called "Edit signed document".
+    if (body.action === 'packet-edit-url') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+
+      const svc    = getServiceClient()
+      const record = await resolveDocumentRecord(svc, id, { verb: 'fix' })
+
+      const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+      const snap  = await syncPacketFromProps(svc, record, props)
+      const live  = snap.status || normalizeStatus(props?.status) || 'in an unknown state'
+
+      if (!['draft', 'sent', 'delivered', 'needs_attention'].includes(live)) {
+        return res.status(409).json({
+          error: live === 'completed'
+            ? 'This packet is fully signed. Completed documents cannot be changed — use Send correction packet instead.'
+            : `This packet is ${live.replace('_', ' ')}, so it can no longer be edited. Use Send correction packet instead.`,
+          status: live,
+        })
+      }
+      // An async file change that has not landed yet. Opening the editor over it
+      // shows the agent a document that is about to change underneath them.
+      if (isQueuedResponse(props)) {
+        return res.status(409).json({
+          error: 'BoldSign is still applying the last file change to this packet. Give it a moment and try again.',
+          status: live, queued: true,
+        })
+      }
+
+      // As the identity the packet was SENT under, never whoever is clicking —
+      // an admin fixing an agent's packet must not change who the client hears
+      // from mid-signature.
+      let onBehalfOf = null
+      try { onBehalfOf = await resolveOnBehalfOf(svc, record.agent_id || actor.agent.id) } catch { /* account default */ }
+
+      // A document in flight belongs on FillingPage; a draft is refused there
+      // and lands on PreparePage instead. createDraftEditUrl already tries both
+      // rather than hard-wiring the mapping, so this is a preference, not a bet.
+      const url = await createDraftEditUrl({
+        documentId: id,
+        redirectUrl: body.redirectUrl,
+        onBehalfOf,
+        sendViewOption: live === 'draft' ? 'FillingPage' : 'PreparePage',
+      })
+      if (!url) return res.status(502).json({ error: 'BoldSign did not return an edit URL for this packet' })
+
+      await recordPacketEvent(svc, {
+        dealId: record.deal_id, packetId: record.id, documentId: id,
+        event: 'EditOpened', status: live, occurredAt: new Date().toISOString(),
+        payload: { by: actor.agent.id },
+      })
+      return res.json({ url, documentId: id, status: live })
+    }
+
+    // ADD ACKNOWLEDGEMENT + INITIALS — the programmatic correction, without
+    // opening the designer.
+    //
+    // This is the sanctioned answer to "the client wants a change to a packet
+    // people are already signing". Not a strike-through: a drawing over the old
+    // text says nothing about who agreed to the change or when, and an
+    // acknowledgement label plus a required Initial says exactly that.
+    //
+    // Aimed at ONE signer — by default the first party, in signing order, who
+    // has not finished. Everything about a signer who HAS finished is left
+    // alone: BoldSign would refuse it, and it would be wrong to want to.
+    if (body.action === 'packet-add-initials') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+
+      const svc    = getServiceClient()
+      const record = await resolveDocumentRecord(svc, id, { verb: 'add an acknowledgement to' })
+
+      const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+      const snap  = await syncPacketFromProps(svc, record, props)
+      const live  = snap.status || normalizeStatus(props?.status)
+
+      if (live === 'completed') {
+        return res.status(409).json({
+          error: 'This packet is fully signed, so nothing can be added to it. Use Send correction packet — it clones the packet, keeps every filled value, and the original signed PDF stays on the deal.',
+          status: live,
+        })
+      }
+      if (!['draft', 'sent', 'delivered', 'needs_attention'].includes(live)) {
+        return res.status(409).json({
+          error: `This packet is ${String(live).replace('_', ' ')}, so it can no longer be edited. Use Send correction packet instead.`,
+          status: live,
+        })
+      }
+
+      // Explicit signer, or the next person who actually owes something. Named
+      // rather than inferred inside the payload builder so the response can say
+      // who it went to — an agent needs to know whether the initials landed on
+      // the seller or on the co-buyer.
+      const target = body.signerId
+        ? assertEditableSigner(props, String(body.signerId))
+        : nextUnfinishedSigner(snap.signers)
+      if (!target) {
+        return res.status(409).json({
+          error: 'Everyone on this packet has already finished, so there is nobody left to initial a change. Use Send correction packet.',
+        })
+      }
+      if (!target.id) {
+        return res.status(409).json({
+          error: 'BoldSign did not give this signer an id, so an acknowledgement cannot be addressed to them. Use Fix packet and place the fields in the editor instead.',
+        })
+      }
+      if (!body.signerId) assertEditableSigner(props, target.id)
+
+      let onBehalfOf = null
+      try { onBehalfOf = await resolveOnBehalfOf(svc, record.agent_id || actor.agent.id) } catch { /* account default */ }
+
+      // Title, brand and signing order are fixed once a document exists.
+      // Anything the caller sent for them is dropped and NAMED, never sent and
+      // silently ignored — see stripLockedEditFields.
+      const { payload: extras, dropped } = stripLockedEditFields(body.edit || {})
+      const payload = {
+        ...buildAcknowledgementEdit({
+          signerId:      target.id,
+          pageNumber:    body.pageNumber,
+          message:       body.message,
+          label:         body.label,
+          labelBounds:   body.labelBounds,
+          initialBounds: body.initialBounds,
+          onBehalfOf,
+        }),
+        ...extras,
+      }
+
+      let result
+      try {
+        result = await editDocumentFields(id, payload)
+      } catch (err) {
+        console.error(`[boldsign] packet-add-initials refused ${id}: ${err.message}`)
+        return res.status(err.status && err.status >= 400 && err.status < 500 ? err.status : 502)
+          .json({ error: describeLayoutFailure(err) })
+      }
+
+      // A FILE change is asynchronous and BoldSign says so by answering with a
+      // Queued document. Field-only edits (which this is) normally settle
+      // immediately, but the check is unconditional because the caller may have
+      // added file edits through `body.edit`, and reporting success over a
+      // packet whose pages have not caught up is how a form goes out missing one.
+      const queued = isQueuedResponse(result) || touchesFiles(payload)
+      if (queued) await patchPacket(svc, record.id, { edit_pending_since: new Date().toISOString() })
+
+      await recordPacketEvent(svc, {
+        dealId: record.deal_id, packetId: record.id, documentId: id,
+        event: 'Edited', status: live, signerName: target.name, signerEmail: target.email,
+        occurredAt: new Date().toISOString(),
+        payload: { change: 'acknowledgement+initials', page: Number(body.pageNumber) || 1, queued },
+      })
+      await logSignatureAudit(svc, {
+        dealId: record.deal_id, actorId: actor.agent.id, documentId: id, action: 'edit',
+        documentName: record.document_name, signers: [target],
+        templateId: record.boldsign_template_id, recordId: record.id,
+      })
+
+      return res.json({
+        ok: true,
+        documentId: id,
+        status: live,
+        queued,
+        signer: { name: target.name, email: target.email, role: target.role },
+        ...(dropped.length ? { ignored: dropped, warning: `BoldSign fixes ${dropped.join(', ')} when a document is created, so ${dropped.length === 1 ? 'that value was' : 'those values were'} not changed.` } : {}),
+      })
+    }
+
+    // CHANGE SIGNER — swap a recipient who has not signed yet.
+    //
+    // The narrowest possible use of the edit API, and the guard is the point:
+    // a signature that already exists is a legal act, and the person who made it
+    // does not get replaced underneath it.
+    if (body.action === 'packet-change-signer') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+      const signerId = String(body.signerId || '').trim()
+      const name     = String(body.name || '').trim()
+      const email    = String(body.email || '').trim()
+      if (!signerId)          return res.status(400).json({ error: 'signerId required' })
+      if (!name || !email)    return res.status(400).json({ error: 'A replacement signer needs both a name and an email address.' })
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: `"${email}" is not a valid email address.` })
+
+      const svc    = getServiceClient()
+      const record = await resolveDocumentRecord(svc, id, { verb: 'change a signer on' })
+      const props  = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+      const snap   = await syncPacketFromProps(svc, record, props)
+      const target = assertEditableSigner(props, signerId)   // refuses signed/declined/absent
+
+      let onBehalfOf = null
+      try { onBehalfOf = await resolveOnBehalfOf(svc, record.agent_id || actor.agent.id) } catch { /* account default */ }
+
+      try {
+        await editDocumentFields(id, {
+          Signers: [{ EditAction: 'Update', Id: signerId, SignerName: name, SignerEmail: email }],
+          ...(onBehalfOf ? { onBehalfOf } : {}),
+        })
+      } catch (err) {
+        console.error(`[boldsign] packet-change-signer refused ${id}: ${err.message}`)
+        return res.status(err.status && err.status >= 400 && err.status < 500 ? err.status : 502)
+          .json({ error: describeLayoutFailure(err) })
+      }
+
+      // Re-read rather than patching our own guess onto the row: BoldSign
+      // decides what the recipient list now is, including whether the change
+      // reset that person's viewed state.
+      const fresh = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+      await syncPacketFromProps(svc, record, fresh)
+
+      await recordPacketEvent(svc, {
+        dealId: record.deal_id, packetId: record.id, documentId: id,
+        event: 'SignerChanged', status: snap.status, signerName: name, signerEmail: email,
+        occurredAt: new Date().toISOString(),
+        payload: { from: { name: target.name, email: target.email }, to: { name, email } },
+      })
+      await logSignatureAudit(svc, {
+        dealId: record.deal_id, actorId: actor.agent.id, documentId: id, action: 'change_signer',
+        documentName: record.document_name, signers: [{ name, email }],
+        templateId: record.boldsign_template_id, recordId: record.id,
+      })
+      return res.json({ ok: true, documentId: id, replaced: { name: target.name, email: target.email }, signer: { name, email } })
+    }
+
+    // SEND CORRECTION PACKET — the only thing that can be done to a settled
+    // packet, and it does not touch it.
+    //
+    // A completed BoldSign envelope is immutable. So a correction is a CLONE:
+    // a NEW document prefilled with everything the parties already agreed
+    // (IncludeFormFieldValues), onto which the agent adds an acknowledgement and
+    // initials before sending. The original signed PDF is untouched and stays on
+    // the deal — it is the file MLS receives.
+    if (body.action === 'packet-clone-url') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+
+      const svc    = getServiceClient()
+      const record = await resolveDocumentRecord(svc, id, { verb: 'clone' })
+      if (!record.deal_id) return res.status(400).json({ error: 'This packet is not attached to a deal, so a correction has nowhere to live.' })
+
+      const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+      const snap  = await syncPacketFromProps(svc, record, props)
+      const live  = snap.status || normalizeStatus(props?.status)
+
+      // Cloning something still in flight would put a second, near-identical
+      // agreement in the same inbox while the first is open — the most confusing
+      // possible thing to do to a client. Fix the original instead.
+      if (['draft', 'sent', 'delivered', 'needs_attention'].includes(live)) {
+        return res.status(409).json({
+          error: `This packet is still ${live === 'draft' ? 'a draft' : 'out for signature'}, so it can be corrected directly. Use Fix packet.`,
+          status: live,
+        })
+      }
+
+      let onBehalfOf = null
+      try { onBehalfOf = await resolveOnBehalfOf(svc, record.agent_id || actor.agent.id) } catch { /* account default */ }
+
+      const { url, documentId: cloneId } = await createEmbeddedCloneUrl({
+        documentId:  id,
+        redirectUrl: body.redirectUrl,
+        onBehalfOf,
+        includeValues: body.includeFormFieldValues !== false,
+      })
+      if (!url) return res.status(502).json({ error: 'BoldSign did not return a URL for the correction packet.' })
+
+      // BoldSign returns the clone's id on the accounts that populate it, and
+      // nothing on the others — the document is created when the agent sends
+      // from inside the frame. Track it now when we can, so the correction is
+      // attached to its original from the first moment it exists; otherwise the
+      // Sent webhook does the stitching (see resolvePendingCorrection).
+      let tracked = false
+      if (cloneId) {
+        tracked = await trackDocument(svc, {
+          dealId:  record.deal_id,
+          agentId: record.agent_id || actor.agent.id,
+          documentId: cloneId,
+          signers: snap.signers,
+          documentName: `${record.document_name || 'Document'} — correction`,
+          status: 'draft',
+          templateId: record.boldsign_template_id,
+          correctionOf: id,
+          mode: 'single',
+          mlsNumber: record.mls_number || null,
+        })
+      }
+
+      await recordPacketEvent(svc, {
+        dealId: record.deal_id, packetId: record.id, documentId: id,
+        event: 'CorrectionStarted', status: live, occurredAt: new Date().toISOString(),
+        payload: { cloneId: cloneId || null, by: actor.agent.id },
+      })
+
+      return res.json({
+        url,
+        documentId:   cloneId || null,
+        correctionOf: id,
+        tracked,
+        // Said out loud because the modal promises it and an agent about to send
+        // a second copy of a signed agreement deserves the reassurance in the
+        // response as well as in the copy.
+        note: 'Creates a new signature request. The original signed PDF stays on the deal for MLS.',
+      })
+    }
+
+    // REFRESH A PACKET from BoldSign and write what comes back.
+    //
+    // The `status` action answers the browser and lets IT write; this one writes
+    // server-side, because the things it resolves — the file list, the download
+    // option, a Queued edit that has settled — are packet facts the browser has
+    // no business deriving.
+    if (body.action === 'packet-sync') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+      const svc    = getServiceClient()
+      const record = await resolveDocumentRecord(svc, id, { verb: 'refresh' })
+
+      let props
+      try {
+        props = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+      } catch (err) {
+        if (isForeignAccountStatus(err.status)) {
+          return res.status(409).json({ error: foreignAccountMessage('read'), foreignAccount: true })
+        }
+        throw err
+      }
+      const snap   = await syncPacketFromProps(svc, record, props)
+      const queued = isQueuedResponse(props)
+      return res.json({
+        documentId:     id,
+        status:         snap.status,
+        rawStatus:      snap.rawStatus,
+        files:          snap.files,
+        downloadOption: snap.downloadOption,
+        signers:        snap.signers,
+        queued,
+        // What the agent is actually waiting for when a file edit is settling.
+        ...(queued ? { note: 'BoldSign is still applying a file change to this packet.' } : {}),
+      })
+    }
+
+    // REVOKE — recall a packet that is out with signers.
+    //
+    // Separate from `document-delete`, which removes the CRM's record as well.
+    // Revoking keeps the row and its history: a packet that was recalled is a
+    // thing that happened on the deal, and the correction that replaces it reads
+    // as a sequence rather than appearing from nowhere.
+    if (body.action === 'document-revoke') {
+      const id = body.envelopeId || body.documentId
+      if (!id) return res.status(400).json({ error: 'documentId required' })
+      const svc    = getServiceClient()
+      const record = await resolveDocumentRecord(svc, id, { verb: 'revoke' })
+
+      // BoldSign, not our row, decides what this document is: a missed webhook
+      // leaves a row saying 'sent' for something already signed, and "revoking"
+      // that is a request BoldSign refuses with a message nobody can act on.
+      let live = record.status
+      try {
+        const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(id)}`)
+        live = normalizeStatus(props?.status) || record.status
+        await syncPacketFromProps(svc, record, props)
+      } catch (e) {
+        console.warn(`[boldsign] revoke: could not read status for ${id} (${e.message}) — using the CRM's "${record.status}"`)
+      }
+      if (live === 'completed') {
+        return res.status(409).json({ error: 'This packet is fully signed — it is the signed record and cannot be recalled.', status: live })
+      }
+      if (live === 'draft') {
+        return res.status(409).json({ error: 'Nothing has been sent for this packet yet, so there is nothing to recall. Delete the draft instead.', status: live })
+      }
+      if (['voided', 'declined', 'expired'].includes(live)) {
+        return res.status(409).json({ error: `This packet is already ${live === 'voided' ? 'revoked' : live}.`, status: live })
+      }
+
+      const reason = String(body.reason || '').trim() || 'Recalled from Gateway CRM'
+      await boldsign(`/document/revoke?documentId=${encodeURIComponent(id)}`, {
+        method: 'POST', json: { message: reason }, idempotent: true,
+      })
+
+      if (shouldApplyStatus(record.status, 'voided')) {
+        await svc.from('boldsign_documents')
+          .update({ status: 'voided' }).eq('id', record.id).eq('status', record.status)
+      }
+      await recordPacketEvent(svc, {
+        dealId: record.deal_id, packetId: record.id, documentId: id,
+        event: 'Revoked', status: 'voided', occurredAt: new Date().toISOString(),
+        payload: { reason, by: actor.agent.id },
+      })
+      await logSignatureAudit(svc, {
+        dealId: record.deal_id, actorId: actor.agent.id, documentId: id, action: 'revoke',
+        documentName: record.document_name, signers: Array.isArray(record.signers) ? record.signers : [],
+        templateId: record.boldsign_template_id, recordId: record.id,
+      })
+      return res.json({ ok: true, documentId: id, status: 'voided' })
+    }
+
     // Embedded SIGNING: a URL to load in an iframe so a signer completes the
     // document inside our app instead of via the BoldSign email link.
     if (body.action === 'sign-link') {
@@ -3155,8 +4167,17 @@ async function handler(req, res) {
       // the app and the SQL bundle can be deployed in either order: fall back to
       // the base columns and take the fetch-from-BoldSign path below.
       let { data: record, error: recErr } = await svc.from('boldsign_documents')
-        .select('id, deal_id, document_name, signed_storage_path, audit_storage_path')
+        .select('id, deal_id, document_name, signed_storage_path, audit_storage_path, local_files')
         .eq('document_id', id).maybeSingle()
+      if (recErr) {
+        // Retry without the packet manifest (migration 0046) before giving up on
+        // the archive-path columns as well — a database missing only the newer
+        // one should still resolve a download.
+        const { data: partial, error: partialErr } = await svc.from('boldsign_documents')
+          .select('id, deal_id, document_name, signed_storage_path, audit_storage_path')
+          .eq('document_id', id).maybeSingle()
+        if (!partialErr) { record = partial; recErr = null }
+      }
       if (recErr) {
         console.warn(`[boldsign] archive-path columns unavailable (${recErr.message}) — falling back; apply 2026-07-31_boldsign_hardening.sql`)
         ;({ data: record } = await svc.from('boldsign_documents')
@@ -3177,18 +4198,37 @@ async function handler(req, res) {
       }
 
       // 2. Not archived (or the object went missing) → pull, archive, sign.
-      const storagePath = archivePath({
-        dealId: record.deal_id, documentId: id,
-        baseName: record.document_name, kind: isAudit ? 'audit' : 'signed',
-      })
+      //
+      // The signed side goes through archiveCompletedPacket, not the plain
+      // archiver: a document created `Individually` downloads as a ZIP, and
+      // writing that to storage as `signed-….pdf` hands the agent a file no PDF
+      // reader opens. It stores each part AND assembles the whole locally, so
+      // this path heals a packet the webhook missed as completely as the webhook
+      // would have.
       const report = {}
-      const archived = await archiveBoldsignPdf(svc, {
-        path: isAudit
-          ? `/document/downloadAuditLog?documentId=${encodeURIComponent(id)}`
-          : `/document/download?documentId=${encodeURIComponent(id)}`,
-        storagePath,
-        report,
-      })
+      const archived = isAudit
+        ? await archiveBoldsignPdf(svc, {
+            path: `/document/downloadAuditLog?documentId=${encodeURIComponent(id)}`,
+            storagePath: archivePath({
+              dealId: record.deal_id, documentId: id,
+              baseName: record.document_name, kind: 'audit',
+            }),
+            report,
+          })
+        : await (async () => {
+            const out = await archiveCompletedPacket(svc, {
+              dealId: record.deal_id, documentId: id,
+              baseName: record.document_name, report,
+            })
+            if (!out.signed) return null
+            // Keep the manifest in step, so a packet healed here shows its
+            // per-form files on the MLS screen exactly like one the webhook
+            // archived.
+            let manifest = normalizeLocalFiles(record.local_files)
+            for (const entry of out.localFiles) manifest = upsertLocalFile(manifest, entry)
+            await patchPacket(svc, record.id, { local_files: manifest })
+            return out.signed
+          })()
       if (!archived) {
         // Nothing stored on the deal AND the account does not have the document:
         // this is a pre-key-switch sandbox document, and no amount of waiting
@@ -3664,6 +4704,220 @@ async function handler(req, res) {
       })
     }
 
+    // ─── Composing a packet from several forms ───────────────────────────────
+    //
+    // Two shapes, and the choice is the agent's radio button:
+    //
+    //   TOGETHER (merged) — one BoldSign envelope built from several templates.
+    //     One email, one signing session, one document id. What MLS gets out of
+    //     it afterwards depends entirely on DocumentDownloadOption, below.
+    //
+    //   SEPARATELY (split) — one envelope per form, same signers, same labels.
+    //     Several document ids and several statuses on the deal. More email for
+    //     the client; per-form files without needing a paid feature, and one
+    //     declined disclosure does not hold up the purchase agreement.
+    //
+    // DOCUMENTDOWNLOADOPTION IS THE ONE DECISION THAT CANNOT BE UNDONE. BoldSign
+    // fixes it at creation, and it decides whether the completed packet comes
+    // back as one merged PDF or as separate files. BoldSign will not split pages
+    // out of a signed combined PDF and neither will this app — so a merged
+    // packet sent as Combined can NEVER be handed to MLS one form at a time.
+    // Every multi-file send therefore asks for `Individually` and falls back to
+    // `Combined` only when BoldSign refuses it (it is a paid-plan feature),
+    // recording what was actually used so the MLS packager knows without asking.
+    const postMergePayload = async (path, payload) => {
+      try {
+        return { data: await boldsign(path, { method: 'POST', json: payload }), downloadOption: payload.documentDownloadOption || null }
+      } catch (err) {
+        if (!isDownloadOptionRejection(err) || payload.documentDownloadOption !== DOWNLOAD_INDIVIDUALLY) throw err
+        console.warn(`[boldsign] ${path}: DocumentDownloadOption=Individually refused (${err.message}) — falling back to Combined`)
+        const { documentDownloadOption: _dropped, ...rest } = payload
+        const data = await boldsign(path, { method: 'POST', json: { ...rest, documentDownloadOption: DOWNLOAD_COMBINED } })
+        return { data, downloadOption: DOWNLOAD_COMBINED, downgraded: true }
+      }
+    }
+
+    // The sentence an agent needs when the packet went out Combined after asking
+    // for Individually. Not a failure — the packet is sent and correct — but it
+    // changes what they can do at MLS time, and finding that out three weeks
+    // later at the upload is the whole problem.
+    const downloadOptionReport = (used, asked) => (used === DOWNLOAD_COMBINED && asked === DOWNLOAD_INDIVIDUALLY
+      ? { downloadWarning: 'Sent as one combined document — this BoldSign plan does not include per-form downloads. When it completes, MLS gets a single PDF; to upload forms separately, send them as separate packets instead.' }
+      : {})
+
+    // MERGE AND SEND — several templates into one envelope, straight to the
+    // signers. The immediate door; `template-merge-embed-url` is the reviewed one.
+    if (body.action === 'template-merge-send' || body.action === 'template-merge-embed-url') {
+      const review = body.action === 'template-merge-embed-url'
+      const { templateIds, deal_id, roles, emailSubject, message, cc, documentName, labels, redirectUrl } = body
+      if (!Array.isArray(templateIds) || templateIds.filter(Boolean).length < 2) {
+        return res.status(400).json({ error: 'Merging needs at least two forms. Send a single form the ordinary way.' })
+      }
+      if (!roles?.length) return res.status(400).json({ error: 'roles required' })
+      if (!deal_id)       return res.status(400).json({ error: 'deal_id required — a packet has to hang off a deal to be found again' })
+
+      const svc        = getServiceClient()
+      const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
+      const asked      = body.downloadOption || downloadOptionFor({ fileCount: templateIds.length })
+
+      const payload = {
+        ...buildMergePayload({
+          templateIds,
+          title:   documentName || emailSubject || 'Signature packet',
+          message,
+          roles,
+          enableSigningOrder: body.enableSigningOrder !== false,
+          downloadOption: asked,
+          cc,
+          labels: Array.isArray(labels) && labels.length ? labels : packetLabels({ dealId: deal_id }),
+          onBehalfOf,
+          ...(review ? { redirectUrl: redirectUrl || '', sendViewOption: 'PreparePage' } : {}),
+        }),
+        // Brand, expiry and auto-reminders — fixed by BoldSign at creation, so
+        // they go on now or never.
+        ...buildSendOptions(body),
+      }
+      if (review) payload.showToolbar = true
+
+      const path = review
+        ? '/template/mergeCreateEmbeddedRequestUrl'
+        : '/template/mergeAndSend'
+      const { data, downloadOption } = await postMergePayload(path, payload)
+
+      const documentId = data?.documentId || null
+      if (!documentId) {
+        return res.status(502).json({
+          error: review
+            ? 'BoldSign built the packet but did not return its id, so it could not be saved to this deal.'
+            : 'BoldSign sent the packet but did not return its id, so it could not be recorded on this deal. Check the BoldSign dashboard.',
+        })
+      }
+
+      // The MLS number is snapshotted onto the packet from the deal's property,
+      // for the reason the column exists: an MLS upload records what was filed,
+      // and a listing re-keyed later must not rewrite what an already-filed
+      // packet says it was.
+      const mlsNumber = await dealMlsNumber(svc, deal_id)
+      // Read the file list back so the deal knows what is inside the envelope
+      // before anyone needs it. Best-effort: a packet whose file list we could
+      // not read is still a perfectly good packet.
+      let files = []
+      try { files = documentFiles(await boldsign(`/document/properties?documentId=${encodeURIComponent(documentId)}`)) }
+      catch (e) { console.warn(`[boldsign] merge: could not read the file list for ${documentId}: ${e.message}`) }
+
+      const tracked = await trackDocument(svc, {
+        dealId: deal_id, agentId: actor.agent.id, documentId,
+        signers: roles, documentName: documentName || emailSubject || 'Signature packet',
+        subject: emailSubject || null, status: review ? 'draft' : 'sent',
+        mode: 'merged', templateIds, files, mlsNumber, downloadOption,
+      })
+      if (!tracked && review) {
+        // Nothing has been sent, so the untrackable draft can be discarded
+        // rather than left where nobody can find it — the same rule
+        // createTemplateDraft applies.
+        try { await boldsign(`/document/delete?documentId=${encodeURIComponent(documentId)}&deletePermanently=true`, { method: 'DELETE', idempotent: true }) }
+        catch { /* best-effort */ }
+        return res.status(500).json({
+          error: 'Could not record this packet against the deal, so it was discarded rather than left where nobody could find it. Nothing was sent — please try again.',
+        })
+      }
+
+      await logSignatureAudit(svc, {
+        dealId: deal_id, actorId: actor.agent.id, documentId,
+        action: review ? 'prepare' : 'send',
+        documentName: documentName || emailSubject || 'Signature packet',
+        signers: roles, templateId: null,
+      })
+      await recordPacketEvent(svc, {
+        dealId: deal_id, documentId, event: review ? 'PacketPrepared' : 'Sent',
+        status: review ? 'draft' : 'sent', occurredAt: new Date().toISOString(),
+        payload: { mode: 'merged', templateIds, downloadOption },
+      })
+
+      return res.json({
+        documentId, envelopeId: documentId,
+        status: review ? 'draft' : 'sent',
+        mode: 'merged', downloadOption, tracked,
+        ...(review ? { url: data.sendUrl || data.embeddedSendUrl || data.url || null } : {}),
+        ...downloadOptionReport(downloadOption, asked),
+        ...(tracked ? {} : { warning: 'Sent to the signers, but it could not be recorded on this deal — it will not appear in the Signatures tab. Tell your admin.' }),
+      })
+    }
+
+    // SPLIT SEND — one envelope per form, same signers, labelled so the several
+    // documents are recognizable as one packet from BoldSign's side too.
+    //
+    // Sends are sequential and each is tracked before the next starts. A partial
+    // failure is REPORTED as a partial, never rolled back: the forms that went
+    // out are legally in front of the client, and quietly deleting them (or
+    // saying nothing) is the worst thing this could do.
+    if (body.action === 'packet-split-send') {
+      const { forms, deal_id, roles, emailSubject, message, cc } = body
+      if (!Array.isArray(forms) || !forms.length) return res.status(400).json({ error: 'forms required — one entry per form to send' })
+      if (!roles?.length) return res.status(400).json({ error: 'roles required' })
+      if (!deal_id)       return res.status(400).json({ error: 'deal_id required' })
+
+      const svc        = getServiceClient()
+      const onBehalfOf = await resolveOnBehalfOf(svc, actor.agent.id)
+      const mlsNumber  = await dealMlsNumber(svc, deal_id)
+
+      const sent = []
+      const failed = []
+      for (const form of forms) {
+        const templateId = String(form?.templateId || '').trim()
+        const name       = String(form?.name || '').trim() || 'Document'
+        if (!templateId) { failed.push({ name, error: 'No template id' }); continue }
+        try {
+          await assertPayloadFieldsExist(templateId, { roles })
+          const { data } = await postTemplatePayload(`/template/send?templateId=${encodeURIComponent(templateId)}`, {
+            title:   name,
+            message: message || 'Please review and sign.',
+            ...buildSendOptions(body),
+            roles,
+            enableSigningOrder: rolesWantSigningOrder(roles),
+            ...(cc ? { cc } : {}),
+            // Both labels: the deal, so every form of one packet groups in the
+            // BoldSign dashboard, and the form, so the individual document is
+            // identifiable there without opening it.
+            labels: packetLabels({ dealId: deal_id, formSlug: formSlug(name) }),
+            ...(onBehalfOf ? { onBehalfOf } : {}),
+          })
+          if (!data?.documentId) { failed.push({ name, error: 'BoldSign returned no document id' }); continue }
+
+          const tracked = await trackDocument(svc, {
+            dealId: deal_id, agentId: actor.agent.id, documentId: data.documentId,
+            signers: roles, documentName: name, subject: emailSubject || null, status: 'sent',
+            templateId, mode: 'split', templateIds: [templateId], mlsNumber,
+            // One form per envelope: there is nothing to combine, so the
+            // question the option answers does not arise.
+            downloadOption: DOWNLOAD_COMBINED,
+          })
+          await logSignatureAudit(svc, {
+            dealId: deal_id, actorId: actor.agent.id, documentId: data.documentId,
+            action: 'send', documentName: name, signers: roles, templateId,
+          })
+          await recordPacketEvent(svc, {
+            dealId: deal_id, documentId: data.documentId, event: 'Sent', status: 'sent',
+            occurredAt: new Date().toISOString(), payload: { mode: 'split', templateId, form: name },
+          })
+          sent.push({ documentId: data.documentId, name, tracked })
+        } catch (err) {
+          console.error(`[boldsign] split send failed for "${name}" (${templateId}): ${err.message}`)
+          failed.push({ name, error: err.message })
+        }
+      }
+
+      if (!sent.length) {
+        return res.status(502).json({ error: `None of the forms could be sent. ${failed.map(f => `${f.name}: ${f.error}`).join('; ')}`, failed })
+      }
+      return res.json({
+        mode: 'split', sent, failed,
+        // Named individually, because "3 of 4 sent" without saying WHICH one is
+        // missing leaves an agent to work it out from the client's inbox.
+        ...(failed.length ? { warning: `${sent.length} of ${sent.length + failed.length} forms were sent. These were not: ${failed.map(f => f.name).join(', ')}. They can be sent on their own — the ones that went out are already with the signers.` } : {}),
+      })
+    }
+
     // Create a document from a template and leave it in DRAFT. Shared by both
     // template paths below, because they differ only in where the agent goes next.
     //
@@ -3940,6 +5194,37 @@ async function handleWebhook(req, res) {
       .limit(1)
     const record = rows?.[0] || null
 
+    // THE DEAL'S SIGNING TIMELINE — written on EVERY delivery that names a
+    // document we know, whether or not it advances the lifecycle.
+    //
+    // Deliberately before the advance gate. "Jane viewed it" and "Jane signed
+    // it" do not move a three-party document off `sent`, so gating the timeline
+    // on `advanced` would discard precisely the events that make a timeline
+    // worth having. The dedupe key makes a redelivery update its row rather than
+    // add a second one, so writing early costs nothing.
+    if (record) {
+      const eventAt = toIso(
+        doc?.activityDate || doc?.eventDate || doc?.modifiedDate
+        || doc?.completedDate || doc?.signedDate || doc?.sentDate || null,
+      ) || new Date().toISOString()
+      await recordPacketEvent(supabase, {
+        dealId:       record.deal_id,
+        packetId:     record.id,
+        documentId,
+        event:        eventName || rawStatus || 'Update',
+        status,
+        signerName:   doc?.signerDetails?.[0]?.signerName || null,
+        signerEmail:  doc?.signerDetails?.[0]?.signerEmail || null,
+        occurredAt:   eventAt,
+        payload: {
+          rawStatus: rawStatus ?? null,
+          signers: normalizeSigners(doc?.signerDetails, {
+            inOrder: Boolean(doc?.enableSigningOrder ?? body?.enableSigningOrder),
+          }),
+        },
+      })
+    }
+
     if (!record) {
       // Every CRM send path now writes its row server-side BEFORE handing out a
       // send URL, so this should only be a document created directly in the
@@ -4078,15 +5363,28 @@ async function handleWebhook(req, res) {
         return res.status(200).json({ received: true, documentId, status, note: 'No deal to archive into' })
       }
 
-      const signed = await archiveBoldsignPdf(supabase, {
-        path: `/document/download?documentId=${encodeURIComponent(documentId)}`,
-        storagePath: archivePath({ dealId: record.deal_id, documentId, baseName, kind: 'signed' }),
+      // Packet-aware: a document created `Individually` downloads as a ZIP, and
+      // this is the last moment its parts can be captured — BoldSign will not
+      // split a signed PDF afterwards, and neither will we. See
+      // archiveCompletedPacket.
+      const { signed, parts, localFiles } = await archiveCompletedPacket(supabase, {
+        dealId: record.deal_id, documentId, baseName,
       })
       if (signed) {
         await recordDocumentVersion(supabase, {
           dealId: record.deal_id, documentName: `signed-${baseName}.pdf`,
           storagePath: signed.storagePath, size: signed.size,
           pinnedAs: 'signed', note: signerNote,
+        })
+      }
+      // Each form on its own, in the Documents tab beside the whole packet.
+      // Named for the form rather than the envelope, because that is the name
+      // the agent is looking for at MLS time and the name the board asks for.
+      for (const part of parts) {
+        await recordDocumentVersion(supabase, {
+          dealId: record.deal_id, documentName: `${part.form}.pdf`,
+          storagePath: part.storagePath, size: part.size,
+          note: `${signerNote} — part of "${record.document_name || baseName}"`,
         })
       }
 
@@ -4122,6 +5420,41 @@ async function handleWebhook(req, res) {
           .update({ audit_trail_saved: Boolean(audit) })
           .eq('id', record.id)
       }
+
+      // THE MANIFEST the MLS packager picks from — the signed PDF, the audit
+      // trail, and every split part, keyed on storage path so a redelivery
+      // updates entries instead of appending duplicates (archive paths are
+      // deterministic, so the same retry writes the same objects).
+      //
+      // Written through patchPacket rather than a plain update because a
+      // deployment that has not had migration 0046 applied must still archive
+      // its PDFs; it just cannot remember the manifest yet.
+      let manifest = normalizeLocalFiles(record.local_files)
+      for (const entry of localFiles) manifest = upsertLocalFile(manifest, entry)
+      if (audit) {
+        manifest = upsertLocalFile(manifest, {
+          kind: 'audit', path: audit.storagePath, form_name: `${baseName} — audit trail`,
+        })
+      }
+      // One properties read at completion fills in what the envelope actually
+      // held: the file list and whether it was Combined or Individually. Both
+      // are unanswerable afterwards from anything but this, and the MLS screen
+      // reads them to explain why a packet does or does not have per-form files.
+      let filePatch = {}
+      try {
+        const props = await boldsign(`/document/properties?documentId=${encodeURIComponent(documentId)}`)
+        const files = documentFiles(props)
+        const opt   = readDownloadOption(props)
+        filePatch = { ...(files.length ? { file_ids: files } : {}), ...(opt ? { download_option: opt } : {}) }
+      } catch (e) {
+        console.warn(`[boldsign] could not read the file list for completed ${documentId}: ${e.message}`)
+      }
+      await patchPacket(supabase, record.id, {
+        local_files: manifest,
+        // A completion settles any file edit that was still in flight.
+        edit_pending_since: null,
+        ...filePatch,
+      })
 
       // Only the delivery that actually made the transition notifies — a
       // redelivery that came back to finish an archive must not tell the agent

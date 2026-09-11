@@ -67,6 +67,13 @@ export function normalizeSigner(raw, index = 0) {
   if (!name && !email) return null
   const viewed = truthy(raw?.isViewed) || Boolean(raw?.viewedDate || raw?.viewedDateTime)
   return {
+    // BoldSign's own id for this recipient ON THIS DOCUMENT. Required by the
+    // edit API — `Signers: [{ EditAction: 'Update', Id: … }]` addresses a signer
+    // by id, not by email — so an "add an acknowledgement and initials for the
+    // party who hasn't finished" correction cannot be built without it.
+    // Round-trip safe like everything else here: it is written to the row and
+    // read back, and an entry that never carried one simply has none.
+    id: str(raw?.id || raw?.signerId) || null,
     name,
     email,
     role:  str(raw?.signerRole || raw?.role),
@@ -131,6 +138,11 @@ export function signerRows(doc) {
   const count  = Math.max(names.length, emails.length)
   const done   = doc?.status === 'completed'
   return Array.from({ length: count }, (_, i) => ({
+    // Nothing to carry: the legacy columns never recorded BoldSign's signer ids.
+    // Explicit rather than absent, so a caller that needs one (the edit API) can
+    // tell "this document predates per-signer state" apart from "the key is
+    // missing because I built this object wrong".
+    id: null,
     name: names[i] || '',
     email: emails[i] || '',
     role: '',
