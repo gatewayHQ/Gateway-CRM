@@ -115,6 +115,70 @@ export const downloadAudit   = (documentId) => call({ action: 'audit-download', 
 export const remindDocument  = (documentId, signerEmails) => call({ action: 'remind', documentId, ...(signerEmails?.length ? { signerEmails } : {}) })
 export const deleteDocument  = (documentId) => call({ action: 'document-delete', documentId })
 
+// ── Signature packets ────────────────────────────────────────────────────────
+// The deal-level packet module. Every one of these is a thin wrapper over an
+// action on the same endpoint — the CRM's own REST shape, per the mapping table
+// in docs/signature-packets.md — and every one of them reads BoldSign's live
+// properties server-side before it acts, because the CRM's row can be stale.
+
+// FIX PACKET — reopen a DRAFT or an IN-PROGRESS packet in BoldSign's editor.
+// Distinct from documentEditUrl, which only ever opens a draft: this is the way
+// into a packet the client is already halfway through signing. Rejects with 409
+// on a completed, declined, revoked or expired packet, naming the alternative
+// (a correction) rather than a status code — there is no "edit signed document"
+// anywhere in this app.
+export const packetEditUrl      = (p) => call({ action: 'packet-edit-url', ...p })
+// Add an acknowledgement label plus a required Initial for the party who has not
+// finished, WITHOUT opening the designer. The sanctioned way to correct a packet
+// in flight: a strike-through drawing says nothing about who agreed to a change
+// or when, and initials beside a stated acknowledgement say exactly that.
+// Resolves { queued } — true while BoldSign is still applying a file change, in
+// which case the packet is not safe to send yet.
+export const packetAddInitials  = (p) => call({ action: 'packet-add-initials', ...p })
+// Replace a recipient who has not signed. Refused for anyone who has: a
+// signature is a legal act and the person who made it is not swapped out from
+// under it.
+export const packetChangeSigner = (p) => call({ action: 'packet-change-signer', ...p })
+// SEND CORRECTION PACKET — an embedded clone of a settled packet, prefilled with
+// every value the parties already agreed. Creates a NEW signature request; the
+// original signed PDF stays on the deal untouched, because that is the file MLS
+// receives. The only thing that can be done to a completed envelope.
+export const packetCloneUrl     = (p) => call({ action: 'packet-clone-url', ...p })
+// Re-read a packet from BoldSign and write what comes back: status, the file
+// list, the download option, and whether a queued file edit has settled.
+export const packetSync         = (documentId) => call({ action: 'packet-sync', documentId })
+// Recall a packet that is out with signers. Keeps the row and its timeline — a
+// recall is a thing that happened on the deal, and the correction that follows
+// should read as a sequence rather than appearing from nowhere.
+export const revokeDocument     = (documentId, reason) => call({ action: 'document-revoke', documentId, ...(reason ? { reason } : {}) })
+
+// ── Composing a packet from several forms ────────────────────────────────────
+// TOGETHER: one envelope from several templates. `mergeTemplatesEmbedUrl` builds
+// it as a draft and hands back a prepare URL; `mergeTemplatesSend` sends it
+// outright. Both ask BoldSign for DocumentDownloadOption: Individually — the
+// setting, fixed at creation and never changeable, that decides whether MLS can
+// later be handed one form at a time — and fall back to Combined when the plan
+// does not include it, saying so in `downloadWarning`.
+export const mergeTemplatesEmbedUrl = (p) => call({ action: 'template-merge-embed-url', ...p })
+export const mergeTemplatesSend     = (p) => call({ action: 'template-merge-send', ...p })
+// SEPARATELY: one envelope per form, same signers, labelled so BoldSign's own
+// dashboard groups them. Resolves { sent, failed } — a partial send is reported
+// as a partial and never rolled back, because the forms that went out are
+// already in front of the client.
+export const splitSendPacket        = (p) => call({ action: 'packet-split-send', ...p })
+
+// ── MLS packaging (local — never goes back through BoldSign) ─────────────────
+// BoldSign will not split pages out of a signed combined PDF, will not merge two
+// completed envelopes into a new one, and will not restripe a signed file. So a
+// pack is assembled from the PDFs already archived on the deal.
+//   list  → { files, unarchived } for the checklist
+//   zip   → one file per form, for a board that wants one form per upload
+//   merge → one PDF in the agent's order, optionally behind a cover sheet
+// Resolves { url, filename } — a short-lived signed storage URL, like every
+// other download in this file.
+export const listMlsFiles = (dealId) => call({ action: 'mls-pack', deal_id: dealId, mode: 'list' })
+export const packForMls   = (dealId, p) => call({ action: 'mls-pack', deal_id: dealId, ...p })
+
 // ── Sendable-PDF upload ───────────────────────────────────────────────────────
 // BoldSign accepts files well above what a serverless request body can carry, so
 // the browser puts the PDF in the deal's own document folder (which it already
@@ -207,3 +271,9 @@ export * from './boldsignPacketPanel.js'
 // should actually go to. Shared with api/boldsign.js, which imports the same
 // module directly (it is pure, like boldsignCaptions.js).
 export * from './boldsignSigners.js'
+// The packet module's rules: what a packet's state is called, which actions
+// that state allows (Fix packet vs. Send correction packet), the local-file
+// manifest, and the MLS selection/ordering helpers. Also shared with
+// api/boldsign.js, so one rulebook decides what the button says and what the
+// endpoint does.
+export * from './signaturePackets.js'

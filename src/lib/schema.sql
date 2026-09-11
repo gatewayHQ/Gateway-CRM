@@ -647,6 +647,49 @@ create table if not exists boldsign_documents (
   -- saved per-deal field layout hangs on (see deal_field_layouts); null for an
   -- ad-hoc PDF send.
   boldsign_template_id text,
+
+  -- ── Signature packet columns (migration 0046) ──────────────────────────────
+  -- The row above already IS the packet; these are the facts the packet module
+  -- acts on that a single send never had to record.
+  --
+  -- How it was composed: 'merged' (one envelope from several templates),
+  -- 'split' (one of several envelopes, one per form, same signers), or
+  -- 'single' (the ordinary one-template / one-PDF send).
+  mode              text,
+  -- Every template that went into this envelope, in send order. A superset of
+  -- boldsign_template_id, which stays because deal_field_layouts keys on it.
+  template_ids      text[],
+  -- The files BoldSign holds INSIDE this document, read from
+  -- /v1/document/properties: [{ id, name, pageCount }]. This is what makes
+  -- "download the disclosures on their own" answerable at all.
+  file_ids          jsonb default '[]'::jsonb,
+  -- Snapshotted, not joined through properties. An MLS upload is a record of
+  -- what was filed; a listing re-keyed under a new MLS number later must not
+  -- silently rewrite what an already-filed packet says it was.
+  mls_number        text,
+  -- The BoldSign document id this packet CORRECTS. A completed envelope is
+  -- immutable, so an acknowledgement + initials is a clone — a new envelope
+  -- that has to stay attached to the one it corrects. Null on an original.
+  correction_of_document_id text,
+  -- 'Combined' | 'Individually' — BoldSign's DocumentDownloadOption, fixed at
+  -- creation and never changeable afterwards. Decides whether the completed
+  -- download is one merged PDF or a zip with one file per form.
+  download_option   text,
+  -- Everything archived for this packet:
+  --   [{ kind: 'signed_pdf'|'audit'|'split_part'|'mls_bundle',
+  --      path, pages?, form_name }]
+  -- signed_storage_path / audit_storage_path above stay the canonical pointers
+  -- the download action resolves; this is the full manifest the MLS packager
+  -- picks from, including the per-form split parts those two have no room for.
+  local_files       jsonb default '[]'::jsonb,
+  -- Non-null while an async BoldSign file edit (Add/Update/Remove) is still
+  -- QUEUED. A packet with this set is not safe to send — the file change has
+  -- not landed — so the UI shows it pending instead of a success toast.
+  edit_pending_since timestamptz,
+  -- BoldSign's own status word, for DISPLAY only, never filtered on. `status`
+  -- stays the normalized forward-only lifecycle column every other query reads.
+  raw_status        text,
+
   created_at        timestamptz default now()
 );
 -- Status values written by the app (deliberately NOT a check constraint: an
@@ -697,6 +740,55 @@ create unique index if not exists idx_deal_field_layouts_key
   on deal_field_layouts(deal_id, template_id);
 
 alter table deal_field_layouts enable row level security;
+-- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SIGNATURE PACKET EVENTS  (the deal's signing timeline — migration 0046)
+--
+-- One row per BoldSign webhook delivery worth remembering, plus our own
+-- 'Edited' entries for a document changed through the edit API.
+--
+-- Why not `audit_log`: that records what an AGENT did. Why not
+-- `agent_notifications`: that says what an agent should look at, and is deleted
+-- when they clear it. Neither records "BoldSign told us Jane viewed it at
+-- 14:02" — which is the record a compliance question actually asks for. Why not
+-- `activities`: that table's CHECK constrains `type` to the five human activity
+-- kinds, and machine events do not belong in the call/note feed.
+--
+-- Append-only by convention. `dedupe_key` makes a webhook redelivery — which
+-- BoldSign performs on any non-2xx, and the completion handler invites by doing
+-- two downloads and two uploads — update one row instead of adding a duplicate
+-- to the timeline.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists signature_packet_events (
+  id          uuid primary key default uuid_generate_v4(),
+  deal_id     uuid references deals(id) on delete cascade,
+  -- `set null`, not cascade: the event happened even if the (unsigned)
+  -- document is later removed, and document_id still identifies it.
+  packet_id   uuid references boldsign_documents(id) on delete set null,
+  document_id text not null,
+  -- BoldSign's event name AS DELIVERED — Sent, Viewed, Signed, Completed,
+  -- Declined, Revoked, Expired — stored verbatim, not normalized: a timeline
+  -- that rewrites what it was told is not a timeline.
+  event       text not null,
+  -- The normalized lifecycle status this event implied, when it implied one.
+  status      text,
+  signer_name  text,
+  signer_email text,
+  -- When BoldSign says it happened, not when we processed it.
+  occurred_at timestamptz,
+  dedupe_key  text not null,
+  payload     jsonb default '{}'::jsonb,
+  created_at  timestamptz default now()
+);
+create unique index if not exists uq_signature_packet_events_dedupe
+  on signature_packet_events(dedupe_key);
+create index if not exists idx_signature_packet_events_deal
+  on signature_packet_events(deal_id, occurred_at desc);
+create index if not exists idx_signature_packet_events_doc
+  on signature_packet_events(document_id, occurred_at desc);
+
+alter table signature_packet_events enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -1309,6 +1401,14 @@ create unique index if not exists uq_boldsign_documents_document_id
 -- ordered by age.
 create index if not exists idx_boldsign_docs_awaiting on boldsign_documents(sent_at)
   where status in ('sent','delivered');
+-- Every correction of a packet, without scanning the deal (migration 0046).
+create index if not exists idx_boldsign_docs_correction_of
+  on boldsign_documents(correction_of_document_id)
+  where correction_of_document_id is not null;
+-- The "is any async file edit still settling?" sweep (migration 0046).
+create index if not exists idx_boldsign_docs_edit_pending
+  on boldsign_documents(edit_pending_since)
+  where edit_pending_since is not null;
 
 -- transaction_steps — deal checklist queries
 create index if not exists idx_txn_steps_deal  on transaction_steps(deal_id, sort_order);
@@ -2333,6 +2433,14 @@ create policy audit_log_scope on audit_log for all to authenticated
 -- deal_field_layouts — per-deal BoldSign field placement (deal-scoped child)
 drop policy if exists deal_field_layouts_deal_scope on deal_field_layouts;
 create policy deal_field_layouts_deal_scope on deal_field_layouts for all to authenticated
+  using      (app_is_admin() or deal_id in (select app_visible_deal_ids()))
+  with check (app_is_admin() or deal_id in (select app_visible_deal_ids()));
+
+-- signature_packet_events — the deal's signing timeline (deal-scoped child).
+-- Written by the webhook through the service key, which bypasses RLS; this
+-- policy is only what agents read it back through.
+drop policy if exists signature_packet_events_deal_scope on signature_packet_events;
+create policy signature_packet_events_deal_scope on signature_packet_events for all to authenticated
   using      (app_is_admin() or deal_id in (select app_visible_deal_ids()))
   with check (app_is_admin() or deal_id in (select app_visible_deal_ids()));
 

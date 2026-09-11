@@ -23,12 +23,20 @@
 // revoked. Revoking immediately after click() cancels the download in Safari.
 const REVOKE_MS = 60_000
 
-export function safePdfFilename(name, fallback = 'document.pdf') {
+/**
+ * Strip the characters no common filesystem accepts, including path separators —
+ * a document named "Listing 3/4 duplex" must not try to write into a directory.
+ * The extension is left exactly as given.
+ */
+export function safeFilename(name, fallback = 'document') {
   const base = String(name || '').trim()
   if (!base) return fallback
-  // Characters no common filesystem accepts, plus path separators — a document
-  // named "Listing 3/4 duplex" must not try to write into a directory.
   const clean = base.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-').replace(/\s+/g, ' ').trim()
+  return clean || fallback
+}
+
+export function safePdfFilename(name, fallback = 'document.pdf') {
+  const clean = safeFilename(name, '')
   if (!clean) return fallback
   return /\.pdf$/i.test(clean) ? clean : `${clean}.pdf`
 }
@@ -36,21 +44,30 @@ export function safePdfFilename(name, fallback = 'document.pdf') {
 /**
  * Download `url` as `filename`. Resolves { saved: true, bytes } once the download
  * has been handed to the browser; rejects with a message worth showing an agent.
+ *
+ * `label` is what an error calls the thing being saved and `rename` decides the
+ * final filename — because not everything saved from the CRM is a PDF. The MLS
+ * packager's "download separately" hands back a ZIP, and coercing that name to
+ * `.zip.pdf` produces a file the agent's machine refuses to open. See
+ * saveFileFromUrl below: the same code with the coercion removed.
  */
-export async function savePdfFromUrl(url, filename, { fetchImpl = fetch, doc = document, win = (typeof window !== 'undefined' ? window : undefined) } = {}) {
+async function download(url, filename, {
+  fetchImpl = fetch, doc = document, win = (typeof window !== 'undefined' ? window : undefined),
+  label = 'PDF', rename = safePdfFilename,
+} = {}) {
   if (!url) throw new Error('No document was returned to save')
 
   let res
   try {
     res = await fetchImpl(url)
   } catch (err) {
-    throw new Error(`Could not download the PDF: ${err.message}`)
+    throw new Error(`Could not download the ${label}: ${err.message}`)
   }
-  if (!res.ok) throw new Error(`Could not download the PDF (HTTP ${res.status})`)
+  if (!res.ok) throw new Error(`Could not download the ${label} (HTTP ${res.status})`)
   const blob = await res.blob()
-  if (!blob?.size) throw new Error('The generated PDF came back empty')
+  if (!blob?.size) throw new Error(`The generated ${label} came back empty`)
 
-  const name    = safePdfFilename(filename)
+  const name    = rename(filename)
   const objUrl  = (win?.URL || URL).createObjectURL(blob)
   const anchor  = doc.createElement('a')
   anchor.href     = objUrl
@@ -67,6 +84,19 @@ export async function savePdfFromUrl(url, filename, { fetchImpl = fetch, doc = d
 
   return { saved: true, bytes: blob.size, filename: name }
 }
+
+/** Save a PDF, forcing a `.pdf` extension onto whatever name it was given. */
+export const savePdfFromUrl = (url, filename, opts = {}) => download(url, filename, opts)
+
+/**
+ * Save any file, keeping the extension the server chose.
+ *
+ * The MLS packager produces a `.zip` as often as a `.pdf`, and which one it is
+ * depends on a radio button the agent pressed — so the caller cannot know, and
+ * the filename the server returns is the authority.
+ */
+export const saveFileFromUrl = (url, filename, opts = {}) =>
+  download(url, filename, { label: 'file', rename: (n) => safeFilename(n, 'download'), ...opts })
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PRINTING — hand the PDF to the browser's own viewer and let IT print.

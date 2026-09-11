@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { savePdfFromUrl, safePdfFilename, openPrintTab, showPdfInPrintTab, closePrintTab } from '../savePdf.js'
+import { savePdfFromUrl, saveFileFromUrl, safePdfFilename, safeFilename, openPrintTab, showPdfInPrintTab, closePrintTab } from '../savePdf.js'
 
 // Hand-rolled DOM stand-in rather than jsdom because this repo's suite runs in
 // plain Node — and because what matters here is the ORDER of operations
@@ -157,5 +157,49 @@ describe('closePrintTab', () => {
   it('is safe on a tab that was never opened', () => {
     expect(() => closePrintTab(null)).not.toThrow()
     expect(() => closePrintTab({ close: () => { throw new Error('gone') } })).not.toThrow()
+  })
+})
+
+// ── Saving something that is not a PDF ───────────────────────────────────────
+// The MLS packager's "download separately" hands back a ZIP. Coercing that name
+// to `.zip.pdf` produces a file the agent's machine refuses to open, which is
+// the bug this pair of helpers exists to keep apart.
+describe('saveFileFromUrl', () => {
+  const harness = () => {
+    const anchor = { click: () => { anchor.clicked = true }, remove: () => {}, style: {}, clicked: false }
+    return {
+      anchor,
+      doc: { createElement: () => anchor, body: { appendChild: () => {} } },
+      win: { URL: { createObjectURL: () => 'blob:x', revokeObjectURL: () => {} } },
+      fetchImpl: async () => ({ ok: true, blob: async () => ({ size: 1234 }) }),
+    }
+  }
+
+  it('keeps the extension the server chose', async () => {
+    const h = harness()
+    const out = await saveFileFromUrl('https://s/x', 'MLS-DM-99213-2026-09-11-3files.zip', h)
+    expect(out.filename).toBe('MLS-DM-99213-2026-09-11-3files.zip')
+    expect(h.anchor.download).toBe('MLS-DM-99213-2026-09-11-3files.zip')
+  })
+
+  it('does not add .pdf to a name that has no extension', async () => {
+    const h = harness()
+    expect((await saveFileFromUrl('https://s/x', 'packet', h)).filename).toBe('packet')
+  })
+
+  it('still strips path separators, so a name cannot write into a directory', () => {
+    expect(safeFilename('a/b/c.zip')).toBe('a-b-c.zip')
+    expect(safeFilename('')).toBe('document')
+  })
+
+  it('leaves the PDF helper coercing, as its callers rely on', () => {
+    expect(safePdfFilename('review copy')).toBe('review copy.pdf')
+    expect(safePdfFilename('already.pdf')).toBe('already.pdf')
+  })
+
+  it('names the thing it failed to download', async () => {
+    const h = harness()
+    h.fetchImpl = async () => ({ ok: false, status: 404 })
+    await expect(saveFileFromUrl('https://s/x', 'a.zip', h)).rejects.toThrow(/Could not download the file \(HTTP 404\)/)
   })
 })
