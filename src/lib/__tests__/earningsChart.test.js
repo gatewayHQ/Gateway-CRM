@@ -112,9 +112,23 @@ describe('describeYear — the sentence under the chart', () => {
     expect(describeYear(s)).toContain('Jun was the biggest month')
   })
 
-  it('admits what it could not place', () => {
+  it('admits what it could not place, and says what to do about it', () => {
     const s = monthlyEarnings([closed(1, 1000), open(null, 9975)], { now: NOW })
-    expect(describeYear(s)).toContain('no expected close date')
+    const line = describeYear(s)
+    expect(line).toContain('No date')
+    expect(line).toContain('set an expected close date')
+  })
+
+  it('still speaks when the whole projection is undated', () => {
+    // The real case that prompted this: every open deal missing a close date,
+    // so the months are empty and the chart would otherwise say "nothing yet"
+    // over a six-figure pipeline.
+    const s = monthlyEarnings([open(null, 107661)], { now: NOW })
+    expect(s.peak).toBe(0)
+    const line = describeYear(s)
+    expect(line).toContain('$107.7k projected')
+    expect(line).not.toContain('Nothing closed or projected')
+    expect(line).not.toMatch(/biggest month|not money in hand/)   // no month to name
   })
 
   it('says so plainly when there is nothing yet', () => {

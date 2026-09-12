@@ -120,17 +120,22 @@ export function shortMoney(n) {
  * dwarfs the rest — the honest answer to "why do my closed months look flat".
  */
 export function describeYear(summary) {
-  if (!summary || !summary.peak) return 'Nothing closed or projected for this year yet.'
+  if (!summary || (!summary.peak && !summary.unscheduled)) return 'Nothing closed or projected for this year yet.'
   const biggest = summary.months.reduce((best, m) =>
     (Math.max(m.earned, m.projected) > Math.max(best.earned, best.projected) ? m : best), summary.months[0])
   const isProjection = biggest.projected > biggest.earned
   const bits = [`${shortMoney(summary.earnedTotal)} earned`]
   if (summary.projectedTotal) bits.push(`${shortMoney(summary.projectedTotal)} projected`)
-  const tail = isProjection
-    ? `${biggest.label} is a projection, not money in hand.`
-    : `${biggest.label} was the biggest month.`
+  const tail = !summary.peak
+    ? ''
+    : isProjection
+      ? `${biggest.label} is a projection, not money in hand.`
+      : `${biggest.label} was the biggest month.`
+  // The undated pile is not a footnote — on a deal book where nobody sets an
+  // expected close date it IS the projection, and the chart's future months sit
+  // empty until somebody fixes that. So it says what to do about it.
   const stray = summary.unscheduled
-    ? ` ${shortMoney(summary.unscheduled)} of the projection has no expected close date, so it is not on the chart.`
+    ? ` ${shortMoney(summary.unscheduled)} sits under "No date" — set an expected close date on those deals and it moves into the months it lands in.`
     : ''
-  return `${bits.join(' · ')}. ${tail}${stray}`
+  return `${bits.join(' · ')}.${tail ? ` ${tail}` : ''}${stray}`
 }
