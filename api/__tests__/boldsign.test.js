@@ -1445,6 +1445,20 @@ describe('buildPrintablePdf — the document, plus a summary that cannot be subt
     expect((await PDFDocument.load(out)).getPageCount()).toBe(2)
   })
 
+  it('leaves no CRM footer on the paper an agent hands a client', async () => {
+    // The summary page used to end with "Printed from Gateway CRM for review. This
+    // copy is not a signed record." It sat at the bottom of the page a client sees
+    // across a kitchen table, so it is gone — and stays gone.
+    const out = await buildPrintablePdf({ pdfBytes: await sourcePdf(1), props, documentName: 'Iowa Listing' })
+    // Read back the words the PDF actually renders — the page content is
+    // compressed, so searching the raw bytes would pass whatever was written.
+    const { extractPdfWords } = await import('../_lib/pdfText.js')
+    const { words } = await extractPdfWords(new Uint8Array(out))
+    const text = words.map(w => w.text).join(' ')
+    expect(text).toContain('SIGNING SUMMARY')          // the page itself is still there
+    expect(text).not.toMatch(/Printed from Gateway CRM|not a signed record/)
+  })
+
   it('prints the rest of a value whose characters no standard font carries', async () => {
     const props = {
       status: 'Draft',
