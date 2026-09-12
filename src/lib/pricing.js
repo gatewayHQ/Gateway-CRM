@@ -230,6 +230,48 @@ export function mergeHistory(rows, legacy) {
 }
 
 /**
+ * The deal drawer's one-line price history, for the strip that replaced the
+ * Pricing History tab.
+ *
+ * The tab was a whole drawer tab for a log that is empty on most deals and, on
+ * a deal with no property linked, could only apologise. Price changes record
+ * themselves from either side (syncPriceChange), so what an agent actually
+ * needs at a glance is: has this moved, which way, when, and how many times.
+ *
+ * Returns null when there is nothing to say — one quiet line beats an empty
+ * panel, and an empty panel beats an empty tab.
+ *
+ * `entries` is oldest-first, as mergeHistory() returns them.
+ */
+export function summarizeHistory(entries = []) {
+  const list = entries.filter(Boolean)
+  if (!list.length) return null
+  const last  = list[list.length - 1]
+  const first = list[0]
+  // Only the changes count as changes: the first recorded price is where the
+  // listing started, not a move, and counting it would report "1 change" on a
+  // deal whose price has never been touched.
+  const changes = list.filter(e => e.previousPrice !== null && e.price !== null)
+  return {
+    entries: list.length,
+    changes: changes.length,
+    latest: last,
+    // Positive = came down, negative = went up, null = nothing to compare.
+    lastMove: last.reduction,
+    lastAt: last.at,
+    since: first.at,
+    // The bars the strip draws, oldest → newest, normalised 0–1 against the
+    // highest price the listing has carried.
+    points: (() => {
+      const prices = list.flatMap(e => [e.previousPrice, e.price]).filter(n => typeof n === 'number')
+      const top = Math.max(...prices, 0) || 1
+      const seq = [list[0].previousPrice ?? list[0].price, ...list.map(e => e.price)].filter(n => typeof n === 'number')
+      return seq.map(n => Math.max(0.08, n / top))
+    })(),
+  }
+}
+
+/**
  * The line an audit entry / toast uses: "$450,000 → $435,000".
  * Formatting of the numbers is the caller's (helpers.formatCurrency).
  */

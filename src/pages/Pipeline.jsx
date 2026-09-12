@@ -23,7 +23,7 @@ import {
 import { priceChanged } from '../lib/pricing.js'
 import { syncPriceChange } from '../lib/services/pricing.js'
 import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
-import { DealPricingHistoryTab } from '../components/PricingHistoryPanel.jsx'
+import { DealPriceLine } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
 import { packetEditUrl, packetAddInitials, packetCloneUrl, packetSync, packetChangeSigner, revokeDocument as apiRevokeDocument, packetState, canFixPacket, fixPacketBlockedReason, canSendCorrection, canRevoke, canChangeSigner, isInFlight, isEditPending, editPendingMs, documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, fileDocumentToDeal, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, emptyLabelsToRemove, partyNameGaps, describeFieldMapping, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
@@ -37,6 +37,7 @@ import SignerPicker, { buildCandidates, isValidEmail } from '../components/Signe
 import { savePdfFromUrl, openPrintTab, showPdfInPrintTab, closePrintTab } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, MenuButton, pushToast } from '../components/UI.jsx'
 import { groupPackets, summaryLine, nextStep, showsStatusChip, daysOut as packetDaysOut, OVERDUE_DAYS } from '../lib/services/signaturesView.js'
+import { groupDocuments, documentsSummary, assignableKinds, kindById } from '../lib/services/documentKinds.js'
 import MlsPackModal from '../components/MlsPackModal.jsx'
 import SplitDocumentModal from '../components/SplitDocumentModal.jsx'
 import MergeDocumentsModal from '../components/MergeDocumentsModal.jsx'
@@ -795,13 +796,23 @@ function DocumentsTab({ deal }) {
   const [split, setSplit]         = useState(null)
   const [merge, setMerge]         = useState(null)
   const [preparing, setPreparing] = useState('')   // which row is fetching its bytes
+  // WHICH PILE EACH FILE IS IN, where an agent has said so by hand.
+  // Kept in the deal's own comp_data next to portal_docs — the same jsonb the
+  // client-portal sharing list already lives in — so correcting a guess needs
+  // no migration and travels with the deal.
+  const [docKinds, setDocKinds] = useState({})
+  const [docGroupOpen, setDocGroupOpen] = useState({})
 
   React.useEffect(() => {
     if (!deal?.id) return
     loadFiles()
     // Load which docs are shared with the client portal (fresh from DB)
     supabase.from('deals').select('comp_data').eq('id', deal.id).single()
-      .then(({ data }) => setSharedDocs(Array.isArray(data?.comp_data?.portal_docs) ? data.comp_data.portal_docs : []))
+      .then(({ data }) => {
+        setSharedDocs(Array.isArray(data?.comp_data?.portal_docs) ? data.comp_data.portal_docs : [])
+        const kinds = data?.comp_data?.doc_kinds
+        setDocKinds(kinds && typeof kinds === 'object' ? kinds : {})
+      })
   }, [deal?.id])
 
   const toggleShare = async (fileName) => {
@@ -856,6 +867,23 @@ function DocumentsTab({ deal }) {
     pushToast('File deleted', 'info')
     setFiles(p => p.filter(f => f.name !== fileName))
   }
+
+  // ─── Filing ────────────────────────────────────────────────────────────────
+  // Correcting the pile a file was guessed into. Written the same way the
+  // client-portal list is: re-read comp_data immediately before merging, so a
+  // key date or a deal term saved on another tab is not clobbered by this.
+  const fileAs = async (fileName, kindId) => {
+    const next = { ...docKinds, [fileName]: kindId }
+    setDocKinds(next)                                   // the row moves at once
+    const { data } = await supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+    const comp_data = { ...(data?.comp_data || {}), doc_kinds: next }
+    const { error } = await supabase.from('deals').update({ comp_data }).eq('id', deal.id)
+    if (error) { pushToast(`Could not file that document: ${error.message}`, 'error'); return }
+    pushToast(`Filed under ${kindById(kindId).label}.`, 'info')
+  }
+
+  const docGroups  = groupDocuments(files, docKinds)
+  const docSummary = documentsSummary(docGroups)
 
   // ─── Split & merge ─────────────────────────────────────────────────────────
   // Both run in the browser on bytes fetched with this agent's own signed URL
@@ -1006,70 +1034,127 @@ with check (bucket_id = 'deal-documents');`}
         )}
       </div>
 
-      {/* File list */}
+      {/* THE FILING CABINET, FILED.
+          One flat list of whatever each file was called on arrival answered
+          "where's the agency agreement?" by making an agent read eleven
+          filenames. Each file now sits in a named pile — agreements, offers,
+          disclosures, reports, closing, audit trails — with the upload
+          timestamp stripped off its name and its actions quiet until wanted.
+
+          The pile is a GUESS from the filename wherever the CRM did not write
+          the file itself, so every row carries "File as…" to correct it, and a
+          correction is remembered on the deal. Anything unplaceable goes to
+          Unfiled rather than into a wrong pile quietly: a misfiled disclosure
+          is worse than an unfiled one, because nobody searches the pile they
+          believe is complete. */}
       {files.length === 0 ? (
         <div style={{ textAlign: 'center', color: 'var(--gw-mist)', fontSize: 13, padding: '16px 0' }}>
           No documents yet. Upload contracts, inspections, or any deal files.
         </div>
       ) : (
-        files.map(file => {
-          const ext = file.name.split('.').pop().toUpperCase()
-          const displayName = file.name.replace(/^\d+-/, '')
-          return (
-            <div key={file.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', marginBottom: 6, background: '#fff' }}>
-              <div style={{ width: 34, height: 34, borderRadius: 6, background: 'var(--gw-sky)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: 9, fontWeight: 700, color: 'var(--gw-azure)', letterSpacing: '0.03em' }}>
-                {ext.slice(0, 4)}
+        <>
+          {docSummary && (
+            <div style={{ fontSize: 11.5, color: 'var(--gw-mist)', marginBottom: 8 }}>{docSummary}</div>
+          )}
+          {docGroups.map(group => {
+            const open = docGroupOpen[group.id] ?? !group.closed
+            const tone = KIND_TONE[group.tone] || 'var(--gw-border)'
+            return (
+              <div key={group.id} style={{ marginBottom: 14 }}>
+                <button
+                  type="button"
+                  onClick={() => setDocGroupOpen(g => ({ ...g, [group.id]: !open }))}
+                  aria-expanded={open}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left',
+                    background: 'transparent', border: 0, borderBottom: '1px solid var(--gw-border)',
+                    padding: '4px 2px 6px', marginBottom: 6, cursor: 'pointer', fontFamily: 'var(--font-body)',
+                  }}
+                >
+                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: tone, flexShrink: 0 }} />
+                  <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--gw-ink)' }}>
+                    {group.label}
+                  </span>
+                  <span style={{ fontSize: 11, color: 'var(--gw-mist)' }}>{group.files.length}</span>
+                  <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--gw-mist)' }}>{open ? '\u25be' : '\u25b8'}</span>
+                </button>
+
+                {open && group.hint && (
+                  <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginBottom: 6, lineHeight: 1.5 }}>{group.hint}</div>
+                )}
+
+                {open && group.files.map(file => {
+                  const ext    = file.name.split('.').pop().toUpperCase()
+                  const shared = sharedDocs.includes(file.name)
+                  return (
+                    <div key={file.name} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', marginBottom: 6, background: '#fff' }}>
+                      <span style={{ width: 3, alignSelf: 'stretch', borderRadius: 2, background: tone, flexShrink: 0 }} />
+                      <div style={{
+                        width: 30, height: 30, borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        flexShrink: 0, fontSize: 8.5, fontWeight: 700, letterSpacing: '0.03em',
+                        background: file.signed ? 'var(--gw-green-light)' : file.audit ? 'var(--gw-bone)' : 'var(--gw-sky)',
+                        color:      file.signed ? 'var(--gw-green)'       : file.audit ? 'var(--gw-mist)' : 'var(--gw-azure)',
+                      }}>
+                        {ext.slice(0, 4)}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                          <span style={{ fontSize: 12.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={file.name}>
+                            {file.label}
+                          </span>
+                          {file.signed && (
+                            <span style={{ fontSize: 9, fontWeight: 700, background: 'var(--gw-green-light)', color: 'var(--gw-green)', padding: '1px 6px', borderRadius: 8, flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em' }}>signed</span>
+                          )}
+                          {shared && (
+                            <span style={{ fontSize: 9, fontWeight: 700, background: 'var(--gw-sky)', color: 'var(--gw-azure)', padding: '1px 6px', borderRadius: 8, flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em' }}>client</span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 10.5, color: 'var(--gw-mist)' }}>
+                          {formatBytes(file.metadata?.size)}
+                          {file.created_at && <> · {new Date(file.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</>}
+                          {!file.confirmed && file.kind !== 'unfiled' && <> · filed by name</>}
+                        </div>
+                      </div>
+
+                      {/* The one action this file is for. Splitting a scan into
+                          its forms is the common one; everything else is behind
+                          the menu, the same way the Signatures rows work. */}
+                      {isPdf(file.name) && (
+                        <button
+                          className="btn btn--ghost btn--sm" style={{ fontSize: 11, flexShrink: 0 }}
+                          title="Cut this PDF into separate documents by page range"
+                          disabled={Boolean(preparing)} onClick={() => openSplit(file)}
+                        >
+                          {preparing === file.name ? 'Opening…' : 'Split'}
+                        </button>
+                      )}
+                      <MenuButton
+                        title="Everything else for this document"
+                        items={[
+                          { label: 'Download', onClick: () => download(file.name) },
+                          isPdf(file.name) && { label: 'Merge with…', title: 'Join this PDF with others on this deal into one document', onClick: () => openMerge(file), disabled: Boolean(preparing) },
+                          { label: shared ? 'Stop sharing with client' : 'Share with client portal', onClick: () => toggleShare(file.name) },
+                          { divider: true },
+                          // "File as…" on every row, because the pile is a guess
+                          // wherever the CRM did not write the file itself — and a
+                          // guess with no way to correct it is just a wrong answer.
+                          ...assignableKinds().map(k => ({
+                            label: `${file.kind === k.id ? '✓ ' : ''}File as ${k.label}`,
+                            onClick: () => fileAs(file.name, k.id),
+                            disabled: file.audit,
+                            title: file.audit ? 'An audit trail files itself — it is compliance evidence, not paperwork' : undefined,
+                          })),
+                          { divider: true },
+                          { label: 'Delete', danger: true, onClick: () => remove(file.name) },
+                        ]}
+                      />
+                    </div>
+                  )
+                })}
               </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={displayName}>{displayName}</span>
-                  {sharedDocs.includes(file.name) && (
-                    <span style={{ fontSize: 9, fontWeight: 700, background: 'var(--gw-green-light)', color: 'var(--gw-green)', padding: '1px 6px', borderRadius: 8, flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Client</span>
-                  )}
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>
-                  {formatBytes(file.metadata?.size)}
-                  {file.created_at && <> · {new Date(file.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</>}
-                </div>
-              </div>
-              <button
-                className="btn btn--ghost btn--icon btn--sm"
-                title={sharedDocs.includes(file.name) ? 'Shared with client — click to unshare' : 'Share with client portal'}
-                onClick={() => toggleShare(file.name)}
-                style={{ color: sharedDocs.includes(file.name) ? 'var(--gw-green)' : undefined }}
-              >
-                <Icon name="eye" size={13} />
-              </button>
-              {/* Split and Merge only on PDFs, because that is the only thing
-                  either operation can do. Shown as words rather than icons: a
-                  mystery glyph on a filing cabinet gets avoided, not pressed. */}
-              {isPdf(file.name) && (
-                <>
-                  <button
-                    className="btn btn--ghost btn--sm" style={{ fontSize: 11 }}
-                    title="Cut this PDF into separate documents by page range"
-                    disabled={Boolean(preparing)} onClick={() => openSplit(file)}
-                  >
-                    {preparing === file.name ? 'Opening…' : 'Split'}
-                  </button>
-                  <button
-                    className="btn btn--ghost btn--sm" style={{ fontSize: 11 }}
-                    title="Join this PDF with others on this deal into one document"
-                    disabled={Boolean(preparing)} onClick={() => openMerge(file)}
-                  >
-                    Merge
-                  </button>
-                </>
-              )}
-              <button className="btn btn--ghost btn--icon btn--sm" title="Download" onClick={() => download(file.name)}>
-                <Icon name="download" size={13} />
-              </button>
-              <button className="btn btn--ghost btn--icon btn--sm" title="Delete" onClick={() => remove(file.name)}>
-                <Icon name="trash" size={13} />
-              </button>
-            </div>
-          )
-        })
+            )
+          })}
+        </>
       )}
 
       {split && (
@@ -1107,6 +1192,26 @@ with check (bucket_id = 'deal-documents');`}
 // left edge of a row says which group it is in even after the header scrolls
 // off — and so the status is carried by position and colour instead of being
 // spelled out three times per card.
+// A pile's colour on the Documents tab — the dot on its header and the rail
+// down each of its rows, so a file says which pile it is in even once the
+// header has scrolled away.
+const KIND_TONE = {
+  purple: 'var(--gw-purple)',
+  amber:  'var(--gw-amber)',
+  azure:  'var(--gw-azure)',
+  green:  'var(--gw-green)',
+  gold:   'var(--gw-gold)',
+  mist:   'var(--gw-border)',
+}
+
+// The deal drawer's two widths. 860 is the working default — wide enough for
+// all seven tabs and a two-column form; the wide one takes most of a laptop
+// screen for a heavy editing session. Both are capped by the Drawer's own
+// maxWidth so neither can run off a small screen.
+const DRAWER_WIDTH = 860
+const DRAWER_WIDE  = 1320
+const DRAWER_WIDE_KEY = 'gw.dealDrawer.wide'
+
 const GROUP_TONE = {
   amber: 'var(--gw-amber)',
   azure: 'var(--gw-azure)',
@@ -3520,6 +3625,9 @@ function DealTermsTab({ deal }) {
   const [saving, setSaving] = React.useState(false)
   const [dirty,  setDirty]  = React.useState(false)
   const [loaded, setLoaded] = React.useState(false)
+  // Which groups the agent has opened or closed by hand. Absent = the group
+  // decides for itself (open while it still has blanks).
+  const [openGroups, setOpenGroups] = React.useState({})
 
   // Read the deal's own comp_data fresh rather than trusting the row the board
   // handed down — another tab (or another session) may have written since.
@@ -3572,10 +3680,14 @@ function DealTermsTab({ deal }) {
   const renderTerm = (t) => {
     const hint = derivedTermHint(t.key, deal)
     return (
-      <div key={t.key} style={{ marginBottom:10 }}>
-        <label className="form-label" style={{ display:'flex', alignItems:'baseline', gap:6 }}>
+      <div key={t.key} className="form-group" style={{ marginBottom:0 }}>
+        {/* The explanation moves onto the label rather than sitting under every
+            box. Twenty-four fields with two lines of help each is why this tab
+            read as a wall; the help is still there for the agent who wants it. */}
+        <label className="form-label" style={{ display:'flex', alignItems:'baseline', gap:6 }} title={t.help || undefined}>
           <span>{t.label}</span>
           {t.unit && <span style={{ fontWeight:400, fontSize:11, color:'var(--gw-mist)' }}>({t.unit})</span>}
+          {t.help && <span style={{ fontWeight:400, fontSize:10, color:'var(--gw-mist)', cursor:'help' }} aria-hidden="true">ⓘ</span>}
         </label>
         {t.type === 'select'
           ? (
@@ -3604,7 +3716,6 @@ function DealTermsTab({ deal }) {
               onBlur={() => normalizeOnBlur(t.key)}
             />
           )}
-        {t.help && <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:3, lineHeight:1.5 }}>{t.help}</div>}
       </div>
     )
   }
@@ -3615,6 +3726,13 @@ function DealTermsTab({ deal }) {
         <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, lineHeight:1.6, marginBottom:16 }}>
           <strong>Fill these in once.</strong> Every agreement you send for this deal fills itself in from here — earnest
           money, the title company, the lender, the deadlines. {total > 0 && <><strong>{filled} of {total}</strong> filled.</>}
+          {total > 0 && (
+            <div style={{ height:4, borderRadius:2, background:'var(--gw-border)', overflow:'hidden', margin:'7px 0 2px' }}
+                 role="progressbar" aria-valuenow={filled} aria-valuemin={0} aria-valuemax={total}
+                 aria-label={`${filled} of ${total} deal terms filled`}>
+              <span style={{ display:'block', height:'100%', width:`${Math.round((filled / total) * 100)}%`, background:'var(--gw-gold)' }} />
+            </div>
+          )}
           <div style={{ color:'var(--gw-mist)', marginTop:4 }}>
             Only the terms that apply to this deal are shown. Anything left blank simply prints blank on the form,
             where you can still fill it in by hand before sending.
@@ -3630,15 +3748,52 @@ function DealTermsTab({ deal }) {
           </div>
         )}
 
-        {loaded && groups.map(g => (
-          <div key={g.key} style={{ marginBottom:20 }}>
-            <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.05em', color:'var(--gw-mist)', marginBottom:2 }}>
-              {g.label}
+        {/* ONE SECTION PER GROUP, AND A FINISHED ONE CLOSES ITSELF.
+            The tab used to render every applicable term — up to 24 of them —
+            in one column at one volume, so "2 of 15 filled" was true and
+            useless: it never said WHICH 13. Each group now carries its own
+            count and a dot, and a group with nothing left to fill arrives
+            collapsed, so the tab opens on exactly the work that is left. */}
+        {loaded && groups.map(g => {
+          const done  = g.terms.filter(t => String(values[t.key] ?? '').trim() !== '').length
+          const whole = done === g.terms.length
+          const open  = openGroups[g.key] ?? !whole
+          return (
+            <div key={g.key} style={{ marginBottom:14 }}>
+              <button
+                type="button"
+                onClick={() => setOpenGroups(o => ({ ...o, [g.key]: !open }))}
+                aria-expanded={open}
+                style={{
+                  display:'flex', alignItems:'center', gap:8, width:'100%', textAlign:'left',
+                  background:'transparent', border:0, borderBottom:'1px solid var(--gw-border)',
+                  padding:'4px 2px 6px', marginBottom:8, cursor:'pointer', fontFamily:'var(--font-body)',
+                }}
+              >
+                <span style={{
+                  width:7, height:7, borderRadius:'50%', flexShrink:0,
+                  background: whole ? 'var(--gw-green)' : done ? 'var(--gw-amber)' : 'var(--gw-border)',
+                }} />
+                <span style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.06em', color:'var(--gw-ink)' }}>
+                  {g.label}
+                </span>
+                <span style={{ fontSize:11, color:'var(--gw-mist)' }}>{done} of {g.terms.length}</span>
+                <span style={{ marginLeft:'auto', fontSize:10, color:'var(--gw-mist)' }}>{open ? '\u25be' : '\u25b8'}</span>
+              </button>
+              {open && (
+                <>
+                  {g.help && <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:8, lineHeight:1.5 }}>{g.help}</div>}
+                  {/* Two-up wherever the drawer is wide enough for it — the
+                      width this tab gained is spent here rather than on longer
+                      lines of the same single column. */}
+                  <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(210px, 1fr))', gap:12 }}>
+                    {g.terms.map(renderTerm)}
+                  </div>
+                </>
+              )}
             </div>
-            {g.help && <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:8, lineHeight:1.5 }}>{g.help}</div>}
-            {g.terms.map(renderTerm)}
-          </div>
-        ))}
+          )
+        })}
       </div>
       <div className="drawer__foot">
         <button className="btn btn--primary" onClick={save} disabled={saving || !dirty || !loaded}>
@@ -5781,6 +5936,23 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
   const [tab, setTab]       = useState(initialTab)
+  // HOW WIDE THE DRAWER OPENS.
+  //
+  // It used to be 500px, which could not fit its own tab strip — the tabs
+  // scrolled sideways — and forced every form inside into one narrow column.
+  // 860 fits all seven tabs on a laptop and lets the .form-row grids below
+  // actually be two columns, while still leaving the board visible behind it.
+  //
+  // The wider setting is for a long editing session (Deal Terms, Documents) and
+  // is REMEMBERED per browser rather than per deal: it is a working preference,
+  // like a window size, not a property of the deal being looked at. On a phone
+  // both are overridden by the full-height sheet in app.css.
+  const [expanded, setExpanded] = useState(() => {
+    try { return localStorage.getItem(DRAWER_WIDE_KEY) === '1' } catch { return false }
+  })
+  React.useEffect(() => {
+    try { localStorage.setItem(DRAWER_WIDE_KEY, expanded ? '1' : '0') } catch { /* private window: the session keeps it, the next one doesn't */ }
+  }, [expanded])
   // Stage picker reads the agent's own column names, so the drawer and the
   // board they dragged the card from agree.
   const stageLabels         = useStageLabels()
@@ -6138,11 +6310,29 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const isExisting = !!deal?.id
 
   return (
-    <Drawer open={open} onClose={onClose} title={deal?.id ? (form.title || 'Edit Deal') : 'Add Deal'} width={500}>
-      {/* Tab bar — only for existing deals */}
+    <Drawer
+      open={open} onClose={onClose}
+      title={deal?.id ? (form.title || 'Edit Deal') : 'Add Deal'}
+      width={expanded ? DRAWER_WIDE : DRAWER_WIDTH}
+      headerExtra={isExisting ? (
+        <button
+          type="button" className="btn btn--ghost btn--icon btn--sm"
+          onClick={() => setExpanded(e => !e)}
+          title={expanded ? 'Narrow the drawer — the board comes back into view' : 'Widen the drawer for a longer editing session'}
+          aria-label={expanded ? 'Narrow this drawer' : 'Widen this drawer'}
+          style={{ fontSize:14, lineHeight:1, color:'var(--gw-mist)' }}
+        >
+          {expanded ? '⇥' : '⇤'}
+        </button>
+      ) : null}
+    >
+      {/* Tab bar — only for existing deals. Pricing History is not here on
+          purpose: price changes record themselves (syncPriceChange, below), so
+          the history is a read-only log and now lives under the number it
+          describes on the Details tab, instead of costing a whole tab. */}
       {isExisting && (
         <div className="drawer-tabs">
-          {[['details','Details'],['terms','Deal Terms'],['dates','Key Dates'],['pricing','Pricing History'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
+          {[['details','Details'],['terms','Deal Terms'],['dates','Key Dates'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
             <button key={id} className={`drawer-tab${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}>
               {label}
             </button>
@@ -6222,9 +6412,13 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
                     agent saves, rather than letting the two drift silently. */}
                 {linkedProperty && priceChanged(linkedProperty.list_price, form.value) && (
                   <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>
-                    Listing price is {linkedProperty.list_price ? formatCurrency(linkedProperty.list_price) : 'not set'} — saving updates the property and logs the change to Pricing History.
+                    Listing price is {linkedProperty.list_price ? formatCurrency(linkedProperty.list_price) : 'not set'} — saving updates the property and logs the change.
                   </div>
                 )}
+                {/* The history of this number, under the number. This replaced
+                    the Pricing History tab: the log records itself, so it needs
+                    to be READ here, not worked in somewhere else. */}
+                {isExisting && <DealPriceLine deal={deal} property={linkedProperty} />}
               </div>
               <div className="form-group"><label className="form-label">Probability %</label><input className="form-control" type="number" min="0" max="100" value={form.probability||0} onChange={e=>set('probability',e.target.value)} /></div>
             </div>
@@ -6415,13 +6609,6 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       {/* Pricing History tab — the LINKED PROPERTY's price log, which is the
           same log the property drawer's own tab shows. The price belongs to the
           building, so a reduction made on either surface appears on both. */}
-      {tab === 'pricing' && isExisting && (
-        <DealPricingHistoryTab
-          deal={deal}
-          property={form.property_id ? (properties || []).find(p => p.id === form.property_id) : null}
-        />
-      )}
-
       {/* Checklist tab */}
       {tab === 'checklist' && isExisting && (
         <ChecklistTab deal={deal} />

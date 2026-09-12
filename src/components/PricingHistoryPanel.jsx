@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import { formatCurrency } from '../lib/helpers.js'
+import { summarizeHistory } from '../lib/pricing.js'
 import { loadPricingHistory, loadDealPricingHistory } from '../lib/services/pricing.js'
+import { Modal, Icon } from './UI.jsx'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pricing History — the same panel on a property and on a deal.
@@ -125,21 +127,95 @@ export function PropertyPricingHistoryTab({ property, refreshKey }) {
  * the building, so a reduction a colleague made on the listing shows up here
  * too, and a change made here shows up there.
  */
-export function DealPricingHistoryTab({ deal, property, refreshKey }) {
+// ─── THE PRICE LINE ON THE DETAILS TAB ───────────────────────────────────────
+// What used to be the Pricing History TAB.
+//
+// A price change records itself from either side — edit Sale / Deal Value on a
+// deal or List price on a listing and syncPriceChange() writes the history row,
+// pushes the number to the property and reprices its other open deals. So this
+// was never a screen anyone worked in; it was a read-only log, empty on most
+// deals, and on a deal with no property linked it could only apologise. That is
+// a whole tab of a 7-tab drawer.
+//
+// It now sits directly under the number it is the history of: the shape of the
+// moves, the last one in words, and a way into the full log. With nothing
+// recorded it is one quiet line, not an empty panel — and the no-property case
+// becomes an invitation to link one rather than an apology for not having.
+export function DealPriceLine({ deal, property, refreshKey }) {
+  const [open, setOpen] = useState(false)
   const { entries, loading, tableReady } = usePricingHistory(
     () => loadDealPricingHistory({ deal, property }),
     [deal?.id, deal?.property_id, refreshKey, JSON.stringify(property?.price_history || [])],
   )
+  const summary = summarizeHistory(entries)
+
+  if (loading) return null
+
   return (
-    <>
-      {!deal?.property_id && (
-        <div style={{ padding:'12px 16px 0', fontSize:11.5, color:'var(--gw-mist)' }}>
-          No property linked — link one on the Details tab and this deal's price changes join the listing's history.
+    <div style={{ marginTop: 6 }}>
+      {summary ? (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12, padding: '8px 11px',
+          border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', background: 'var(--gw-bone)',
+        }}>
+          {/* The shape of the moves. Deliberately not a chart with axes: it
+              answers "has this been cut, and how hard" at a glance, and the
+              numbers themselves are one click away. */}
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 24, width: 76, flexShrink: 0 }}
+               aria-hidden="true">
+            {summary.points.slice(-8).map((n, i) => (
+              <span key={i} style={{ flex: 1, height: `${Math.round(n * 100)}%`, background: 'var(--gw-gold)', borderRadius: '2px 2px 0 0' }} />
+            ))}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--gw-ink)' }}>
+              {summary.lastMove === null
+                ? <>Listed at {formatCurrency(summary.latest.price)}</>
+                : summary.lastMove > 0
+                  ? <><span style={{ color: 'var(--gw-red)' }}>↓ {formatCurrency(Math.abs(summary.lastMove))}</span> on {dateLabel(summary.lastAt)}</>
+                  : <><span style={{ color: 'var(--gw-green)' }}>↑ {formatCurrency(Math.abs(summary.lastMove))}</span> on {dateLabel(summary.lastAt)}</>}
+              {summary.changes > 0 && (
+                <span style={{ color: 'var(--gw-mist)', fontWeight: 400 }}>
+                  {' · '}{summary.changes} change{summary.changes === 1 ? '' : 's'} since {dateLabel(summary.since)}
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: 10.5, color: 'var(--gw-mist)' }}>
+              Recorded automatically whenever this value or the listing's price is saved.
+            </div>
+          </div>
+          <button type="button" className="btn btn--ghost btn--sm" style={{ fontSize: 11, flexShrink: 0 }} onClick={() => setOpen(true)}>
+            All changes
+          </button>
+        </div>
+      ) : (
+        <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>
+          No price changes yet — they record themselves whenever this value or the listing's price is saved.
         </div>
       )}
-      <PricingHistoryPanel entries={entries} loading={loading} tableReady={tableReady}
-        emptyHint="Changes are tracked automatically when you update the Sale / Deal Value and save — on the deal or on the listing." />
-    </>
+
+      {!deal?.property_id && (
+        <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 5 }}>
+          No property linked, so these changes stand alone. Link one below and they join the listing's history.
+        </div>
+      )}
+
+      {open && (
+        <Modal open={true} onClose={() => setOpen(false)} width={560}>
+          <div className="modal__head">
+            <div>
+              <div className="eyebrow-label">{deal?.title || 'This deal'}</div>
+              <h3 style={{ margin: 0, fontSize: 18, fontFamily: 'var(--font-display)' }}>Price history</h3>
+            </div>
+            <button className="drawer__close" onClick={() => setOpen(false)}><Icon name="x" size={18} /></button>
+          </div>
+          <div className="modal__body" style={{ padding: 0 }}>
+            <PricingHistoryPanel entries={entries} loading={false} tableReady={tableReady}
+              emptyHint="Changes are tracked automatically when you update the Sale / Deal Value and save — on the deal or on the listing." />
+          </div>
+        </Modal>
+      )}
+    </div>
   )
 }
 

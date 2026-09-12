@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  normalizePrice, priceChanged, dealsToRepriceFor, planPriceSync,
+  normalizePrice, priceChanged, dealsToRepriceFor, planPriceSync, summarizeHistory, normalizeHistory,
   normalizeEntry, normalizeHistory, mergeHistory, describeChange,
 } from '../pricing.js'
 
@@ -224,5 +224,54 @@ describe('describeChange', () => {
     expect(describeChange(normalizeEntry({ price: 500000, previous_price: null }), fmt))
       .toBe('Price set to $500,000')
     expect(describeChange(null)).toBe('')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The one-line history that replaced the Pricing History tab. It sits under the
+// Sale / Deal Value on the Details tab, so it has to be right at a glance and
+// silent when there is nothing to say.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('summarizeHistory — the price line on the Details tab', () => {
+  const history = (rows) => normalizeHistory(rows)
+
+  it('reports the last move, its direction, and how many there have been', () => {
+    const s = summarizeHistory(history([
+      { price: 130000, previous_price: null,   created_at: '2026-06-02' },
+      { price: 125000, previous_price: 130000, created_at: '2026-07-10' },
+      { price: 119996, previous_price: 125000, created_at: '2026-08-14' },
+    ]))
+    expect(s.lastMove).toBe(5004)          // positive = the price came down
+    expect(s.changes).toBe(2)              // the initial price is not a change
+    expect(s.lastAt).toBe('2026-08-14')
+    expect(s.since).toBe('2026-06-02')
+  })
+
+  it('reads an increase as a negative move rather than pretending it is a cut', () => {
+    const s = summarizeHistory(history([
+      { price: 400000, previous_price: null,   created_at: '2026-01-01' },
+      { price: 425000, previous_price: 400000, created_at: '2026-02-01' },
+    ]))
+    expect(s.lastMove).toBe(-25000)
+  })
+
+  it('counts a listing that has never moved as no changes at all', () => {
+    const s = summarizeHistory(history([{ price: 500000, previous_price: null, created_at: '2026-03-01' }]))
+    expect(s.changes).toBe(0)
+    expect(s.lastMove).toBeNull()          // renders as "Listed at $500,000"
+  })
+
+  it('says nothing when there is nothing to say', () => {
+    expect(summarizeHistory([])).toBeNull()
+    expect(summarizeHistory()).toBeNull()
+  })
+
+  it('draws bars that stay inside the box and never vanish', () => {
+    const s = summarizeHistory(history([
+      { price: 900000, previous_price: null,   created_at: '2026-01-01' },
+      { price: 100,    previous_price: 900000, created_at: '2026-02-01' },
+    ]))
+    expect(Math.max(...s.points)).toBeLessThanOrEqual(1)
+    expect(Math.min(...s.points)).toBeGreaterThan(0)   // a huge cut still draws
   })
 })
