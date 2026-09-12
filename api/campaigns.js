@@ -50,6 +50,7 @@
 import { createClient } from '@supabase/supabase-js'
 import crypto from 'crypto'
 import { log } from './_lib/observability.js'
+import { readUnsubscribeToken, isContactUnsubscribeToken } from './_lib/unsubscribeToken.js'
 
 // ─── Supabase client (lazy singleton — avoids cold-start env-var crashes) ───
 let _supabase = null
@@ -1601,6 +1602,42 @@ export default async function handler(req, res) {
     if (action === 'unsubscribe') {
       const token = (req.body?.token || req.query?.token || '').trim()
       if (!token) return json(res, 400, { error: 'token required' })
+
+      // Two kinds of opt-out arrive on this one path. A deal-announcement
+      // recipient carries a signed contact token; a mailing-list subscriber
+      // carries the bare row token below. The signature is the tell — a hex
+      // subscriber token can never contain a dot.
+      if (isContactUnsubscribeToken(token)) {
+        const claim = readUnsubscribeToken(token)
+        if (!claim) return json(res, 404, { error: 'This unsubscribe link is no longer valid.' })
+        const { data: contact, error: optErr } = await db()
+          .from('contacts')
+          .update({ email_opt_out: true })
+          .eq('id', claim.contactId)
+          .select('id, email, assigned_agent_id')
+          .maybeSingle()
+        if (optErr) throw optErr
+        // A link for a contact that has since been deleted is spent, not broken
+        // — and saying so beats a 404 the recipient reads as "it didn't work".
+        if (!contact) return json(res, 200, { ok: true, scope: 'contact', email: '' })
+
+        // Recorded on the contact's timeline, so the agent finds out from the
+        // CRM rather than from the next person who asks why they were emailed.
+        try {
+          await db().from('activities').insert([{
+            contact_id: contact.id,
+            agent_id:   contact.assigned_agent_id || null,
+            type:       'note',
+            body:       'Unsubscribed from marketing email using the link in an announcement.',
+          }])
+        } catch (err) {
+          // The opt-out itself is already saved; failing to log it must never
+          // turn a successful unsubscribe into an error the recipient retries.
+          log.warn('unsubscribe.activity_failed', { error: err.message })
+        }
+        return json(res, 200, { ok: true, scope: 'contact', email: contact.email || '' })
+      }
+
       const { data, error } = await db()
         .from('mailing_subscribers')
         .update({ status: 'unsubscribed', unsubscribed_at: new Date().toISOString() })
@@ -1609,7 +1646,7 @@ export default async function handler(req, res) {
         .maybeSingle()
       if (error) throw error
       if (!data) return json(res, 404, { error: 'This unsubscribe link is no longer valid.' })
-      return json(res, 200, { ok: true, email: data.email })
+      return json(res, 200, { ok: true, scope: 'mailing', email: data.email })
     }
 
     // ── Deal Machine neighbor lookup ────────────────────────────────────────

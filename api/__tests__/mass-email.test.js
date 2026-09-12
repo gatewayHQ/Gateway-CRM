@@ -35,6 +35,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 // reads it at import time.
 process.env.MASS_EMAIL_INTERVAL_MS = '0'
 
+// Unsubscribe links are signed server-side; without a secret the module refuses
+// to send at all (which is itself asserted below). Set before the import so the
+// real minting path runs rather than a stub.
+process.env.UNSUBSCRIBE_SIGNING_SECRET = 'test-signing-secret'
+
 const sendGraphMail = vi.fn(async () => {})
 vi.mock('../_lib/msGraph.js', () => ({
   getValidAccessToken: async () => ({ accessToken: 'tok', connection: { email: 'agent@gatewayreadvisors.com', scopes: ['Mail.Send'] } }),
@@ -44,6 +49,7 @@ vi.mock('../_lib/msGraph.js', () => ({
 
 const { createBlast, sendBlastBatch, blastProgress, MAX_RECIPIENTS, DAILY_SEND_LIMIT } =
   await import('../_lib/massEmail.js')
+const { COMPANY } = await import('../../src/lib/emailFooter.js')
 
 // ─── Minimal in-memory stand-in for the supabase-js query builder ────────────
 // Only the operations this module actually performs; anything else would be
@@ -127,12 +133,53 @@ async function seedBlast(db, contacts) {
   return createBlast(db, db, { agentId: AGENT.id, blast: BLAST_INPUT, contactIds })
 }
 
-const runBatch = (db, blast, contacts) => sendBlastBatch(db, {
-  blast, agent: AGENT, property: PROPERTY,
+const BASE_URL = 'https://crm.example.com'
+
+const runBatch = (db, blast, contacts, over = {}) => sendBlastBatch(db, {
+  blast, agent: AGENT, property: PROPERTY, baseUrl: BASE_URL,
   contactsById: Object.fromEntries(contacts.map(c => [c.id, c])),
+  ...over,
 })
 
 beforeEach(() => { sendGraphMail.mockClear(); sendGraphMail.mockImplementation(async () => {}) })
+
+// ─── The footer every message has to carry ───────────────────────────────────
+
+describe('unsubscribe links', () => {
+  it('gives each recipient their own working opt-out link', async () => {
+    const contacts = [
+      { id: 'c1', first_name: 'A', email: 'a@x.com' },
+      { id: 'c2', first_name: 'B', email: 'b@x.com' },
+    ]
+    const db = makeDb({ agents: [AGENT] })
+    const blast = await seedBlast(db, contacts)
+    await runBatch(db, blast, contacts)
+
+    const links = sendGraphMail.mock.calls.map(([, msg]) => msg.html.match(/https:\/\/crm\.example\.com\/u\/[A-Za-z0-9._-]+/)[0])
+    expect(links).toHaveLength(2)
+    // One person's opt-out must never take anybody else with them.
+    expect(new Set(links).size).toBe(2)
+  })
+
+  it('puts the postal address in every message', async () => {
+    const contacts = [{ id: 'c1', first_name: 'A', email: 'a@x.com' }]
+    const db = makeDb({ agents: [AGENT] })
+    const blast = await seedBlast(db, contacts)
+    await runBatch(db, blast, contacts)
+    expect(sendGraphMail.mock.calls[0][1].html).toContain(COMPANY.address)
+  })
+
+  it('sends nothing at all when it cannot build the links', async () => {
+    // Half a blast delivered without an opt-out is not a degraded send, it is
+    // the exact outcome this feature exists to prevent — so it fails closed.
+    const contacts = [{ id: 'c1', first_name: 'A', email: 'a@x.com' }]
+    const db = makeDb({ agents: [AGENT] })
+    const blast = await seedBlast(db, contacts)
+    await expect(runBatch(db, blast, contacts, { baseUrl: '' })).rejects.toThrow(/unsubscribe/i)
+    expect(sendGraphMail).not.toHaveBeenCalled()
+    expect(db.tables.email_blast_recipients.every(r => r.status === 'pending')).toBe(true)
+  })
+})
 
 // ─── Building the send ────────────────────────────────────────────────────────
 

@@ -50,7 +50,9 @@ const lpPropMatch    = pathname.match(/^\/lp\/property\/([0-9a-f-]{36})/i)
 const lpValMatch     = pathname.match(/^\/lp\/valuation\/([0-9a-f-]{36})/i)
 const lpMultiMatch   = pathname.match(/^\/lp\/multifamily\/([0-9a-f-]{36})/i)
 const lpMailingMatch = pathname.match(/^\/lp\/mailing\/([0-9a-f-]{36})/i)
-const unsubMatch     = pathname.match(/^\/u\/([0-9a-z]{16,40})/i)
+// Two token shapes share this path: a mailing subscriber's bare hex token, and
+// a deal-announcement recipient's signed `payload.signature` (base64url, longer).
+const unsubMatch     = pathname.match(/^\/u\/([A-Za-z0-9._-]{16,400})$/)
 const advisorMatch   = pathname.match(/^\/advisor\/([0-9a-f-]{36})/i)
 const portalMatch    = pathname.match(/^\/portal\/([0-9a-f-]{36})/i)
 

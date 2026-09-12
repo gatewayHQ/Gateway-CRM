@@ -4,6 +4,7 @@ import {
   propertyPhotos, unitCount, announcementPrice, assetTypeLabel, fullAddress,
   defaultAnnouncementBody, defaultAnnouncementSubject, statusLabel,
 } from '../dealAnnouncement.js'
+import { COMPANY } from '../emailFooter.js'
 
 const property = {
   id: 'p1',
@@ -109,6 +110,22 @@ describe('renderAnnouncementHtml', () => {
     const out = renderAnnouncementHtml({ property: office, status: 'new-listing', agent, contact })
     expect(out).not.toContain('>Units<')
     expect(out).toContain('>Asset type<')
+  })
+
+  it('closes with the sender, the postal address and the recipient’s opt-out', () => {
+    // These are the two things a commercial email is required to carry, and the
+    // announcement template had neither before. The recipient has to be able to
+    // leave without asking an agent to do it for them.
+    const out = html({ unsubscribeUrl: 'https://crm.example.com/u/tok.sig' })
+    expect(out).toContain(COMPANY.address)
+    expect(out).toContain('href="https://crm.example.com/u/tok.sig"')
+    expect(out).toContain('Unsubscribe')
+  })
+
+  it('still prints the address when no opt-out link was passed', () => {
+    const out = html()
+    expect(out).toContain(COMPANY.address)
+    expect(out).not.toContain('Unsubscribe')     // never a link that goes nowhere
   })
 
   it('carries the agent custom message into the body', () => {

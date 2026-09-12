@@ -31,9 +31,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { getValidAccessToken, sendGraphMail, canSendMail } from './msGraph.js'
+import { mintUnsubscribeToken, canMintUnsubscribeTokens } from './unsubscribeToken.js'
 import {
   renderAnnouncementHtml, renderTokens, announcementTokens, statusLabel,
 } from '../../src/lib/dealAnnouncement.js'
+import { unsubscribeUrl } from '../../src/lib/emailFooter.js'
 
 // ─── Pacing / limits ─────────────────────────────────────────────────────────
 
@@ -213,7 +215,7 @@ export async function blastProgress(svc, blastId) {
  * — far past it. Each call does as much as it safely can and reports what is
  * left; the client drives the loop and can show real progress while it happens.
  */
-export async function sendBlastBatch(svc, { blast, agent, contactsById = {}, property = null }) {
+export async function sendBlastBatch(svc, { blast, agent, contactsById = {}, property = null, baseUrl = '' }) {
   const startedAt = Date.now()
 
   const { data: pending, error: pendErr } = await svc
@@ -243,6 +245,16 @@ export async function sendBlastBatch(svc, { blast, agent, contactsById = {}, pro
     throw e
   }
   const roomToday = DAILY_SEND_LIMIT - alreadySent
+
+  // Every message in this batch has to carry a working opt-out link. Checked
+  // once, here, rather than per recipient: a blast that goes out without them is
+  // exactly the failure the link exists to prevent, and discovering it at
+  // recipient 150 means 150 people already have a message they can't opt out of.
+  if (!baseUrl || !canMintUnsubscribeTokens()) {
+    const e = new Error('Cannot build unsubscribe links for this send — no public URL or signing secret configured. Nothing was sent.')
+    e.status = 500
+    throw e
+  }
 
   const { accessToken, connection } = await getValidAccessToken(svc, agent.id)
   if (!canSendMail(connection)) {
@@ -278,7 +290,11 @@ export async function sendBlastBatch(svc, { blast, agent, contactsById = {}, pro
     // Subject and body resolve from the SAME token map the preview used, so
     // what the agent approved is what each recipient receives.
     const subject = renderTokens(blast.subject, announcementTokens(tokenArgs))
-    const html    = renderAnnouncementHtml({ ...tokenArgs, photoUrl: blast.photo_url, body: blast.body })
+    // Per recipient, so one person's opt-out never takes anybody else with them.
+    const optOut  = row.contact_id ? unsubscribeUrl(baseUrl, mintUnsubscribeToken(row.contact_id)) : ''
+    const html    = renderAnnouncementHtml({
+      ...tokenArgs, photoUrl: blast.photo_url, body: blast.body, unsubscribeUrl: optOut,
+    })
 
     let sendError = null
     try {

@@ -6,10 +6,12 @@
  * the public campaigns API, then confirms.
  */
 import React, { useEffect, useState } from 'react'
+import { COMPANY } from '../lib/emailFooter.js'
 
 export default function Unsubscribe({ token }) {
   const [state, setState] = useState('working') // working | done | error
   const [email, setEmail] = useState('')
+  const [scope, setScope] = useState('')        // contact | mailing
   const [message, setMessage] = useState('')
 
   useEffect(() => {
@@ -22,6 +24,7 @@ export default function Unsubscribe({ token }) {
         const data = await res.json().catch(() => ({}))
         if (!res.ok || data.error) { setMessage(data.error || 'This link is no longer valid.'); setState('error'); return }
         setEmail(data.email || '')
+        setScope(data.scope || '')
         setState('done')
       } catch {
         setMessage('Something went wrong. Please try again.')
@@ -46,9 +49,14 @@ export default function Unsubscribe({ token }) {
             <h1 style={{ fontFamily: 'Cormorant Garamond, serif', fontWeight: 500, fontSize: 30, margin: '16px 0 8px' }}>
               You've been unsubscribed
             </h1>
-            <p style={{ color: '#b8b6ad', lineHeight: 1.6 }}>
-              {email ? <><b style={{ color: '#f4f1e9' }}>{email}</b> won't receive any more emails from this list.</>
-                     : "You won't receive any more emails from this list."}
+<p style={{ color: '#b8b6ad', lineHeight: 1.6 }}>
+              {/* Say what was actually turned off. A person who opted out of
+                  property announcements and then reads that they left "this
+                  list" has no way to know whether it worked. */}
+              {email ? <b style={{ color: '#f4f1e9' }}>{email}</b> : 'You'}
+              {scope === 'contact'
+                ? ` won't receive any more marketing or property emails from ${COMPANY.name}.`
+                : " won't receive any more emails from this list."}
             </p>
           </>
         )}
