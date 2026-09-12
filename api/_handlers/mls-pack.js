@@ -22,6 +22,11 @@
 //           whole file as a single document, optionally behind a cover sheet.
 // ─────────────────────────────────────────────────────────────────────────────
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib'
+// A cover page prints names an agent typed — a deal title, a property address,
+// a form name. pdf-lib's standard fonts encode with WinAnsi and THROW on anything
+// it has no code for (a newline, an emoji, a non-Latin name), which would fail the
+// whole packet over a cover line. winAnsiLine() makes each one drawable first.
+import { winAnsiLine } from '../_lib/winAnsi.js'
 import { requireAgent, errorResponse, getServiceClient, getUserClient } from '../_lib/auth.js'
 import { zip } from '../_lib/zip.js'
 import {
@@ -233,13 +238,13 @@ function drawCover(doc, bold, reg, { address, mlsNumber, agent, files }) {
   const mist = rgb(0.45, 0.49, 0.59)
 
   page.drawText('Signature Packet', { x: 56, y: 720, size: 26, font: bold, color: rgb(0.18, 0.21, 0.38) })
-  if (address) page.drawText(address, { x: 56, y: 692, size: 14, font: reg, color: ink, maxWidth: 500 })
+  if (address) page.drawText(winAnsiLine(address), { x: 56, y: 692, size: 14, font: reg, color: ink, maxWidth: 500 })
 
   let y = 650
   const line = (label, value) => {
     if (!value) return
     page.drawText(label, { x: 56, y, size: 10, font: bold, color: mist })
-    page.drawText(String(value), { x: 190, y, size: 11, font: reg, color: ink, maxWidth: 366 })
+    page.drawText(winAnsiLine(value), { x: 190, y, size: 11, font: reg, color: ink, maxWidth: 366 })
     y -= 22
   }
   line('MLS number', mlsNumber)
@@ -255,7 +260,7 @@ function drawCover(doc, bold, reg, { address, mlsNumber, agent, files }) {
   for (const f of files) {
     if (y < 70) break
     const pages = f.pages ? `  (${f.pages} page${f.pages === 1 ? '' : 's'})` : ''
-    page.drawText(`${running}.  ${f.form_name}${pages}`, {
+    page.drawText(winAnsiLine(`${running}.  ${f.form_name}${pages}`), {
       x: 56, y, size: 10, font: reg, color: rgb(0.20, 0.24, 0.38), maxWidth: 500,
     })
     y -= 16

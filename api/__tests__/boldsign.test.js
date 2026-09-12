@@ -1426,6 +1426,37 @@ describe('buildPrintablePdf — the document, plus a summary that cannot be subt
     expect((await PDFDocument.load(after)).getPageCount()).toBe(2)
     expect(after.length).toBeGreaterThan(before.length)
   })
+
+  it('prints a multi-line textbox instead of failing the whole document', async () => {
+    // The report this covers: "Could not file it on the deal: WinAnsi cannot
+    // encode ' ' (0x000a)". 0x000a is the newline in an addendum's terms box,
+    // and pdf-lib's standard fonts throw on it rather than skipping it — so one
+    // three-line field failed Save PDF, Print and Save to Deal together.
+    const props = {
+      status: 'Draft',
+      signerDetails: [{ signerRole: 'Seller', signerName: 'Janet Hala', order: 1, formFields: [
+        { type: 'Textbox', pageNumber: 1, fontSize: 10,
+          value: 'Sale price to be: $2,050,000\nBuyer Agent Commission to remain @ 2.5%\nSeller to provide rent roll with rent & deposit amounts.',
+          bounds: { x: 60, y: 330, width: 480, height: 120 } },
+      ] }],
+    }
+    const out = await buildPrintablePdf({ pdfBytes: await sourcePdf(1), props, documentName: 'Iowa Addendum' })
+    const { PDFDocument } = await import('pdf-lib')
+    expect((await PDFDocument.load(out)).getPageCount()).toBe(2)
+  })
+
+  it('prints the rest of a value whose characters no standard font carries', async () => {
+    const props = {
+      status: 'Draft',
+      signerDetails: [{ signerRole: 'Seller', order: 1, formFields: [
+        { type: 'Textbox', pageNumber: 1, value: 'Hala Ventures LLC \u2713 \uD83C\uDFE0 \u4F60\u597D',
+          bounds: { x: 60, y: 200, width: 200, height: 16 } },
+      ] }],
+    }
+    const out = await buildPrintablePdf({ pdfBytes: await sourcePdf(1), props, documentName: 'Odd characters' })
+    const { PDFDocument } = await import('pdf-lib')
+    expect((await PDFDocument.load(out)).getPageCount()).toBe(2)
+  })
 })
 
 // ─── Printing a draft's own entries ───────────────────────────────────────────
