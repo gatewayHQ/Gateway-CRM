@@ -1,4 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
+import { parseContactList, matchContactList, describeMatch } from '../lib/services/contactList.js'
 // AudienceFilter — pick who a mass email goes to, by asset type and market side.
 //
 // Standalone from the deal-announcement wizard on purpose: "everyone who buys
@@ -79,6 +80,36 @@ export default function AudienceFilter({
     onManualChange?.({ added, removed })
   }
 
+  // ─── "Here are the people I want this to go to." ─────────────────────────
+  // An agent with a spreadsheet of owners had no way in: the audience could
+  // only be built from filters over contacts already in the CRM. This matches a
+  // pasted or uploaded list against the contact book by email and adds whoever
+  // it finds to THIS send.
+  //
+  // It deliberately does not create contacts. There is already a proper CSV
+  // importer on the Contacts page — with column mapping, de-duplication and
+  // agent assignment — and a second half-built one here would be the version
+  // that quietly makes a mess. New addresses are reported and pointed at it.
+  const [listOpen,  setListOpen]  = useState(false)
+  const [listText,  setListText]  = useState('')
+  const [listName,  setListName]  = useState('')
+  const [listMatch, setListMatch] = useState(null)
+
+  const readList = (text, name = '') => {
+    setListText(text)
+    setListName(name)
+    const parsed = parseContactList(text)
+    setListMatch({ parsed, match: matchContactList(parsed.rows, contacts) })
+  }
+
+  const addMatchedFromList = () => {
+    const ids = (listMatch?.match?.matched || []).map(m => m.contact?.id).filter(Boolean)
+    if (!ids.length) return
+    const added   = [...new Set([...(manual.added || []), ...ids])]
+    const removed = (manual.removed || []).filter(x => !ids.includes(x))
+    onManualChange?.({ added, removed })
+  }
+
   const removeContact = (id) => {
     // A contact the filter matched is suppressed via `removed`; one the agent
     // added by hand is simply un-added. Keeping those apart is what lets the
@@ -98,6 +129,74 @@ export default function AudienceFilter({
 
   return (
     <div>
+      {/* ── Upload a list ── */}
+      <div style={cardStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <label className="form-label" style={{ margin: 0, flex: 1 }}>
+            Have a list already?
+            <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}> — paste it or upload a CSV</span>
+          </label>
+          <button type="button" className="btn btn--ghost btn--sm" onClick={() => setListOpen(o => !o)}>
+            {listOpen ? 'Hide' : 'Upload a list'}
+          </button>
+        </div>
+
+        {listOpen && (
+          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <label className="btn btn--secondary btn--sm" style={{ cursor: 'pointer' }}>
+                Choose a CSV
+                <input
+                  type="file" accept=".csv,.txt,text/csv,text/plain" style={{ display: 'none' }}
+                  onChange={async e => {
+                    const file = e.target.files?.[0]
+                    e.target.value = ''
+                    if (!file) return
+                    readList(await file.text(), file.name)
+                  }}
+                />
+              </label>
+              <span style={{ fontSize: 12, color: 'var(--gw-mist)' }}>or paste addresses below — one per line, or a whole spreadsheet row</span>
+            </div>
+
+            <textarea
+              className="form-control form-control--textarea" style={{ minHeight: 78, fontSize: 12.5 }}
+              value={listText}
+              placeholder={'janet@example.com\nSmith, John\tjohn@example.com'}
+              onChange={e => readList(e.target.value, listName)}
+            />
+
+            {listMatch && (
+              <div style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--gw-mist)' }}>
+                <div>{describeMatch(listName, listMatch.parsed, listMatch.match)}</div>
+
+                {listMatch.match.unsubscribed.length > 0 && (
+                  <div style={{ color: 'var(--gw-red)' }}>
+                    {listMatch.match.unsubscribed.length} on this list {listMatch.match.unsubscribed.length === 1 ? 'has' : 'have'} unsubscribed
+                    and will not be emailed, whichever list they appear on.
+                  </div>
+                )}
+
+                {listMatch.match.fresh.length > 0 && (
+                  <div>
+                    {listMatch.match.fresh.length} address{listMatch.match.fresh.length === 1 ? ' is' : 'es are'} not a contact yet.
+                    Import them on the <strong>Contacts</strong> page first — that importer maps columns, de-duplicates
+                    and assigns an agent — then they can be added here.
+                  </div>
+                )}
+
+                {listMatch.match.matched.length > 0 && (
+                  <button type="button" className="btn btn--primary btn--sm" style={{ marginTop: 6 }}
+                          onClick={addMatchedFromList}>
+                    Add {listMatch.match.matched.length} matched contact{listMatch.match.matched.length === 1 ? '' : 's'} to this send
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* ── Asset types ── */}
       <div style={cardStyle}>
         <label className="form-label">Asset Types</label>

@@ -15,6 +15,10 @@ const TRANSACTION_TYPES = [
 
 const BUCKET = 'form-packets'
 
+// The shelf label. Reads the brokerage's own operating-states list, so opening
+// a fourth state is one edit there rather than a lookup table that drifts.
+const STATE_NAMES = Object.fromEntries(OPERATING_STATES.map(s => [s.code, s.name]))
+
 // BoldSign's own per-file ceiling. The app used to impose a far lower one without
 // saying so: template PDFs travelled to the API as base64 inside a JSON body, and a
 // serverless request is capped at 4.5 MB (base64 inflates ~33% → ~3.3 MB of PDF).
@@ -569,6 +573,15 @@ export default function FormLibraryPage({ isAdmin }) {
 
   const states = [...new Set(packets.map(p => p.state))].sort()
 
+  // The shelves, in a stable order. Built off the FILTERED list so the state
+  // and type dropdowns still work — they now narrow the shelves rather than
+  // being the only way to find anything.
+  const byState = filtered.reduce((acc, p) => {
+    const key = p.state || '—'
+    ;(acc[key] ||= []).push(p)
+    return acc
+  }, {})
+
   if (!tableReady) return (
     // .page-content is the app's scroll container (flex:1 + overflow-y:auto inside
     // .main, which is overflow:hidden). Without it the page is simply clipped.
@@ -606,7 +619,7 @@ create unique index if not exists uq_form_packets_boldsign_tid
     // which is overflow:hidden). It has to sit on the outermost element — putting the
     // centring wrapper outside it is what made long form lists unreachable.
     <div className="page-content">
-      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+      <div style={{ maxWidth: 1120, margin: '0 auto' }}>
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div>
@@ -647,8 +660,29 @@ create unique index if not exists uq_form_packets_boldsign_tid
             : 'No form packets have been uploaded yet. Ask your admin to add them.'}
         />
       ) : (
+        /* SHELVED BY STATE.
+           State is the first thing an agent filters by and it is a legal
+           boundary, not a tag — an Iowa agent must not reach for a Nebraska
+           listing agreement. So it becomes the shelf rather than a dropdown
+           nobody sets, and the packets under it go two-up, which halves the
+           scrolling on a sixteen-packet library. */
         <div>
-          {filtered.map(packet => {
+          {Object.entries(byState).map(([state, group]) => (
+          <div key={state} style={{ marginBottom: 22 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, borderBottom: '1px solid var(--gw-border)', paddingBottom: 6, marginBottom: 10 }}>
+              <span style={{ width: 22, height: 22, borderRadius: 5, background: 'var(--gw-slate)', color: '#fff',
+                             fontSize: 10, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                {state}
+              </span>
+              <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--gw-ink)' }}>
+                {STATE_NAMES[state] || state}
+              </span>
+              <span style={{ fontSize: 11, color: 'var(--gw-mist)' }}>
+                {group.length} packet{group.length === 1 ? '' : 's'}
+              </span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(330px, 1fr))', gap: 10 }}>
+          {group.map(packet => {
             const typeLabel = TRANSACTION_TYPES.find(t => t.value === packet.transaction_type)?.label || packet.transaction_type
             return (
               <div key={packet.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', background: '#fff', marginBottom: 8 }}>
@@ -707,6 +741,9 @@ create unique index if not exists uq_form_packets_boldsign_tid
               </div>
             )
           })}
+            </div>
+          </div>
+          ))}
         </div>
       )}
 
