@@ -597,7 +597,12 @@ async function handleBlastSend(req, res) {
     for (const c of (contacts || [])) contactsById[c.id] = c
   }
 
-  const progress = await sendBlastBatch(svc, { blast, agent, contactsById, property })
+  // The origin the recipient's unsubscribe link points back at. Taken from the
+  // request rather than an env var so a preview deployment's links resolve to
+  // that preview instead of silently opting people out on production.
+  const baseUrl = `${req.headers['x-forwarded-proto'] || 'https'}://${req.headers.host}`
+
+  const progress = await sendBlastBatch(svc, { blast, agent, contactsById, property, baseUrl })
   return res.status(200).json({ ok: true, ...progress })
 }
 

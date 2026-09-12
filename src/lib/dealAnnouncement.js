@@ -14,6 +14,7 @@
 
 import { PROPERTY_TYPE_LABELS } from './enums.js'
 import { fullAddress as composeFullAddress } from './address.js'
+import { renderEmailFooterHtml, escapeHtml } from './emailFooter.js'
 
 // ─── Deal statuses ────────────────────────────────────────────────────────────
 // The announcement's headline. Distinct from `properties.status` and from
@@ -146,9 +147,6 @@ export function renderTokens(text, tokens) {
     (Object.prototype.hasOwnProperty.call(tokens, key) ? tokens[key] : match))
 }
 
-const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
-
 /** Plain text → HTML paragraphs, matching how ComposeModal sends a typed body. */
 export function textToHtml(text) {
   return String(text || '')
@@ -195,6 +193,7 @@ export function defaultAnnouncementSubject(status) {
  */
 export function renderAnnouncementHtml({
   property, status, agent, contact, terms = '', customMessage = '', photoUrl, body,
+  unsubscribeUrl = '',
 }) {
   const tokens = announcementTokens({ property, status, agent, contact, terms, customMessage })
   const bodyText = renderTokens(body || defaultAnnouncementBody(status), tokens)
@@ -246,11 +245,7 @@ export function renderAnnouncementHtml({
               <div style="font-size:14px;line-height:1.65;color:#374151">${textToHtml(bodyText)}</div>
             </td>
           </tr>
-          <tr>
-            <td style="padding:16px 24px;border-top:1px solid #e5e7eb;font-size:12px;color:#6b7280">
-              ${escapeHtml(tokens.agentName)} · Gateway Real Estate Advisors
-            </td>
-          </tr>
+${renderEmailFooterHtml({ agentName: tokens.agentName, unsubscribeUrl })}
         </table>
       </td>
     </tr>

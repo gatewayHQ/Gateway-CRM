@@ -31,6 +31,7 @@ import {
   renderAnnouncementHtml, renderTokens, announcementTokens,
   propertyPhotos, defaultPhotoUrl, fullAddress, statusLabel,
 } from '../lib/dealAnnouncement.js'
+import { PREVIEW_UNSUBSCRIBE_URL } from '../lib/emailFooter.js'
 
 const STEPS = [
   { id: 1, label: 'Property' },
@@ -155,6 +156,10 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
     property, status: dealStatus, agent: activeAgent,
     contact: resolved.recipients[0] || { first_name: 'Pat', last_name: 'Ryan' },
     terms, customMessage, photoUrl, body,
+    // The real link is minted per recipient at send time and must never be live
+    // in a preview — clicking your own preview would opt out the contact it was
+    // drawn for. The footer still renders, so what is approved is what is sent.
+    unsubscribeUrl: PREVIEW_UNSUBSCRIBE_URL,
   }), [property, dealStatus, activeAgent, resolved.recipients, terms, customMessage, photoUrl, body])
 
   const previewSubject = useMemo(() => renderTokens(subject, announcementTokens({
