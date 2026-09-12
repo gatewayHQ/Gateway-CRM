@@ -121,7 +121,7 @@ export function Modal({ open, onClose, children, width = 520, className = '' }) 
 }
 
 // ─── DRAWER ───────────────────────────────────────────────────────────────────
-export function Drawer({ open, onClose, title, children, width = 480 }) {
+export function Drawer({ open, onClose, title, children, width = 480, headerExtra = null }) {
   useEffect(() => {
     // Let the modal on top of us take the Escape (see modalIsOpen above).
     const handler = (e) => { if (e.key === 'Escape' && !modalIsOpen()) onClose() }
@@ -136,6 +136,9 @@ export function Drawer({ open, onClose, title, children, width = 480 }) {
       <div className="drawer" style={{ width, maxWidth: 'calc(100vw - 48px)' }}>
         <div className="drawer__head">
           <div className="drawer__title">{title}</div>
+          {/* Anything the drawer's owner wants beside the close button — the
+              deal drawer puts its widen/narrow toggle here. */}
+          {headerExtra}
           <button className="drawer__close" onClick={onClose}><Icon name="x" size={18} /></button>
         </div>
         {children}
