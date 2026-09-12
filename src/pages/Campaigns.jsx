@@ -16,6 +16,7 @@ import { supabase } from '../lib/supabase.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { Icon, Modal, pushToast, EmptyState, ConfirmDialog } from '../components/UI.jsx'
 import QrCode from '../components/QrCode.jsx'
+import { groupMailings, mailingsSummary } from '../lib/services/mailingGroups.js'
 import { shortUrl, downloadQr } from '../lib/qr.js'
 import { streetLine } from '../lib/address.js'
 import { normalizeOm, uploadOm, deleteOm, formatBytes } from '../lib/om.js'
@@ -2529,6 +2530,8 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
   const [setupNeeded, setSetupNeeded] = useState(false)
   const [setupError,  setSetupError]  = useState('')
 
+  // Which status groups are open inside the list. Absent = the group's own default.
+  const [mailGroupOpen, setMailGroupOpen] = useState({})
   // Collapsible page sections + the anchor the "All campaigns" jump scrolls to
   const [quickOpen, setQuickOpen]   = useSectionToggle('quickStart', true)
   const [listOpen,  setListOpen]    = useSectionToggle('list', true)
@@ -2670,13 +2673,18 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
         </div>
       </div>
 
+      {/* FIVE TILES BECOME ONE LINE. The tiles took a third of the screen above
+          the fold to say five numbers, which pushed the mailings themselves
+          below it. Leads lead, because they are the only figure here that is
+          money and the one the next mailing gets decided on. */}
       {dashboard && (
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(5, 1fr)', gap:10, marginBottom:20 }}>
-          <StatCard value={dashboard.total_mailings}    label="Total Mailings" />
-          <StatCard value={dashboard.active_mailings}   label="Active / Sent"   color="var(--gw-azure)" />
-          <StatCard value={(dashboard.total_recipients || 0).toLocaleString()} label="Pieces Mailed" />
-          <StatCard value={dashboard.total_scans_30d}   label="Scans (30d)"     color="var(--gw-green)" />
-          <StatCard value={dashboard.total_leads_30d}   label="Leads (30d)"     color="#7c3aed" />
+        <div style={{ display:'flex', gap:18, flexWrap:'wrap', alignItems:'baseline', marginBottom:16,
+                      fontSize:12, color:'var(--gw-mist)' }}>
+          <span><strong style={{ fontSize:17, color:'#7c3aed' }}>{dashboard.total_leads_30d}</strong> leads · 30d</span>
+          <span><strong style={{ fontSize:17, color:'var(--gw-green)' }}>{dashboard.total_scans_30d}</strong> scans · 30d</span>
+          <span><strong style={{ fontSize:17, color:'var(--gw-ink)' }}>{(dashboard.total_recipients || 0).toLocaleString()}</strong> pieces mailed</span>
+          <span><strong style={{ fontSize:17, color:'var(--gw-azure)' }}>{dashboard.active_mailings}</strong> out in the mail</span>
+          <span style={{ marginLeft:'auto' }}>{dashboard.total_mailings} mailings in all</span>
         </div>
       )}
 
@@ -2762,8 +2770,36 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
                         message={mailings.length === 0 ? 'Create your first mailing to get a unique trackable QR code.' : 'Try clearing the filters.'}
                         action={mailings.length === 0 && <button className="btn btn--primary" onClick={() => setCreating(true)}>Create First Mailing</button>} />
           ) : (
-            <div style={{ display:'grid', gap:10 }}>
-              {filtered.map(m => {
+            /* GROUPED BY WHERE EACH MAILING IS — out in the mail, drafts,
+               archived — so the pieces that can still pull a scan are not
+               interleaved with ones that were never sent. The sort control
+               above still decides the order inside each group. */
+            groupMailings(filtered).map(group => (
+            <div key={group.id} style={{ marginBottom:16 }}>
+              <button
+                type="button"
+                onClick={() => setMailGroupOpen(g => ({ ...g, [group.id]: !(g[group.id] ?? group.open) }))}
+                aria-expanded={mailGroupOpen[group.id] ?? group.open}
+                style={{ display:'flex', alignItems:'center', gap:8, width:'100%', textAlign:'left',
+                         background:'transparent', border:0, borderBottom:'1px solid var(--gw-border)',
+                         padding:'4px 2px 6px', marginBottom:8, cursor:'pointer', fontFamily:'var(--font-body)' }}
+              >
+                <span style={{ width:7, height:7, borderRadius:'50%', flexShrink:0,
+                               background: group.tone === 'azure' ? 'var(--gw-azure)' : 'var(--gw-border)' }} />
+                <span style={{ fontSize:11, fontWeight:700, letterSpacing:'0.06em', textTransform:'uppercase', color:'var(--gw-ink)' }}>
+                  {group.label}
+                </span>
+                <span style={{ fontSize:11, color:'var(--gw-mist)' }}>{group.mailings.length}</span>
+                <span style={{ marginLeft:'auto', fontSize:10, color:'var(--gw-mist)' }}>
+                  {(mailGroupOpen[group.id] ?? group.open) ? '\u25be' : '\u25b8'}
+                </span>
+              </button>
+              {(mailGroupOpen[group.id] ?? group.open) && group.hint && (
+                <div style={{ fontSize:11, color:'var(--gw-mist)', marginBottom:8 }}>{group.hint}</div>
+              )}
+              {(mailGroupOpen[group.id] ?? group.open) && (
+              <div style={{ display:'grid', gap:10 }}>
+              {group.mailings.map(m => {
                 const agent    = agents.find(a => a.id === m.agent_id)
                 const property = properties.find(p => p.id === m.property_id)
                 const mailed   = m.recipient_count || 0
@@ -2817,7 +2853,10 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
                   </div>
                 )
               })}
+              </div>
+              )}
             </div>
+            ))
           )}
         </CollapsibleSection>
       </div>

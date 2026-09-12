@@ -371,6 +371,13 @@ select.form-control { cursor: pointer; }
 .drawer__close { background: none; border: none; cursor: pointer; padding: 4px; color: var(--gw-mist); border-radius: 4px; display: flex; transition: color 200ms ease; }
 .drawer__close:hover { color: var(--gw-ink); }
 
+/* Mass Email's compose step: controls beside the live preview, stacking to one
+   column where there isn't room for two. */
+@media (max-width: 900px) {
+  .masscompose { grid-template-columns: 1fr !important; }
+  .masscompose > div:last-child { position: static !important; }
+}
+
 /* EMPTY STATE */
 .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 60px 20px; text-align: center; }
 .empty-state__icon { width: 56px; height: 56px; background: var(--gw-bone); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 16px; color: var(--gw-mist); }
@@ -1598,7 +1605,15 @@ select.form-control { cursor: pointer; }
   opacity: 0;
   transition: opacity 200ms ease;
 }
-.collapse.is-open > .collapse__inner { opacity: 1; }
+/* THE CLIPPING BUG.
+   `overflow: hidden` is what makes the 0fr → 1fr height animation look like a
+   slide instead of a jump — and it has to go the moment the section is open.
+   Left on, the open row still clips against the animated grid track: an agent
+   with eleven mailings could see about six and had no scrollbar to reach the
+   rest ("I can't scroll down to see all my campaigns"). It also clipped any
+   menu or popover that tried to open near the bottom of a section.
+   `visible` once open; the animation is unchanged on the way in and out. */
+.collapse.is-open > .collapse__inner { opacity: 1; overflow: visible; }
 
 .collapse-head {
   display: flex;

@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js'
 import { Icon, Badge, EmptyState, Loading } from '../components/UI.jsx'
 import { formatCurrency, formatDate } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
+import EarningsChart from '../components/EarningsChart.jsx'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // My Earnings — what a non-admin agent sees on the Commission page since the
@@ -88,6 +89,15 @@ export default function MyEarnings({ activeAgent }) {
           <div className="stat-card__value">{formatCurrency(cap.ytd_fees)}</div>
           <div className="stat-card__label">Transaction fees paid</div>
         </div>
+      </div>
+
+      {/* ── The year, month by month ──
+          The four totals above say how much; this says WHEN — which months were
+          empty, and how much of the projection rests on a single deal. Drawn
+          from the same `deals` payload, so it costs no extra request. */}
+      <div className="card" style={{ marginBottom: 16, padding: '16px 20px' }}>
+        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>Commission by month</div>
+        <EarningsChart deals={deals} />
       </div>
 
       {/* ── Cap tracker ── */}

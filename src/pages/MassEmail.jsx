@@ -56,6 +56,25 @@ async function authedPost(action, payload) {
   return data
 }
 
+// What the step bar says. A disabled button with no explanation is a dead end;
+// naming the one missing thing turns it into an instruction.
+function blockedNote(step) {
+  if (step === 1) return 'Pick a property and what you are announcing.'
+  if (step === 2) return 'A subject and a body are needed before this can go out.'
+  if (step === 3) return 'Nobody is selected yet — choose an audience or upload a list.'
+  return ''
+}
+
+function readyNote(step, { property, resolved, subject } = {}) {
+  if (step === 1) return property ? `Announcing ${property.address || 'this property'}.` : ''
+  if (step === 2) return subject ? `Subject: ${subject}` : ''
+  if (step === 3) {
+    const n = resolved?.recipients?.length || 0
+    return `${n} contact${n === 1 ? '' : 's'} will each get their own copy.`
+  }
+  return ''
+}
+
 export default function MassEmail({ db, activeAgent, go, focusProperty = null, onFocusHandled }) {
   const [step, setStep] = useState(1)
 
@@ -237,7 +256,13 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
   const propertyItems = properties.map(p => ({ ...p, name: fullAddress(p) }))
 
   return (
-    <div className="page">
+    // `.page-content` — the class every other page uses — is what makes this
+    // scroll: `.main` is overflow:hidden, and this page was rendering into a
+    // `.page` class that DOES NOT EXIST in the stylesheet. So it had no padding
+    // and, far worse, no scroll container: anything below the fold was not just
+    // pushed down but unreachable, which is the real reason Continue could not
+    // be clicked on the Message step.
+    <div className="page-content">
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', gap: 6 }}>
           {STEPS.map(s => (
@@ -317,7 +342,14 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
 
       {/* ── Step 2: message ── */}
       {step === 2 && (
-        <>
+        /* TWO PANES. Everything here existed before — the preview included —
+           but it was stacked in one column, so an agent proofreading their
+           email scrolled past four cards to reach it and past five to reach
+           Continue. The controls stay on the left; the rendered email sits on
+           the right, pinned, where it is read while the words are typed. */
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.05fr) minmax(0, 1fr)', gap: 16, alignItems: 'start' }}
+             className="masscompose">
+        <div style={{ minWidth: 0 }}>
           <div style={card}>
             <label className="form-label">Start from a template</label>
             <select className="form-control" value={templateId} onChange={e => applyTemplate(e.target.value)}>
@@ -330,10 +362,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
           </div>
 
           <div style={card}>
-            <label className="form-label">Photo</label>
-            <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 8 }}>
-              Defaults to the property's first photo. Pick another, or upload one just for this send.
-            </div>
+            <label className="form-label">Photo <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}>— the property's first photo unless you pick another</span></label>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
               {photos.map(url => (
                 <button key={url} type="button" onClick={() => { setPhotoUrl(url); setPhotoTouched(true) }}
@@ -376,9 +405,14 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
                 value={customMessage} onChange={e => setCustomMessage(e.target.value)}
                 placeholder="The personal note for this announcement — it renders wherever {{customMessage}} appears." />
             </div>
+            {/* Kept because {{terms}} is a real token the body can print, but
+                demoted: as its own full-width field under a heading it read as
+                a second body, and an agent could not see where it came out. */}
             <div className="form-group">
-              <label className="form-label">Price / terms note</label>
-              <input className="form-control" value={terms} onChange={e => setTerms(e.target.value)}
+              <label className="form-label" style={{ fontWeight: 400, color: 'var(--gw-mist)' }}>
+                Price / terms — prints wherever {'{{terms}}'} appears
+              </label>
+              <input className="form-control" style={{ fontSize: 13 }} value={terms} onChange={e => setTerms(e.target.value)}
                 placeholder="e.g. All cash, 30-day close · 5.8% cap" />
             </div>
             <div className="form-group" style={{ marginBottom: 0 }}>
@@ -401,20 +435,26 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
             </div>
           </div>
 
-          <div style={card}>
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
-              <label className="form-label" style={{ margin: 0, flex: 1 }}>Preview</label>
+        </div>
+
+        <div style={{ position: 'sticky', top: 0, minWidth: 0 }}>
+          <div style={{ ...card, marginBottom: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8, gap: 8 }}>
+              <label className="form-label" style={{ margin: 0, flex: 1 }}>
+                Preview <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}>— as a contact receives it</span>
+              </label>
               <button className="btn btn--ghost btn--sm" onClick={saveAsTemplate} disabled={savingTemplate}>
                 {savingTemplate ? 'Saving…' : 'Save as template'}
               </button>
             </div>
-            <div style={{ fontSize: 12.5, color: 'var(--gw-mist)', marginBottom: 8 }}>
+            <div style={{ fontSize: 12.5, color: 'var(--gw-mist)', marginBottom: 8, wordBreak: 'break-word' }}>
               Subject: <strong style={{ color: 'var(--gw-slate)' }}>{previewSubject}</strong>
             </div>
             <iframe title="Announcement preview" srcDoc={previewHtml} sandbox=""
-              style={{ width: '100%', height: 460, border: '1px solid var(--gw-border)', borderRadius: 6, background: '#fff' }} />
+              style={{ width: '100%', height: 420, border: '1px solid var(--gw-border)', borderRadius: 6, background: '#fff' }} />
           </div>
-        </>
+        </div>
+        </div>
       )}
 
       {/* ── Step 3: audience ── */}
@@ -508,13 +548,30 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
         </>
       )}
 
-      {/* ── Wizard nav ── */}
+      {/* ── Wizard nav ──
+          STICKY, because it used to sit at the end of the step's content in
+          normal flow: on the Message step the body box, the token chips and the
+          preview pushed Continue below the fold, so the one control an agent
+          needed was the one they could not see. It now rides the bottom of the
+          page whatever the step's height, and says what it is waiting for
+          rather than just going grey. */}
       {!progress && (
-        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+        <div style={{
+          position: 'sticky', bottom: 0, zIndex: 5, marginTop: 16,
+          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+          background: '#fff', borderTop: '1px solid var(--gw-border)',
+          padding: '10px 14px', margin: '16px -24px -24px',
+          boxShadow: '0 -4px 14px rgba(26,26,46,0.05)',
+        }}>
           {step > 1 && <button className="btn btn--ghost" onClick={() => setStep(s => s - 1)}>Back</button>}
+          <span style={{ flex: 1, fontSize: 12.5, color: 'var(--gw-mist)', minWidth: 160 }}>
+            {stepReady[step] ? readyNote(step, { property, resolved, subject }) : blockedNote(step)}
+          </span>
           {step < 4 && (
             <button className="btn btn--primary" disabled={!stepReady[step]} onClick={() => setStep(s => s + 1)}>
-              Continue
+              {step === 1 ? 'Continue to the message'
+                : step === 2 ? 'Continue to the audience'
+                : 'Continue to review'}
             </button>
           )}
         </div>
