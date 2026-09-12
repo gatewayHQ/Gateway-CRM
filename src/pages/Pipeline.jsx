@@ -37,6 +37,9 @@ import SignerPicker, { buildCandidates, isValidEmail } from '../components/Signe
 import { savePdfFromUrl, openPrintTab, showPdfInPrintTab, closePrintTab } from '../lib/savePdf.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import MlsPackModal from '../components/MlsPackModal.jsx'
+import SplitDocumentModal from '../components/SplitDocumentModal.jsx'
+import MergeDocumentsModal from '../components/MergeDocumentsModal.jsx'
+import { splitPdfBytes, mergePdfBytes, pdfPageCount, safeFileName, moveItem } from '../lib/services/pdfEdit.js'
 import ComposePacketModal from '../components/ComposePacketModal.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 import AgentMultiSelect from '../components/AgentMultiSelect.jsx'
@@ -785,6 +788,12 @@ function DocumentsTab({ deal }) {
   const [dragOver, setDragOver]   = useState(false)
   const [sharedDocs, setSharedDocs] = useState([])   // filenames shared to the client portal
   const fileRef                   = React.useRef()
+  // Split & merge. `split` holds the document being cut up (bytes already in
+  // hand, so the preview and the cut read the same copy); `merge` holds the
+  // ordered stack being joined. Both are null unless that screen is open.
+  const [split, setSplit]         = useState(null)
+  const [merge, setMerge]         = useState(null)
+  const [preparing, setPreparing] = useState('')   // which row is fetching its bytes
 
   React.useEffect(() => {
     if (!deal?.id) return
@@ -845,6 +854,111 @@ function DocumentsTab({ deal }) {
     if (error) { pushToast(error.message, 'error'); return }
     pushToast('File deleted', 'info')
     setFiles(p => p.filter(f => f.name !== fileName))
+  }
+
+  // ─── Split & merge ─────────────────────────────────────────────────────────
+  // Both run in the browser on bytes fetched with this agent's own signed URL
+  // and write their result back as an ordinary upload, so storage's row rules
+  // answer "may they touch this deal?" exactly as they do for a drag-and-drop.
+  const isPdf = (name) => /\.pdf$/i.test(name)
+  const displayNameOf = (name) => name.replace(/^\d+-/, '')
+
+  const bytesOf = async (fileName) => {
+    const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(`deal-${deal.id}/${fileName}`, 120)
+    if (error || !data?.signedUrl) throw new Error(error?.message || 'Could not open that file.')
+    const res = await fetch(data.signedUrl)
+    if (!res.ok) throw new Error(`Could not read ${displayNameOf(fileName)} (HTTP ${res.status}).`)
+    return new Uint8Array(await res.arrayBuffer())
+  }
+
+  // One upload path for everything this screen writes, so a split piece, a
+  // merged packet and a dragged-in file are all filed the same way.
+  const putDocument = async (fileName, bytes) => {
+    // safeFileName is the authority on the name (see pdfEdit.js) — sanitizing it
+    // again here would store something other than what the screen promised.
+    const path = `deal-${deal.id}/${Date.now()}-${safeFileName(fileName)}`
+    const { error } = await supabase.storage.from(BUCKET)
+      .upload(path, new Blob([bytes], { type: 'application/pdf' }), { upsert: false, contentType: 'application/pdf' })
+    if (error) throw new Error(error.message)
+    return path
+  }
+
+  const openSplit = async (file) => {
+    setPreparing(file.name)
+    try {
+      setSplit({ fileName: file.name, bytes: await bytesOf(file.name) })
+    } catch (e) {
+      pushToast(e.message, 'error')
+    } finally {
+      setPreparing('')
+    }
+  }
+
+  const runSplit = async (pieces) => {
+    try {
+      const cut = await splitPdfBytes(split.bytes, pieces)
+      for (const piece of cut) await putDocument(piece.filename, piece.bytes)
+      pushToast(`Split into ${cut.length} document${cut.length === 1 ? '' : 's'} — the original is still on this deal.`, 'success')
+      setSplit(null)
+      loadFiles()
+    } catch (e) {
+      pushToast(e.message, 'error')
+    }
+  }
+
+  // Page counts are read up front: a merge screen that cannot say how long each
+  // document is cannot warn that one of them is not a PDF at all.
+  const asMergeItem = async (key, label, bytes) => {
+    let pages = 0, notPdf = false
+    try { pages = await pdfPageCount(bytes) } catch { notPdf = true }
+    return { key, label, bytes, pages, notPdf }
+  }
+
+  const openMerge = async (file) => {
+    setPreparing(file.name)
+    try {
+      const bytes = await bytesOf(file.name)
+      setMerge({ items: [await asMergeItem(file.name, displayNameOf(file.name), bytes)], uploads: [] })
+    } catch (e) {
+      pushToast(e.message, 'error')
+    } finally {
+      setPreparing('')
+    }
+  }
+
+  const addMergeFromDeal = async (doc) => {
+    try {
+      const bytes = await bytesOf(doc.key)
+      const item = await asMergeItem(doc.key, doc.label, bytes)
+      setMerge(m => ({ ...m, items: [...m.items, item] }))
+    } catch (e) {
+      pushToast(e.message, 'error')
+    }
+  }
+
+  const addMergeFromDisk = async (file) => {
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      const item = await asMergeItem(`disk:${file.name}:${Date.now()}`, file.name, bytes)
+      // Filed on the deal in its own right when the merge runs — a document an
+      // agent added is a document on the deal, not just pages inside a copy.
+      setMerge(m => ({ ...m, items: [...m.items, item], uploads: [...m.uploads, { key: item.key, name: file.name, bytes }] }))
+    } catch (e) {
+      pushToast(e.message, 'error')
+    }
+  }
+
+  const runMerge = async (filename) => {
+    try {
+      const bytes = await mergePdfBytes(merge.items)
+      for (const up of merge.uploads) await putDocument(up.name, up.bytes)
+      await putDocument(filename, bytes)
+      pushToast(`Merged into ${filename} — the originals are still on this deal.`, 'success')
+      setMerge(null)
+      loadFiles()
+    } catch (e) {
+      pushToast(e.message, 'error')
+    }
   }
 
   if (!bucketReady) return (
@@ -925,6 +1039,27 @@ with check (bucket_id = 'deal-documents');`}
               >
                 <Icon name="eye" size={13} />
               </button>
+              {/* Split and Merge only on PDFs, because that is the only thing
+                  either operation can do. Shown as words rather than icons: a
+                  mystery glyph on a filing cabinet gets avoided, not pressed. */}
+              {isPdf(file.name) && (
+                <>
+                  <button
+                    className="btn btn--ghost btn--sm" style={{ fontSize: 11 }}
+                    title="Cut this PDF into separate documents by page range"
+                    disabled={Boolean(preparing)} onClick={() => openSplit(file)}
+                  >
+                    {preparing === file.name ? 'Opening…' : 'Split'}
+                  </button>
+                  <button
+                    className="btn btn--ghost btn--sm" style={{ fontSize: 11 }}
+                    title="Join this PDF with others on this deal into one document"
+                    disabled={Boolean(preparing)} onClick={() => openMerge(file)}
+                  >
+                    Merge
+                  </button>
+                </>
+              )}
               <button className="btn btn--ghost btn--icon btn--sm" title="Download" onClick={() => download(file.name)}>
                 <Icon name="download" size={13} />
               </button>
@@ -934,6 +1069,34 @@ with check (bucket_id = 'deal-documents');`}
             </div>
           )
         })
+      )}
+
+      {split && (
+        <SplitDocumentModal
+          fileName={split.fileName}
+          bytes={split.bytes}
+          onClose={() => setSplit(null)}
+          onSubmit={runSplit}
+        />
+      )}
+
+      {merge && (
+        <MergeDocumentsModal
+          items={merge.items}
+          available={files
+            .filter(f => isPdf(f.name) && !merge.items.some(i => i.key === f.name))
+            .map(f => ({ key: f.name, label: displayNameOf(f.name) }))}
+          onAddFromDeal={addMergeFromDeal}
+          onAddFromDisk={addMergeFromDisk}
+          onRemove={key => setMerge(m => ({
+            ...m,
+            items:   m.items.filter(i => i.key !== key),
+            uploads: m.uploads.filter(u => u.key !== key),
+          }))}
+          onReorder={(from, to) => setMerge(m => ({ ...m, items: moveItem(m.items, from, to) }))}
+          onClose={() => setMerge(null)}
+          onSubmit={runMerge}
+        />
       )}
     </div>
   )
