@@ -1254,10 +1254,10 @@ async function appendSigningSummary(pdfDoc, { summary, documentName, status, val
     y -= 6
   }
 
-  // Said once, at the end, where someone holding the paper will read it.
-  if (y < margin + 30) { page = pdfDoc.addPage([W, H]); y = H - margin }
-  page.drawText('Printed from Gateway CRM for review. This copy is not a signed record.',
-    { x: margin, y: margin - 18, size: 8.5, font, color: muted })
+  // No footer line here on purpose. A review copy used to carry "Printed from
+  // Gateway CRM for review — this copy is not a signed record" along the bottom;
+  // it is what an agent hands across a kitchen table, and a CRM's name stamped on
+  // the paper is not what the brokerage wants a client reading.
   return pdfDoc
 }
 
