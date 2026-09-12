@@ -27,26 +27,32 @@ const PROJECTED = '#2f5c9e'
 // Plot geometry, in the SVG's own units. The viewBox leaves room at the top for
 // a direct label and at the bottom for month names — a chart whose labels sit
 // outside its own box is a chart that clips on someone's screen.
-const W = 720, H = 240, PAD_L = 52, PAD_R = 8, PAD_T = 26, BASE = 196
+const W = 760, H = 248, PAD_L = 52, PAD_R = 8, PAD_T = 30, BASE = 200
 
 export default function EarningsChart({ deals = [], now = Date.now() }) {
   const summary = monthlyEarnings(deals, { now })
-  const { top, ticks } = axisFor(summary.peak)
+  const { top, ticks } = axisFor(Math.max(summary.peak, summary.unscheduled))
 
-  const slot  = (W - PAD_L - PAD_R) / 12
-  const barW  = Math.min(34, slot - 12)
+  // A thirteenth column when there is projected money with no expected close
+  // date. It is the honest place for it: the money is real, the MONTH is not
+  // known, and spreading it across the autumn would be the chart inventing
+  // dates the deals do not have. Set the dates on those deals and the bars move
+  // into their months — the caption says so.
+  const hasUndated = summary.unscheduled > 0
+  const cols  = hasUndated ? 13 : 12
+  const slot  = (W - PAD_L - PAD_R) / cols
+  const barW  = Math.min(32, slot - 10)
   const xOf   = (i) => PAD_L + slot * i + (slot - barW) / 2
   const yOf   = (v) => BASE - (v / top) * (BASE - PAD_T)
   // A month with money in it never draws as nothing: below ~3 units the bar
   // disappears and the month reads as empty, which is a different fact.
   const hOf   = (v) => (v > 0 ? Math.max(3, BASE - yOf(v)) : 0)
 
-  // Direct labels on the two bars worth naming — the best real month and the
-  // biggest projection — rather than a number over every bar.
-  const bestEarned    = summary.months.reduce((b, m) => (m.earned > b.earned ? m : b), summary.months[0])
-  const bestProjected = summary.months.reduce((b, m) => (m.projected > b.projected ? m : b), summary.months[0])
 
-  if (!summary.peak) {
+  // Nothing to draw only when there is nothing at all — including the undated
+  // column, which is the whole projection on a deal book where nobody has set
+  // expected close dates.
+  if (!summary.peak && !summary.unscheduled) {
     return (
       <div style={{ fontSize: 12.5, color: 'var(--gw-mist)', padding: '4px 0 2px' }}>
         Nothing closed or projected for {summary.year} yet — closed deals and open ones with an expected
@@ -110,6 +116,14 @@ export default function EarningsChart({ deals = [], now = Date.now() }) {
                   <title>{`${m.label} · ${formatCurrency(m.projected)} projected from ${m.openDeals} open deal${m.openDeals === 1 ? '' : 's'}`}</title>
                 </rect>
               )}
+              {/* THE NUMBER OVER EVERY BAR. A chart an agent has to hover to
+                  read is a chart they screenshot and then annotate by hand. */}
+              {(m.earned > 0 || m.projected > 0) && (
+                <text x={x + barW / 2} y={yOf(Math.max(m.earned, m.projected)) - 6} textAnchor="middle"
+                      fontSize="9.5" fontWeight="700" fill="var(--gw-ink)">
+                  {shortMoney(Math.max(m.earned, m.projected))}
+                </text>
+              )}
               <text x={x + barW / 2} y={BASE + 15} textAnchor="middle" fontSize="10"
                     fill={m.i === summary.todayMonth ? 'var(--gw-ink)' : 'var(--gw-mist)'}
                     fontWeight={m.i === summary.todayMonth ? 700 : 400}>
@@ -119,18 +133,22 @@ export default function EarningsChart({ deals = [], now = Date.now() }) {
           )
         })}
 
-        {/* The two labels worth printing. */}
-        {bestEarned.earned > 0 && (
-          <text x={xOf(bestEarned.i) + barW / 2} y={yOf(bestEarned.earned) - 6} textAnchor="middle"
-                fontSize="10.5" fontWeight="700" fill="var(--gw-ink)">
-            {shortMoney(bestEarned.earned)}
-          </text>
-        )}
-        {bestProjected.projected > 0 && (
-          <text x={xOf(bestProjected.i) + barW / 2} y={yOf(bestProjected.projected) - 6} textAnchor="middle"
-                fontSize="10.5" fontWeight="700" fill="var(--gw-ink)">
-            {shortMoney(bestProjected.projected)}
-          </text>
+        {/* The undated projection, kept at arm's length from the months by a
+            rule so it can never be read as December. */}
+        {hasUndated && (
+          <g>
+            <line x1={PAD_L + slot * 12 - 3} y1={PAD_T - 16} x2={PAD_L + slot * 12 - 3} y2={BASE}
+                  stroke="var(--gw-border)" strokeWidth="1" />
+            <rect x={xOf(12)} y={BASE - hOf(summary.unscheduled)} width={barW} height={hOf(summary.unscheduled)}
+                  rx="3" fill="url(#gw-earn-hatch)" stroke={PROJECTED} strokeWidth="1.2" strokeDasharray="3 2">
+              <title>{`${formatCurrency(summary.unscheduled)} projected, with no expected close date set`}</title>
+            </rect>
+            <text x={xOf(12) + barW / 2} y={yOf(summary.unscheduled) - 6} textAnchor="middle"
+                  fontSize="9.5" fontWeight="700" fill="var(--gw-ink)">
+              {shortMoney(summary.unscheduled)}
+            </text>
+            <text x={xOf(12) + barW / 2} y={BASE + 15} textAnchor="middle" fontSize="9" fill="var(--gw-mist)">No date</text>
+          </g>
         )}
 
         {/* Where the year has got to. Only on the current year. */}
