@@ -1,4 +1,4 @@
-import React, { useState, useEffect, Component } from 'react'
+import React, { useState, useEffect, useRef, Component } from 'react'
 
 // ─── ICONS ───────────────────────────────────────────────────────────────────
 const ICONS = {
@@ -395,6 +395,87 @@ export function BootScreen() {
 }
 
 // ─── TABS ─────────────────────────────────────────────────────────────────────
+// ─── OVERFLOW MENU ────────────────────────────────────────────────────────────
+// The "…" a row's less-used actions live behind.
+//
+// It exists because a row that shows every action it supports shows none of
+// them: the Signatures tab used to put nine controls on one packet, and the one
+// an agent wanted was never the one their eye landed on. Here the row keeps the
+// action that moves the packet forward and this holds the rest — nothing is
+// removed, it just stops competing.
+//
+// `items` is [{ label, onClick, title, disabled, danger, divider }]. A `divider`
+// entry draws a rule instead of a button, which is how "delete" gets separated
+// from everything that is not destructive.
+//
+// Closes on pick, on Escape, and on any click outside — including a click on
+// another menu's trigger, so two can never be open at once.
+export function MenuButton({ items = [], label = '⋯', title = 'More actions', align = 'right', disabled = false, className = 'btn btn--ghost btn--icon btn--sm' }) {
+  const [open, setOpen] = useState(false)
+  const wrap = useRef(null)
+
+  useEffect(() => {
+    if (!open) return
+    const away = (e) => { if (!wrap.current?.contains(e.target)) setOpen(false) }
+    const esc  = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false) } }
+    // Capture phase: a row that expands on click must not also toggle when the
+    // click that closes this menu lands on it.
+    document.addEventListener('mousedown', away, true)
+    document.addEventListener('keydown', esc, true)
+    return () => {
+      document.removeEventListener('mousedown', away, true)
+      document.removeEventListener('keydown', esc, true)
+    }
+  }, [open])
+
+  const usable = items.filter(Boolean)
+  if (!usable.length) return null
+
+  return (
+    <span ref={wrap} style={{ position: 'relative', display: 'inline-flex' }}>
+      <button
+        type="button" className={className} title={title} aria-haspopup="menu" aria-expanded={open}
+        disabled={disabled}
+        onClick={(e) => { e.stopPropagation(); setOpen(o => !o) }}
+      >
+        {label}
+      </button>
+      {open && (
+        <div
+          role="menu"
+          onClick={e => e.stopPropagation()}
+          style={{
+            position: 'absolute', top: '100%', marginTop: 4, [align]: 0, zIndex: 40,
+            background: '#fff', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)',
+            boxShadow: 'var(--shadow-card)', padding: 4, minWidth: 186,
+            display: 'flex', flexDirection: 'column',
+          }}
+        >
+          {usable.map((item, i) => item.divider ? (
+            <hr key={`d${i}`} style={{ border: 0, borderTop: '1px solid var(--gw-border)', margin: '4px 2px' }} />
+          ) : (
+            <button
+              key={item.label}
+              type="button" role="menuitem" title={item.title || undefined} disabled={item.disabled}
+              onClick={(e) => { e.stopPropagation(); setOpen(false); item.onClick?.(e) }}
+              style={{
+                textAlign: 'left', fontFamily: 'var(--font-body)', fontSize: 12, lineHeight: 1.5,
+                padding: '6px 9px', border: 0, borderRadius: 4, background: 'transparent',
+                color: item.disabled ? 'var(--gw-mist)' : item.danger ? 'var(--gw-red)' : 'var(--gw-ink)',
+                cursor: item.disabled ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
+              }}
+              onMouseEnter={e => { if (!item.disabled) e.currentTarget.style.background = 'var(--gw-bone)' }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
+  )
+}
+
 export function Tabs({ tabs, active, onChange }) {
   return (
     <div style={{ display: 'flex', borderBottom: '1px solid var(--gw-border)', background: 'var(--gw-bone)', paddingLeft: 8 }}>
