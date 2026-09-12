@@ -4,6 +4,7 @@ import mlsPackHandler from './_handlers/mls-pack.js'
 import { wrap, log } from './_lib/observability.js'
 import crypto from 'node:crypto'
 import { extractPdfWords } from './_lib/pdfText.js'
+import { winAnsiLine, winAnsiLines } from './_lib/winAnsi.js'
 import { captionFields, detectSelectionCues } from '../src/lib/services/boldsignCaptions.js'
 import { normalizeSigners, outstandingSigners } from '../src/lib/services/boldsignSigners.js'
 // The packet module's pure rules — status vocabulary, what each state allows,
@@ -1110,6 +1111,11 @@ export function startingFontSize({ fontSize, scale, boxH }) {
   return fontSize ? fontSize * scale : Math.min(10, Math.max(boxH * 0.8, 5))
 }
 
+// Baseline-to-baseline spacing for a stacked multi-line value, as a multiple of
+// the font size. 1.15 is tight enough that three lines still fit a box sized for
+// three lines, loose enough that they don't touch.
+const LINE_LEADING = 1.15
+
 // Draw each filled value where BoldSign holds it. Returns how many were drawn —
 // 0 means the scale could not be established and the summary is doing all the
 // work, which the caller says out loud on the summary page.
@@ -1133,28 +1139,59 @@ export async function drawFilledValues(pdfDoc, props) {
   for (const f of fields) {
     const page = pages[f.page - 1]
     if (!page) continue
-    const h = page.getHeight()
-    const boxW = f.width * scale
-    const boxH = f.height * scale
-    const left = f.x * scale
-    // BoldSign measures from the TOP-left of the page; pdf-lib draws from the
-    // bottom-left, so the box's top edge becomes (page height − y).
-    const top  = h - (f.y * scale)
+    // One field can never cost the whole printout. Everything below measures and
+    // draws text that came from a client's keyboard, and the failure mode is a
+    // throw (see winAnsi.js), so a value that still defeats it is skipped and
+    // named in the log — the summary page still lists it either way.
+    try {
+      const h = page.getHeight()
+      const boxW = f.width * scale
+      const boxH = f.height * scale
+      const left = f.x * scale
+      // BoldSign measures from the TOP-left of the page; pdf-lib draws from the
+      // bottom-left, so the box's top edge becomes (page height − y).
+      const top  = h - (f.y * scale)
 
-    let size = startingFontSize({ fontSize: f.fontSize, scale, boxH })
-    let text = String(f.value)
-    const widthAt = (s) => font.widthOfTextAtSize(text, s)
-    while (size > 4.5 && widthAt(size) > boxW) size -= 0.5
-    if (widthAt(size) > boxW) {
+      // A BoldSign textbox can be multi-line, and an addendum's terms box usually
+      // is. Those lines are drawn as lines, stacked inside the same box, rather
+      // than run together — running them together is how a three-term addendum
+      // printed as one unreadable overflowing row.
+      const lines = f.ticked ? ['X'] : winAnsiLines(f.value)
+      if (!lines.filter(Boolean).length) continue
+
+      let size = startingFontSize({ fontSize: f.fontSize, scale, boxH })
+      const widestAt = (s) => Math.max(...lines.map(l => font.widthOfTextAtSize(l, s)))
+      // Height only constrains a stack: a single-line box is routinely drawn
+      // shorter than its own font size and renders fine (see startingFontSize).
+      const tallAt = (s) => lines.length * s * LINE_LEADING
+      while (size > 4.5 && (widestAt(size) > boxW || (lines.length > 1 && tallAt(size) > boxH))) size -= 0.5
+
       // Still too wide at the floor — truncate rather than spill across the form.
-      while (text.length > 1 && font.widthOfTextAtSize(`${text}…`, size) > boxW) text = text.slice(0, -1)
-      text = `${text}…`
-    }
+      const fitted = lines.map(line => {
+        let text = line
+        while (text.length > 1 && font.widthOfTextAtSize(`${text}…`, size) > boxW) text = text.slice(0, -1)
+        return font.widthOfTextAtSize(line, size) > boxW ? `${text}…` : line
+      })
 
-    const x = f.ticked ? left + Math.max((boxW - widthAt(size)) / 2, 0) : left + 1
-    const y = top - boxH + Math.max((boxH - size) / 2, 0)
-    page.drawText(text, { x, y, size, font, color: ink })
-    drawn++
+      if (fitted.length === 1) {
+        const x = f.ticked ? left + Math.max((boxW - font.widthOfTextAtSize(fitted[0], size)) / 2, 0) : left + 1
+        const y = top - boxH + Math.max((boxH - size) / 2, 0)
+        page.drawText(fitted[0], { x, y, size, font, color: ink })
+      } else {
+        // Top-down from the first line, the block centred in the box when it has
+        // room to spare, so the text sits where the agent typed it.
+        const gap  = size * LINE_LEADING
+        const slack = Math.max((boxH - tallAt(size)) / 2, 0)
+        let y = top - slack - size
+        for (const line of fitted) {
+          if (line) page.drawText(line, { x: left + 1, y, size, font, color: ink })
+          y -= gap
+        }
+      }
+      drawn++
+    } catch (err) {
+      console.warn(`[boldsign] print: could not draw a field's value on page ${f.page} (${err.message}) — it is listed in the summary instead`)
+    }
   }
   return drawn
 }
@@ -1176,7 +1213,10 @@ async function appendSigningSummary(pdfDoc, { summary, documentName, status, val
     // A new page when the current one runs out — a packet with many fields must not
     // silently lose the tail of its own summary.
     if (y < margin + 40) { page = pdfDoc.addPage([W, H]); y = H - margin }
-    page.drawText(String(text).slice(0, 120), { x: margin + indent, y, size, font: f, color })
+    // One row per entry: a value that carries its own line breaks (a multi-line
+    // textbox) is flattened here rather than allowed to run into the row below —
+    // and, unflattened, to throw on the way in.
+    page.drawText(winAnsiLine(text).slice(0, 120), { x: margin + indent, y, size, font: f, color })
     y -= gap
   }
 
@@ -1334,7 +1374,15 @@ export async function buildPrintablePdf({ pdfBytes, props, documentName }) {
   // Values next, onto the document's OWN pages — the summary is appended after,
   // so it never gets an overlay of its own.
   const valuesTotal = collectFilledFields(props).length
-  const valuesDrawn = valuesTotal ? await drawFilledValues(doc, props) : 0
+  let valuesDrawn = 0
+  // Never at the cost of the printout itself: if drawing the values fails outright,
+  // the document and its summary — which lists every value in full — still come
+  // back. Save PDF / Print / Save to Deal returning an error is the worse outcome.
+  try {
+    if (valuesTotal) valuesDrawn = await drawFilledValues(doc, props)
+  } catch (err) {
+    console.warn(`[boldsign] print: could not draw this document's values (${err.message}) — the summary lists them instead`)
+  }
   await appendSigningSummary(doc, {
     summary: buildSigningSummary(props),
     documentName,

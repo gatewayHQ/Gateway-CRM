@@ -8,6 +8,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib'
 import { requireAdmin, errorResponse } from '../_lib/auth.js'
+// A cover page prints names an agent typed — a deal title, a document name, a
+// signer. pdf-lib's standard fonts encode with WinAnsi and THROW on anything it
+// has no code for (a newline, an emoji, a non-Latin name), which would fail the
+// whole packet over a cover line. winAnsiLine() makes each one drawable first.
+import { winAnsiLine } from '../_lib/winAnsi.js'
 
 const DEAL_BUCKET   = 'deal-documents'
 const PACKET_BUCKET = 'closing-packets'
@@ -65,7 +70,7 @@ export default async function closingPacketHandler(req, res) {
         // PDF magic bytes (%PDF)
         if (!(bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46)) {
           const p = merged.addPage([612, 792])
-          p.drawText(`[Skipped non-PDF: ${label}]`, { x: 56, y: 700, size: 14, font: fontR, color: rgb(0.6, 0.3, 0.3) })
+          p.drawText(winAnsiLine(`[Skipped non-PDF: ${label}]`), { x: 56, y: 700, size: 14, font: fontR, color: rgb(0.6, 0.3, 0.3) })
           return { ok: true, skipped: true }
         }
         const src   = await PDFDocument.load(bytes, { ignoreEncryption: true })
@@ -147,12 +152,12 @@ export default async function closingPacketHandler(req, res) {
 function drawCoverPage(merged, font, fontR, { deal, me, envelopes, docSet }) {
   const cover = merged.addPage([612, 792])
   cover.drawText('Closing Packet', { x: 56, y: 720, size: 28, font, color: rgb(0.18, 0.21, 0.38) })
-  cover.drawText(deal.title || 'Untitled Deal', { x: 56, y: 690, size: 16, font: fontR, color: rgb(0.12, 0.15, 0.26) })
+  cover.drawText(winAnsiLine(deal.title || 'Untitled Deal'), { x: 56, y: 690, size: 16, font: fontR, color: rgb(0.12, 0.15, 0.26) })
   let y = 640
   const line = (label, value) => {
     if (!value) return
     cover.drawText(label, { x: 56, y, size: 10, font, color: rgb(0.45, 0.49, 0.59) })
-    cover.drawText(String(value), { x: 200, y, size: 11, font: fontR, color: rgb(0.12, 0.15, 0.26) })
+    cover.drawText(winAnsiLine(value), { x: 200, y, size: 11, font: fontR, color: rgb(0.12, 0.15, 0.26) })
     y -= 22
   }
   line('Deal value',     deal.value > 0 ? `$${Number(deal.value).toLocaleString()}` : null)
@@ -168,7 +173,7 @@ function drawCoverPage(merged, font, fontR, { deal, me, envelopes, docSet }) {
     ...docSet.map(v => `${v.pinned_as === 'final' ? 'Final · ' : ''}${v.document_name}${v.version_num > 1 ? ` (v${v.version_num})` : ''}`),
   ]
   for (const item of indexItems.slice(0, 26)) {
-    cover.drawText(`• ${item}`, { x: 56, y, size: 10, font: fontR, color: rgb(0.20, 0.24, 0.38), maxWidth: 500 })
+    cover.drawText(winAnsiLine(`• ${item}`), { x: 56, y, size: 10, font: fontR, color: rgb(0.20, 0.24, 0.38), maxWidth: 500 })
     y -= 16
     if (y < 80) break
   }
