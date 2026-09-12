@@ -49,7 +49,7 @@ const env = (key) => {
 export const COMPANY = {
   name:    env('COMPANY_NAME')    || 'Gateway Real Estate Advisors',
   address: env('COMPANY_ADDRESS') || '700 Nebraska St, Sioux City, IA 51101',
-  phone:   env('COMPANY_PHONE')   || '(712) 900-0205',
+  phone:   env('COMPANY_PHONE')   || '(712) 226-8000',
 }
 
 /**
