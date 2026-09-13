@@ -1659,3 +1659,133 @@ select.form-control { cursor: pointer; }
   .collapse-head__chevron { transition: none; }
   .boot__seal { animation: none; }
 }
+
+/* =============================================
+   PDF MARKUP — the selectable text layer and the strokes drawn over it.
+
+   The text layer is pdf.js's: a transparent span per text run, positioned and
+   scaled to sit exactly on the glyphs painted on the canvas below it. It is
+   what makes a rendered PDF selectable, and selecting is how a strike is
+   placed (see src/components/PdfMarkup.jsx).
+   ============================================= */
+.pdf-markup__page {
+  position: relative;
+  display: inline-block;
+  /* The pane centres with text-align; the page itself must not inherit that,
+     or every line of the form would render centred inside the text layer. */
+  text-align: left;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.18);
+  background: #fff;
+}
+
+.pdf-textlayer {
+  /* inset:0 rather than a width of its own. pdf.js positions every span as a
+     percentage of this box, so it has to be exactly the rendered page: an
+     absolutely-positioned box with no width shrinks to its content, and since
+     every child is itself absolutely positioned that content measures zero —
+     which collapses the layer and hands the clicks to the canvas underneath. */
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  z-index: 2;
+  /* Selecting is the whole gesture, so it stays on here even where the app
+     turns it off elsewhere. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+.pdf-textlayer > span {
+  position: absolute;
+  white-space: pre;
+  color: transparent;
+  transform-origin: 0% 0%;
+  cursor: text;
+}
+/* pdf.js appends this as the selection's end anchor; it must not be visible. */
+.pdf-textlayer > .endOfContent { display: none; }
+
+.pdf-textlayer ::selection { background: rgba(74,111,165,0.35); }
+.pdf-textlayer ::-moz-selection { background: rgba(74,111,165,0.35); }
+
+/* A placed stroke. Same ink as pdfStrike.js draws into the page, so the screen
+   is not a friendlier version of the file — it is the file. pointer-events are
+   off because a mark sits on top of the words it struck, and anything clickable
+   there would make that text impossible to select again. */
+.pdf-markup__strike {
+  position: absolute;
+  height: 2px;
+  background: #0d1473;
+  border-radius: 1px;
+  z-index: 3;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+.pdf-markup__strike.is-lit {
+  outline: 2px solid rgba(201,168,76,0.9);
+  outline-offset: 2px;
+}
+
+/* =============================================
+   MARKUP WORKSPACE — the document beside its list of marks.
+
+   THE HEIGHT IS DEFINITE ON PURPOSE. `flex: 1` + `overflow: auto` only makes a
+   scroll container when some ancestor has a height to divide up; with every
+   ancestor sized by its content instead, the pane simply grows to the full
+   height of the rendered page and the bottom of the form becomes unreachable —
+   the app shell is `height: 100vh; overflow: hidden`, so there is no outer
+   scrollbar to fall back on. Giving the row a real height is what lets the
+   document scroll inside its own pane, with the toolbar and the marks panel
+   staying put beside it.
+   ============================================= */
+.markup-workspace {
+  display: flex;
+  align-items: stretch;
+  /* Tall enough to read a form on a laptop, never taller than the window. */
+  height: min(76vh, 980px);
+  min-height: 420px;
+}
+
+/* Inside a workspace modal the height comes from the modal body, which is
+   already a bounded flex column — so the row fills it instead of setting a
+   height of its own. */
+.markup-workspace--fill { height: auto; flex: 1; min-height: 0; }
+
+.markup-workspace__doc {
+  flex: 1 1 540px;
+  min-width: 300px;
+  min-height: 0;          /* without this a flex item refuses to shrink below its content */
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--gw-border);
+}
+
+.markup-workspace__rail {
+  flex: 0 0 280px;
+  min-width: 240px;
+  min-height: 0;
+  background: var(--gw-bone);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  overflow-y: auto;        /* a dozen struck passages scroll rather than push the buttons off */
+}
+
+/* One column when there is no room for two. The document keeps a definite
+   height of its own here — stacking must not bring back the unscrollable pane. */
+@media (max-width: 900px) {
+  .markup-workspace {
+    flex-wrap: wrap;
+    height: auto;
+  }
+  .markup-workspace__doc {
+    flex: 1 1 100%;
+    height: 68vh;
+    border-right: none;
+    border-bottom: 1px solid var(--gw-border);
+  }
+  .markup-workspace__rail {
+    flex: 1 1 100%;
+    overflow-y: visible;
+  }
+}
