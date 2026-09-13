@@ -3072,7 +3072,7 @@ create policy "agent_notifications_policy" on agent_notifications
                           )}
                           {daysOut !== null && daysOut >= 2 && (
                             <span style={{ color: daysOut >= OVERDUE_DAYS ? 'var(--gw-red)' : 'var(--gw-amber)', fontWeight:600 }}>
-                              {' '}\u00b7 waiting {daysOut}d
+                              {' \u00b7 waiting '}{daysOut}d
                               {env.reminder_count > 0 && ` \u00b7 ${env.reminder_count} reminder${env.reminder_count > 1 ? 's' : ''} sent`}
                             </span>
                           )}
