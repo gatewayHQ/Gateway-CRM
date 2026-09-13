@@ -233,7 +233,17 @@ export default function PdfMarkup({ bytes, marks = [], onAddMarks, highlightGrou
       </div>
 
       {/* ── The document ────────────────────────────────────────────────── */}
-      <div ref={paneRef} style={{ flex: 1, overflow: 'auto', background: '#e5e7eb', padding: 24, minHeight: 0 }}>
+      {/* The scroll container. Its height comes from .markup-workspace, which is
+          what makes `overflow: auto` mean anything here. Centred with text-align
+          rather than flex: a flex-centred item wider than its container is
+          clipped on the left and cannot be scrolled back to. */}
+      <div
+        ref={paneRef}
+        style={{
+          flex: 1, minHeight: 0, overflow: 'auto',
+          background: '#e5e7eb', padding: 24, textAlign: 'center',
+        }}
+      >
         {!hasText && (
           <div style={{
             maxWidth: 520, margin: '0 auto 16px', padding: '10px 14px', fontSize: 12, lineHeight: 1.5,

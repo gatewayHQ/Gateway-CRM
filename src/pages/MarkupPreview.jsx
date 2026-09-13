@@ -166,21 +166,17 @@ export default function MarkupPreview() {
             </span>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'stretch', minHeight: 520, flexWrap: 'wrap' }}>
+          {/* The height of this row is what makes the document scrollable —
+              see .markup-workspace in app.css. */}
+          <div className="markup-workspace">
 
             {/* ── The form ───────────────────────────────────────────────── */}
-            <div style={{
-              flex: '1 1 540px', minWidth: 300, display: 'flex', flexDirection: 'column',
-              borderRight: '1px solid var(--gw-border)',
-            }}>
+            <div className="markup-workspace__doc">
               <PdfMarkup bytes={file.bytes} marks={marks} onAddMarks={addMarks} highlightGroup={lit} />
             </div>
 
             {/* ── What has been struck ───────────────────────────────────── */}
-            <aside style={{
-              flex: '0 0 280px', minWidth: 240, background: 'var(--gw-bone)',
-              display: 'flex', flexDirection: 'column', gap: 14, padding: 16,
-            }}>
+            <aside className="markup-workspace__rail">
               <div>
                 <div className="eyebrow-label">Struck passages ({groups.length})</div>
                 {!groups.length ? (
