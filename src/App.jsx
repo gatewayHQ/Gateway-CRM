@@ -30,6 +30,9 @@ const IntegrationsPage = React.lazy(() => import('./pages/Integrations.jsx'))
 const CampaignsPage    = React.lazy(() => import('./pages/Campaigns.jsx'))
 const FormLibraryPage  = React.lazy(() => import('./pages/FormLibrary.jsx'))
 const AdminReviewPage  = React.lazy(() => import('./pages/AdminReview.jsx'))
+// Unreleased. Reached only by ?preview=markup — deliberately not in the nav,
+// so testing it cannot become an agent stumbling onto it mid-transaction.
+const MarkupPreviewPage = React.lazy(() => import('./pages/MarkupPreview.jsx'))
 import LoginPage from './pages/Login.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
 import GlobalSearch from './components/GlobalSearch.jsx'
@@ -272,6 +275,17 @@ export default function App() {
     if (outlook === 'connected') pushToast('Outlook connected')
     else pushToast(params.get('message') || 'Could not connect Outlook', 'error')
     window.history.replaceState(null, '', window.location.pathname)
+  }, [])
+
+  // ?preview=markup — the strike-through markup bench (src/pages/MarkupPreview.jsx).
+  // Unreleased, so it has no nav entry and nothing links to it. The query string
+  // is deliberately NOT stripped the way the Outlook one above is: testing this
+  // means reloading it repeatedly, and a refresh that dumped you on the dashboard
+  // would make that tedious.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('preview') === 'markup') {
+      setRoute('markup-preview')
+    }
   }, [])
 
   // Per-agent hidden nav — loaded from agents table (nav_hidden column)
@@ -799,6 +813,7 @@ export default function App() {
           {route === 'integrations'      && <IntegrationsPage />}
           {route === 'data-management'   && <DataManagementPage />}
           {route === 'settings'          && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} activeAgentId={activeAgentId} hideableNav={HIDEABLE_NAV} />}
+          {route === 'markup-preview'    && <MarkupPreviewPage />}
         </ErrorBoundary>
         </React.Suspense>
       </div>
