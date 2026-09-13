@@ -279,4 +279,13 @@ describe('sending', () => {
     await expect(send(svc)).resolves.toMatchObject({ sent: false })
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  it('never throws, whatever goes wrong', async () => {
+    // The caller is a webhook: a throw here is a 500, and a 500 asks BoldSign to
+    // redeliver an event whose archive already succeeded. This holds even for a
+    // failure nothing anticipated — here, a client that is not a client at all.
+    await expect(mailSignedCopyToAgents(null, { dealId: DEAL })).resolves.toMatchObject({ sent: false })
+    await expect(mailSignedCopyToAgents({}, { dealId: DEAL })).resolves.toMatchObject({ sent: false })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
 })

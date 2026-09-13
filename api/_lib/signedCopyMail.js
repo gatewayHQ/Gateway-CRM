@@ -185,7 +185,19 @@ async function postResend({ apiKey, from, to, subject, html, text, attachment, i
  * key on the message itself costs nothing and is the difference between a
  * belt-and-braces retry and an agent reading the same email twice.
  */
-export async function mailSignedCopyToAgents(svc, {
+export async function mailSignedCopyToAgents(svc, opts) {
+  // "Never throws" is a contract the caller relies on, so it is enforced here
+  // once rather than by guarding each risky line and hoping none was missed —
+  // a throw out of this function is a 500 out of the webhook, which asks
+  // BoldSign to redeliver an event whose archive already succeeded.
+  try {
+    return await sendSignedCopy(svc, opts)
+  } catch (e) {
+    return { sent: false, reason: e.message }
+  }
+}
+
+async function sendSignedCopy(svc, {
   dealId, documentId, documentName, dealTitle,
   signerNames = [], completedAt, signedStoragePath, bucket, baseUrl,
 }) {
