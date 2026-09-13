@@ -171,7 +171,11 @@ describe('time of day survives the trip to Outlook', () => {
     expect(allDay).toBe(false)
     expect(fields.startsAt).toBe('2026-09-10T19:00:00.000Z')
 
-    const body = calendarEventBody(fields)
+    // `now` is pinned a week out from the due date: the reminder lead is only
+    // honoured while it still lands in the future (see resolveReminderLead),
+    // and a fixture date that has since gone by would otherwise make this
+    // assertion depend on when the suite is run.
+    const body = calendarEventBody(fields, Date.parse('2026-09-03T12:00:00Z'))
     expect(body.isAllDay).toBe(false)
     expect(body.start).toEqual({ dateTime: '2026-09-10T19:00:00', timeZone: 'UTC' })
     expect(body.end).toEqual({ dateTime: '2026-09-10T19:30:00', timeZone: 'UTC' })

@@ -25,9 +25,50 @@
 // dead deal doesn't leave stale reminders on someone's calendar forever.
 // ─────────────────────────────────────────────────────────────────────────────
 import crypto from 'node:crypto'
-import { getValidAccessToken, createCalendarEvent, updateCalendarEvent, deleteCalendarEvent } from './msGraph.js'
+import {
+  getValidAccessToken, createCalendarEvent, updateCalendarEvent, deleteCalendarEvent,
+  listGatewayCalendarEvents,
+} from './msGraph.js'
 import { isOpenStage } from '../../src/lib/stages.js'
 import { streetLine, readPropertiesWithUnit } from '../../src/lib/address.js'
+
+// ─── Creating an event WITHOUT leaving an untracked copy behind ──────────────
+//
+// The create path is read-then-write with nothing holding the gap: read the
+// ledger, see no row, POST the event, insert the row. Two syncs for the same
+// date that overlap — and they do, because the Key Dates tab and every task
+// save fire one each, fire-and-forget, while the last one is still talking to
+// Microsoft — both read "no row" and both create an event. The second insert
+// then loses to the unique index.
+//
+// That error used to go unread, and THAT is what made the duplicates
+// permanent: the second Graph event is real, on the agent's calendar, with its
+// own reminder, and nothing in the ledger names it — so no later sync can ever
+// update it, move it, or delete it. Every subsequent race adds another. An
+// agent ends up with a stack of identical "Inspection — …" events, all of them
+// ringing, none of them removable from the CRM.
+//
+// So the insert's verdict is now read. Losing the race means the OTHER sync's
+// event is the one the ledger points at, and the event this call just created
+// is the surplus — delete it immediately and report nothing created. Postgres
+// says 23505 for a unique violation; PostgREST forwards the code.
+async function createTrackedEvent({ svc, accessToken, table, row, fields }) {
+  const created = await createCalendarEvent(accessToken, fields)
+  const { error } = await svc.from(table).insert([{ ...row, graph_event_id: created.id }])
+  if (!error) return { created: true }
+
+  const duplicate = error.code === '23505' || /duplicate key|unique constraint/i.test(error.message || '')
+  if (!duplicate) {
+    // The event exists and cannot be recorded — that is exactly the orphan this
+    // function exists to prevent, so take it back off the calendar.
+    await deleteCalendarEvent(accessToken, created.id).catch(() => {})
+    throw new Error(`Calendar event could not be recorded (${error.message}) — it was removed again rather than left untracked`)
+  }
+  await deleteCalendarEvent(accessToken, created.id).catch(err => {
+    if (err.status !== 404) console.warn(`[calendarSync] lost the create race and could not clean up ${created.id}: ${err.message}`)
+  })
+  return { created: false, raced: true }
+}
 
 function eventHash(entry, dealTitle, propertyAddress) {
   return crypto.createHash('sha256')
@@ -88,12 +129,12 @@ export async function syncDealCalendar(svc, deal, { property } = {}) {
           .eq('id', existing.id)
         result.updated++
       } else {
-        const created = await createCalendarEvent(accessToken, { subject, date: entry.date, bodyHtml })
-        await svc.from('deal_calendar_events').insert([{
-          deal_id: deal.id, agent_id: deal.agent_id, date_type: entry.type,
-          graph_event_id: created.id, event_hash: hash,
-        }])
-        result.created++
+        const { created } = await createTrackedEvent({
+          svc, accessToken, table: 'deal_calendar_events',
+          row: { deal_id: deal.id, agent_id: deal.agent_id, date_type: entry.type, event_hash: hash },
+          fields: { subject, date: entry.date, bodyHtml },
+        })
+        if (created) result.created++
       }
     } catch (err) {
       result.errors.push({ type: entry.type, error: err.message })
@@ -322,11 +363,12 @@ export async function syncTaskCalendar(svc, task, { contact, deal, purge = false
         .eq('id', existing.id)
       result.updated++
     } else {
-      const created = await createCalendarEvent(accessToken, fields)
-      await svc.from('task_calendar_events').insert([{
-        task_id: task.id, agent_id: agentId, graph_event_id: created.id, event_hash: hash,
-      }])
-      result.created++
+      const { created } = await createTrackedEvent({
+        svc, accessToken, table: 'task_calendar_events',
+        row: { task_id: task.id, agent_id: agentId, event_hash: hash },
+        fields,
+      })
+      if (created) result.created++
     }
   } catch (err) {
     result.errors.push({ task: task.id, error: err.message })
@@ -400,4 +442,122 @@ export async function syncAllTaskCalendars(svc) {
   }
 
   return { ok: true, synced, cleaned, total: candidates.length, errors }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Duplicate sweep — clearing copies the ledger already lost
+//
+// createTrackedEvent stops NEW duplicates being stranded, but it cannot help
+// the ones already sitting on agents' calendars from before it existed. Those
+// are invisible to every other path here: the ledger names one event per key
+// date, so a sync updates that one and never learns the other five exist. They
+// keep their reminders indefinitely and the only way to clear them was by hand,
+// one at a time, in Outlook.
+//
+// This finds them the only way left — by the 'Gateway CRM' category every event
+// this file creates is stamped with — and removes the surplus.
+//
+// THE RULES IT WILL NOT BREAK, because this deletes from somebody's real
+// calendar:
+//   • only events carrying our own category are even looked at;
+//   • an event is only ever deleted when an IDENTICAL one (same subject, same
+//     start, same all-day-ness) is still named by the ledger — the ledger row
+//     is the proof the CRM created this shape of event, and the keeper;
+//   • anything the ledger names is kept, always;
+//   • a lone untracked event is LEFT ALONE. It might be an orphan, or it might
+//     be something the agent made themselves or a copy they want; without a
+//     tracked twin there is no way to tell, and guessing wrong deletes work.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Same subject, same instant, same kind → the same event twice over. Graph
+// hands back the start as { dateTime, timeZone }; two events this file created
+// from one key date carry byte-identical values for both.
+function eventIdentity(ev) {
+  return [
+    ev?.subject || '',
+    ev?.start?.dateTime || '',
+    ev?.start?.timeZone || '',
+    ev?.isAllDay ? 'all-day' : 'timed',
+  ].join('|')
+}
+
+export async function pruneDuplicateCalendarEvents(svc, agentId) {
+  const result = { deleted: 0, scanned: 0, errors: [] }
+
+  // The ledger first, because it is a cheap local read and it can rule the
+  // whole sweep out. No ledger rows means no keeper can be proven for anything,
+  // and the rule above says a lone untracked event is left alone — so there is
+  // nothing this sweep could legitimately delete, and no reason to refresh a
+  // token or enumerate a calendar to discover that.
+  const [{ data: dealRows }, { data: taskRows }] = await Promise.all([
+    svc.from('deal_calendar_events').select('graph_event_id').eq('agent_id', agentId),
+    svc.from('task_calendar_events').select('graph_event_id').eq('agent_id', agentId),
+  ])
+  const tracked = new Set([...(dealRows || []), ...(taskRows || [])].map(r => r.graph_event_id).filter(Boolean))
+  if (!tracked.size) return { ...result, skipped: true, reason: 'No tracked events for this agent' }
+
+  let accessToken
+  try {
+    ;({ accessToken } = await getValidAccessToken(svc, agentId))
+  } catch (err) {
+    return { ...result, skipped: true, reason: err.message }
+  }
+
+  let events
+  try {
+    events = await listGatewayCalendarEvents(accessToken)
+  } catch (err) {
+    // A tenant that refuses the category filter simply gets no sweep — see
+    // listGatewayCalendarEvents on why the fallback is "nothing", not "read the
+    // whole calendar".
+    return { ...result, skipped: true, reason: `Could not list Gateway events: ${err.message}` }
+  }
+  result.scanned = events.length
+
+  const groups = new Map()
+  for (const ev of events) {
+    if (!ev?.id) continue
+    const key = eventIdentity(ev)
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(ev)
+  }
+
+  for (const group of groups.values()) {
+    if (group.length < 2) continue
+    if (!group.some(ev => tracked.has(ev.id))) continue   // no proven keeper — leave the whole group
+    for (const ev of group) {
+      if (tracked.has(ev.id)) continue                     // the ledger's copy, and any other it names
+      try {
+        await deleteCalendarEvent(accessToken, ev.id)
+        result.deleted++
+      } catch (err) {
+        if (err.status === 404) { result.deleted++; continue }   // already gone — that is the goal
+        result.errors.push({ event: ev.id, error: err.message })
+      }
+    }
+  }
+
+  return result
+}
+
+// The nightly pass, one agent at a time. Runs AFTER both sweeps above so the
+// ledger is as complete as it is going to get before anything is judged
+// surplus.
+export async function pruneAllDuplicateCalendarEvents(svc) {
+  const { data: connections } = await svc.from('ms_graph_connections')
+    .select('agent_id').eq('status', 'connected')
+  const agentIds = (connections || []).map(c => c.agent_id)
+  if (!agentIds.length) return { ok: true, message: 'No agents have Outlook connected', deleted: 0 }
+
+  let deleted = 0
+  let swept = 0
+  const errors = []
+  for (const agentId of agentIds) {
+    const result = await pruneDuplicateCalendarEvents(svc, agentId)
+    if (result.skipped) continue
+    swept++
+    deleted += result.deleted
+    if (result.errors?.length) errors.push({ agent: agentId, errors: result.errors })
+  }
+  return { ok: true, agents: swept, deleted, errors }
 }

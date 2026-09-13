@@ -277,6 +277,19 @@ export default function App() {
     window.history.replaceState(null, '', window.location.pathname)
   }, [])
 
+  // ?deal=<id> — a deep link INTO a deal from outside the app. The signed-copy
+  // email the BoldSign webhook sends (api/_lib/signedCopyMail.js) is the first
+  // thing to need one: "open the deal" in an email has to land on the deal, and
+  // this app has no real URL routing to land on. Same shape as the Outlook
+  // callback above — route, then strip the query so a refresh doesn't re-route
+  // an agent who has since navigated somewhere else.
+  useEffect(() => {
+    const dealId = new URLSearchParams(window.location.search).get('deal')
+    if (!dealId) return
+    setRoute(`deal/${dealId}`)
+    window.history.replaceState(null, '', window.location.pathname)
+  }, [])
+
   // ?preview=markup — the strike-through markup bench (src/pages/MarkupPreview.jsx).
   // Unreleased, so it has no nav entry and nothing links to it. The query string
   // is deliberately NOT stripped the way the Outlook one above is: testing this

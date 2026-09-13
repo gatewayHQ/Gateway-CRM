@@ -35,7 +35,7 @@ import { normalizeSigners, outstandingSigners } from '../src/lib/services/boldsi
 import { OPERATING_STATES } from '../src/lib/constants.js'
 import { ALL_DEAL_STAGES, isOpenStage } from '../src/lib/stages.js'
 import { streetLine, readPropertiesWithUnit } from '../src/lib/address.js'
-import { syncAllDealCalendars, syncAllTaskCalendars } from './_lib/calendarSync.js'
+import { syncAllDealCalendars, syncAllTaskCalendars, pruneAllDuplicateCalendarEvents } from './_lib/calendarSync.js'
 import { syncAllInboxes } from './_lib/inboxSync.js'
 
 // Every stage a deal can sit in while still in flight — derived from the stage
@@ -466,6 +466,16 @@ async function runCalendarSync(supabase) {
   } catch (err) {
     body.tasks = { ok: false, error: err.message }
     failed = true
+  }
+  // Last, and only after both ledgers have been brought up to date: clear the
+  // duplicate events stranded on agents' calendars by races the ledger could
+  // not record (see pruneDuplicateCalendarEvents). A failure here costs nothing
+  // already synced, so it is reported but does not fail the run — the copies it
+  // did not reach are noise, not lost data, and tomorrow's run tries again.
+  try {
+    body.duplicates = await pruneAllDuplicateCalendarEvents(supabase)
+  } catch (err) {
+    body.duplicates = { ok: false, error: err.message }
   }
   return { status: failed ? 500 : 200, body: { ok: !failed, ...body } }
 }
