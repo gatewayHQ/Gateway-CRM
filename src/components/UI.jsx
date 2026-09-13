@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, Component } from 'react'
+import React, { useState, useEffect, useRef, useCallback, Component } from 'react'
 
 // ─── ICONS ───────────────────────────────────────────────────────────────────
 const ICONS = {
@@ -413,45 +413,108 @@ export function BootScreen() {
 //
 // Closes on pick, on Escape, and on any click outside — including a click on
 // another menu's trigger, so two can never be open at once.
+// Roughly how tall the menu will be, from what is in it. Used only to decide
+// whether it opens downward or upward, so an estimate is enough — being a few
+// pixels out picks the same side.
+const MENU_ITEM_H = 29
+const MENU_DIVIDER_H = 9
+const MENU_GAP = 4
+const menuHeight = (items) => items.reduce((h, it) => h + (it.divider ? MENU_DIVIDER_H : MENU_ITEM_H), 8)
+
+// Two placements are the same when every side they pin is the same. Compared by
+// value because each call to place() builds a fresh object.
+const POS_KEYS = ['top', 'bottom', 'left', 'right', 'maxHeight']
+const samePos = (a, b) => POS_KEYS.every(k => a[k] === b[k])
+
 export function MenuButton({ items = [], label = '⋯', title = 'More actions', align = 'right', disabled = false, className = 'btn btn--ghost btn--icon btn--sm' }) {
   const [open, setOpen] = useState(false)
+  const [pos, setPos] = useState(null)
   const wrap = useRef(null)
+  const btn = useRef(null)
+
+  const usable = items.filter(Boolean)
+  // Read through a ref inside place(). `usable` is a fresh array on every
+  // render, so depending on it directly would rebuild place(), which would
+  // re-run the effect, which calls place(), which sets state, which renders
+  // again — a loop that spins for as long as the menu is open and churns the
+  // scroll listener so fast it never catches a scroll.
+  const usableRef = useRef(usable)
+  usableRef.current = usable
+
+  // WHY THIS IS position: fixed AND NOT position: absolute.
+  //
+  // An absolutely-positioned menu is clipped by any ancestor with `overflow:
+  // hidden`, and cards clip on purpose — the signature rows use it to keep a
+  // colour rail and a footer strip inside their rounded corners. The menu was
+  // opening into that clip and vanishing completely: the button worked, the
+  // items rendered, and nothing was on screen. A fixed element is positioned
+  // against the viewport, so ancestor overflow cannot cut it off.
+  //
+  // It still lives inside `wrap` in the DOM, which is what keeps the click-away
+  // check below honest — DOM containment does not care where a box is painted.
+  const place = useCallback(() => {
+    const el = btn.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const below = window.innerHeight - r.bottom - 8
+    // Open upward when there is not room beneath and there is more above — a
+    // row near the bottom of a scrolling drawer is the common case.
+    const up = menuHeight(usableRef.current) > below && r.top > below
+    const next = {
+      ...(up ? { bottom: window.innerHeight - r.top + MENU_GAP } : { top: r.bottom + MENU_GAP }),
+      ...(align === 'right'
+        ? { right: Math.max(8, window.innerWidth - r.right) }
+        : { left: Math.max(8, r.left) }),
+      // Never taller than the room it has; scroll rather than run off-screen.
+      maxHeight: Math.max(120, (up ? r.top - 12 : below)),
+    }
+    // Keep the previous object when nothing moved, so a scroll that does not
+    // shift the button does not re-render every listener on the page.
+    setPos(prev => (prev && samePos(prev, next) ? prev : next))
+  }, [align])
 
   useEffect(() => {
     if (!open) return
+    place()
     const away = (e) => { if (!wrap.current?.contains(e.target)) setOpen(false) }
     const esc  = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false) } }
-    // Capture phase: a row that expands on click must not also toggle when the
-    // click that closes this menu lands on it.
+    // Fixed coordinates go stale the moment anything scrolls, so follow the
+    // button rather than leaving the menu behind. Capture phase catches scrolls
+    // on inner panes (the deal drawer) as well as the window.
+    const follow = () => place()
     document.addEventListener('mousedown', away, true)
     document.addEventListener('keydown', esc, true)
+    document.addEventListener('scroll', follow, true)
+    window.addEventListener('resize', follow)
     return () => {
       document.removeEventListener('mousedown', away, true)
       document.removeEventListener('keydown', esc, true)
+      document.removeEventListener('scroll', follow, true)
+      window.removeEventListener('resize', follow)
     }
-  }, [open])
+  }, [open, place])
 
-  const usable = items.filter(Boolean)
   if (!usable.length) return null
 
   return (
     <span ref={wrap} style={{ position: 'relative', display: 'inline-flex' }}>
       <button
+        ref={btn}
         type="button" className={className} title={title} aria-haspopup="menu" aria-expanded={open}
         disabled={disabled}
         onClick={(e) => { e.stopPropagation(); setOpen(o => !o) }}
       >
         {label}
       </button>
-      {open && (
+      {open && pos && (
         <div
           role="menu"
           onClick={e => e.stopPropagation()}
           style={{
-            position: 'absolute', top: '100%', marginTop: 4, [align]: 0, zIndex: 40,
+            position: 'fixed', ...pos, zIndex: 160,
             background: '#fff', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)',
             boxShadow: 'var(--shadow-card)', padding: 4, minWidth: 186,
-            display: 'flex', flexDirection: 'column',
+            display: 'flex', flexDirection: 'column', overflowY: 'auto',
           }}
         >
           {usable.map((item, i) => item.divider ? (
