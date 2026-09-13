@@ -99,16 +99,32 @@ export default function PdfMarkup({ bytes, marks = [], onAddMarks, highlightGrou
     ? Math.max(MIN_SCALE, (paneWidth - PANE_PADDING) / natural)
     : zoom
 
-  // Draw the page. Serialised by the `live` guard: pdf.js will start a second
-  // render onto a canvas it is still painting, and that leaves half a page.
+  // Draw the page. Renders are CHAINED, never merely flagged.
+  //
+  // The scale changes once on open — the initial zoom, then the fit-width figure
+  // as soon as the pane has been measured — so two renders are in flight within
+  // a few frames of each other every single time this mounts. renderPage() sizes
+  // the canvas and then paints it, so if the first render finishes AFTER the
+  // second has resized the canvas, the page is painted at the old scale inside a
+  // box sized for the new one: the document appears about three-quarters size,
+  // sitting up in the corner of its own page.
+  //
+  // The text layer and the strokes are positioned against the page box and stay
+  // exactly where they belong, so what an agent sees is ink floating off the
+  // words it struck — the marks look wrong when they are right, which is worse
+  // than a visibly broken render. Awaiting the previous render before starting
+  // the next means the last one to run is the one with the current scale.
+  const renderChain = React.useRef(Promise.resolve())
   React.useEffect(() => {
     if (!pdf || !canvasRef.current || !scale) return
     let live = true
-    ;(async () => {
-      try {
+    renderChain.current = renderChain.current
+      .catch(() => {})
+      .then(async () => {
+        if (!live || !canvasRef.current) return   // superseded while it waited its turn
         await renderPage(pdf, page, canvasRef.current, scale)
-      } catch { /* a cancelled render during teardown is not an error */ }
-    })()
+      })
+      .catch(() => { /* a cancelled render during teardown is not an error */ })
     return () => { live = false }
   }, [pdf, page, scale])
 
@@ -285,6 +301,64 @@ export default function PdfMarkup({ bytes, marks = [], onAddMarks, highlightGrou
           })}
         </div>
       </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MarksList — what has been struck, as a list beside the page.
+//
+// Shared by the markup modal and the preview bench so the two cannot drift into
+// describing the same mark differently. One row per SELECTION, not per stroke:
+// striking a sentence that wraps across three lines is one thing the agent did,
+// and removing it removes all three.
+// ─────────────────────────────────────────────────────────────────────────────
+export function MarksList({ groups, onRemove, onHover }) {
+  if (!groups.length) {
+    return (
+      <p style={{ fontSize: 12, color: 'var(--gw-mist)', lineHeight: 1.55, marginTop: 6 }}>
+        Nothing struck yet. Select text on the form the way you would in any document, and let go.
+      </p>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginTop: 8 }}>
+      {groups.map(g => (
+        <div
+          key={g.group}
+          onMouseEnter={() => onHover?.(g.group)}
+          onMouseLeave={() => onHover?.(null)}
+          style={{
+            background: 'var(--gw-chalk)', border: '1px solid var(--gw-border)',
+            borderRadius: 'var(--radius)', padding: '8px 9px',
+            display: 'flex', gap: 8, alignItems: 'flex-start',
+          }}
+        >
+          <span style={{ width: 3, alignSelf: 'stretch', borderRadius: 2, background: '#0d1473', flexShrink: 0 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontSize: 9, letterSpacing: '0.05em', textTransform: 'uppercase',
+              color: 'var(--gw-mist)', fontFamily: 'var(--font-mono)',
+            }}>
+              Page {g.page}{g.lines > 1 ? ` · ${g.lines} lines` : ''}
+            </div>
+            <div style={{
+              fontSize: 12.5, marginTop: 2, overflowWrap: 'anywhere',
+              textDecoration: 'line-through', textDecorationColor: '#0d1473',
+            }}>
+              {g.text || 'marked passage'}
+            </div>
+          </div>
+          <button
+            className="btn btn--ghost btn--icon btn--sm"
+            title="Remove this strike"
+            onClick={() => onRemove(g.group)}
+          >
+            <Icon name="x" size={12} />
+          </button>
+        </div>
+      ))}
     </div>
   )
 }

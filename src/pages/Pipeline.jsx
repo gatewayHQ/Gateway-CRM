@@ -41,6 +41,7 @@ import { groupDocuments, documentsSummary, assignableKinds, kindById } from '../
 import MlsPackModal from '../components/MlsPackModal.jsx'
 import SplitDocumentModal from '../components/SplitDocumentModal.jsx'
 import MergeDocumentsModal from '../components/MergeDocumentsModal.jsx'
+import MarkupDocumentModal from '../components/MarkupDocumentModal.jsx'
 import { splitPdfBytes, mergePdfBytes, pdfPageCount, safeFileName, moveItem } from '../lib/services/pdfEdit.js'
 import ComposePacketModal from '../components/ComposePacketModal.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
@@ -795,6 +796,7 @@ function DocumentsTab({ deal }) {
   // ordered stack being joined. Both are null unless that screen is open.
   const [split, setSplit]         = useState(null)
   const [merge, setMerge]         = useState(null)
+  const [markup, setMarkup]       = useState(null)
   const [preparing, setPreparing] = useState('')   // which row is fetching its bytes
   // WHICH PILE EACH FILE IS IN, where an agent has said so by hand.
   // Kept in the deal's own comp_data next to portal_docs — the same jsonb the
@@ -990,6 +992,35 @@ function DocumentsTab({ deal }) {
     }
   }
 
+  // MARK UP — strike a clause out of a form before anyone signs it.
+  //
+  // Same shape as split and merge, and deliberately so: bytes in, bytes out,
+  // filed as a NEW document. The original is never overwritten, which matters
+  // most for the case an agent will reach for first — a signed PDF is the file
+  // MLS receives, and a marked-up copy of an executed agreement is a working
+  // document, not an amendment to it.
+  const openMarkup = async (file) => {
+    setPreparing(file.name)
+    try {
+      setMarkup({ fileName: file.name, bytes: await bytesOf(file.name) })
+    } catch (e) {
+      pushToast(e.message, 'error')
+    } finally {
+      setPreparing('')
+    }
+  }
+
+  const runMarkup = async (bytes, name) => {
+    try {
+      await putDocument(name, bytes)
+      pushToast(`Saved as ${safeFileName(name)} — the original is still on this deal.`, 'success')
+      setMarkup(null)
+      loadFiles()
+    } catch (e) {
+      pushToast(e.message, 'error')
+    }
+  }
+
   if (!bucketReady) return (
     <div style={{ padding: 20 }}>
       <div style={{ background: '#fff8ec', border: '1px solid var(--gw-amber)', borderRadius: 'var(--radius)', padding: 16, fontSize: 13, lineHeight: 1.7 }}>
@@ -1133,6 +1164,7 @@ with check (bucket_id = 'deal-documents');`}
                         items={[
                           { label: 'Download', onClick: () => download(file.name) },
                           isPdf(file.name) && { label: 'Merge with…', title: 'Join this PDF with others on this deal into one document', onClick: () => openMerge(file), disabled: Boolean(preparing) },
+                          isPdf(file.name) && { label: 'Mark up…', title: 'Strike clauses out of this PDF and save a marked-up copy', onClick: () => openMarkup(file), disabled: Boolean(preparing) },
                           { label: shared ? 'Stop sharing with client' : 'Share with client portal', onClick: () => toggleShare(file.name) },
                           { divider: true },
                           // "File as…" on every row, because the pile is a guess
@@ -1182,6 +1214,15 @@ with check (bucket_id = 'deal-documents');`}
           onReorder={(from, to) => setMerge(m => ({ ...m, items: moveItem(m.items, from, to) }))}
           onClose={() => setMerge(null)}
           onSubmit={runMerge}
+        />
+      )}
+
+      {markup && (
+        <MarkupDocumentModal
+          fileName={markup.fileName}
+          bytes={markup.bytes}
+          onClose={() => setMarkup(null)}
+          onSubmit={runMarkup}
         />
       )}
     </div>
@@ -1842,6 +1883,8 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
   const [file,       setFile]      = React.useState(null)
   const [pickedFile, setPickedFile]= React.useState('')
   const [agentSigns, setAgentSigns]= React.useState(false)
+  const [markup,     setMarkup]    = React.useState(null)
+  const [opening,    setOpening]   = React.useState(false)
   const [sending,    setSending]   = React.useState(false)
   const [dragOver,   setDragOver]  = React.useState(false)
   const [embedUrl,   setEmbedUrl]  = React.useState(null)   // BoldSign prepare/send iframe URL
@@ -1898,6 +1941,44 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
     }
     return clients
   }, [signers, agentSigns, activeAgent])
+
+  // MARK UP BEFORE SENDING — strike a clause out of the document on its way out.
+  //
+  // The bytes come from wherever the agent got the document: a file they just
+  // chose, or one already on the deal. Either way what comes back is handed to
+  // chooseFile(), so the marked version becomes this send's file and inherits
+  // the same PDF and size checks a dragged-in file gets. sendForSignature below
+  // then uploads it exactly as it would any other chosen file — which also means
+  // the document that actually went out is the one filed on the deal.
+  const openMarkup = async () => {
+    setOpening(true)
+    try {
+      let name, bytes
+      if (file) {
+        name  = file.name
+        bytes = new Uint8Array(await file.arrayBuffer())
+      } else {
+        name = pickedFile.replace(/^\d+-/, '')
+        const { data, error } = await supabase.storage.from(BUCKET)
+          .createSignedUrl(`deal-${deal.id}/${pickedFile}`, 120)
+        if (error || !data?.signedUrl) throw new Error(error?.message || 'Could not open that document.')
+        const res = await fetch(data.signedUrl)
+        if (!res.ok) throw new Error(`Could not read ${name} (HTTP ${res.status}).`)
+        bytes = new Uint8Array(await res.arrayBuffer())
+      }
+      setMarkup({ fileName: name, bytes })
+    } catch (e) {
+      pushToast(e.message, 'error')
+    } finally {
+      setOpening(false)
+    }
+  }
+
+  const useMarkedVersion = async (bytes, name) => {
+    chooseFile(new File([bytes], safeFileName(name), { type: 'application/pdf' }))
+    setMarkup(null)
+    pushToast('The marked-up version will be sent, and filed on this deal.')
+  }
 
   const sendForSignature = async () => {
     const invalid = signers.find(s => !s.name.trim() || !s.email.trim())
@@ -2078,6 +2159,21 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
           </div>
         </div>
 
+        {/* Striking a clause happens HERE, before anyone signs — never on a
+            packet already out for signature, which keeps the acknowledgement
+            path (see the Signatures rows). */}
+        {(file || pickedFile) && (
+          <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:16, background:'var(--gw-bone)' }}>
+            <span style={{ fontSize:12, flex:1, color:'var(--gw-mist)', lineHeight:1.45 }}>
+              <strong style={{ color:'var(--gw-ink)' }}>Striking anything out?</strong> Mark the form up first —
+              the line is written into the PDF the client signs.
+            </span>
+            <button className="btn btn--secondary btn--sm" style={{ flexShrink:0 }} onClick={openMarkup} disabled={opening || sending}>
+              <Icon name="edit" size={12}/> {opening ? 'Opening…' : 'Mark up'}
+            </button>
+          </div>
+        )}
+
         <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', marginBottom:16, background:'var(--gw-bone)' }}>
           <input type="checkbox" id="useTextTags" checked={useTextTags} onChange={e=>setUseTextTags(e.target.checked)} style={{width:15,height:15,cursor:'pointer'}}/>
           <label htmlFor="useTextTags" style={{ fontSize:13, cursor:'pointer', flex:1 }}>
@@ -2099,6 +2195,17 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
           {sending ? 'Opening…' : 'Continue in BoldSign'}
         </button>
       </div>
+
+      {markup && (
+        <MarkupDocumentModal
+          fileName={markup.fileName}
+          bytes={markup.bytes}
+          eyebrow="Mark up before sending"
+          submitLabel="Use this version"
+          onClose={() => setMarkup(null)}
+          onSubmit={useMarkedVersion}
+        />
+      )}
     </Modal>
   )
 }

@@ -1745,6 +1745,11 @@ select.form-control { cursor: pointer; }
   min-height: 420px;
 }
 
+/* Inside a workspace modal the height comes from the modal body, which is
+   already a bounded flex column — so the row fills it instead of setting a
+   height of its own. */
+.markup-workspace--fill { height: auto; flex: 1; min-height: 0; }
+
 .markup-workspace__doc {
   flex: 1 1 540px;
   min-width: 300px;

@@ -1,6 +1,6 @@
 import React from 'react'
 import { Icon, pushToast } from '../components/UI.jsx'
-import PdfMarkup from '../components/PdfMarkup.jsx'
+import PdfMarkup, { MarksList } from '../components/PdfMarkup.jsx'
 import { drawStrikes, groupMarks, validateMarks, pdfPageBoxes } from '../lib/services/pdfStrike.js'
 import { baseName } from '../lib/services/pdfEdit.js'
 
@@ -179,44 +179,7 @@ export default function MarkupPreview() {
             <aside className="markup-workspace__rail">
               <div>
                 <div className="eyebrow-label">Struck passages ({groups.length})</div>
-                {!groups.length ? (
-                  <p style={{ fontSize: 12, color: 'var(--gw-mist)', lineHeight: 1.55, marginTop: 6 }}>
-                    Nothing struck yet. Select text on the form the way you would in any document,
-                    and let go.
-                  </p>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginTop: 8 }}>
-                    {groups.map(g => (
-                      <div
-                        key={g.group}
-                        onMouseEnter={() => setLit(g.group)}
-                        onMouseLeave={() => setLit(null)}
-                        style={{
-                          background: 'var(--gw-chalk)', border: '1px solid var(--gw-border)',
-                          borderRadius: 'var(--radius)', padding: '8px 9px',
-                          display: 'flex', gap: 8, alignItems: 'flex-start',
-                        }}
-                      >
-                        <span style={{ width: 3, alignSelf: 'stretch', borderRadius: 2, background: '#0d1473', flexShrink: 0 }} />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 9, letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--gw-mist)', fontFamily: 'var(--font-mono)' }}>
-                            Page {g.page}{g.lines > 1 ? ` · ${g.lines} lines` : ''}
-                          </div>
-                          <div style={{ fontSize: 12.5, marginTop: 2, overflowWrap: 'anywhere', textDecoration: 'line-through', textDecorationColor: '#0d1473' }}>
-                            {g.text || 'marked passage'}
-                          </div>
-                        </div>
-                        <button
-                          className="btn btn--ghost btn--icon btn--sm"
-                          title="Remove this strike"
-                          onClick={() => removeGroup(g.group)}
-                        >
-                          <Icon name="x" size={12} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                <MarksList groups={groups} onRemove={removeGroup} onHover={setLit} />
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
