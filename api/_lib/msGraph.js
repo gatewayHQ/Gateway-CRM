@@ -278,6 +278,38 @@ const CALENDAR_TIMEZONE = process.env.MS_CALENDAR_TIMEZONE || 'Central Standard 
 // reminders (api/cron.js ?task=reminders) still fire at 24h and today too.
 const CALENDAR_REMINDER_MINUTES = Number(process.env.MS_CALENDAR_REMINDER_MINUTES || 4320)
 
+// ─── Not-already-overdue reminders ───────────────────────────────────────────
+// A reminder whose moment has already passed is not skipped by Outlook — it
+// fires the instant the event arrives, sits in the reminder window until it is
+// dismissed by hand, and comes back on the next sync that rewrites the event's
+// reminder fields. With a three-day default lead that is the COMMON case, not
+// the edge one: an inspection booked for Thursday and typed in on Tuesday is
+// already inside its own lead time, so creating the event immediately pops a
+// notification about a date three days out. Several key dates on one deal, each
+// saved more than once, is how a single deal turns into a screen full of alerts.
+//
+// So: never ask Outlook for a reminder that is already in the past. Step down
+// through shorter leads and take the first one that still lands in the future;
+// if the date itself has been and gone, create the event with NO reminder at
+// all — a key date that already happened must not buzz anyone. The CRM's own
+// 72h/24h/today emails (api/cron.js ?task=reminders) are unaffected and still
+// cover the near-term warning.
+const REMINDER_LEAD_LADDER = [24 * 60, 2 * 60, 30]
+
+export function resolveReminderLead(startMs, requested, now = Date.now()) {
+  const wanted = Number.isFinite(requested) ? requested : CALENDAR_REMINDER_MINUTES
+  // An unparseable start is not a reason to drop the reminder — leave the
+  // caller's lead alone and let Graph judge the event.
+  if (!Number.isFinite(startMs)) return wanted
+  const minutesOut = (startMs - now) / 60000
+  if (minutesOut <= 0) return null
+  if (wanted <= minutesOut) return wanted
+  for (const lead of REMINDER_LEAD_LADDER) {
+    if (lead < wanted && lead < minutesOut) return lead
+  }
+  return null
+}
+
 function allDayBounds(dateStr) {
   const start = dateStr
   const end = new Date(`${dateStr}T00:00:00Z`)
@@ -299,13 +331,23 @@ function allDayBounds(dateStr) {
 //     view, short enough not to look like it blocks the afternoon.
 //
 // `reminderMinutes` overrides the default lead time: a deal key date wants
-// three days' warning, a task due at 2pm wants thirty minutes.
-export function calendarEventBody({ subject, date, startsAt, durationMinutes = 30, bodyHtml, reminderMinutes }) {
+// three days' warning, a task due at 2pm wants thirty minutes. Either way it is
+// only the lead the event ASKS for — resolveReminderLead has the final say, so
+// a date too close (or already past) never carries an overdue reminder.
+export function calendarEventBody({ subject, date, startsAt, durationMinutes = 30, bodyHtml, reminderMinutes }, now = Date.now()) {
+  // For an all-day event the real start is midnight in CALENDAR_TIMEZONE, which
+  // is LATER than the midnight-UTC read here (Central is behind UTC). Reading it
+  // early only ever shortens the lead we pick, never pushes one into the past —
+  // the safe direction to be approximate in.
+  const startMs = startsAt ? new Date(startsAt).getTime() : Date.parse(`${date}T00:00:00Z`)
+  const lead = resolveReminderLead(startMs, reminderMinutes, now)
+
   const common = {
     subject,
     body: { contentType: 'HTML', content: bodyHtml || '' },
-    isReminderOn: true,
-    reminderMinutesBeforeStart: Number.isFinite(reminderMinutes) ? reminderMinutes : CALENDAR_REMINDER_MINUTES,
+    ...(lead === null
+      ? { isReminderOn: false }
+      : { isReminderOn: true, reminderMinutesBeforeStart: lead }),
     categories: ['Gateway CRM'],
   }
 
@@ -359,6 +401,35 @@ export async function updateCalendarEvent(accessToken, eventId, fields) {
 // not surfaced as a sync failure.
 export async function deleteCalendarEvent(accessToken, eventId) {
   return graphEventRequest('DELETE', `${GRAPH_BASE}/me/events/${eventId}`, accessToken)
+}
+
+// Every event on this agent's calendar that the CRM put there, found by the
+// category every calendarEventBody() stamps. Used by the duplicate sweep in
+// calendarSync.js to find COPIES the ledger lost track of — an event the CRM
+// created but never recorded can otherwise never be updated or deleted again,
+// so it keeps its reminder forever with nothing able to take it down.
+//
+// Deliberately narrow: the category filter means a mailbox's own appointments
+// are never enumerated, let alone read. A tenant that refuses the filter gets
+// no sweep rather than a full-calendar scan — the events it would have found
+// are a nuisance, and reading somebody's whole calendar to find them is not a
+// trade this integration makes.
+export const GATEWAY_EVENT_CATEGORY = 'Gateway CRM'
+
+export async function listGatewayCalendarEvents(accessToken, { pageSize = 100, maxPages = 10 } = {}) {
+  const params = new URLSearchParams({
+    '$filter': `categories/any(c:c eq '${GATEWAY_EVENT_CATEGORY}')`,
+    '$select': 'id,subject,start,isAllDay,createdDateTime',
+    '$top': String(pageSize),
+  })
+  let url = `${GRAPH_BASE}/me/events?${params.toString()}`
+  const events = []
+  for (let page = 0; page < maxPages && url; page++) {
+    const data = await graphFetch(url, { accessToken })
+    events.push(...(data.value || []))
+    url = data['@odata.nextLink'] || null
+  }
+  return events
 }
 
 // ─── Inbound mail (delta query) ───────────────────────────────────────────────

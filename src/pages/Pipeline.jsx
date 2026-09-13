@@ -515,6 +515,30 @@ function dateUrgency(dateStr) {
 
 const URGENCY_COLORS = { urgent: 'var(--gw-red)', warning: 'var(--gw-amber)', ok: 'var(--gw-green)' }
 
+// ── Why saving a key date waits ──────────────────────────────────────────────
+// A native <input type="date"> fires onChange for every VALID intermediate
+// value it passes through, and a year typed digit by digit is four of them:
+// 0002, then 0020, then 0202, then 2026. Saving and syncing on each one meant
+// four writes to the agent's Outlook calendar for one date — three of them for
+// a date two millennia in the past, which Outlook answers by firing the
+// reminder immediately. Do that across the several dates on a deal and one
+// inspection becomes a screenful of alerts.
+//
+// Two guards, and they are separate problems: the debounce collapses a burst
+// into the LAST value, and the year check means a half-typed date never leaves
+// the browser at all.
+const SAVE_DEBOUNCE_MS = 700
+
+// Empty is a real answer — it clears the date. Anything else has to be a date
+// a person could have meant. Exported for its own test: this is the guard
+// between a half-typed year and somebody's calendar.
+export function plausibleKeyDate(value) {
+  if (!value) return true
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const year = Number(value.slice(0, 4))
+  return year >= 1900 && year <= 2200
+}
+
 function KeyDatesTab({ deal }) {
   const [dates, setDates]         = useState([])
   const [saving, setSaving]       = useState(false)
@@ -557,6 +581,12 @@ function KeyDatesTab({ deal }) {
     }
   }
 
+  const saveTimer  = React.useRef(null)
+  const pendingRef = React.useRef(null)   // the rows a scheduled save will write
+  const persistRef = React.useRef(null)   // latest persist, for the unmount flush
+  const syncingRef = React.useRef(false)  // a sync is in flight right now
+  const resyncRef  = React.useRef(false)  // …and another was asked for while it ran
+
   const persist = async (updated) => {
     setSaving(true)
     const comp_data = { ...(deal.comp_data || {}), key_dates: updated }
@@ -564,6 +594,33 @@ function KeyDatesTab({ deal }) {
     setSaving(false)
     syncOutlookCalendar(deal.id)
   }
+  persistRef.current = persist
+
+  // Collapse a burst of edits into one save. `immediate` is for the discrete
+  // actions — adding or removing a row — where there is no burst coming and the
+  // wait would only read as lag.
+  const schedulePersist = (updated, { immediate = false } = {}) => {
+    pendingRef.current = updated
+    clearTimeout(saveTimer.current)
+    setSaving(true)          // an edit is owed a write; don't claim "auto-saved" yet
+    const run = () => {
+      const next = pendingRef.current
+      pendingRef.current = null
+      if (next) persist(next)
+      else setSaving(false)
+    }
+    if (immediate) run()
+    else saveTimer.current = setTimeout(run, SAVE_DEBOUNCE_MS)
+  }
+
+  // A pending edit must not die with a tab switch — the label above says the
+  // change is saved, so it has to be.
+  React.useEffect(() => () => {
+    clearTimeout(saveTimer.current)
+    const next = pendingRef.current
+    pendingRef.current = null
+    if (next) persistRef.current?.(next)
+  }, [])
 
   // Best-effort, fire-and-forget: push the updated key dates onto the
   // assigned agent's Outlook calendar (api/email-send.js?action=outlook-calendar-sync).
@@ -571,7 +628,15 @@ function KeyDatesTab({ deal }) {
   // deal's assigned agent (only they may write to their own calendar) — either
   // way this must never block or interrupt the key-dates save itself, which
   // already has its own "Saving…"/"Changes auto-saved" feedback above.
+  //
+  // ONE AT A TIME. Two of these in flight together both read "this date has no
+  // calendar event yet" and both create one; the server now refuses to strand
+  // the loser's copy, but the cheaper fix is not to race in the first place. A
+  // request that arrives mid-flight is remembered and run once, after — the
+  // sync reads the whole deal, so the later run subsumes the earlier one.
   const syncOutlookCalendar = async (dealId) => {
+    if (syncingRef.current) { resyncRef.current = true; return }
+    syncingRef.current = true
     try {
       const { data: { session } } = await supabase.auth.getSession()
       if (!session?.access_token) return
@@ -582,13 +647,19 @@ function KeyDatesTab({ deal }) {
       })
     } catch {
       // best-effort — nightly api/cron.js?task=calendar-sync is the safety net
+    } finally {
+      syncingRef.current = false
+      if (resyncRef.current) { resyncRef.current = false; syncOutlookCalendar(dealId) }
     }
   }
 
   const updateDate = (i, date) => {
     const updated = dates.map((d, idx) => idx === i ? { ...d, date } : d)
     setDates(updated)
-    persist(updated)
+    // A year still being typed stays in the box and goes no further. Once it is
+    // a date a person could have meant, the debounce above takes it.
+    if (!plausibleKeyDate(date)) return
+    schedulePersist(updated)
   }
 
   const addRow = (type) => {
@@ -596,14 +667,14 @@ function KeyDatesTab({ deal }) {
     if (!t || dates.some(d => d.type.toLowerCase() === t.toLowerCase())) return
     const updated = [...dates, { type: t, date: '' }]
     setDates(updated)
-    persist(updated)
+    schedulePersist(updated, { immediate: true })
     setNewType(''); setCustomType(''); setShowCustom(false)
   }
 
   const removeRow = (i) => {
     const updated = dates.filter((_, idx) => idx !== i)
     setDates(updated)
-    persist(updated)
+    schedulePersist(updated, { immediate: true })
   }
 
   const usedTypes = new Set(dates.map(d => d.type))
@@ -4224,6 +4295,18 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     setCc(p => [...p, email])
     setCcInput('')
   }
+
+  // The deal's own agents, for the one-click CC below. Typing a colleague's
+  // address by hand on every send is how the box stayed empty — but this is
+  // deliberately a BUTTON and not a default: the CRM emails the signed PDF to
+  // everyone on the deal by itself now (api/_lib/signedCopyMail.js), and a
+  // BoldSign CC puts those addresses in front of every signer. Worth having for
+  // an agent who wants BoldSign's own copy as well; not worth doing silently.
+  const agentsNotCopied = React.useMemo(
+    () => (dealAgents || [])
+      .filter(a => a?.email && !cc.some(e => e.toLowerCase() === a.email.toLowerCase())),
+    [dealAgents, cc],
+  )
   const [details,    setDetails]    = React.useState(null)   // { roles, fields }
   const [loadingDet, setLoadingDet] = React.useState(false)
   const [detailsErr, setDetailsErr] = React.useState('')     // why the roles/fields could not be read
@@ -5669,8 +5752,22 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
                   onKeyDown={e => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addCc(ccInput) } }}
                   onBlur={() => addCc(ccInput)}
                 />
+                {agentsNotCopied.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn btn--link btn--sm"
+                    style={{ padding:0, marginTop:6, fontSize:11 }}
+                    onClick={() => setCc(p => [...p, ...agentsNotCopied.map(a => a.email)])}
+                    title="Adds the deal's agents as BoldSign CC recipients, so BoldSign emails them the completed document directly."
+                  >
+                    + Copy the {agentsNotCopied.length === 1 ? 'agent' : 'agents'} on this deal
+                    {' '}({agentsNotCopied.map(a => a.name || a.email).join(', ')})
+                  </button>
+                )}
                 <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:3 }}>
                   They get the completed copy without being asked to sign. Press Enter after each address.
+                  {' '}Copying the deal&rsquo;s own agents is optional — the CRM already emails them the signed
+                  PDF the moment it completes, and a CC here is visible to every signer.
                 </div>
               </div>
 

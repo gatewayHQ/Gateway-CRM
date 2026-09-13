@@ -6,7 +6,8 @@ import crypto from 'node:crypto'
 import { extractPdfWords } from './_lib/pdfText.js'
 import { winAnsiLine, winAnsiLines } from './_lib/winAnsi.js'
 import { captionFields, detectSelectionCues } from '../src/lib/services/boldsignCaptions.js'
-import { normalizeSigners, outstandingSigners } from '../src/lib/services/boldsignSigners.js'
+import { normalizeSigners, outstandingSigners, signerRows } from '../src/lib/services/boldsignSigners.js'
+import { mailSignedCopyToAgents } from './_lib/signedCopyMail.js'
 // The packet module's pure rules — status vocabulary, what each state allows,
 // the local-file manifest, and the MLS selection helpers. Imported the same way
 // boldsignSigners.js and boldsignCaptions.js are: it holds no browser or
@@ -5157,6 +5158,27 @@ async function handler(req, res) {
   }
 }
 
+// Absolute CRM base for links in mail this handler sends. Same resolution as
+// api/_handlers/website-lead.js: an explicit env var wins, so a preview
+// deployment's host is never baked into a link an agent keeps.
+function crmBaseUrl(req) {
+  const configured = process.env.PUBLIC_BASE_URL || process.env.CRM_BASE_URL
+  if (configured) return configured.trim().replace(/\/+$/, '')
+  const host = req.headers['x-forwarded-host'] || req.headers.host
+  if (!host) return null
+  return `${req.headers['x-forwarded-proto'] || 'https'}://${host}`
+}
+
+// Who signed, by name, for the "Signed by …" line. Prefers what this delivery
+// carried (the most recent word on who has finished) and falls back to the
+// stored row — signerRows() covers documents sent before per-signer state
+// existed, where the only record is the comma-joined legacy column.
+function signedByNames(record, incomingSigners) {
+  const rows = incomingSigners?.length ? incomingSigners : signerRows(record)
+  const signed = rows.filter(r => r.status === 'signed')
+  return (signed.length ? signed : rows).map(r => r.name).filter(Boolean)
+}
+
 // ─── BoldSign webhook handler ──────────────────────────────────────────────────
 // BoldSign POSTs document lifecycle events (Sent, Viewed, Signed, Completed,
 // Declined, Revoked, Expired) to the registered callback URL as:
@@ -5504,17 +5526,52 @@ async function handleWebhook(req, res) {
         ...filePatch,
       })
 
-      // Only the delivery that actually made the transition notifies — a
-      // redelivery that came back to finish an archive must not tell the agent
-      // their document was signed a second time.
+      // THE DOCUMENT ITSELF, to everyone on the deal. The in-app notification
+      // below says where the signed copy is; this one IS the signed copy, and
+      // unlike the notification it reaches the co-agents too — a co-listed deal
+      // used to tell the co-agent nothing at all.
+      //
+      // Only the delivery that actually made the transition sends, the same
+      // gate the notification uses: BoldSign redelivers freely, and a second
+      // copy of "your document was signed" teaches an agent to ignore the
+      // first. Best-effort by contract — see signedCopyMail.js; a mail failure
+      // must never cost the archive that already succeeded by turning this into
+      // a redelivery.
       const deal = record.deals
+      let mailed = { sent: false, reason: 'not attempted' }
+      if (advanced) {
+        mailed = await mailSignedCopyToAgents(supabase, {
+          dealId:            record.deal_id,
+          documentId,
+          documentName:      record.document_name,
+          dealTitle:         deal?.title || null,
+          signerNames:       signedByNames(record, incomingSigners),
+          completedAt:       completedAt || new Date().toISOString(),
+          signedStoragePath: signed?.storagePath || null,
+          bucket:            DEAL_BUCKET,
+          baseUrl:           crmBaseUrl(req),
+        })
+        if (mailed.sent) {
+          console.log(`[boldsign] emailed the signed copy for ${documentId} to ${mailed.recipients} agent(s)${mailed.attached ? ' with the PDF attached' : ' as a link'}`)
+        } else {
+          console.warn(`[boldsign] signed copy for ${documentId} was not emailed: ${mailed.reason}`)
+        }
+      }
+
+      // …and the in-app notification, written AFTER the send so it can say what
+      // actually happened. "Check your email" on a deployment where the mail
+      // did not go is the kind of small lie that sends an agent hunting through
+      // a junk folder for a message that was never sent.
       if (advanced && deal?.agent_id) {
+        const whereItIs = mailed.sent
+          ? `The signed copy has been emailed to ${mailed.recipients > 1 ? 'everyone on the deal' : 'you'} and saved to the deal's Documents tab.`
+          : `The signed copy has been saved to the deal's Documents tab.`
         await supabase.from('agent_notifications').insert([{
           agent_id:    deal.agent_id,
           deal_id:     record.deal_id,
           envelope_id: documentId,
           title:       'Document Signed',
-          message:     `"${record.document_name || 'Document'}" for ${deal.title || 'your deal'} has been fully signed by ${record.signer_name || 'the signer'}. The signed copy has been saved to the deal's Documents tab.`,
+          message:     `"${record.document_name || 'Document'}" for ${deal.title || 'your deal'} has been fully signed by ${record.signer_name || 'the signer'}. ${whereItIs}`,
           type:        'document_signed',
         }])
       }
