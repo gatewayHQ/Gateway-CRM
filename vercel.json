@@ -20,6 +20,7 @@
   "rewrites": [
     { "source": "/api/webhooks/website-lead", "destination": "/api/property-public?action=website-lead" },
     { "source": "/m/:token",  "destination": "/api/campaigns?action=scan&token=:token" },
+    { "source": "/e/:token",  "destination": "/api/campaigns?action=open&token=:token" },
     { "source": "/share/:id", "destination": "/api/property-public?id=:id" },
     { "source": "/lp/property/:id",
       "has": [{ "type": "header", "key": "user-agent", "value": "(?i).*(facebookexternalhit|facebot|twitterbot|linkedinbot|slackbot|slack-imgproxy|whatsapp|telegrambot|discordbot|pinterest|redditbot|embedly|skypeuripreview|applebot|googlebot|bingbot|iframely|vkshare).*" }],
@@ -33,7 +34,7 @@
     { "source": "/lp/mailing/:id",
       "has": [{ "type": "header", "key": "user-agent", "value": "(?i).*(facebookexternalhit|facebot|twitterbot|linkedinbot|slackbot|slack-imgproxy|whatsapp|telegrambot|discordbot|pinterest|redditbot|embedly|skypeuripreview|applebot|googlebot|bingbot|iframely|vkshare).*" }],
       "destination": "/api/campaigns?action=og&id=:id&lt=mailing" },
-    { "source": "/((?!api/)(?!share/)(?!m/).*)", "destination": "/index.html" }
+    { "source": "/((?!api/)(?!share/)(?!m/)(?!e/).*)", "destination": "/index.html" }
   ],
   "headers": [
     {
@@ -53,6 +54,14 @@
       "source": "/api/(.*)",
       "headers": [
         { "key": "Cache-Control", "value": "no-store" }
+      ]
+    },
+    {
+      "source": "/e/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, no-cache, must-revalidate, max-age=0" },
+        { "key": "CDN-Cache-Control", "value": "no-store" },
+        { "key": "Vercel-CDN-Cache-Control", "value": "no-store" }
       ]
     },
     {

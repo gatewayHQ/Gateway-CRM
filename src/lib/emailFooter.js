@@ -66,6 +66,21 @@ export function unsubscribeUrl(baseUrl, token) {
 }
 
 /**
+ * The open-tracking pixel's URL for one recipient row.
+ *
+ * `/e/:token.gif` — its own short path, rewritten into api/campaigns.js because
+ * this project sits on exactly the 12 serverless functions Vercel Hobby allows
+ * and a 13th file would fail the deploy. The `.gif` suffix is cosmetic but it
+ * earns its keep: a mail client that sniffs the extension treats the response
+ * as an image rather than something to warn about.
+ */
+export function openPixelUrl(baseUrl, token) {
+  const base = String(baseUrl || '').replace(/\/+$/, '')
+  if (!base || !token) return ''
+  return `${base}/e/${token}.gif`
+}
+
+/**
  * What the wizard's preview shows in place of a real token. A preview has no
  * recipient token to mint and must never render a live one — an agent clicking
  * their own preview would otherwise unsubscribe the contact it was drawn for.

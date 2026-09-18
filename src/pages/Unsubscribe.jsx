@@ -11,7 +11,7 @@ import { COMPANY } from '../lib/emailFooter.js'
 export default function Unsubscribe({ token }) {
   const [state, setState] = useState('working') // working | done | error
   const [email, setEmail] = useState('')
-  const [scope, setScope] = useState('')        // contact | mailing
+  const [scope, setScope] = useState('')        // contact | address | mailing
   const [message, setMessage] = useState('')
 
   useEffect(() => {
@@ -54,7 +54,11 @@ export default function Unsubscribe({ token }) {
                   property announcements and then reads that they left "this
                   list" has no way to know whether it worked. */}
               {email ? <b style={{ color: '#f4f1e9' }}>{email}</b> : 'You'}
-              {scope === 'contact'
+              {/* 'address' is an announcement recipient who was never a contact
+                  — mailed off a pasted list. Their opt-out is every bit as
+                  broad as a contact's (it suppresses the address itself), so it
+                  must not be described as leaving one list. */}
+              {scope === 'contact' || scope === 'address'
                 ? ` won't receive any more marketing or property emails from ${COMPANY.name}.`
                 : " won't receive any more emails from this list."}
             </p>

@@ -23,6 +23,7 @@ import { supabase } from '../lib/supabase.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { Icon, Badge, EmptyState, SearchDropdown, pushToast, ConfirmDialog } from '../components/UI.jsx'
 import AudienceFilter from '../components/AudienceFilter.jsx'
+import BlastReport from '../components/BlastReport.jsx'
 import { BLANK_AUDIENCE, describeAudience } from '../lib/audience.js'
 import { TEMPLATE_CATEGORY_LABELS } from '../lib/enums.js'
 import {
@@ -63,22 +64,26 @@ async function authedPost(action, payload) {
 function blockedNote(step) {
   if (step === 1) return 'Pick a property and what you are announcing.'
   if (step === 2) return 'A subject and a body are needed before this can go out.'
-  if (step === 3) return 'Nobody is selected yet — choose an audience or upload a list.'
+  if (step === 3) return 'Nobody is selected yet — choose an audience, or paste a list and add it.'
   return ''
 }
 
-function readyNote(step, { property, resolved, subject } = {}) {
+function readyNote(step, { property, subject, total = 0, fromList = 0 } = {}) {
   if (step === 1) return property ? `Announcing ${property.address || 'this property'}.` : ''
   if (step === 2) return subject ? `Subject: ${subject}` : ''
   if (step === 3) {
-    const n = resolved?.recipients?.length || 0
-    return `${n} contact${n === 1 ? '' : 's'} will each get their own copy.`
+    const tail = fromList > 0 ? ` (${fromList} from your list)` : ''
+    return `${total} recipient${total === 1 ? '' : 's'} will each get their own copy${tail}.`
   }
   return ''
 }
 
 export default function MassEmail({ db, activeAgent, go, focusProperty = null, onFocusHandled }) {
   const [step, setStep] = useState(1)
+  // Past sends live behind a toggle on this page rather than in their own nav
+  // entry: the report is what an agent checks the day after a send, from the
+  // same screen they sent it on.
+  const [showReport, setShowReport] = useState(false)
 
   // ── Step 1 ──
   const [propertyId, setPropertyId] = useState(focusProperty || '')
@@ -103,6 +108,11 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
   const [audience, setAudience] = useState(BLANK_AUDIENCE)
   const [manual, setManual]     = useState({ added: [], removed: [] })
   const [resolved, setResolved] = useState({ recipients: [], skipped: [], duplicates: [] })
+  // Addresses off a pasted/uploaded list: recipients with no contact record,
+  // mailed as themselves. Held here rather than inside AudienceFilter because
+  // they are part of the SEND — blast-create stores them as recipient rows.
+  const [listRecipients, setListRecipients] = useState([])
+  const [listSource, setListSource]         = useState('')
 
   // ── Step 4 ──
   const [outlook, setOutlook]   = useState(null)   // null = loading, false = not connected
@@ -114,6 +124,12 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
   const properties = db?.properties || []
   const templates  = (db?.templates || []).filter(t => t.category === 'deal-announcement')
   const property   = properties.find(p => p.id === propertyId) || null
+
+  // Contacts the filter resolved plus addresses off the list. Every count, gate
+  // and confirmation on this page reads this rather than one half of it — the
+  // old page said "12 contacts will receive this" while a 122-row paste sat
+  // ignored beside it.
+  const totalRecipients = resolved.recipients.length + listRecipients.length
 
   // A property handed over from the Properties page seeds step 1 once, then the
   // parent clears it — so coming back later starts blank rather than silently
@@ -254,6 +270,8 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
           photoUrl: photoUrl || null,
           audience: { ...audience, manual },
           contactIds: resolved.recipients.map(c => c.id),
+          listRecipients,
+          listSource: listSource || null,
         })
         blastId = blast.id
         setProgress({
@@ -287,7 +305,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
   const stepReady = {
     1: Boolean(propertyId && dealStatus),
     2: Boolean(subject.trim() && body.trim()),
-    3: resolved.recipients.length > 0,
+    3: totalRecipients > 0,
     4: true,
   }
 
@@ -318,15 +336,22 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
           ))}
         </div>
         {outlook === false && (
-          <div style={{ marginLeft: 'auto', fontSize: 12.5, color: '#b45309' }}>
+          <div style={{ fontSize: 12.5, color: '#b45309' }}>
             Outlook isn't connected —{' '}
             <button className="btn btn--ghost btn--sm" onClick={() => go?.('integrations')}>connect it in Integrations</button>
           </div>
         )}
+        <button type="button" className="btn btn--ghost btn--sm" style={{ marginLeft: 'auto' }}
+          onClick={() => setShowReport(v => !v)}>
+          <Icon name={showReport ? 'x' : 'reports'} size={12} style={{ marginRight: 6 }} />
+          {showReport ? 'Back to the wizard' : 'Past sends'}
+        </button>
       </div>
 
+      {showReport && <BlastReport activeAgent={activeAgent} />}
+
       {/* ── Step 1: property + status ── */}
-      {step === 1 && (
+      {!showReport && step === 1 && (
         <>
           <div style={card}>
             <label className="form-label required">Property</label>
@@ -379,7 +404,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
       )}
 
       {/* ── Step 2: message ── */}
-      {step === 2 && (
+      {!showReport && step === 2 && (
         /* TWO PANES. Everything here existed before — the preview included —
            but it was stacked in one column, so an agent proofreading their
            email scrolled past four cards to reach it and past five to reach
@@ -550,23 +575,26 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
       )}
 
       {/* ── Step 3: audience ── */}
-      {step === 3 && (
+      {!showReport && step === 3 && (
         <AudienceFilter
           contacts={contacts}
           audience={audience}
           manual={manual}
+          listRecipients={listRecipients}
+          listSource={listSource}
           onChange={setAudience}
           onManualChange={setManual}
           onResolved={setResolved}
+          onListChange={(rows, source) => { setListRecipients(rows); setListSource(source) }}
         />
       )}
 
       {/* ── Step 4: review & send ── */}
-      {step === 4 && (
+      {!showReport && step === 4 && (
         <>
           <div style={card}>
             <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
-              <Stat label="Recipients" value={resolved.recipients.length} />
+              <Stat label="Recipients" value={totalRecipients} />
               <Stat label="Announcing" value={statusLabel(dealStatus)} />
               <Stat label="Property" value={property?.address || '—'} />
               <Stat label="Sending as" value={outlook?.email || activeAgent?.email || '—'} />
@@ -583,6 +611,14 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
               {manual.added?.length ? ` · ${manual.added.length} added by hand` : ''}
               {manual.removed?.length ? ` · ${manual.removed.length} removed` : ''}
             </div>
+            {listRecipients.length > 0 && (
+              <div style={{ fontSize: 12.5, color: 'var(--gw-slate)', marginTop: 6 }}>
+                <strong>{listRecipients.length}</strong> of these came from{' '}
+                {listSource ? <strong>{listSource}</strong> : 'your pasted list'} and are not contacts —
+                no contact records are created. Each still gets their own unsubscribe link, and their
+                opens and replies land on this send's report.
+              </div>
+            )}
             <div style={{ fontSize: 12.5, color: 'var(--gw-mist)', marginTop: 6 }}>
               Messages go out one at a time from your own mailbox, about 30 a minute — a large send
               takes a few minutes and keeps this page open. Each contact receives their own copy;
@@ -615,18 +651,24 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
                   Failed recipients keep their error on the send record — nobody was mailed twice.
                 </div>
               )}
+              {progress.done && (
+                <div style={{ fontSize: 12.5, color: 'var(--gw-mist)', marginTop: 10 }}>
+                  Opens, replies and opt-outs arrive over the following hours and days — see
+                  <strong> Past sends</strong> at the top of this page.
+                </div>
+              )}
             </div>
           )}
 
           {!progress?.done && (
             <button className="btn btn--primary"
-              disabled={sending || !outlook || resolved.recipients.length === 0}
+              disabled={sending || !outlook || totalRecipients === 0}
               onClick={() => (progress?.blastId ? startSend() : setConfirmSend(true))}>
               {sending
-                ? `Sending… ${progress?.sent || 0}/${progress?.total || resolved.recipients.length}`
+                ? `Sending… ${progress?.sent || 0}/${progress?.total || totalRecipients}`
                 : progress?.blastId
                   ? `Resume — ${progress.remaining ?? 0} left to send`
-                  : `Send to ${resolved.recipients.length} contact${resolved.recipients.length === 1 ? '' : 's'}`}
+                  : `Send to ${totalRecipients} recipient${totalRecipients === 1 ? '' : 's'}`}
             </button>
           )}
           {progress?.done && (
@@ -636,7 +678,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
           {confirmSend && (
             <ConfirmDialog
               eyebrow="Confirm Send"
-              title={`Send this announcement to ${resolved.recipients.length} contact${resolved.recipients.length === 1 ? '' : 's'}?`}
+              title={`Send this announcement to ${totalRecipients} recipient${totalRecipients === 1 ? '' : 's'}?`}
               message={`Each one gets their own email from ${outlook?.email || 'your mailbox'}. This cannot be unsent.`}
               confirmLabel="Send now"
               confirmVariant="btn--primary"
@@ -654,7 +696,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
           needed was the one they could not see. It now rides the bottom of the
           page whatever the step's height, and says what it is waiting for
           rather than just going grey. */}
-      {!progress && (
+      {!progress && !showReport && (
         <div style={{
           position: 'sticky', bottom: 0, zIndex: 5, marginTop: 16,
           display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
@@ -664,7 +706,9 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
         }}>
           {step > 1 && <button className="btn btn--ghost" onClick={() => setStep(s => s - 1)}>Back</button>}
           <span style={{ flex: 1, fontSize: 12.5, color: 'var(--gw-mist)', minWidth: 160 }}>
-            {stepReady[step] ? readyNote(step, { property, resolved, subject }) : blockedNote(step)}
+            {stepReady[step]
+              ? readyNote(step, { property, subject, total: totalRecipients, fromList: listRecipients.length })
+              : blockedNote(step)}
           </span>
           {step < 4 && (
             <button className="btn btn--primary" disabled={!stepReady[step]} onClick={() => setStep(s => s + 1)}>
@@ -676,7 +720,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
         </div>
       )}
 
-      {properties.length === 0 && step === 1 && (
+      {properties.length === 0 && step === 1 && !showReport && (
         <EmptyState icon="building" title="No properties yet"
           message="Add a property first — a deal announcement is built from a property record." />
       )}

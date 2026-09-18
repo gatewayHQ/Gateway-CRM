@@ -67,7 +67,11 @@
  *                                     never written back to the CRM automatically.
  *   POST ?action=blast-create         (auth) → create a mass send (deal
  *                                     announcement) plus one row per recipient,
- *                                     then return it. Does NOT send.
+ *                                     then return it. Does NOT send. Recipients
+ *                                     come as `contactIds` and/or
+ *                                     `listRecipients` [{email,name}] — pasted
+ *                                     addresses that are not contacts and for
+ *                                     which none are created (migration 0048).
  *   POST ?action=blast-send           (auth) → send ONE BATCH of a blast and
  *                                     report progress. The client calls this in
  *                                     a loop until { done: true } — a send of a
@@ -550,7 +554,11 @@ async function handleBlastCreate(req, res) {
   const { agent } = await requireAgent(req)
   const svc  = getServiceClient()
   const user = getUserClient(req)
-  const { contactIds, ...blast } = req.body || {}
+  // listRecipients is pulled out explicitly rather than left to ride along in
+  // `blast`: createBlast takes it as its own argument, and a spread would have
+  // put it somewhere nothing reads — the pasted list would have been accepted
+  // by the request and then quietly mailed to nobody.
+  const { contactIds, listRecipients, ...blast } = req.body || {}
 
   if (!blast.subject || !String(blast.subject).trim()) {
     return res.status(400).json({ error: 'A subject line is required' })
@@ -559,7 +567,9 @@ async function handleBlastCreate(req, res) {
     return res.status(400).json({ error: 'The message body is empty' })
   }
 
-  const created = await createBlast(svc, user, { agentId: agent.id, blast, contactIds })
+  const created = await createBlast(svc, user, {
+    agentId: agent.id, blast, contactIds, listRecipients,
+  })
   return res.status(200).json({ ok: true, blast: created })
 }
 

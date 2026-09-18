@@ -11,7 +11,9 @@
  *                                     the live edit paths also fire this per-deal
  *                                     and per-task — see api/email-send.js)
  * GET /api/cron?task=inbox-sync     — nightly inbound-mail matching (Graph delta
- *                                     query per connected agent; see api/_lib/inboxSync.js)
+ *                                     query per connected agent; also marks
+ *                                     mass-email recipients who replied — see
+ *                                     api/_lib/inboxSync.js)
  *
  * These scheduled tasks share one serverless function (Vercel Hobby caps total
  * functions at 12 — this repo is already at that cap). Each is dispatched by
@@ -482,6 +484,12 @@ async function runCalendarSync(supabase) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Task: inbound mail matching (nightly)
+//
+// Two jobs in one pass over each agent's inbox delta: import mail from known
+// contacts onto their timeline, and mark the mass-email recipients who wrote
+// back (api/_lib/inboxSync.js). The second exists because a send can now go to
+// pasted addresses that are not contacts and therefore have no timeline for a
+// reply to appear on — their row on the blast is the only place it can land.
 // ─────────────────────────────────────────────────────────────────────────────
 async function runInboxSync(supabase) {
   try {

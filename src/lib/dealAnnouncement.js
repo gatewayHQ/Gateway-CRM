@@ -247,7 +247,7 @@ export function defaultAnnouncementSubject(status) {
  */
 export function renderAnnouncementHtml({
   property, status, agent, contact, terms = '', customMessage = '', photoUrl, body,
-  unsubscribeUrl = '', hiddenFacts = [],
+  unsubscribeUrl = '', hiddenFacts = [], openPixelUrl = '',
 }) {
   const tokens = announcementTokens({ property, status, agent, contact, terms, customMessage })
   const bodyText = renderTokens(body || defaultAnnouncementBody(status), tokens)
@@ -284,6 +284,23 @@ export function renderAnnouncementHtml({
               </table>`
     : ''
 
+  // Open tracking. Last element in the body, 1×1, empty alt and aria-hidden so
+  // a screen reader doesn't announce it and a client showing alt text doesn't
+  // draw a broken-image box. Absent from the preview (no recipient row exists
+  // to attribute an open to) and absent whenever the URL is blank, so a
+  // misconfigured deployment sends a clean email rather than a broken image.
+  //
+  // What it cannot do is worth writing down next to what it does: Outlook and
+  // Gmail block or proxy remote images by default, so a recorded open is real
+  // but a missing one means nothing at all.
+  const pixel = openPixelUrl ? `
+      <tr>
+        <td style="padding:0;line-height:0;font-size:0">
+          <img src="${escapeHtml(openPixelUrl)}" width="1" height="1" alt="" aria-hidden="true"
+               style="display:block;width:1px;height:1px;border:0;opacity:0" />
+        </td>
+      </tr>` : ''
+
   const photoBlock = photo ? `
       <tr>
         <td style="padding:0">
@@ -312,7 +329,7 @@ export function renderAnnouncementHtml({
               <div style="font-size:14px;line-height:1.65;color:#374151">${textToHtml(bodyText)}</div>
             </td>
           </tr>
-${renderEmailFooterHtml({ agentName: tokens.agentName, unsubscribeUrl })}
+${renderEmailFooterHtml({ agentName: tokens.agentName, unsubscribeUrl })}${pixel}
         </table>
       </td>
     </tr>

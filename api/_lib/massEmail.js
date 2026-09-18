@@ -28,15 +28,26 @@
 // 3. A PARTIAL SEND IS REPORTED, NEVER ROUNDED OFF. Per-recipient failures are
 //    stored with their Graph error, counted, and surfaced. "Sent to 240 of 247,
 //    7 failed" is the truth an agent can act on; "sent" is not.
+//
+// 4. A RECIPIENT DOES NOT HAVE TO BE A CONTACT, BUT STILL GETS AN OPT-OUT.
+//    A send can carry addresses pasted off a spreadsheet that are deliberately
+//    not in the contact book. Those people are recipients in every way that
+//    matters to them: an individually addressed message, a working one-click
+//    unsubscribe, and a suppression that outlives the send. What they don't get
+//    is a contact timeline, because there is no contact — the recipient row is
+//    their whole record, which is why opens, replies and opt-outs are stamped
+//    on it rather than derived from `activities`.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { getValidAccessToken, sendGraphMail, canSendMail } from './msGraph.js'
-import { mintUnsubscribeToken, canMintUnsubscribeTokens } from './unsubscribeToken.js'
+import {
+  mintRecipientUnsubscribeToken, mintOpenToken, canMintUnsubscribeTokens,
+} from './unsubscribeToken.js'
 import {
   renderAnnouncementHtml, renderTokens, announcementTokens, statusLabel,
   normalizeHiddenFacts,
 } from '../../src/lib/dealAnnouncement.js'
-import { unsubscribeUrl } from '../../src/lib/emailFooter.js'
+import { unsubscribeUrl, openPixelUrl } from '../../src/lib/emailFooter.js'
 
 // ─── Pacing / limits ─────────────────────────────────────────────────────────
 
@@ -87,33 +98,106 @@ export async function sentInLast24h(svc, agentId) {
 }
 
 /**
+ * Every address on this list that has opted out, lower-cased.
+ *
+ * The one check that is not the agent's to override, and the reason opt-out
+ * moved out of `contacts` into its own table: a pasted list is full of
+ * addresses with no contact record, and "we had nowhere to record that they
+ * asked us to stop" is not an acceptable reason to mail somebody again.
+ *
+ * A failure here is fatal by design. Everywhere else in this module a failed
+ * bookkeeping query degrades to a permissive default; this one cannot, because
+ * the permissive default is mailing people who opted out.
+ */
+export async function suppressedEmails(svc, emails = []) {
+  const list = [...new Set(emails.map(e => String(e || '').trim().toLowerCase()).filter(Boolean))]
+  if (!list.length) return new Set()
+
+  const found = new Set()
+  // Chunked: a 500-recipient send would otherwise build a single `in` list long
+  // enough to be refused as a URL.
+  for (let i = 0; i < list.length; i += 200) {
+    const slice = list.slice(i, i + 200)
+    const { data, error } = await svc
+      .from('email_suppressions')
+      .select('email')
+      .in('email', slice)
+    if (error) {
+      const e = new Error(`Could not check the unsubscribe list — nothing was sent. (${error.message})`)
+      e.status = 500
+      throw e
+    }
+    for (const row of (data || [])) found.add(String(row.email || '').toLowerCase())
+  }
+  return found
+}
+
+/** A pasted "Firstname Lastname" split into the two columns a row wants. */
+export function splitListName(name = '') {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return { first_name: null, last_name: null }
+  if (parts.length === 1) return { first_name: parts[0], last_name: null }
+  // Last word is the surname; everything before it is the given name, so
+  // "Abigail M. Hillers" keeps its middle initial with the first name rather
+  // than losing it or turning it into the surname.
+  return { first_name: parts.slice(0, -1).join(' '), last_name: parts[parts.length - 1] }
+}
+
+/**
  * Create the blast and its recipient rows in one go.
  *
- * Recipients are re-validated here against the CURRENT contact records rather
- * than trusted from the browser: the wizard's list was built from a snapshot,
- * and an opt-out or a deleted address between preview and send must win. The
- * caller's own Supabase client does the read, so RLS decides which contacts
- * this agent may mail at all — a hand-crafted request cannot blast contacts the
- * agent cannot see.
+ * Two kinds of recipient arrive here and are treated the same from the moment
+ * they have an address:
+ *
+ *   • `contactIds` — contacts the audience filter matched or the agent added.
+ *     Re-validated against the CURRENT contact records rather than trusted from
+ *     the browser: the wizard's list was built from a snapshot, and an opt-out
+ *     or a deleted address between preview and send must win. The caller's own
+ *     Supabase client does the read, so RLS decides which contacts this agent
+ *     may mail at all — a hand-crafted request cannot blast contacts the agent
+ *     cannot see.
+ *
+ *   • `listRecipients` — [{ email, name }] pasted or uploaded, with no contact
+ *     record and none created. These are NOT read through RLS because there is
+ *     nothing to read; they are whatever the agent typed. That is exactly why
+ *     they go through the same address validation, the same suppression check
+ *     and the same de-duplication as the rest — an address the agent supplied
+ *     gets no more trust than one the CRM already had.
  */
-export async function createBlast(svc, user, { agentId, blast, contactIds }) {
+export async function createBlast(svc, user, { agentId, blast, contactIds, listRecipients }) {
   const ids = [...new Set((contactIds || []).filter(Boolean))]
-  if (ids.length === 0) {
+  const pasted = Array.isArray(listRecipients) ? listRecipients : []
+
+  if (ids.length === 0 && pasted.length === 0) {
     const e = new Error('No recipients selected')
     e.status = 400
     throw e
   }
-  if (ids.length > MAX_RECIPIENTS) {
-    const e = new Error(`This send has ${ids.length} recipients — the per-send limit is ${MAX_RECIPIENTS}. Narrow the audience and send in stages.`)
-    e.status = 400
-    throw e
-  }
 
-  const { data: contacts, error: contactErr } = await user
-    .from('contacts')
-    .select('id, first_name, last_name, email, email_opt_out, status')
-    .in('id', ids)
+  // The cap counts PEOPLE, not contacts: a 400-row paste on top of a
+  // 200-contact audience is the runaway send this limit exists to stop, and
+  // counting only one half of it would have let the bigger half through.
+  //
+  // Checked on what was ASKED FOR, before the contact lookup, so an oversized
+  // request is refused rather than turned into an `in (...)` list of thousands
+  // of ids. Re-checked on what RESOLVED below, because the two can differ.
+  const tooMany = (n) => {
+    const e = new Error(`This send has ${n} recipients — the per-send limit is ${MAX_RECIPIENTS}. Narrow the audience or split the list and send in stages.`)
+    e.status = 400
+    return e
+  }
+  if (ids.length + pasted.length > MAX_RECIPIENTS) throw tooMany(ids.length + pasted.length)
+
+  const { data: contacts, error: contactErr } = ids.length
+    ? await user
+      .from('contacts')
+      .select('id, first_name, last_name, email, email_opt_out, status')
+      .in('id', ids)
+    : { data: [], error: null }
   if (contactErr) { const e = new Error(contactErr.message); e.status = 500; throw e }
+
+  const totalResolved = (contacts || []).length + pasted.length
+  if (totalResolved > MAX_RECIPIENTS) throw tooMany(totalResolved)
 
   const { data: created, error: blastErr } = await svc.from('email_blasts').insert([{
     agent_id:       agentId,
@@ -133,15 +217,28 @@ export async function createBlast(svc, user, { agentId, blast, contactIds }) {
     // the same price the first batch withheld.
     hidden_facts:   normalizeHiddenFacts(blast.hiddenFacts),
     audience:       blast.audience || {},
+    list_source:    blast.listSource || null,
     status:         'draft',
   }]).select('*').single()
   if (blastErr) { const e = new Error(blastErr.message); e.status = 500; throw e }
+
+  // The opt-out list, read ONCE for every address in the send — contacts and
+  // pasted rows together, before a single row is written as sendable.
+  const suppressed = await suppressedEmails(svc, [
+    ...(contacts || []).map(c => c.email),
+    ...pasted.map(r => r?.email),
+  ])
 
   // Skipped recipients are STORED, not dropped. An agent who selected 250 and
   // sees 243 sent needs the other 7 named, or the feature has quietly decided
   // something on their behalf.
   const rows = []
   const seen = new Set()
+
+  // Contacts first, so that when the same address appears in the contact book
+  // AND in the pasted file, the row that survives is the one with a contact
+  // behind it — the send then lands on that person's timeline instead of
+  // becoming an anonymous list delivery.
   for (const c of (contacts || [])) {
     const email = String(c.email || '').trim()
     const key   = email.toLowerCase()
@@ -149,6 +246,7 @@ export async function createBlast(svc, user, { agentId, blast, contactIds }) {
     if (!email)                    skip = 'No email on file'
     else if (!isValidEmail(email)) skip = 'Invalid email address'
     else if (c.email_opt_out)      skip = 'Opted out of email'
+    else if (suppressed.has(key))  skip = 'Unsubscribed'
     else if (seen.has(key))        skip = 'Duplicate address in this send'
     if (!skip) seen.add(key)
 
@@ -160,6 +258,34 @@ export async function createBlast(svc, user, { agentId, blast, contactIds }) {
       email:       email || '(no email on file)',
       first_name:  c.first_name || null,
       last_name:   c.last_name || null,
+      source:      'contact',
+      status:      skip ? 'skipped' : 'pending',
+      skip_reason: skip,
+    })
+  }
+
+  for (const r of pasted) {
+    const email = String(r?.email || '').trim()
+    const key   = email.toLowerCase()
+    let skip = null
+    if (!email)                    skip = 'No email address'
+    else if (!isValidEmail(email)) skip = 'Invalid email address'
+    else if (suppressed.has(key))  skip = 'Unsubscribed'
+    else if (seen.has(key))        skip = 'Duplicate address in this send'
+    if (!skip) seen.add(key)
+
+    // A pasted row has no contact_id — that is the whole point — so the
+    // snapshotted name is all the personalisation this recipient will ever
+    // have. A row with no name still sends: {{firstName}} falls back to
+    // "there", which reads better than an empty gap after "Hi".
+    const { first_name, last_name } = splitListName(r?.name)
+    rows.push({
+      blast_id:    created.id,
+      contact_id:  null,
+      email:       email || '(no email address)',
+      first_name,
+      last_name,
+      source:      'list',
       status:      skip ? 'skipped' : 'pending',
       skip_reason: skip,
     })
@@ -168,10 +294,12 @@ export async function createBlast(svc, user, { agentId, blast, contactIds }) {
   const { error: recErr } = await svc.from('email_blast_recipients').insert(rows)
   if (recErr) { const e = new Error(recErr.message); e.status = 500; throw e }
 
-  const skippedCount = rows.filter(r => r.status === 'skipped').length
+  const sendable     = rows.filter(r => r.status === 'pending')
+  const skippedCount = rows.length - sendable.length
   const { data: updated } = await svc.from('email_blasts').update({
-    recipient_count: rows.length - skippedCount,
-    skipped_count:   skippedCount,
+    recipient_count:      sendable.length,
+    skipped_count:        skippedCount,
+    list_recipient_count: sendable.filter(r => r.source === 'list').length,
   }).eq('id', created.id).select('*').single()
 
   return updated || created
@@ -209,6 +337,10 @@ export async function blastProgress(svc, blastId) {
     sent:      blast?.sent_count || 0,
     failed:    blast?.failed_count || 0,
     skipped:   blast?.skipped_count || 0,
+    opened:    blast?.opened_count || 0,
+    replied:   blast?.replied_count || 0,
+    unsubscribed: blast?.unsubscribed_count || 0,
+    listRecipients: blast?.list_recipient_count || 0,
     remaining: remaining || 0,
     lastError: blast?.last_error || null,
     done:      (remaining || 0) === 0,
@@ -287,6 +419,8 @@ export async function sendBlastBatch(svc, { blast, agent, contactsById = {}, pro
     if (Date.now() - startedAt > BATCH_BUDGET_MS) break
     if (index > 0) await sleep(SEND_INTERVAL_MS)
 
+    // A list recipient has no contact record, so the row IS the contact as far
+    // as personalisation is concerned — which is why the row snapshots a name.
     const contact = contactsById[row.contact_id] || {
       id: row.contact_id, first_name: row.first_name, last_name: row.last_name, email: row.email,
     }
@@ -298,11 +432,18 @@ export async function sendBlastBatch(svc, { blast, agent, contactsById = {}, pro
     // Subject and body resolve from the SAME token map the preview used, so
     // what the agent approved is what each recipient receives.
     const subject = renderTokens(blast.subject, announcementTokens(tokenArgs))
-    // Per recipient, so one person's opt-out never takes anybody else with them.
-    const optOut  = row.contact_id ? unsubscribeUrl(baseUrl, mintUnsubscribeToken(row.contact_id)) : ''
+    // Per recipient, so one person's opt-out never takes anybody else with them
+    // — and minted for EVERY recipient, contact or not. This used to be
+    // conditional on row.contact_id, which meant a recipient the CRM had no
+    // record for received a bulk email with no way out of it. That is the one
+    // defect in this module that could not be described as a trade-off.
+    const optOut  = unsubscribeUrl(baseUrl, mintRecipientUnsubscribeToken({
+      email: row.email, contactId: row.contact_id, recipientId: row.id,
+    }))
     const html    = renderAnnouncementHtml({
       ...tokenArgs, photoUrl: blast.photo_url, body: blast.body, unsubscribeUrl: optOut,
       hiddenFacts: blast.hidden_facts,
+      openPixelUrl: openPixelUrl(baseUrl, mintOpenToken(row.id)),
     })
 
     let sendError = null
@@ -353,6 +494,10 @@ export async function sendBlastBatch(svc, { blast, agent, contactsById = {}, pro
  * one-off send — a mass send must not be a second, parallel kind of history.
  */
 async function logDelivery(svc, { blast, agent, row, subject, html, property }) {
+  // A list recipient has no contact to hang history on, and inventing one is
+  // precisely what this feature was asked not to do. Their record is the
+  // recipient row — status, opens, replies and opt-out all live there, and the
+  // send's own report is where an agent reads them.
   if (!row.contact_id) return
 
   const label = statusLabel(blast.deal_status)
@@ -390,8 +535,25 @@ async function refreshCounters(svc, blastId) {
       .eq('blast_id', blastId).eq('status', status)
     return count || 0
   }
-  const [sent, failed, skipped] = await Promise.all([countBy('sent'), countBy('failed'), countBy('skipped')])
-  await svc.from('email_blasts').update({ sent_count: sent, failed_count: failed, skipped_count: skipped }).eq('id', blastId)
+  // Engagement is counted the same way — from the rows, never incremented — so
+  // the report cannot drift from what actually happened. `not.is` rather than a
+  // boolean column because the timestamp is the fact and "when" is the part an
+  // agent asks about next.
+  const countStamped = async (column) => {
+    const { count } = await svc
+      .from('email_blast_recipients')
+      .select('id', { count: 'exact', head: true })
+      .eq('blast_id', blastId).not(column, 'is', null)
+    return count || 0
+  }
+  const [sent, failed, skipped, opened, replied, unsubscribed] = await Promise.all([
+    countBy('sent'), countBy('failed'), countBy('skipped'),
+    countStamped('first_opened_at'), countStamped('replied_at'), countStamped('unsubscribed_at'),
+  ])
+  await svc.from('email_blasts').update({
+    sent_count: sent, failed_count: failed, skipped_count: skipped,
+    opened_count: opened, replied_count: replied, unsubscribed_count: unsubscribed,
+  }).eq('id', blastId)
 }
 
 /**

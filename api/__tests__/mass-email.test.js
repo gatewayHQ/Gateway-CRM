@@ -47,7 +47,7 @@ vi.mock('../_lib/msGraph.js', () => ({
   canSendMail:         () => true,
 }))
 
-const { createBlast, sendBlastBatch, blastProgress, MAX_RECIPIENTS, DAILY_SEND_LIMIT } =
+const { createBlast, sendBlastBatch, blastProgress, splitListName, MAX_RECIPIENTS, DAILY_SEND_LIMIT } =
   await import('../_lib/massEmail.js')
 const { COMPANY } = await import('../../src/lib/emailFooter.js')
 
@@ -58,6 +58,7 @@ function makeDb(seed = {}) {
   const tables = {
     contacts: [], properties: [], agents: [],
     email_blasts: [], email_blast_recipients: [], email_messages: [], activities: [],
+    email_suppressions: [],
     ...seed,
   }
   let seq = 0
@@ -75,7 +76,19 @@ function makeDb(seed = {}) {
       eq(col, val)  { state.filters.push(r => r[col] === val); return api },
       neq(col, val) { state.filters.push(r => r[col] !== val); return api },
       gte(col, val) { state.filters.push(r => r[col] != null && r[col] >= val); return api },
-      in(col, vals) { state.filters.push(r => vals.includes(r[col])); return api },
+      in(col, vals) {
+        // Case-insensitive for the address columns, matching the lower(email)
+        // unique index the real suppression lookup hits.
+        const lower = vals.map(v => (typeof v === 'string' ? v.toLowerCase() : v))
+        state.filters.push(r => vals.includes(r[col]) ||
+          (typeof r[col] === 'string' && lower.includes(r[col].toLowerCase())))
+        return api
+      },
+      not(col, op, val) {
+        if (op !== 'is' || val !== null) throw new Error(`stub .not() only supports ("${col}", "is", null)`)
+        state.filters.push(r => r[col] != null)
+        return api
+      },
       order() { return api },
       limit(n) { state.limit = n; return api },
       single()      { state.single = true; return api },
@@ -404,5 +417,248 @@ describe('blastProgress', () => {
     expect(await blastProgress(db, blast.id)).toMatchObject({
       total: 2, sent: 2, failed: 0, skipped: 1, remaining: 0, done: true,
     })
+  })
+})
+
+// ─── Recipients who are not contacts ─────────────────────────────────────────
+// The feature this section guards: an agent pastes 122 addresses off a county
+// roll, none of which are in the CRM, and all 122 get mailed WITHOUT 122 junk
+// contact records being created. Everything that used to hang off the contact
+// record — the opt-out above all — has to work for them anyway.
+
+const listRow = (email, name = '') => ({ email, name })
+
+const seedMixedBlast = (db, { contacts = [], listRecipients = [], listSource = 'owners.csv' } = {}) => {
+  db.tables.contacts.push(...contacts)
+  return createBlast(db, db, {
+    agentId: AGENT.id,
+    blast: { ...BLAST_INPUT, listSource },
+    contactIds: contacts.map(c => c.id),
+    listRecipients,
+  })
+}
+
+describe('pasted-list recipients', () => {
+  it('mails an address with no contact record at all', async () => {
+    const db = makeDb({ agents: [AGENT] })
+    const blast = await seedMixedBlast(db, {
+      listRecipients: [listRow('abigail.hillers@brownwinick.com', 'Abigail M. Hillers')],
+    })
+    expect(blast.recipient_count).toBe(1)
+    expect(blast.list_recipient_count).toBe(1)
+
+    await runBatch(db, blast, [])
+    expect(sendGraphMail).toHaveBeenCalledTimes(1)
+    expect(sendGraphMail.mock.calls[0][1].to).toEqual(['abigail.hillers@brownwinick.com'])
+  })
+
+  it('creates NO contacts — the row on the send is the whole record', async () => {
+    const db = makeDb({ agents: [AGENT] })
+    const blast = await seedMixedBlast(db, {
+      listRecipients: [listRow('a@x.com', 'A One'), listRow('b@x.com', 'B Two')],
+    })
+    await runBatch(db, blast, [])
+    expect(db.tables.contacts).toHaveLength(0)
+    expect(db.tables.email_blast_recipients.every(r => r.contact_id === null)).toBe(true)
+    expect(db.tables.email_blast_recipients.every(r => r.source === 'list')).toBe(true)
+  })
+
+  it('still gives every one of them a working unsubscribe link', async () => {
+    // The defect this closes: the link used to be minted only when the row had
+    // a contact_id, so a list recipient received a bulk email with no way out.
+    const db = makeDb({ agents: [AGENT] })
+    const blast = await seedMixedBlast(db, {
+      listRecipients: [listRow('a@x.com'), listRow('b@x.com')],
+    })
+    await runBatch(db, blast, [])
+
+    const links = sendGraphMail.mock.calls.map(([, m]) =>
+      m.html.match(/https:\/\/crm\.example\.com\/u\/[A-Za-z0-9._-]+/)?.[0])
+    expect(links.filter(Boolean)).toHaveLength(2)
+    expect(new Set(links).size).toBe(2)
+    expect(sendGraphMail.mock.calls.every(([, m]) => m.html.includes('Unsubscribe'))).toBe(true)
+  })
+
+  it('personalises from the name snapshotted on the row, and greets a nameless one gracefully', async () => {
+    const db = makeDb({ agents: [AGENT] })
+    const blast = await seedMixedBlast(db, {
+      listRecipients: [listRow('a@x.com', 'Abigail M. Hillers'), listRow('b@x.com')],
+    })
+    await runBatch(db, blast, [])
+    const bodies = sendGraphMail.mock.calls.map(([, m]) => m.html)
+    expect(bodies.some(h => h.includes('Hi Abigail M.,'))).toBe(true)
+    expect(bodies.some(h => h.includes('Hi there,'))).toBe(true)
+  })
+
+  it('writes no contact history for them, and does not crash trying', async () => {
+    const db = makeDb({ agents: [AGENT] })
+    const blast = await seedMixedBlast(db, { listRecipients: [listRow('a@x.com')] })
+    await runBatch(db, blast, [])
+    expect(db.tables.activities).toHaveLength(0)
+    expect(db.tables.email_messages).toHaveLength(0)
+    // …but the send itself is recorded as delivered.
+    expect(db.tables.email_blast_recipients[0].status).toBe('sent')
+  })
+
+  it('sends to contacts and list addresses in one blast, counting both', async () => {
+    const db = makeDb({ agents: [AGENT] })
+    const blast = await seedMixedBlast(db, {
+      contacts: [contact({ id: 'c1', email: 'c1@x.com' })],
+      listRecipients: [listRow('list@x.com')],
+    })
+    expect(blast.recipient_count).toBe(2)
+    expect(blast.list_recipient_count).toBe(1)
+    await runBatch(db, blast, [contact({ id: 'c1', email: 'c1@x.com' })])
+    expect(sendGraphMail).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the contact when the same address is in the book AND the file', async () => {
+    // The contact row wins, so the send lands on that person's timeline rather
+    // than becoming an anonymous list delivery — and they get ONE email.
+    const db = makeDb({ agents: [AGENT] })
+    const blast = await seedMixedBlast(db, {
+      contacts: [contact({ id: 'c1', email: 'dup@x.com' })],
+      listRecipients: [listRow('DUP@x.com', 'Dup Person')],
+    })
+    await runBatch(db, blast, [contact({ id: 'c1', email: 'dup@x.com' })])
+    expect(sendGraphMail).toHaveBeenCalledTimes(1)
+    const kept = db.tables.email_blast_recipients.filter(r => r.status === 'pending' || r.status === 'sent')
+    expect(kept).toHaveLength(1)
+    expect(kept[0].source).toBe('contact')
+    const skipped = db.tables.email_blast_recipients.find(r => r.status === 'skipped')
+    expect(skipped.skip_reason).toMatch(/duplicate/i)
+  })
+
+  it('drops an unusable address with a reason rather than attempting it', async () => {
+    const db = makeDb({ agents: [AGENT] })
+    const blast = await seedMixedBlast(db, {
+      listRecipients: [listRow('not-an-email'), listRow('good@x.com')],
+    })
+    expect(blast.recipient_count).toBe(1)
+    await runBatch(db, blast, [])
+    expect(sendGraphMail).toHaveBeenCalledTimes(1)
+    expect(db.tables.email_blast_recipients.find(r => r.status === 'skipped').skip_reason)
+      .toMatch(/invalid/i)
+  })
+
+  it('counts contacts and list rows together against the per-send cap', async () => {
+    const db = makeDb({ agents: [AGENT] })
+    const listRecipients = Array.from({ length: MAX_RECIPIENTS + 1 }, (_, i) => listRow(`p${i}@x.com`))
+    await expect(seedMixedBlast(db, { listRecipients }))
+      .rejects.toThrow(new RegExp(`per-send limit is ${MAX_RECIPIENTS}`))
+  })
+
+  it('refuses a send with no recipients of either kind', async () => {
+    const db = makeDb({ agents: [AGENT] })
+    await expect(seedMixedBlast(db, {})).rejects.toThrow(/no recipients/i)
+  })
+})
+
+// ─── The suppression list ────────────────────────────────────────────────────
+
+describe('address-level opt-out', () => {
+  it('never mails a suppressed address, contact or not', async () => {
+    const db = makeDb({
+      agents: [AGENT],
+      email_suppressions: [
+        { id: 's1', email: 'gone@x.com',      reason: 'unsubscribed' },
+        { id: 's2', email: 'also-gone@x.com', reason: 'unsubscribed' },
+      ],
+    })
+    const blast = await seedMixedBlast(db, {
+      contacts: [contact({ id: 'c1', email: 'gone@x.com' })],
+      listRecipients: [listRow('also-gone@x.com'), listRow('fine@x.com')],
+    })
+    expect(blast.recipient_count).toBe(1)
+
+    await runBatch(db, blast, [contact({ id: 'c1', email: 'gone@x.com' })])
+    expect(sendGraphMail).toHaveBeenCalledTimes(1)
+    expect(sendGraphMail.mock.calls[0][1].to).toEqual(['fine@x.com'])
+
+    // Named, not silently dropped: an agent who selected 3 and sees 1 sent has
+    // to be able to find out what happened to the other two.
+    const reasons = db.tables.email_blast_recipients
+      .filter(r => r.status === 'skipped').map(r => r.skip_reason)
+    expect(reasons).toEqual(['Unsubscribed', 'Unsubscribed'])
+  })
+
+  it('matches a suppression regardless of how the address was capitalised', async () => {
+    const db = makeDb({
+      agents: [AGENT],
+      email_suppressions: [{ id: 's1', email: 'gone@x.com', reason: 'unsubscribed' }],
+    })
+    const blast = await seedMixedBlast(db, { listRecipients: [listRow('GONE@X.com')] })
+    expect(blast.recipient_count).toBe(0)
+  })
+
+  it('sends nothing at all if the opt-out list cannot be read', async () => {
+    // Everywhere else a failed bookkeeping query degrades to a permissive
+    // default. Here the permissive default is mailing people who opted out.
+    const db = makeDb({ agents: [AGENT] })
+    const realFrom = db.from
+    const guarded = {
+      from: (table) => {
+        if (table === 'email_suppressions') {
+          const boom = { error: { message: 'connection reset' }, data: null }
+          const api = { select: () => api, in: () => api, then: (r) => Promise.resolve(boom).then(r) }
+          return api
+        }
+        return realFrom(table)
+      },
+      tables: db.tables,
+    }
+    await expect(createBlast(guarded, guarded, {
+      agentId: AGENT.id, blast: BLAST_INPUT, listRecipients: [listRow('a@x.com')],
+    })).rejects.toThrow(/unsubscribe list/i)
+  })
+})
+
+// ─── Open tracking ───────────────────────────────────────────────────────────
+
+describe('open tracking pixel', () => {
+  it('embeds a per-recipient pixel, so an open is attributable to one person', async () => {
+    const db = makeDb({ agents: [AGENT] })
+    const blast = await seedMixedBlast(db, {
+      listRecipients: [listRow('a@x.com'), listRow('b@x.com')],
+    })
+    await runBatch(db, blast, [])
+    const pixels = sendGraphMail.mock.calls.map(([, m]) =>
+      m.html.match(/https:\/\/crm\.example\.com\/e\/[A-Za-z0-9._-]+\.gif/)?.[0])
+    expect(pixels.filter(Boolean)).toHaveLength(2)
+    expect(new Set(pixels).size).toBe(2)
+  })
+
+  it('renders the pixel as a 1×1 that no client will draw as a broken image', async () => {
+    const db = makeDb({ agents: [AGENT] })
+    const blast = await seedMixedBlast(db, { listRecipients: [listRow('a@x.com')] })
+    await runBatch(db, blast, [])
+    const html = sendGraphMail.mock.calls[0][1].html
+    expect(html).toMatch(/width="1" height="1" alt="" aria-hidden="true"/)
+  })
+})
+
+describe('splitListName', () => {
+  // A pasted file gives one name cell, and the row needs two columns. Getting
+  // this wrong shows up in the greeting of every message in the send.
+  it('keeps a middle initial with the first name rather than losing it', () => {
+    expect(splitListName('Abigail M. Hillers')).toEqual({ first_name: 'Abigail M.', last_name: 'Hillers' })
+  })
+
+  it('handles a plain two-part name', () => {
+    expect(splitListName('Tony Reed')).toEqual({ first_name: 'Tony', last_name: 'Reed' })
+  })
+
+  it('treats a single word as the first name, so the greeting still reads', () => {
+    expect(splitListName('Susan')).toEqual({ first_name: 'Susan', last_name: null })
+  })
+
+  it('returns nothing for an empty cell instead of empty strings', () => {
+    expect(splitListName('')).toEqual({ first_name: null, last_name: null })
+    expect(splitListName('   ')).toEqual({ first_name: null, last_name: null })
+    expect(splitListName(undefined)).toEqual({ first_name: null, last_name: null })
+  })
+
+  it('collapses the ragged whitespace a spreadsheet paste brings with it', () => {
+    expect(splitListName('  Tony   Joseph   Reed ')).toEqual({ first_name: 'Tony Joseph', last_name: 'Reed' })
   })
 })

@@ -19,6 +19,25 @@
 // Deliberately NOT time-limited — see the first bullet. This is the one token
 // in the codebase that is supposed to outlive everything around it.
 //
+// ── TWO SHAPES, BECAUSE NOT EVERY RECIPIENT IS A CONTACT ─────────────────────
+//
+// v1 carries a contact id. It is what the first announcements shipped with and
+// is read forever: a link in somebody's inbox is not something we get to
+// re-issue.
+//
+// v2 carries the ADDRESS, plus the contact id and blast-recipient row when
+// there are any. Mass email can now go to a pasted list of addresses that are
+// deliberately NOT contacts (an agent with 122 owners off a county roll should
+// not have to pollute the contact book to mail them). Those people need the
+// same one-click opt-out as anyone else — an email with no working unsubscribe
+// is the one thing a bulk send must never be — so the token stopped being
+// "which contact is this" and became "which mailbox is this".
+//
+// Carrying all three means one opt-out does all the things it should: the
+// address goes on the suppression list, the contact record (if there is one)
+// gets email_opt_out, and the recipient row is stamped so the send's own report
+// can say who left.
+//
 // Server-only (api/_lib/* is never bundled into the browser build): the signing
 // secret must never reach a page.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,6 +92,24 @@ export function mintUnsubscribeToken(contactId) {
  * forged signature from a truncated link.
  */
 export function readUnsubscribeToken(token) {
+  const obj = verified(token)
+  if (!obj) return null
+  // v1: the original contact-only link. Its shape is part of the contract —
+  // links minted before v2 existed still arrive and must read the same.
+  if (obj.v === 1 && obj.c) return { contactId: String(obj.c) }
+  // v2: an address, which every recipient has, plus whatever else we knew.
+  if (obj.v === 2 && obj.e) {
+    return {
+      email:       String(obj.e),
+      contactId:   obj.c ? String(obj.c) : null,
+      recipientId: obj.r ? String(obj.r) : null,
+    }
+  }
+  return null
+}
+
+/** Shared verify step: signature first, then let each reader judge the shape. */
+function verified(token) {
   try {
     const secret = signingSecret()
     if (!secret) return null
@@ -81,10 +118,51 @@ export function readUnsubscribeToken(token) {
     const want = mac(body, secret)
     const a = Buffer.from(sig), b = Buffer.from(want)
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null
-    const obj = b64u.dec(body)
-    if (obj?.v !== 1 || !obj?.c) return null
-    return { contactId: String(obj.c) }
+    return b64u.dec(body)
   } catch { return null }
+}
+
+/**
+ * The opt-out token for one recipient of one blast — contact or pasted address.
+ *
+ * `email` is required because it is the only identifier every recipient has,
+ * and because suppression is per MAILBOX: the person who opts out is telling us
+ * not to mail that address again, whether or not a contact record exists for it
+ * today or gets created next month.
+ */
+export function mintRecipientUnsubscribeToken({ email, contactId = null, recipientId = null }) {
+  const secret = signingSecret()
+  if (!secret) throw new Error('Server misconfigured: no signing secret for unsubscribe links')
+  const addr = String(email || '').trim().toLowerCase()
+  if (!addr) throw new Error('mintRecipientUnsubscribeToken requires an email address')
+  const payload = { v: 2, e: addr }
+  if (contactId)   payload.c = String(contactId)
+  if (recipientId) payload.r = String(recipientId)
+  const body = b64u.enc(payload)
+  return `${body}.${mac(body, secret)}`
+}
+
+/**
+ * The token behind an open-tracking pixel.
+ *
+ * Signed for the same reason the opt-out link is: an unsigned or sequential id
+ * would let anyone inflate — or, worse, fabricate — the open record for a send
+ * they never received. It identifies a recipient ROW, not a person, so it says
+ * nothing about who was mailed if the URL leaks out of the email.
+ */
+export function mintOpenToken(recipientId) {
+  const secret = signingSecret()
+  if (!secret) throw new Error('Server misconfigured: no signing secret for tracking pixels')
+  if (!recipientId) throw new Error('mintOpenToken requires a recipient id')
+  const body = b64u.enc({ v: 1, o: String(recipientId) })
+  return `${body}.${mac(body, secret)}`
+}
+
+/** The recipient row a pixel token points at, or null if we didn't issue it. */
+export function readOpenToken(token) {
+  const obj = verified(token)
+  if (!obj || obj.v !== 1 || !obj.o) return null
+  return { recipientId: String(obj.o) }
 }
 
 /**
