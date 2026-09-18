@@ -31,7 +31,9 @@
  * Auth: service role key bypasses RLS for server-side writes. The 'scan',
  *       'scan_replay', 'landing', 'og', 'capture_lead', 'om_request',
  *       'capture_subscriber' and
- *       'unsubscribe' actions are intentionally unauthenticated (public).
+ *       'unsubscribe' and 'open' actions are intentionally unauthenticated
+ *       (public) — both are reached from a link or an image inside an email
+ *       that the recipient opens without ever logging in.
  *       'om_request' resolves the file from the campaign's own landing_config —
  *       never from the request — so it can't be turned into an anonymous reader
  *       for the private `campaign-oms` bucket.
@@ -50,7 +52,7 @@
 import { createClient } from '@supabase/supabase-js'
 import crypto from 'crypto'
 import { log } from './_lib/observability.js'
-import { readUnsubscribeToken, isContactUnsubscribeToken } from './_lib/unsubscribeToken.js'
+import { readUnsubscribeToken, isContactUnsubscribeToken, readOpenToken } from './_lib/unsubscribeToken.js'
 
 // ─── Supabase client (lazy singleton — avoids cold-start env-var crashes) ───
 let _supabase = null
@@ -1598,6 +1600,75 @@ export default async function handler(req, res) {
       return json(res, 200, { ok: true, subscriber_id: subscriber?.id || null })
     }
 
+    // ── Public: email open pixel (no login) ──────────────────────────────────
+    // GET /e/:token.gif (rewritten here in vercel.json). Stamps the open on the
+    // blast recipient row the token names.
+    //
+    // ALWAYS RETURNS THE IMAGE — valid token, forged token, dead database, all
+    // of it. Two reasons. A broken image in a marketing email is a visible
+    // defect the recipient blames the sender for, and a response that varies
+    // with whether the token resolved would let anyone probe which tokens are
+    // real. Tracking is the side effect; serving the pixel is the job.
+    //
+    // WHAT AN OPEN IS WORTH. Outlook and Gmail block or proxy remote images by
+    // default, and some proxies fetch them once on delivery whether or not
+    // anybody looked. So a recorded open is weak evidence somebody read it, and
+    // a missing open is no evidence at all. The obvious machine traffic is
+    // filtered out below with the same classifier the QR scan path uses, which
+    // improves the number without making it trustworthy — nothing here should
+    // be presented to an agent as a read receipt.
+    if (action === 'open') {
+      const token = String(req.query?.token || '').replace(/\.gif$/i, '').trim()
+      noStore(res)
+
+      try {
+        const claim = token ? readOpenToken(token) : null
+        const { isBot } = classifyBot(req, req.headers['user-agent'] || '')
+        if (claim && !isBot) {
+          const now = new Date().toISOString()
+          // Read-then-write rather than an increment: first_opened_at must
+          // survive every later open, and this path has no transaction. The
+          // race (two opens landing together) can only lose a count, never
+          // corrupt the first-open time, which is the field anybody reads.
+          const { data: row } = await db()
+            .from('email_blast_recipients')
+            .select('id, blast_id, open_count, first_opened_at')
+            .eq('id', claim.recipientId)
+            .maybeSingle()
+          if (row) {
+            await db().from('email_blast_recipients').update({
+              first_opened_at: row.first_opened_at || now,
+              last_opened_at:  now,
+              open_count:      (row.open_count || 0) + 1,
+            }).eq('id', row.id)
+
+            // Roll the blast's opened_count forward only on a FIRST open, so
+            // the report counts people rather than page-loads.
+            if (!row.first_opened_at && row.blast_id) {
+              const { count } = await db()
+                .from('email_blast_recipients')
+                .select('id', { count: 'exact', head: true })
+                .eq('blast_id', row.blast_id)
+                .not('first_opened_at', 'is', null)
+              await db().from('email_blasts')
+                .update({ opened_count: count || 0 })
+                .eq('id', row.blast_id)
+            }
+          }
+        }
+      } catch (err) {
+        // Never let bookkeeping break the image. An agent would rather have a
+        // clean email with a missing open than a grey box in every inbox.
+        log.warn('open_pixel.record_failed', { error: err.message })
+      }
+
+      // 1×1 transparent GIF, the smallest thing a mail client will render.
+      const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
+      res.setHeader('Content-Type', 'image/gif')
+      res.setHeader('Content-Length', String(gif.length))
+      return res.status(200).send(gif)
+    }
+
     // ── Public: one-click unsubscribe (no login) ─────────────────────────────
     if (action === 'unsubscribe') {
       const token = (req.body?.token || req.query?.token || '').trim()
@@ -1610,32 +1681,105 @@ export default async function handler(req, res) {
       if (isContactUnsubscribeToken(token)) {
         const claim = readUnsubscribeToken(token)
         if (!claim) return json(res, 404, { error: 'This unsubscribe link is no longer valid.' })
-        const { data: contact, error: optErr } = await db()
-          .from('contacts')
-          .update({ email_opt_out: true })
-          .eq('id', claim.contactId)
-          .select('id, email, assigned_agent_id')
-          .maybeSingle()
-        if (optErr) throw optErr
-        // A link for a contact that has since been deleted is spent, not broken
-        // — and saying so beats a 404 the recipient reads as "it didn't work".
-        if (!contact) return json(res, 200, { ok: true, scope: 'contact', email: '' })
+
+        // ── The address is the opt-out ──────────────────────────────────────
+        // A v2 token carries the mailbox; a v1 token (minted before pasted-list
+        // recipients existed) carries only a contact id, so its address is
+        // looked up. Suppressing the ADDRESS is what makes the opt-out hold for
+        // somebody who is not a contact — and what stops a contact who is
+        // re-imported, or duplicated on a second record, from becoming mailable
+        // again. Migration 0048.
+        let email     = String(claim.email || '').trim().toLowerCase()
+        let contactId = claim.contactId || null
+
+        if (!email && contactId) {
+          const { data: c } = await db().from('contacts').select('email').eq('id', contactId).maybeSingle()
+          email = String(c?.email || '').trim().toLowerCase()
+        }
+
+        // The recipient row that carried this link, so the send's own report can
+        // say who left. Also fills in the contact behind a list row that has
+        // since been added to the contact book.
+        let recipientRow = null
+        if (claim.recipientId) {
+          const { data } = await db()
+            .from('email_blast_recipients')
+            .select('id, blast_id, contact_id')
+            .eq('id', claim.recipientId)
+            .maybeSingle()
+          recipientRow = data || null
+          if (!contactId && recipientRow?.contact_id) contactId = recipientRow.contact_id
+        }
+
+        if (email) {
+          // Idempotent: a second click, or a recipient forwarding the link to
+          // themselves, must be a quiet success rather than an error page.
+          const { error: supErr } = await db().from('email_suppressions').upsert([{
+            email,
+            reason:       'unsubscribed',
+            blast_id:     recipientRow?.blast_id || null,
+            recipient_id: recipientRow?.id || null,
+            contact_id:   contactId,
+          }], { onConflict: 'email' })
+          // An upsert failure here is the one thing worth failing the request
+          // for: telling somebody they are unsubscribed when nothing was stored
+          // is how they end up reporting the next message as spam.
+          if (supErr) throw supErr
+        }
+
+        if (recipientRow?.id) {
+          try {
+            await db().from('email_blast_recipients')
+              .update({ unsubscribed_at: new Date().toISOString() })
+              .eq('id', recipientRow.id)
+          } catch (err) {
+            log.warn('unsubscribe.recipient_stamp_failed', { error: err.message })
+          }
+        }
+
+        // The contact record keeps its own flag. Redundant with the suppression
+        // list by design: every screen in the CRM already reads email_opt_out,
+        // and an opt-out that only existed in a table nothing consults would be
+        // an opt-out in name only.
+        let contact = null
+        if (contactId) {
+          const { data, error: optErr } = await db()
+            .from('contacts')
+            .update({ email_opt_out: true })
+            .eq('id', contactId)
+            .select('id, email, assigned_agent_id')
+            .maybeSingle()
+          if (optErr) throw optErr
+          contact = data || null
+        }
 
         // Recorded on the contact's timeline, so the agent finds out from the
         // CRM rather than from the next person who asks why they were emailed.
-        try {
-          await db().from('activities').insert([{
-            contact_id: contact.id,
-            agent_id:   contact.assigned_agent_id || null,
-            type:       'note',
-            body:       'Unsubscribed from marketing email using the link in an announcement.',
-          }])
-        } catch (err) {
-          // The opt-out itself is already saved; failing to log it must never
-          // turn a successful unsubscribe into an error the recipient retries.
-          log.warn('unsubscribe.activity_failed', { error: err.message })
+        // A list recipient has no timeline — the suppression row and the stamped
+        // recipient row are their record.
+        if (contact) {
+          try {
+            await db().from('activities').insert([{
+              contact_id: contact.id,
+              agent_id:   contact.assigned_agent_id || null,
+              type:       'note',
+              body:       'Unsubscribed from marketing email using the link in an announcement.',
+            }])
+          } catch (err) {
+            // The opt-out itself is already saved; failing to log it must never
+            // turn a successful unsubscribe into an error the recipient retries.
+            log.warn('unsubscribe.activity_failed', { error: err.message })
+          }
         }
-        return json(res, 200, { ok: true, scope: 'contact', email: contact.email || '' })
+
+        // A link whose contact was deleted, or that never had one, is spent
+        // rather than broken — and the address is suppressed either way, which
+        // is the part that actually protects the recipient.
+        return json(res, 200, {
+          ok: true,
+          scope: contact ? 'contact' : 'address',
+          email: contact?.email || email || '',
+        })
       }
 
       const { data, error } = await db()

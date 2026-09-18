@@ -13,8 +13,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 process.env.UNSUBSCRIBE_SIGNING_SECRET = 'test-signing-secret'
 
-const { mintUnsubscribeToken, readUnsubscribeToken, isContactUnsubscribeToken, canMintUnsubscribeTokens } =
-  await import('../_lib/unsubscribeToken.js')
+const {
+  mintUnsubscribeToken, readUnsubscribeToken, isContactUnsubscribeToken, canMintUnsubscribeTokens,
+  mintRecipientUnsubscribeToken, mintOpenToken, readOpenToken,
+} = await import('../_lib/unsubscribeToken.js')
 
 const CONTACT = '9f1c0c62-7d7e-4c31-9a3f-1f8d9f2b4c55'
 
@@ -105,5 +107,84 @@ describe('with no signing secret configured', () => {
 
   it('accepts nothing, so an unsigned deployment cannot be talked into an opt-out', () => {
     expect(readUnsubscribeToken('YWJj.YWJj')).toBeNull()
+  })
+})
+
+// ─── v2: the address is the opt-out ──────────────────────────────────────────
+// Mass email can go to addresses that are deliberately not contacts, and those
+// people need the same one-click opt-out as anyone else. So the token stopped
+// asking "which contact is this" and started asking "which mailbox is this".
+
+describe('recipient tokens (v2)', () => {
+  const EMAIL = 'Abigail.Hillers@BrownWinick.com'
+  const RECIPIENT = '2b7e6c11-9c3a-4f5d-8a1b-6d0e2f3a4b5c'
+
+  it('round-trips an address with no contact behind it', () => {
+    const token = mintRecipientUnsubscribeToken({ email: EMAIL, recipientId: RECIPIENT })
+    expect(readUnsubscribeToken(token)).toEqual({
+      email: 'abigail.hillers@brownwinick.com',   // lower-cased: one mailbox, however typed
+      contactId: null,
+      recipientId: RECIPIENT,
+    })
+  })
+
+  it('carries the contact too when there is one, so both records are updated', () => {
+    const token = mintRecipientUnsubscribeToken({ email: EMAIL, contactId: CONTACT, recipientId: RECIPIENT })
+    expect(readUnsubscribeToken(token)).toEqual({
+      email: 'abigail.hillers@brownwinick.com',
+      contactId: CONTACT,
+      recipientId: RECIPIENT,
+    })
+  })
+
+  it('refuses to mint without an address — there would be nothing to suppress', () => {
+    expect(() => mintRecipientUnsubscribeToken({ email: '', contactId: CONTACT })).toThrow()
+    expect(() => mintRecipientUnsubscribeToken({ email: '   ' })).toThrow()
+  })
+
+  it('still reads a v1 link, because one in an inbox cannot be re-issued', () => {
+    expect(readUnsubscribeToken(mintUnsubscribeToken(CONTACT))).toEqual({ contactId: CONTACT })
+  })
+
+  it('cannot be forged by editing the address in the URL', () => {
+    const token = mintRecipientUnsubscribeToken({ email: 'victim@x.com' })
+    const [body, sig] = token.split('.')
+    const swapped = Buffer.from(JSON.stringify({ v: 2, e: 'someone-else@x.com' })).toString('base64url')
+    expect(readUnsubscribeToken(`${swapped}.${sig}`)).toBeNull()
+    expect(readUnsubscribeToken(`${body}.${'x'.repeat(sig.length)}`)).toBeNull()
+  })
+
+  it('is URL-safe, so it survives being pasted out of a mail client', () => {
+    expect(mintRecipientUnsubscribeToken({ email: EMAIL })).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/)
+  })
+
+  it('looks like a contact token to the router, which splits on the signature', () => {
+    expect(isContactUnsubscribeToken(mintRecipientUnsubscribeToken({ email: EMAIL }))).toBe(true)
+  })
+})
+
+describe('open-pixel tokens', () => {
+  const RECIPIENT = '2b7e6c11-9c3a-4f5d-8a1b-6d0e2f3a4b5c'
+
+  it('round-trips the recipient row it was minted for', () => {
+    expect(readOpenToken(mintOpenToken(RECIPIENT))).toEqual({ recipientId: RECIPIENT })
+  })
+
+  it('cannot be forged, so nobody can fabricate opens for a send', () => {
+    const [body, sig] = mintOpenToken(RECIPIENT).split('.')
+    expect(readOpenToken(`${body}.${'x'.repeat(sig.length)}`)).toBeNull()
+    expect(readOpenToken('nonsense')).toBeNull()
+    expect(readOpenToken('')).toBeNull()
+  })
+
+  it('does not read an opt-out token, and an opt-out does not read a pixel token', () => {
+    // Same secret, different jobs. A pixel fetch must never be able to opt
+    // somebody out, and an opt-out link must never be spendable as an open.
+    expect(readOpenToken(mintRecipientUnsubscribeToken({ email: 'a@x.com' }))).toBeNull()
+    expect(readUnsubscribeToken(mintOpenToken(RECIPIENT))).toBeNull()
+  })
+
+  it('refuses to mint without a recipient row', () => {
+    expect(() => mintOpenToken('')).toThrow()
   })
 })

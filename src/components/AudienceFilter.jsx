@@ -33,13 +33,20 @@ const cardStyle = {
  * @param manual    { added: [ids], removed: [ids] } — the agent's hand edits
  * @param onChange  (audience) => void
  * @param onManualChange (manual) => void
+ * @param listRecipients [{ email, name }] — addresses off a pasted/uploaded
+ *                       list that are NOT contacts and are mailed as
+ *                       themselves. Lifted to the parent because they are part
+ *                       of the send, not of this filter's state.
+ * @param listSource     the file name or 'pasted list', for the blast record
+ * @param onListChange   (listRecipients, listSource) => void
  * @param onResolved     ({ recipients, skipped, duplicates }) => void — the
  *                       final list, so the parent can send it without
  *                       recomputing (and diverging from) what is shown here
  */
 export default function AudienceFilter({
   contacts = [], audience, manual = { added: [], removed: [] },
-  onChange, onManualChange, onResolved,
+  listRecipients = [], listSource = '',
+  onChange, onManualChange, onResolved, onListChange,
 }) {
   const [showList, setShowList] = useState(true)
 
@@ -55,6 +62,10 @@ export default function AudienceFilter({
   React.useEffect(() => {
     onResolved?.({ recipients, skipped, duplicates })
   }, [recipients, skipped, duplicates])   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Contacts + pasted addresses. The one number the agent is deciding on, and
+  // the one the send has to agree with.
+  const totalRecipients = recipients.length + listRecipients.length
 
   const toggleSide = (side) => {
     const sides = audience.sides.includes(side)
@@ -82,14 +93,16 @@ export default function AudienceFilter({
 
   // ─── "Here are the people I want this to go to." ─────────────────────────
   // An agent with a spreadsheet of owners had no way in: the audience could
-  // only be built from filters over contacts already in the CRM. This matches a
-  // pasted or uploaded list against the contact book by email and adds whoever
-  // it finds to THIS send.
+  // only be built from filters over contacts already in the CRM. A pasted list
+  // is matched against the contact book by email — and, since migration 0048,
+  // the addresses that match NOBODY are mailable too, as themselves.
   //
-  // It deliberately does not create contacts. There is already a proper CSV
-  // importer on the Contacts page — with column mapping, de-duplication and
-  // agent assignment — and a second half-built one here would be the version
-  // that quietly makes a mess. New addresses are reported and pointed at it.
+  // It still does not create contacts, and that is the point rather than a
+  // limitation: 122 unqualified addresses off a county roll would bury a
+  // working contact book, and the proper importer on the Contacts page (column
+  // mapping, de-duplication, agent assignment) is still where a real contact
+  // comes from. A list recipient's record is their row on the send: status,
+  // opens, replies and opt-out all live there.
   const [listOpen,  setListOpen]  = useState(false)
   const [listText,  setListText]  = useState('')
   const [listName,  setListName]  = useState('')
@@ -102,13 +115,52 @@ export default function AudienceFilter({
     setListMatch({ parsed, match: matchContactList(parsed.rows, contacts) })
   }
 
-  const addMatchedFromList = () => {
+  /**
+   * Take the whole list into the send: matched rows join as contacts, unmatched
+   * addresses join as themselves.
+   *
+   * One button rather than two, because "add the 0 that matched" was the only
+   * thing the old UI offered on a file where nothing matched — which is the
+   * normal case for a county roll, and read as the feature being broken.
+   */
+  const addWholeList = () => {
     const ids = (listMatch?.match?.matched || []).map(m => m.contact?.id).filter(Boolean)
-    if (!ids.length) return
-    const added   = [...new Set([...(manual.added || []), ...ids])]
-    const removed = (manual.removed || []).filter(x => !ids.includes(x))
-    onManualChange?.({ added, removed })
+    if (ids.length) {
+      const added   = [...new Set([...(manual.added || []), ...ids])]
+      const removed = (manual.removed || []).filter(x => !ids.includes(x))
+      onManualChange?.({ added, removed })
+    }
+
+    // Unsubscribed rows are NOT here: matchContactList already separated them,
+    // and they stay separated. The server checks the suppression list again at
+    // send time, so this is the friendly half of a guarantee rather than the
+    // whole of it.
+    const fresh = listMatch?.match?.fresh || []
+    if (fresh.length) {
+      const byEmail = new Map(listRecipients.map(r => [String(r.email).toLowerCase(), r]))
+      for (const row of fresh) {
+        const key = String(row.email || '').toLowerCase()
+        if (key && !byEmail.has(key)) byEmail.set(key, { email: row.email, name: row.name || '' })
+      }
+      onListChange?.([...byEmail.values()], listSource || listName || 'pasted list')
+    }
   }
+
+  const removeListRecipient = (email) => {
+    const key  = String(email || '').toLowerCase()
+    const next = listRecipients.filter(r => String(r.email).toLowerCase() !== key)
+    onListChange?.(next, next.length ? (listSource || listName || 'pasted list') : '')
+  }
+
+  const clearListRecipients = () => onListChange?.([], '')
+
+  // How many of the parsed rows are already on the send, so the button can stop
+  // offering to add a list the agent has already added.
+  const listOnSend = useMemo(() => {
+    const onSend = new Set(listRecipients.map(r => String(r.email).toLowerCase()))
+    const rows   = listMatch?.match?.fresh || []
+    return rows.filter(r => onSend.has(String(r.email || '').toLowerCase())).length
+  }, [listRecipients, listMatch])
 
   const removeContact = (id) => {
     // A contact the filter matched is suppressed via `removed`; one the agent
@@ -179,16 +231,20 @@ export default function AudienceFilter({
 
                 {listMatch.match.fresh.length > 0 && (
                   <div>
-                    {listMatch.match.fresh.length} address{listMatch.match.fresh.length === 1 ? ' is' : 'es are'} not a contact yet.
-                    Import them on the <strong>Contacts</strong> page first — that importer maps columns, de-duplicates
-                    and assigns an agent — then they can be added here.
+                    {listMatch.match.fresh.length} address{listMatch.match.fresh.length === 1 ? ' is' : 'es are'} not a contact —
+                    {listMatch.match.fresh.length === 1 ? ' it' : ' they'} can still be emailed, and no contact record is created.
+                    {' '}To make {listMatch.match.fresh.length === 1 ? 'it a real contact' : 'them real contacts'} instead, use the
+                    importer on the <strong>Contacts</strong> page.
                   </div>
                 )}
 
-                {listMatch.match.matched.length > 0 && (
+                {(listMatch.match.matched.length + listMatch.match.fresh.length) > 0 && (
                   <button type="button" className="btn btn--primary btn--sm" style={{ marginTop: 6 }}
-                          onClick={addMatchedFromList}>
-                    Add {listMatch.match.matched.length} matched contact{listMatch.match.matched.length === 1 ? '' : 's'} to this send
+                          onClick={addWholeList}
+                          disabled={listOnSend === listMatch.match.fresh.length && listMatch.match.matched.length === 0}>
+                    {listOnSend === listMatch.match.fresh.length && listMatch.match.matched.length === 0
+                      ? 'Already added to this send'
+                      : `Add all ${listMatch.match.matched.length + listMatch.match.fresh.length} to this send`}
                   </button>
                 )}
               </div>
@@ -245,19 +301,67 @@ export default function AudienceFilter({
         )}
       </div>
 
+      {/* ── Addresses off a list, on this send ──
+          Their own card rather than mixed into the contact list: these people
+          have no contact record, so "open the contact" is not an action that
+          exists for them and a row that looked identical would imply it did. */}
+      {listRecipients.length > 0 && (
+        <div style={cardStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+            <label className="form-label" style={{ margin: 0, flex: 1 }}>
+              {listRecipients.length} address{listRecipients.length === 1 ? '' : 'es'} from your list
+              <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}>
+                {listSource ? ` — ${listSource}` : ''} · not contacts, and none will be created
+              </span>
+            </label>
+            <button type="button" className="btn btn--ghost btn--sm" onClick={clearListRecipients}>
+              Remove all
+            </button>
+          </div>
+          <div style={{ maxHeight: 200, overflowY: 'auto', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)' }}>
+            {listRecipients.map(r => (
+              <div key={r.email} style={{
+                display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px',
+                borderBottom: '1px solid var(--gw-border)', fontSize: 12.5,
+              }}>
+                <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {r.name ? <span style={{ fontWeight: 600 }}>{r.name} · </span> : null}
+                  <span style={{ color: 'var(--gw-mist)' }}>{r.email}</span>
+                </div>
+                <button type="button" className="btn btn--ghost btn--icon btn--sm"
+                  onClick={() => removeListRecipient(r.email)} title="Remove from this send">
+                  <Icon name="x" size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 8 }}>
+            Each still gets their own individual email with a working unsubscribe link. Opens, replies and
+            opt-outs are tracked on this send's report rather than on a contact timeline.
+          </div>
+        </div>
+      )}
+
       {/* ── Live count + list ── */}
       <div style={cardStyle}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-          <div style={{ fontSize: 26, fontWeight: 700, color: recipients.length ? 'var(--gw-slate)' : 'var(--gw-mist)' }}>
-            {recipients.length}
+          <div style={{ fontSize: 26, fontWeight: 700, color: totalRecipients ? 'var(--gw-slate)' : 'var(--gw-mist)' }}>
+            {totalRecipients}
           </div>
           <div style={{ fontSize: 13, color: 'var(--gw-mist)', flex: 1 }}>
-            {recipients.length === 1 ? 'contact will receive this' : 'contacts will receive this'}
-            {!hasFilter && <div style={{ fontSize: 12 }}>Select at least one asset type and one side to build an audience.</div>}
+            {totalRecipients === 1 ? 'recipient will receive this' : 'recipients will receive this'}
+            {listRecipients.length > 0 && recipients.length > 0 && (
+              <div style={{ fontSize: 12 }}>
+                {recipients.length} from your contacts · {listRecipients.length} from your list
+              </div>
+            )}
+            {!hasFilter && listRecipients.length === 0 && (
+              <div style={{ fontSize: 12 }}>Select at least one asset type and one side to build an audience — or paste a list above.</div>
+            )}
           </div>
           {recipients.length > 0 && (
             <button type="button" className="btn btn--ghost btn--sm" onClick={() => setShowList(v => !v)}>
-              {showList ? 'Hide list' : 'Show list'}
+              {showList ? 'Hide contacts' : 'Show contacts'}
             </button>
           )}
         </div>

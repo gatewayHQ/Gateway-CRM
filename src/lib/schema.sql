@@ -1118,6 +1118,16 @@ create table if not exists email_blasts (
   sent_count       integer not null default 0,
   failed_count     integer not null default 0,
   skipped_count    integer not null default 0,
+  -- Engagement roll-ups for the per-send report (migration 0048). Recomputed
+  -- from the recipient rows, never incremented, so a retried batch cannot
+  -- double-count. Opens are directional only — most clients block the pixel.
+  opened_count     integer not null default 0,
+  replied_count    integer not null default 0,
+  unsubscribed_count integer not null default 0,
+  -- How many recipients came off a pasted/uploaded list rather than the contact
+  -- book, and what that list was called, so the send is recognisable later.
+  list_recipient_count integer not null default 0,
+  list_source      text,
   last_error       text,
   started_at       timestamptz,
   completed_at     timestamptz,
@@ -1145,6 +1155,24 @@ create table if not exists email_blast_recipients (
   skip_reason      text,
   email_message_id uuid references email_messages(id) on delete set null,
   sent_at          timestamptz,
+  -- Where this recipient came from (migration 0048). 'contact' — the audience
+  -- filter or a hand add. 'list' — an address off a pasted CSV with no contact
+  -- record, which mass email can now mail directly. It changes what the CRM can
+  -- tell you afterwards: a 'contact' send also lands on somebody's timeline, a
+  -- 'list' send exists only on this row.
+  source           text not null default 'contact'
+                     check (source in ('contact','list')),
+  -- Opens. Kept as first/last rather than one column because "did it land?" and
+  -- "are they still coming back to it?" are different questions, and a re-open
+  -- must not overwrite the answer to the first.
+  first_opened_at  timestamptz,
+  last_opened_at   timestamptz,
+  open_count       integer not null default 0,
+  -- Stamped on the row that carried the message, so a send's own report can say
+  -- who left and who wrote back.
+  unsubscribed_at  timestamptz,
+  replied_at       timestamptz,
+  reply_subject    text,
   created_at       timestamptz default now()
 );
 -- The double-send guard: one row per (blast, contact) and per (blast, address),
@@ -1158,6 +1186,10 @@ create unique index if not exists uq_blast_recipient_email
   on email_blast_recipients(blast_id, lower(email)) where status <> 'skipped';
 create index if not exists idx_blast_recipients_blast   on email_blast_recipients(blast_id, status);
 create index if not exists idx_blast_recipients_contact on email_blast_recipients(contact_id, sent_at desc);
+-- Reply matching (api/_lib/inboxSync.js) looks recipients up by address across
+-- recent sends, so the address needs an index of its own.
+create index if not exists idx_blast_recipients_email
+  on email_blast_recipients(lower(email));
 
 alter table email_blast_recipients enable row level security;
 -- (scoped policy — see "SCOPED RLS POLICIES" at the end of this file)
@@ -1167,6 +1199,59 @@ alter table email_blast_recipients enable row level security;
 -- defined in this block.
 alter table email_messages add column if not exists blast_id uuid references email_blasts(id) on delete set null;
 create index if not exists idx_email_messages_blast on email_messages(blast_id) where blast_id is not null;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- EMAIL SUPPRESSIONS  (migration 0048)
+--
+-- One row per address that must not be mailed, and the gate every bulk send
+-- passes through. Keyed by ADDRESS rather than contact because mass email can
+-- now go to a pasted list whose addresses are deliberately not contacts — and
+-- because contacts.email_opt_out quietly under-protected even the people it
+-- covered: the same human on a second address, or re-imported as a new row,
+-- came back mailable. The recipient opted out a mailbox, not a database row.
+--
+-- Not scoped to an agent or a blast: an opt-out is global. "He unsubscribed
+-- from Daniel's list but not mine" is not a distinction a recipient would
+-- recognise, and acting on it is how a domain earns a spam reputation.
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists email_suppressions (
+  id              uuid primary key default gen_random_uuid(),
+  email           text not null,
+  -- 'unsubscribed' (they clicked the link), 'manual' (asked an agent directly),
+  -- 'bounced' (dead address). Free text so a new reason needs no migration.
+  reason          text not null default 'unsubscribed',
+  -- Provenance, all nullable — a suppression stands on its own without any of it.
+  blast_id        uuid references email_blasts(id)           on delete set null,
+  recipient_id    uuid references email_blast_recipients(id) on delete set null,
+  contact_id      uuid references contacts(id)               on delete set null,
+  unsubscribed_at timestamptz not null default now(),
+  created_at      timestamptz default now()
+);
+-- Addresses are stored LOWER-CASED (api/campaigns.js lower-cases before every
+-- write, and the CHECK below makes that an invariant rather than a habit), so a
+-- plain unique index on the column does two jobs at once: it de-duplicates
+-- case-insensitively, AND it is a valid ON CONFLICT target for the upsert the
+-- unsubscribe path uses. A unique index on lower(email) would do only the
+-- first — Postgres cannot infer a conflict target from a column name when the
+-- index is on an expression, so every second click on an opt-out link would
+-- have raised "no unique or exclusion constraint matching the ON CONFLICT
+-- specification" and shown the recipient an error instead of confirming they
+-- were unsubscribed. Same reasoning as mailing_subscribers_unique.
+alter table email_suppressions drop constraint if exists email_suppressions_lower_check;
+alter table email_suppressions add  constraint email_suppressions_lower_check
+  check (email = lower(email));
+create unique index if not exists uq_email_suppressions_email
+  on email_suppressions(email);
+create index if not exists idx_email_suppressions_blast on email_suppressions(blast_id);
+
+alter table email_suppressions enable row level security;
+-- Reads are open to any authenticated user: every agent needs to see that an
+-- address is off-limits, and the audience UI has to be able to say WHY somebody
+-- was skipped. Writes stay with the service key — an agent must not be able to
+-- delete somebody's opt-out.
+drop policy if exists email_suppressions_read on email_suppressions;
+create policy email_suppressions_read on email_suppressions for select to authenticated
+  using (true);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- BOLDSIGN TEMPLATES  (reusable documents with fields; CRM prefills by field id)
