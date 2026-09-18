@@ -34,6 +34,7 @@ import { getValidAccessToken, sendGraphMail, canSendMail } from './msGraph.js'
 import { mintUnsubscribeToken, canMintUnsubscribeTokens } from './unsubscribeToken.js'
 import {
   renderAnnouncementHtml, renderTokens, announcementTokens, statusLabel,
+  normalizeHiddenFacts,
 } from '../../src/lib/dealAnnouncement.js'
 import { unsubscribeUrl } from '../../src/lib/emailFooter.js'
 
@@ -124,6 +125,13 @@ export async function createBlast(svc, user, { agentId, blast, contactIds }) {
     photo_url:      blast.photoUrl || null,
     terms:          blast.terms || null,
     custom_message: blast.customMessage || null,
+    // Which detail rows the agent switched off (see ANNOUNCEMENT_FACT_FIELDS).
+    // Normalised here rather than trusted: this arrives from the browser, and
+    // an unknown key silently doing nothing is better than one stored on the
+    // blast that a later reader has to interpret. Stored on the record because
+    // it is part of what was sent — a resumed batch tomorrow has to withhold
+    // the same price the first batch withheld.
+    hidden_facts:   normalizeHiddenFacts(blast.hiddenFacts),
     audience:       blast.audience || {},
     status:         'draft',
   }]).select('*').single()
@@ -294,6 +302,7 @@ export async function sendBlastBatch(svc, { blast, agent, contactsById = {}, pro
     const optOut  = row.contact_id ? unsubscribeUrl(baseUrl, mintUnsubscribeToken(row.contact_id)) : ''
     const html    = renderAnnouncementHtml({
       ...tokenArgs, photoUrl: blast.photo_url, body: blast.body, unsubscribeUrl: optOut,
+      hiddenFacts: blast.hidden_facts,
     })
 
     let sendError = null
