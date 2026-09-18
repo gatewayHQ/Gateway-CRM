@@ -1103,6 +1103,13 @@ create table if not exists email_blasts (
   photo_url        text,                       -- hero image (property default or per-send override)
   terms            text,                       -- free-text price/terms note
   custom_message   text,                       -- the agent's free-text block
+  -- Detail rows the agent switched OFF for this send — a jsonb array of field
+  -- keys from ANNOUNCEMENT_FACT_FIELDS ('price' on an under-contract
+  -- announcement being the case it exists for). A property of the SEND, not of
+  -- the wording: a blast is delivered in paced, resumable batches and every
+  -- batch has to withhold exactly what the first one did, and "did this
+  -- announcement publish the contract price?" is answerable only from here.
+  hidden_facts     jsonb not null default '[]',
   -- { assetTypes: [...], sides: [...], manual: { added: [], removed: [] } }
   audience         jsonb not null default '{}',
   status           text not null default 'draft'

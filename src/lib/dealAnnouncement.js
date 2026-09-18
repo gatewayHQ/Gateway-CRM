@@ -62,6 +62,60 @@ export const ANNOUNCEMENT_TOKENS = [
   { token: '{{customMessage}}',   label: 'Your custom message'  },
 ]
 
+// ─── Optional detail rows ─────────────────────────────────────────────────────
+// The fact table under the photo is the part of an announcement an agent most
+// often needs to trim. A property under contract is the clear case: the address,
+// asset type and unit count are the pitch, but the number it went under
+// contract at is the seller's business, and printing it in a mass email hands
+// every other buyer in the market a reference point.
+//
+// So each row is a switch rather than a fixed field. `key` is what gets stored
+// on the blast; `token` is the merge token that prints the same value in the
+// body, named here so the wizard can warn an agent who hid the Price row but
+// left {{price}} in their wording — hiding the row does not blank the token,
+// because a token the agent typed themselves is a deliberate choice.
+export const ANNOUNCEMENT_FACT_FIELDS = [
+  { key: 'address',   label: 'Address',    token: '{{propertyAddress}}' },
+  { key: 'assetType', label: 'Asset type', token: '{{assetType}}'       },
+  { key: 'units',     label: 'Units',      token: '{{unitCount}}'       },
+  { key: 'price',     label: 'Price',      token: '{{price}}'           },
+  { key: 'terms',     label: 'Terms',      token: '{{terms}}'           },
+]
+
+export const ANNOUNCEMENT_FACT_KEYS = ANNOUNCEMENT_FACT_FIELDS.map(f => f.key)
+
+/**
+ * Which rows start switched off for a status.
+ *
+ * Only 'under-contract' has one: the contract price. It is the default an agent
+ * would set by hand every time, and the one whose omission they would not
+ * notice until after the send. Every other status shows everything the property
+ * record has, exactly as before — a closing price and a list price are meant to
+ * be announced.
+ */
+export function defaultHiddenFacts(status) {
+  return status === 'under-contract' ? ['price'] : []
+}
+
+/** Keep only real field keys, in the canonical order — this comes off a jsonb column. */
+export function normalizeHiddenFacts(hidden) {
+  const list = Array.isArray(hidden) ? hidden.map(String) : []
+  return ANNOUNCEMENT_FACT_KEYS.filter(k => list.includes(k))
+}
+
+/**
+ * Merge tokens for hidden rows that the wording still prints. Not an error —
+ * the body is the agent's — but the one thing they would want told to them
+ * before the send goes out, since the preview's body is easy to skim past.
+ */
+export function hiddenFactTokensUsed(text, hiddenFacts) {
+  const hidden = normalizeHiddenFacts(hiddenFacts)
+  const haystack = String(text || '')
+  return ANNOUNCEMENT_FACT_FIELDS
+    .filter(f => hidden.includes(f.key) && haystack.includes(f.token))
+    .map(f => f.token)
+}
+
 const money = (val) => {
   const n = Number(val)
   if (!Number.isFinite(n) || n <= 0) return ''
@@ -193,28 +247,42 @@ export function defaultAnnouncementSubject(status) {
  */
 export function renderAnnouncementHtml({
   property, status, agent, contact, terms = '', customMessage = '', photoUrl, body,
-  unsubscribeUrl = '',
+  unsubscribeUrl = '', hiddenFacts = [],
 }) {
   const tokens = announcementTokens({ property, status, agent, contact, terms, customMessage })
   const bodyText = renderTokens(body || defaultAnnouncementBody(status), tokens)
   const accent   = DEAL_ANNOUNCEMENT_STATUS_COLORS[status] || '#1f2937'
   const photo    = photoUrl || defaultPhotoUrl(property)
 
-  // Only the facts that exist get a row — an office building has no unit count,
-  // and an empty "Units: —" line reads as sloppy in a marketing email.
-  const facts = [
-    ['Address',    tokens.propertyAddress],
-    ['Asset type', tokens.assetType],
-    ['Units',      tokens.unitCount],
-    ['Price',      tokens.price],
-    ['Terms',      tokens.terms],
-  ].filter(([, v]) => v)
+  // Two independent reasons a row doesn't print, and they mean different things.
+  // A row with no value never existed — an office building has no unit count,
+  // and an empty "Units: —" line reads as sloppy in a marketing email. A row in
+  // `hiddenFacts` exists and the agent chose to keep it to themselves, which is
+  // why it is stored on the blast rather than worked around in the wording.
+  const hidden = normalizeHiddenFacts(hiddenFacts)
+  const values = {
+    address:   tokens.propertyAddress,
+    assetType: tokens.assetType,
+    units:     tokens.unitCount,
+    price:     tokens.price,
+    terms:     tokens.terms,
+  }
+  const facts = ANNOUNCEMENT_FACT_FIELDS
+    .filter(f => !hidden.includes(f.key) && values[f.key])
+    .map(f => [f.label, values[f.key]])
 
   const factRows = facts.map(([label, value]) => `
           <tr>
             <td style="padding:6px 0;font-size:13px;color:#6b7280;width:110px;vertical-align:top">${escapeHtml(label)}</td>
             <td style="padding:6px 0;font-size:14px;color:#111827;font-weight:600">${escapeHtml(value)}</td>
           </tr>`).join('')
+
+  // Every row hidden means no table at all, rather than an empty one whose
+  // margin leaves a visible gap between the address and the message.
+  const factsTable = factRows
+    ? `<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:0 0 20px 0">${factRows}
+              </table>`
+    : ''
 
   const photoBlock = photo ? `
       <tr>
@@ -240,8 +308,7 @@ export function renderAnnouncementHtml({
           <tr>
             <td style="padding:24px">
               <div style="font-size:20px;font-weight:700;color:#111827;margin:0 0 16px 0">${escapeHtml(tokens.propertyAddress)}</div>
-              <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:0 0 20px 0">${factRows}
-              </table>
+              ${factsTable}
               <div style="font-size:14px;line-height:1.65;color:#374151">${textToHtml(bodyText)}</div>
             </td>
           </tr>

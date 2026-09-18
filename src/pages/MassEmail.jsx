@@ -30,6 +30,7 @@ import {
   ANNOUNCEMENT_TOKENS, defaultAnnouncementBody, defaultAnnouncementSubject,
   renderAnnouncementHtml, renderTokens, announcementTokens,
   propertyPhotos, defaultPhotoUrl, fullAddress, statusLabel,
+  ANNOUNCEMENT_FACT_FIELDS, defaultHiddenFacts, hiddenFactTokensUsed,
 } from '../lib/dealAnnouncement.js'
 import { PREVIEW_UNSUBSCRIBE_URL } from '../lib/emailFooter.js'
 
@@ -91,6 +92,10 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
   const [customMessage, setCustomMessage] = useState('')
   const [photoUrl, setPhotoUrl]           = useState('')
   const [photoTouched, setPhotoTouched]   = useState(false)
+  // Detail rows switched off for this send. Follows the status default until the
+  // agent touches it themselves — see the effect below.
+  const [hiddenFacts, setHiddenFacts]     = useState(defaultHiddenFacts('closed'))
+  const [factsTouched, setFactsTouched]   = useState(false)
   const [uploading, setUploading]         = useState(false)
   const [savingTemplate, setSavingTemplate] = useState(false)
 
@@ -135,6 +140,20 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
     setBody(defaultAnnouncementBody(dealStatus))
   }, [dealStatus])   // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Which detail rows show follows the status the same way the wording does:
+  // switching to "Under Contract" drops the contract price out of the email,
+  // switching back to "New Listing" puts the list price back — until the agent
+  // sets the rows themselves, after which their choice is never overwritten.
+  useEffect(() => {
+    if (factsTouched) return
+    setHiddenFacts(defaultHiddenFacts(dealStatus))
+  }, [dealStatus])   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleFact = (key) => {
+    setFactsTouched(true)
+    setHiddenFacts(h => (h.includes(key) ? h.filter(k => k !== key) : [...h, key]))
+  }
+
   // Photo defaults to the property's own first image, and keeps following the
   // property until the agent picks or uploads something for this send.
   const photos = propertyPhotos(property)
@@ -155,12 +174,26 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
   const previewHtml = useMemo(() => renderAnnouncementHtml({
     property, status: dealStatus, agent: activeAgent,
     contact: resolved.recipients[0] || { first_name: 'Pat', last_name: 'Ryan' },
-    terms, customMessage, photoUrl, body,
+    terms, customMessage, photoUrl, body, hiddenFacts,
     // The real link is minted per recipient at send time and must never be live
     // in a preview — clicking your own preview would opt out the contact it was
     // drawn for. The footer still renders, so what is approved is what is sent.
     unsubscribeUrl: PREVIEW_UNSUBSCRIBE_URL,
-  }), [property, dealStatus, activeAgent, resolved.recipients, terms, customMessage, photoUrl, body])
+  }), [property, dealStatus, activeAgent, resolved.recipients, terms, customMessage, photoUrl, body, hiddenFacts])
+
+  // The value each detail row WOULD print, so a switch can say "there is
+  // nothing on this property to show" instead of offering to hide a blank.
+  const factValues = useMemo(() => {
+    const t = announcementTokens({ property, status: dealStatus, agent: activeAgent, contact: {}, terms, customMessage })
+    return { address: t.propertyAddress, assetType: t.assetType, units: t.unitCount, price: t.price, terms: t.terms }
+  }, [property, dealStatus, activeAgent, terms, customMessage])
+
+  // A hidden row whose token is still typed into the subject or the body prints
+  // anyway — the wording is the agent's and is not rewritten for them, but they
+  // are told, because it is the one way to withhold a price and send it anyway.
+  const leakedTokens = useMemo(
+    () => hiddenFactTokensUsed(`${subject}\n${body}\n${customMessage}`, hiddenFacts),
+    [subject, body, customMessage, hiddenFacts])
 
   const previewSubject = useMemo(() => renderTokens(subject, announcementTokens({
     property, status: dealStatus, agent: activeAgent,
@@ -217,7 +250,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
         const { blast } = await authedPost('blast-create', {
           propertyId: propertyId || null,
           templateId: templateId || null,
-          dealStatus, subject, body, terms, customMessage,
+          dealStatus, subject, body, terms, customMessage, hiddenFacts,
           photoUrl: photoUrl || null,
           audience: { ...audience, manual },
           contactIds: resolved.recipients.map(c => c.id),
@@ -398,6 +431,60 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
             )}
           </div>
 
+          {/* ── Which details to show ──
+              The reason this exists: a property under contract is announced to
+              build a buyer list, not to publish what the seller accepted. The
+              price row is therefore a switch, and it starts OFF for Under
+              Contract. Every row is a switch for the same reason in miniature —
+              an agent who does not want to lead with a 6-unit count shouldn't
+              have to delete the property's data to leave it out of one email. */}
+          <div style={card}>
+            <label className="form-label">
+              Details to include
+              <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}> — the rows under the photo</span>
+            </label>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '8px 0 0' }}>
+              {ANNOUNCEMENT_FACT_FIELDS.map(f => {
+                const on    = !hiddenFacts.includes(f.key)
+                const empty = !factValues[f.key]
+                return (
+                  <button key={f.key} type="button" onClick={() => toggleFact(f.key)}
+                    title={empty
+                      ? `Nothing on this property to show as ${f.label.toLowerCase()}`
+                      : `${on ? 'Hide' : 'Show'} ${f.label.toLowerCase()} — ${factValues[f.key]}`}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 6,
+                      padding: '6px 12px', borderRadius: 999, fontSize: 12.5, fontWeight: 600,
+                      cursor: 'pointer', fontFamily: 'var(--font-body)',
+                      border: `1px solid ${on ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+                      background: on ? 'var(--gw-azure)' : '#fff',
+                      color: on ? '#fff' : 'var(--gw-mist)',
+                      textDecoration: on ? 'none' : 'line-through',
+                      opacity: empty ? 0.55 : 1,
+                    }}>
+                    <Icon name={on ? 'check' : 'x'} size={12} />
+                    {f.label}
+                  </button>
+                )
+              })}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 8 }}>
+              {hiddenFacts.length === 0
+                ? 'Everything the property record has will be listed.'
+                : `Left out of this email: ${ANNOUNCEMENT_FACT_FIELDS.filter(f => hiddenFacts.includes(f.key)).map(f => f.label.toLowerCase()).join(', ')}.`}
+              {' '}A row with nothing on the property never prints either way. The address in the
+              headline always stays.
+            </div>
+            {leakedTokens.length > 0 && (
+              <div style={{ fontSize: 12.5, color: '#b45309', marginTop: 8 }}>
+                Heads up — your wording still prints {leakedTokens.join(' and ')}, so{' '}
+                {leakedTokens.length === 1 ? 'that detail' : 'those details'} will go out in the
+                message even though the row is off. Remove the token from the subject or body to
+                withhold it completely.
+              </div>
+            )}
+          </div>
+
           <div style={card}>
             <div className="form-group">
               <label className="form-label required">Subject</label>
@@ -484,6 +571,13 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
               <Stat label="Property" value={property?.address || '—'} />
               <Stat label="Sending as" value={outlook?.email || activeAgent?.email || '—'} />
             </div>
+            {hiddenFacts.length > 0 && (
+              <div style={{ fontSize: 12.5, color: 'var(--gw-slate)', marginTop: 12 }}>
+                Withheld from this announcement:{' '}
+                <strong>{ANNOUNCEMENT_FACT_FIELDS.filter(f => hiddenFacts.includes(f.key)).map(f => f.label.toLowerCase()).join(', ')}</strong>
+                {leakedTokens.length > 0 && <span style={{ color: '#b45309' }}> — but {leakedTokens.join(' and ')} still prints in your wording</span>}
+              </div>
+            )}
             <div style={{ fontSize: 12.5, color: 'var(--gw-mist)', marginTop: 12 }}>
               Audience: {describeAudience(audience)}
               {manual.added?.length ? ` · ${manual.added.length} added by hand` : ''}

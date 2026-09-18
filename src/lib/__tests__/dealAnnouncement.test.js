@@ -3,6 +3,8 @@ import {
   announcementTokens, renderTokens, renderAnnouncementHtml, defaultPhotoUrl,
   propertyPhotos, unitCount, announcementPrice, assetTypeLabel, fullAddress,
   defaultAnnouncementBody, defaultAnnouncementSubject, statusLabel,
+  defaultHiddenFacts, normalizeHiddenFacts, hiddenFactTokensUsed,
+  ANNOUNCEMENT_FACT_FIELDS,
 } from '../dealAnnouncement.js'
 import { COMPANY } from '../emailFooter.js'
 
@@ -156,5 +158,61 @@ describe('defaults', () => {
   it('labels every supported status', () => {
     expect(statusLabel('under-contract')).toBe('Under Contract')
     expect(statusLabel('nonsense')).toBe('Announcement')
+  })
+})
+
+describe('optional detail rows', () => {
+  const html = (over = {}) => renderAnnouncementHtml({
+    property, status: 'under-contract', agent, contact, terms: 'All cash, 30-day close', ...over,
+  })
+
+  it('hides only the rows it is asked to, and keeps the rest', () => {
+    const out = html({ hiddenFacts: ['price'] })
+    expect(out).not.toContain('>Price<')
+    expect(out).not.toContain('$4,250,000')
+    expect(out).toContain('>Units<')
+    expect(out).toContain('>Asset type<')
+    expect(out).toContain('>Terms<')
+  })
+
+  it('prints every row when nothing is hidden — the previous behaviour', () => {
+    const out = html({ hiddenFacts: [] })
+    expect(out).toContain('>Price<')
+    expect(out).toContain('$4,250,000')
+  })
+
+  it('still leads with the address headline when the address ROW is hidden', () => {
+    // The row duplicates the headline; hiding it must not leave the email
+    // describing a property it never names.
+    const out = html({ hiddenFacts: ['address'] })
+    expect(out).not.toContain('>Address<')
+    expect(out).toContain('1200 Grand Ave, Des Moines, IA, 50309')
+  })
+
+  it('drops the detail table entirely rather than leaving an empty one', () => {
+    const out = html({ hiddenFacts: ANNOUNCEMENT_FACT_FIELDS.map(f => f.key) })
+    expect(out).not.toContain('>Price<')
+    expect(out).not.toContain('margin:0 0 20px 0')
+  })
+
+  it('ignores junk from the stored jsonb column instead of dropping real rows', () => {
+    expect(normalizeHiddenFacts(['price', 'nonsense'])).toEqual(['price'])
+    expect(normalizeHiddenFacts(null)).toEqual([])
+    expect(normalizeHiddenFacts('price')).toEqual([])
+    expect(html({ hiddenFacts: 'price' })).toContain('$4,250,000')
+  })
+
+  it('starts an under-contract announcement with the price withheld, and no other status', () => {
+    expect(defaultHiddenFacts('under-contract')).toEqual(['price'])
+    expect(defaultHiddenFacts('closed')).toEqual([])
+    expect(defaultHiddenFacts('new-listing')).toEqual([])
+  })
+
+  it('does not blank a token the agent typed — it reports it instead', () => {
+    const out = html({ hiddenFacts: ['price'], body: 'Under contract at {{price}}.' })
+    expect(out).toContain('$4,250,000')                                  // the wording is the agent's
+    expect(hiddenFactTokensUsed('Under contract at {{price}}.', ['price'])).toEqual(['{{price}}'])
+    expect(hiddenFactTokensUsed('Under contract.', ['price'])).toEqual([])
+    expect(hiddenFactTokensUsed('{{price}}', [])).toEqual([])
   })
 })

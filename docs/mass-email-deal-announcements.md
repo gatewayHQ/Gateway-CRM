@@ -23,8 +23,8 @@ drawer (which pre-selects that property):
 1. **Property + deal status** — the property record supplies the address, asset
    type, unit count, price and photo.
 2. **Message** — optionally start from a saved `Deal Announcement` template,
-   choose the photo, write the custom note, insert merge tokens, preview the
-   rendered email.
+   choose the photo, **choose which details to include**, write the custom note,
+   insert merge tokens, preview the rendered email.
 3. **Audience** — asset-type chips × buyer/seller sides, with a live count, the
    matched list, and hand add/remove.
 4. **Review & send** — the send runs in paced batches with live progress.
@@ -51,6 +51,34 @@ Deliberately strict, matching `src/lib/matching.js`:
   become a send to the whole database.
 * No email, `email_opt_out`, or `status = 'closed'` is never a recipient, and the
   UI names the reason rather than quietly shrinking the count.
+
+## Which details to include
+
+The rows under the photo — **Address, Asset type, Units, Price, Terms** — are
+each a switch (`ANNOUNCEMENT_FACT_FIELDS` in `src/lib/dealAnnouncement.js`).
+
+The case this exists for is a property **under contract**: the address and unit
+count are the pitch, but the number the seller accepted is their business, and
+printing it in a mass email hands every other buyer in the market a reference
+point. So `under-contract` starts with **Price switched off**
+(`defaultHiddenFacts()`); every other status starts with everything on, exactly
+as before. Like the wording, the switches follow the chosen status until the
+agent sets them by hand, after which their choice is never overwritten.
+
+Two things it does **not** do, both deliberate:
+
+* **It does not rewrite the agent's words.** A hidden row whose merge token is
+  still typed into the subject or body still prints — a token the agent typed is
+  a choice. The wizard says so, on the Message step and again on Review, because
+  it is the one way to withhold a price and mail it anyway.
+* **It does not hide the headline.** Switching off the *Address* row removes the
+  duplicate detail line, not the address the email leads with.
+
+The choice is stored on the blast (`email_blasts.hidden_facts`, migration 0047),
+not applied only in the browser, for two reasons: a blast is delivered in paced
+batches and resumed after a timeout or the next day, and every batch has to
+withhold exactly what the first one did; and *"did this announcement publish the
+contract price?"* is an audit question about mail that has already gone out.
 
 ## Merge tokens
 
@@ -121,6 +149,10 @@ direction of the join.
 `migrations/0039_mass_email_deal_announcements.sql` — `email_blasts`,
 `email_blast_recipients`, `email_messages.blast_id`, `contacts.email_opt_out`,
 and `templates.category` widened for `'deal-announcement'`.
+
+`migrations/0047_announcement_hidden_facts.sql` — `email_blasts.hidden_facts`,
+the detail rows withheld from a send (empty array = the original behavior, so
+blasts sent before it read back exactly as they rendered).
 
 Blast reads follow the standard visibility model (own + sharing team peers +
 admin); writes belong to the service key, so an agent cannot hand-edit a
