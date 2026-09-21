@@ -15,7 +15,8 @@
     { "path": "/api/cron?task=boldsign-sync",  "schedule": "0 3 * * *" },
     { "path": "/api/cron?task=scan-reconcile", "schedule": "0 4 * * *" },
     { "path": "/api/cron?task=calendar-sync",  "schedule": "0 5 * * *" },
-    { "path": "/api/cron?task=inbox-sync",     "schedule": "0 6 * * *" }
+    { "path": "/api/cron?task=inbox-sync",     "schedule": "0 6 * * *" },
+    { "path": "/api/cron?task=access-audit",  "schedule": "0 7 * * *" }
   ],
   "rewrites": [
     { "source": "/api/webhooks/website-lead", "destination": "/api/property-public?action=website-lead" },

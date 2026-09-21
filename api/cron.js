@@ -14,6 +14,11 @@
  *                                     query per connected agent; also marks
  *                                     mass-email recipients who replied — see
  *                                     api/_lib/inboxSync.js)
+ * GET /api/cron?task=access-audit   — nightly check that the live database still
+ *                                     matches the access model this repo describes
+ *                                     (storage bucket policies, RLS on the scoped
+ *                                     tables, anon exposure). Notifies office
+ *                                     admins on a failure; never repairs anything.
  *
  * These scheduled tasks share one serverless function (Vercel Hobby caps total
  * functions at 12 — this repo is already at that cap). Each is dispatched by
@@ -408,8 +413,10 @@ export default async function handler(req, res) {
     result = await runCalendarSync(supabase)
   } else if (task === 'inbox-sync') {
     result = await runInboxSync(supabase)
+  } else if (task === 'access-audit') {
+    result = await runAccessAudit(supabase)
   } else {
-    return res.status(400).json({ error: `Unknown task "${task}" — use ?task=reminders, ?task=sequence, ?task=nudges, ?task=boldsign-sync, ?task=scan-reconcile, ?task=calendar-sync, or ?task=inbox-sync` })
+    return res.status(400).json({ error: `Unknown task "${task}" — use ?task=reminders, ?task=sequence, ?task=nudges, ?task=boldsign-sync, ?task=scan-reconcile, ?task=calendar-sync, ?task=inbox-sync, or ?task=access-audit` })
   }
 
   return res.status(result.status).json(result.body)
@@ -866,4 +873,88 @@ async function runSignatureReminders(supabase) {
     }
   }
   return { ok: true, candidates: (pending || []).length, due: due.length, sent, failed }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task: access audit
+//
+// WHY THIS RUNS EVERY NIGHT
+//   A deal's documents were invisible to every agent but the one who uploaded
+//   them, for months. The `deal-documents` storage bucket had been created by
+//   hand in the Supabase dashboard, whose default policy template is
+//   `owner = auth.uid()`, and nothing ever compared the live database to what
+//   this repository says it should be. Migration 0049 fixed the policy. It did
+//   not fix the condition that produced it:
+//
+//     • CI parses schema.sql as TEXT — it passes whether or not a single
+//       migration has actually been applied to the database
+//     • the browser cannot read pg_policies, so the app cannot tell either
+//     • a storage policy that hides rows FILTERS them rather than erroring, so
+//       the screen looks calm while the data is gone
+//
+//   Nobody was going to notice the next one either. So the database is asked
+//   directly, on a schedule, and office admins are told when the answer changes.
+//
+// WHAT IT DOES NOT DO
+//   It never repairs anything. An access control that silently rewrites itself
+//   at 3am is worse than one that drifts: the fix belongs in a migration a
+//   human reads and applies, and the notification says which one.
+//
+// NOISE CONTROL
+//   Admins are notified only when a FAIL is present AND they have no unread
+//   audit notification already. A hole that goes unfixed for a week produces
+//   one notification, not seven; marking it read re-arms the alert.
+// ─────────────────────────────────────────────────────────────────────────────
+export async function runAccessAudit(supabase) {
+  const { data, error } = await supabase.rpc('app_access_audit')
+  if (error) {
+    // Not yet migrated is a normal state, not a failure worth paging on —
+    // the same posture as scan-reconcile above.
+    if (/does not exist|PGRST202|schema cache/i.test(error.message || '')) {
+      return { status: 200, body: { ok: true, skipped: 'migration 0050 not applied yet' } }
+    }
+    return { status: 500, body: { ok: false, error: error.message } }
+  }
+
+  const findings = Array.isArray(data) ? data : []
+  const failures = findings.filter(f => f.status === 'FAIL')
+  const warnings = findings.filter(f => f.status === 'warn')
+
+  if (!failures.length) {
+    return { status: 200, body: { ok: true, checks: findings.length, failures: 0, warnings: warnings.length } }
+  }
+
+  // Office admins own the database, so they are who hears about it.
+  const { data: admins } = await supabase
+    .from('agents').select('id, name').eq('is_admin', true)
+  if (!admins?.length) {
+    return { status: 200, body: { ok: true, failures: failures.length, notified: 0, note: 'no office admin to notify', findings: failures } }
+  }
+
+  // The message carries the findings themselves. An alert that only says
+  // "something is wrong" costs the reader a round trip to find out what.
+  const title = `Access audit: ${failures.length} problem${failures.length === 1 ? '' : 's'}`
+  const message = failures.map(f => `${f.area} — ${f.item}: ${f.detail}`).join('\n')
+
+  let notified = 0
+  for (const admin of admins) {
+    const { data: pending } = await supabase
+      .from('agent_notifications')
+      .select('id')
+      .eq('agent_id', admin.id)
+      .eq('type', 'access_audit')
+      .eq('read', false)
+      .limit(1)
+    if (pending?.length) continue          // already told them; don't repeat nightly
+
+    const { error: notifErr } = await supabase.from('agent_notifications').insert([{
+      agent_id: admin.id, title, message, type: 'access_audit',
+    }])
+    if (!notifErr) notified++
+  }
+
+  return {
+    status: 200,
+    body: { ok: true, checks: findings.length, failures: failures.length, warnings: warnings.length, notified, findings: failures },
+  }
 }
