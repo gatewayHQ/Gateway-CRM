@@ -3742,11 +3742,11 @@ begin
     area := 'storage bucket';
     if not exists (select 1 from storage.buckets b where b.id = item) then
       status := 'FAIL';
-      detail := 'bucket is missing — uploads fail and the Documents tab shows a setup panel. Apply migration 0049.';
+      detail := 'bucket is missing — uploads fail and the Documents tab shows a setup panel. Apply migration 0053.';
     elsif exists (select 1 from storage.buckets b where b.id = item and b.public) then
       -- A public bucket needs no signed URL and consults no policy at all.
       status := 'FAIL';
-      detail := 'bucket is PUBLIC — every file in it is readable by URL with no session. Apply migration 0049, which forces it private.';
+      detail := 'bucket is PUBLIC — every file in it is readable by URL with no session. Apply migration 0053, which forces it private.';
     else
       status := 'ok';
       detail := 'private';
@@ -3763,7 +3763,7 @@ begin
          and p.policyname = item
     ) then
       status := 'FAIL';
-      detail := 'policy is missing — apply migration 0049.';
+      detail := 'policy is missing — apply migration 0053.';
       return next;
     end if;
   end loop;
@@ -3784,7 +3784,13 @@ begin
       from pg_policies p
      where p.schemaname = 'storage' and p.tablename = 'objects'
   loop
-    if r.body !~ 'deal-documents|closing-packets' then
+    -- A RESTRICTIVE policy is examined whatever bucket it names, INCLUDING one
+    -- that names none. Skipping those is the blind spot that hid the real
+    -- cause for three migrations: the rule actually in force was
+    -- `as restrictive ... using (owner = auth.uid())` with no bucket clause,
+    -- so every query that filtered on the body mentioning 'deal-documents'
+    -- matched nothing and reported a clean bill of health.
+    if r.permissive <> 'RESTRICTIVE' and r.body !~ 'deal-documents|closing-packets' then
       continue;
     end if;
     area := 'storage policy';
@@ -3795,7 +3801,10 @@ begin
       -- creates a restrictive policy on these buckets, and one that exists can
       -- only take access away from agents the deal already grants.
       status := 'FAIL';
-      detail := 'RESTRICTIVE policy on a deal bucket (' || r.cmd || '). Restrictive policies are ANDed, so this vetoes the deal check no matter what else is in place — the migration can look applied and change nothing. Run migration 0051, or: drop policy ' || quote_ident(r.policyname) || ' on storage.objects;';
+      detail := 'RESTRICTIVE policy on storage.objects (' || r.cmd ||
+                case when r.body ~ 'deal-documents|closing-packets' then ', names a deal bucket'
+                     else ', names NO bucket so it applies to deal-documents too' end ||
+                '). Restrictive policies are ANDed, so this vetoes every permissive policy no matter what else is in place — the fix can look applied and change nothing. Run migration 0053, or: drop policy ' || quote_ident(r.policyname) || ' on storage.objects;';
       return next;
     elsif r.body ~ '\mowner\M' and not (r.policyname = any(known_storage_policies)) then
       -- Permissive and uploader-scoped: it can only widen, so it is untidy
@@ -3874,15 +3883,24 @@ begin
   -- this; a deal converted by a pre-0025 client build can reintroduce it.
   area := 'co-agent visibility';
   item := 'deals displaying a co-agent RLS does not grant';
-  select count(*) into n
+  -- Counts a PARTIAL mismatch, not just an empty column. The first version of
+  -- this asked `array_length(co_agent_ids) = 0`, which silently passed a deal
+  -- carrying one co-agent whose property listed two — the second was on the
+  -- team card and nowhere RLS could see it. Seen live: granted=1, shown=2.
+  select count(distinct d.id) into n
     from deals d
     join properties p on p.id = d.property_id
-   where coalesce(array_length(d.co_agent_ids, 1), 0) = 0
-     and jsonb_typeof(p.details->'co_agent_ids') = 'array'
-     and jsonb_array_length(p.details->'co_agent_ids') > 0;
+    cross join lateral (
+      select nullif(v, '')::uuid as shown
+        from jsonb_array_elements_text(p.details->'co_agent_ids') as t(v)
+       where v ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    ) listed
+   where jsonb_typeof(p.details->'co_agent_ids') = 'array'
+     and listed.shown is distinct from d.agent_id
+     and not (coalesce(d.co_agent_ids, '{}') @> array[listed.shown]);
   if n > 0 then
     status := 'warn';
-    detail := n || ' deal(s). They show a co-agent on the team card who cannot open the deal. Re-run the backfill at the end of migration 0049.';
+    detail := n || ' deal(s) show a co-agent on the team card that RLS does not grant. Run migration 0053 — it MERGES the property''s co-agents in, where 0049/0051 only filled a column that was entirely empty.';
   else
     status := 'ok';
     detail := 'none';
@@ -3900,7 +3918,7 @@ begin
   ) then
     status := 'ok';    detail := 'applied';
   else
-    status := 'FAIL';  detail := 'NOT APPLIED — deal documents are still scoped by whoever uploaded them. Run migrations/0049_deal_document_storage_rls.sql.';
+    status := 'FAIL';  detail := 'NOT APPLIED — deal documents are still scoped by whoever uploaded them. Run migrations/0053_deal_documents_one_fix.sql.';
   end if;
   return next;
 end

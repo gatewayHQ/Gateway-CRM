@@ -3,9 +3,13 @@ select 'migration 0049' as check, case when to_regproc('app_storage_deal_id') is
        then 'NOT APPLIED' else 'applied' end as result
 union all
 select 'policy: '||policyname, permissive||' / '||cmd||
-       case when coalesce(qual,'')~'\mowner\M' then ' / SCOPED BY UPLOADER' else '' end
+       case when coalesce(qual,'')~'\mowner\M' then ' / SCOPED BY UPLOADER' else '' end||
+       case when permissive='RESTRICTIVE' then ' / VETOES EVERYTHING' else '' end
   from pg_policies where schemaname='storage' and tablename='objects'
-   and coalesce(qual,'')||coalesce(with_check,'') ~ 'deal-documents'
+   -- No bucket filter. A restrictive policy naming no bucket still applies to
+   -- deal-documents, and filtering on the bucket name is what hid the cause.
+   and (permissive='RESTRICTIVE'
+        or coalesce(qual,'')||coalesce(with_check,'') ~ 'deal-documents')
 union all
 select 'deal '||left(d.id::text,8), 'granted co-agents='||coalesce(array_length(d.co_agent_ids,1),0)
        ||' shown-via-property='||coalesce(jsonb_array_length(p.details->'co_agent_ids'),0)
