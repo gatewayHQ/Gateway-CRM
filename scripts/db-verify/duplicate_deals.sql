@@ -15,6 +15,10 @@ select
   coalesce(p.address, d.title)                              as property,
   left(d.id::text, 8)                                       as deal,
   a.name                                                    as primary_agent,
+  -- Which side the deal represents. Two OPEN deals on the same property and the
+  -- same side are true duplicates; a buy-side alongside a sell-side is normal
+  -- business. This is the column the planned constraint keys on.
+  coalesce(d.comp_data->>'transaction_type', '?')           as side,
   d.stage,
   d.created_at::date                                        as created,
   coalesce(array_length(d.co_agent_ids, 1), 0)              as co_agents,
