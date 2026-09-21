@@ -3874,15 +3874,24 @@ begin
   -- this; a deal converted by a pre-0025 client build can reintroduce it.
   area := 'co-agent visibility';
   item := 'deals displaying a co-agent RLS does not grant';
-  select count(*) into n
+  -- Counts a PARTIAL mismatch, not just an empty column. The first version of
+  -- this asked `array_length(co_agent_ids) = 0`, which silently passed a deal
+  -- carrying one co-agent whose property listed two — the second was on the
+  -- team card and nowhere RLS could see it. Seen live: granted=1, shown=2.
+  select count(distinct d.id) into n
     from deals d
     join properties p on p.id = d.property_id
-   where coalesce(array_length(d.co_agent_ids, 1), 0) = 0
-     and jsonb_typeof(p.details->'co_agent_ids') = 'array'
-     and jsonb_array_length(p.details->'co_agent_ids') > 0;
+    cross join lateral (
+      select nullif(v, '')::uuid as shown
+        from jsonb_array_elements_text(p.details->'co_agent_ids') as t(v)
+       where v ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    ) listed
+   where jsonb_typeof(p.details->'co_agent_ids') = 'array'
+     and listed.shown is distinct from d.agent_id
+     and not (coalesce(d.co_agent_ids, '{}') @> array[listed.shown]);
   if n > 0 then
     status := 'warn';
-    detail := n || ' deal(s). They show a co-agent on the team card who cannot open the deal. Re-run the backfill at the end of migration 0049.';
+    detail := n || ' deal(s) show a co-agent on the team card that RLS does not grant. Run migration 0052 — it MERGES the property''s co-agents in, where 0049/0051 only filled a column that was entirely empty.';
   else
     status := 'ok';
     detail := 'none';
