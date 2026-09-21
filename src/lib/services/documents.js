@@ -115,3 +115,73 @@ export async function listDealVersions(dealId) {
     .order('created_at', { ascending: false })
   return { versions: data || [], error: error?.message || null }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LISTING A DEAL'S FILES
+//
+// The deal's Documents tab does not read the `documents` / `document_versions`
+// tables — it lists the `deal-documents` bucket under the `deal-<uuid>/` prefix
+// that every writer in the app and the API agrees on. Two screens do this (the
+// pipeline drawer's DocumentsTab and the deal page's summary card), and they
+// used to do it with two copies of the same inline call, which is how they
+// drifted apart on the one thing that matters here: what to do when the list
+// comes back empty.
+//
+// It can come back empty for three quite different reasons, and an agent
+// deserves to be told which:
+//
+//   • the deal genuinely has no files             → empty state, no alarm
+//   • the bucket does not exist yet               → setup instructions
+//   • RLS denied the rows                         → say so
+//
+// The third is the one that caused real trouble. Supabase storage does not
+// ERROR on rows a policy hides, it FILTERS them, so before migration 0049
+// scoped the bucket to the deal, a co-agent on a colleague's deal got `[]` and
+// both screens rendered "No documents yet" — the same words they use for an
+// empty deal. Two agents looked at one deal, saw contradictory answers, and
+// nothing anywhere said "you were not allowed to see those". `denied` below is
+// a heuristic for the residual case (a database where 0049 has not been applied
+// yet, or a leftover hand-made policy): a storage error that talks about
+// permission, rather than a missing bucket. It is advisory only — the fix is
+// the policy, not the message.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The storage prefix holding a deal's files. The one place this is spelled. */
+export function dealFolder(dealId) {
+  return `deal-${dealId}`
+}
+
+const isMissingBucket = (message = '') =>
+  /not found|does not exist|bucket not found/i.test(message)
+
+const isDenied = (message = '') =>
+  /permission|denied|unauthor|not authorized|violates row-level security|rls/i.test(message)
+
+/**
+ * Every file filed against a deal, newest first.
+ *
+ * Sub-folder entries (storage lists `print/` as an entry with no `id`) are
+ * dropped: the `print/` prefix holds throwaway BoldSign review copies, and
+ * showing it would put a fake "print" document in the deal's filing list.
+ *
+ * @returns {{ files: object[], error: string|null, bucketMissing: boolean, denied: boolean }}
+ */
+export async function listDealFiles(dealId) {
+  const empty = { files: [], error: null, bucketMissing: false, denied: false }
+  if (!dealId) return empty
+
+  const { data, error } = await supabase.storage
+    .from(BUCKETS.DEAL_DOCS)
+    .list(dealFolder(dealId), { sortBy: { column: 'created_at', order: 'desc' } })
+
+  if (error) {
+    const message = error.message || 'Could not load this deal’s documents.'
+    if (isMissingBucket(message)) return { ...empty, bucketMissing: true }
+    return { ...empty, error: message, denied: isDenied(message) }
+  }
+
+  return {
+    ...empty,
+    files: (data || []).filter(f => f.id && f.name !== '.emptyFolderPlaceholder'),
+  }
+}

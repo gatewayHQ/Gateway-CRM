@@ -38,6 +38,7 @@ import { savePdfFromUrl, openPrintTab, showPdfInPrintTab, closePrintTab } from '
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, MenuButton, pushToast } from '../components/UI.jsx'
 import { groupPackets, summaryLine, nextStep, showsStatusChip, daysOut as packetDaysOut, OVERDUE_DAYS } from '../lib/services/signaturesView.js'
 import { groupDocuments, documentsSummary, assignableKinds, kindById } from '../lib/services/documentKinds.js'
+import { listDealFiles } from '../lib/services/documents.js'
 import MlsPackModal from '../components/MlsPackModal.jsx'
 import SplitDocumentModal from '../components/SplitDocumentModal.jsx'
 import MergeDocumentsModal from '../components/MergeDocumentsModal.jsx'
@@ -859,6 +860,14 @@ function DocumentsTab({ deal }) {
   const [loading, setLoading]     = useState(true)
   const [uploading, setUploading] = useState(false)
   const [bucketReady, setBucketReady] = useState(true)
+  // A storage policy that hides rows FILTERS them; it does not error. So "this
+  // deal has no files" and "you are not allowed to see this deal's files"
+  // arrive here looking identical, and this tab used to render the friendly
+  // first message for both — which is how a co-agent was told a deal full of
+  // signed contracts was empty. See listDealFiles() in
+  // src/lib/services/documents.js and migration 0049.
+  const [loadError, setLoadError]     = useState('')
+  const [loadDenied, setLoadDenied]   = useState(false)
   const [dragOver, setDragOver]   = useState(false)
   const [sharedDocs, setSharedDocs] = useState([])   // filenames shared to the client portal
   const fileRef                   = React.useRef()
@@ -903,15 +912,12 @@ function DocumentsTab({ deal }) {
 
   const loadFiles = async () => {
     setLoading(true)
-    const { data, error } = await supabase.storage.from(BUCKET).list(`deal-${deal.id}`, { sortBy: { column: 'created_at', order: 'desc' } })
-    if (error?.message?.includes('not found') || error?.message?.includes('does not exist')) {
-      setBucketReady(false); setLoading(false); return
-    }
-    // Storage lists sub-folders as entries with no id. Filter those out: the
-    // `print/` prefix holds throwaway review copies, and showing it here would put
-    // a fake "print" document in the deal's filing list.
-    setFiles((data || []).filter(f => f.name !== '.emptyFolderPlaceholder' && f.id))
+    const res = await listDealFiles(deal.id)
     setLoading(false)
+    if (res.bucketMissing) { setBucketReady(false); setLoadError(''); setLoadDenied(false); return }
+    setLoadError(res.error || '')
+    setLoadDenied(res.denied)
+    setFiles(res.files)
   }
 
   const upload = async (file) => {
@@ -1096,13 +1102,14 @@ function DocumentsTab({ deal }) {
     <div style={{ padding: 20 }}>
       <div style={{ background: '#fff8ec', border: '1px solid var(--gw-amber)', borderRadius: 'var(--radius)', padding: 16, fontSize: 13, lineHeight: 1.7 }}>
         <strong>Storage bucket setup required.</strong><br />
-        In your <strong>Supabase dashboard → Storage</strong>, create a private bucket named <code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3 }}>deal-documents</code>, then add this RLS policy:
-        <pre style={{ background: 'var(--gw-slate)', color: '#e2e8f0', padding: 10, borderRadius: 6, fontSize: 11, marginTop: 8, overflowX: 'auto' }}>
-{`create policy "agents_deal_docs"
-on storage.objects for all to authenticated
-using  (bucket_id = 'deal-documents')
-with check (bucket_id = 'deal-documents');`}
-        </pre>
+        Run <code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3 }}>migrations/0049_deal_document_storage_rls.sql</code> in
+        the <strong>Supabase dashboard → SQL Editor</strong>. It creates the private <code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3 }}>deal-documents</code> bucket
+        and scopes it to the deal, so every agent on a deal sees the same files.
+        <div style={{ marginTop: 8, color: 'var(--gw-mist)' }}>
+          Do <strong>not</strong> add the bucket&rsquo;s policy by hand in the Storage UI. Its default template is
+          <code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3, margin: '0 4px' }}>owner = auth.uid()</code>
+          — which shows each agent only the files they uploaded themselves, and silently shows a co-agent an empty deal.
+        </div>
         <button className="btn btn--secondary btn--sm" style={{ marginTop: 8 }} onClick={() => { setBucketReady(true); loadFiles() }}>
           <Icon name="refresh" size={12} /> Retry
         </button>
@@ -1149,7 +1156,22 @@ with check (bucket_id = 'deal-documents');`}
           Unfiled rather than into a wrong pile quietly: a misfiled disclosure
           is worse than an unfiled one, because nobody searches the pile they
           believe is complete. */}
-      {files.length === 0 ? (
+      {loadError ? (
+        <div style={{ margin: '16px 0', background: 'var(--gw-red-light)', border: '1px solid var(--gw-red)', borderRadius: 'var(--radius)', padding: 14, fontSize: 13, lineHeight: 1.7 }}>
+          <strong>This deal&rsquo;s documents could not be loaded.</strong><br />
+          {loadError}
+          {loadDenied && (
+            <div style={{ marginTop: 6 }}>
+              Storage is still scoped to whoever uploaded each file. Apply
+              <code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3, margin: '0 4px' }}>migrations/0049_deal_document_storage_rls.sql</code>
+              so a deal&rsquo;s documents follow the deal to every agent on it.
+            </div>
+          )}
+          <div style={{ marginTop: 8 }}>
+            <button className="btn btn--secondary btn--sm" onClick={loadFiles}><Icon name="refresh" size={12} /> Retry</button>
+          </div>
+        </div>
+      ) : files.length === 0 ? (
         <div style={{ textAlign: 'center', color: 'var(--gw-mist)', fontSize: 13, padding: '16px 0' }}>
           No documents yet. Upload contracts, inspections, or any deal files.
         </div>

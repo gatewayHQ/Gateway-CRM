@@ -20,3 +20,12 @@ create schema if not exists storage;
 create table if not exists storage.buckets (id text primary key, name text, public boolean, file_size_limit bigint, allowed_mime_types text[]);
 create table if not exists storage.objects (id uuid primary key default gen_random_uuid(), bucket_id text, name text);
 alter table storage.objects enable row level security;
+-- The deal-file storage policies at the end of schema.sql (migration 0049) read
+-- `owner` off storage.objects and are created against this table, so the shim
+-- has to carry the column even though vanilla Postgres has no storage at all.
+alter table storage.objects add column if not exists owner uuid;
+-- Supabase ships storage.foldername(); nothing in schema.sql uses it today (the
+-- deal id is parsed out of the path by app_storage_deal_id instead), but a
+-- policy written against it later should not abort the whole file here.
+create or replace function storage.foldername(name text) returns text[]
+language sql immutable as $$ select string_to_array(name, '/') $$;
