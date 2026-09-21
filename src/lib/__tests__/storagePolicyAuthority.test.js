@@ -154,3 +154,84 @@ describe('no migration uses a custom dollar-quote tag', () => {
     }
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The blind spot that hid the real cause — migration 0053.
+//
+// The rule actually in force on the production database was:
+//
+//     as restrictive for select to authenticated using (owner = auth.uid())
+//
+// with NO bucket clause. Every query written to investigate this — both
+// diagnostics and the discovery loop in 0051 — filtered policies by whether
+// their body mentioned 'deal-documents'. A bucket-agnostic policy matches
+// nothing, so it never appeared in any output, and the database reported a
+// clean bill of health while the uploader-only rule was in force.
+//
+// Reproduced exactly: uploader 3 of 3, co-agent 0 of 3, and the diagnostic
+// printing nothing but "agents_deal_docs PERMISSIVE / ALL".
+// ─────────────────────────────────────────────────────────────────────────────
+describe('migration 0053 — one file, and no bucket filter on restrictive policies', () => {
+  const one = read('../../../migrations/0053_deal_documents_one_fix.sql')
+
+  it('examines EVERY policy on storage.objects, unfiltered, before changing any', () => {
+    // Comments stripped: the header quotes the bad filter in prose while
+    // explaining it, which is the point of the file, not a regression.
+    const code = one.split('\n').filter(l => !l.trim().startsWith('--')).join('\n')
+    const before = code.slice(0, code.search(/drop policy/i))
+    expect(before).toMatch(/from pg_policies where schemaname = 'storage' and tablename = 'objects'/i)
+    expect(before, 'the first listing must carry no bucket predicate')
+      .not.toMatch(/~ 'deal-documents/)
+  })
+
+  it('drops restrictive policies without filtering by bucket', () => {
+    const loop = one.slice(one.search(/permissive = 'RESTRICTIVE'/))
+    const dropAt = loop.search(/drop policy %I/)
+    expect(dropAt).toBeGreaterThan(-1)
+    // No bucket-name predicate between the RESTRICTIVE test and the drop.
+    expect(loop.slice(0, dropAt)).not.toMatch(/deal-documents/)
+  })
+
+  it('prints a recreate statement for every policy it drops', () => {
+    // Dropping a policy somebody may have created deliberately, without
+    // recording how to put it back, is not a fix — it is a different outage.
+    expect(one).toMatch(/To put it back: create policy/)
+  })
+
+  it('backfills co-agents BEFORE narrowing access', () => {
+    // Storage is wide open on that database, so scoping to the deal TAKES
+    // access away. Filling co_agent_ids first is what stops an agent losing a
+    // document they can see today.
+    const backfillAt = one.search(/co-agents: % deal\(s\) updated/)
+    const narrowAt   = one.search(/create policy "deal-documents: read"/)
+    expect(backfillAt).toBeGreaterThan(-1)
+    expect(narrowAt).toBeGreaterThan(backfillAt)
+  })
+
+  it('merges co-agents rather than filling only an empty column', () => {
+    expect(one).toMatch(/@> m\.ids and d\.co_agent_ids <@ m\.ids/)
+    expect(one, 'fill-if-empty skips a partially populated deal')
+      .not.toMatch(/where coalesce\(array_length\(d2\.co_agent_ids, 1\), 0\) = 0/)
+  })
+
+  it('stands alone — it supersedes 0049, 0051 and 0052', () => {
+    for (const f of ['app_storage_deal_id', 'deal-documents: read', 'deal-documents: upload',
+                     'deal-documents: update', 'deal-documents: delete', 'closing-packets: read',
+                     "details->'co_agent_ids'"]) {
+      expect(one, `0053 must contain ${f}`).toContain(f)
+    }
+  })
+})
+
+describe.each([
+  ['migrations/0050', audit],
+  ['schema.sql', schema],
+])('%s — the audit no longer filters restrictive policies by bucket', (_label, sql) => {
+  it('examines a restrictive policy whatever bucket it names, including none', () => {
+    expect(sql).toMatch(/if r\.permissive <> 'RESTRICTIVE' and r\.body !~ 'deal-documents\|closing-packets' then/)
+  })
+
+  it('says so when the restrictive policy names no bucket', () => {
+    expect(sql).toMatch(/names NO bucket so it applies to deal-documents too/)
+  })
+})
