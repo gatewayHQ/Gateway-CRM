@@ -3509,3 +3509,156 @@ create policy email_blast_recipients_scope on email_blast_recipients for select 
          or b.agent_id in (select app_visible_agent_ids('contacts'))
        )
   ));
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- DEAL FILE STORAGE  (migration 0049)
+--
+-- These live at the very END of this file on purpose: they are policies on
+-- `storage.objects`, and their bodies call `app_visible_deal_ids()`, which is
+-- not defined until the SCOPED RLS POLICIES section above. Postgres resolves
+-- function names when a policy is CREATED, so moving this block up next to the
+-- campaign buckets breaks a fresh install.
+--
+-- WHY THIS SECTION EXISTS AT ALL. The deal Documents tab does not read the
+-- `documents` or `document_versions` tables — it lists storage directly:
+--
+--     supabase.storage.from('deal-documents').list(`deal-${deal.id}`)
+--     — src/pages/Pipeline.jsx (DocumentsTab), src/pages/DealPage.jsx
+--
+-- so `storage.objects` row policies, not the scoped tables above, decide what
+-- an agent sees on that tab. For a long time those policies were not in this
+-- repository: the bucket was made by hand in the Supabase dashboard, whose
+-- default template is `owner = auth.uid()`. Under that rule an uploader saw
+-- their own files and nobody else did — a co-agent opening the same deal got
+-- "No documents yet", because a denied row makes storage FILTER, not error.
+--
+-- The rule below is the one every other deal child already uses:
+-- `app_visible_deal_ids()`. Assigned agent, co-agents, sharing team peers and
+-- office admins all resolve to the same set, so they all see the same files.
+--
+-- The object→deal link is the path. Every writer agrees on `deal-<uuid>/…`
+-- (Pipeline.jsx, src/lib/services/documents.js, api/boldsign.js,
+-- api/_handlers/closing-packet.js); `app_storage_deal_id()` reads it back out
+-- and returns NULL for anything else, so an unattributable object is
+-- admin-only. `service_role` bypasses RLS entirely, so the BoldSign archive
+-- webhook and the client portal's signed URLs are untouched.
+-- ═════════════════════════════════════════════════════════════════════════════
+
+create or replace function app_storage_deal_id(object_name text)
+returns uuid
+language sql
+immutable
+set search_path = public
+as $$
+  select nullif(substring(
+    object_name from
+    '^deal-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/'
+  ), '')::uuid
+$$;
+
+grant execute on function app_storage_deal_id(text) to authenticated;
+
+-- All three buckets are PRIVATE. `deal-documents` holds executed contracts and
+-- the compliance audit trails BoldSign archives; public would make every one of
+-- them readable by URL with no session at all. `do update set public = false`
+-- rather than `do nothing` so a re-run also CLOSES a bucket someone flipped
+-- open in the dashboard.
+insert into storage.buckets (id, name, public, file_size_limit)
+values ('deal-documents', 'deal-documents', false, 52428800)     -- 50 MB, matches the UI's limit
+on conflict (id) do update set public = false;
+
+insert into storage.buckets (id, name, public, file_size_limit)
+values ('closing-packets', 'closing-packets', false, 104857600)  -- 100 MB, every deal doc merged
+on conflict (id) do update set public = false;
+
+insert into storage.buckets (id, name, public, file_size_limit)
+values ('form-packets', 'form-packets', false, 52428800)
+on conflict (id) do update set public = false;
+
+-- Named policies from before this section owned the buckets. Dropped by EXACT
+-- name only: `agents_deal_docs` is what the app's own setup panel printed, the
+-- rest are the Supabase dashboard's owner-scoped templates.
+drop policy if exists "agents_deal_docs" on storage.objects;
+drop policy if exists "Give users access to own folder 1oj01fe_0" on storage.objects;
+drop policy if exists "Give users access to own folder 1oj01fe_1" on storage.objects;
+drop policy if exists "Give users access to own folder 1oj01fe_2" on storage.objects;
+drop policy if exists "Give users access to own folder 1oj01fe_3" on storage.objects;
+
+-- DEAL DOCUMENTS — follow the deal, in every direction. Delete included:
+-- whoever may edit the deal row under `deals_agent_scope` may remove its files,
+-- and a co-agent who cannot delete a file they just uploaded to a colleague's
+-- deal is the mirror image of the bug this section fixes.
+drop policy if exists "deal-documents: read" on storage.objects;
+create policy "deal-documents: read"
+  on storage.objects for select to authenticated
+  using (
+    bucket_id = 'deal-documents'
+    and (app_is_admin() or app_storage_deal_id(name) in (select app_visible_deal_ids()))
+  );
+
+drop policy if exists "deal-documents: upload" on storage.objects;
+create policy "deal-documents: upload"
+  on storage.objects for insert to authenticated
+  with check (
+    bucket_id = 'deal-documents'
+    and (app_is_admin() or app_storage_deal_id(name) in (select app_visible_deal_ids()))
+  );
+
+-- Covers `upsert: true` and storage's own move/copy.
+drop policy if exists "deal-documents: update" on storage.objects;
+create policy "deal-documents: update"
+  on storage.objects for update to authenticated
+  using (
+    bucket_id = 'deal-documents'
+    and (app_is_admin() or app_storage_deal_id(name) in (select app_visible_deal_ids()))
+  )
+  with check (
+    bucket_id = 'deal-documents'
+    and (app_is_admin() or app_storage_deal_id(name) in (select app_visible_deal_ids()))
+  );
+
+drop policy if exists "deal-documents: delete" on storage.objects;
+create policy "deal-documents: delete"
+  on storage.objects for delete to authenticated
+  using (
+    bucket_id = 'deal-documents'
+    and (app_is_admin() or app_storage_deal_id(name) in (select app_visible_deal_ids()))
+  );
+
+-- CLOSING PACKETS — follow the deal, READ ONLY for agents. Packets are built
+-- by api/_handlers/closing-packet.js with the service key; the browser only
+-- signs a download URL. No write policy, so an agent cannot hand-edit a frozen
+-- bundle the audit log points at.
+drop policy if exists "closing-packets: read" on storage.objects;
+create policy "closing-packets: read"
+  on storage.objects for select to authenticated
+  using (
+    bucket_id = 'closing-packets'
+    and (app_is_admin() or app_storage_deal_id(name) in (select app_visible_deal_ids()))
+  );
+
+-- FORM PACKETS — the shared catalog of blank state forms (`IA/seller/…`), not
+-- deal files: there is no deal to scope to and every agent needs the Iowa
+-- listing agreement. Mirrors the `form_packets` TABLE — any signed-in agent
+-- reads, only office admins write (migration 0030 closed agent writes at the
+-- row level while this bucket stayed open to everyone).
+drop policy if exists "form-packets: read" on storage.objects;
+create policy "form-packets: read"
+  on storage.objects for select to authenticated
+  using (bucket_id = 'form-packets');
+
+drop policy if exists "form-packets: admin write" on storage.objects;
+create policy "form-packets: admin write"
+  on storage.objects for insert to authenticated
+  with check (bucket_id = 'form-packets' and app_is_admin());
+
+drop policy if exists "form-packets: admin update" on storage.objects;
+create policy "form-packets: admin update"
+  on storage.objects for update to authenticated
+  using      (bucket_id = 'form-packets' and app_is_admin())
+  with check (bucket_id = 'form-packets' and app_is_admin());
+
+drop policy if exists "form-packets: admin delete" on storage.objects;
+create policy "form-packets: admin delete"
+  on storage.objects for delete to authenticated
+  using (bucket_id = 'form-packets' and app_is_admin());

@@ -15,7 +15,7 @@ import { getClosingGate, gateBadge } from '../lib/compliance.js'
 import { listRequiredForms } from '../lib/services/requiredForms.js'
 import { audit, useDealAudit } from '../lib/audit.js'
 import { BUCKETS, TABLES, REVIEW_STATUS } from '../lib/constants.js'
-import { uploadDealDocument, signDealDocumentUrl } from '../lib/services/documents.js'
+import { uploadDealDocument, signDealDocumentUrl, listDealFiles } from '../lib/services/documents.js'
 import { submitDealForReview, decideDealReview } from '../lib/services/review.js'
 import { generateClosingPacket, listClosingPackets, openClosingPacket } from '../lib/services/closingPacket.js'
 import { listDealSteps, toggleDealStep } from '../lib/services/steps.js'
@@ -131,16 +131,23 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
 
   // ── Per-deal extras not in global state ────────────────────────────────────
   const [files, setFiles]         = useState([])
+  // Why the list can be empty, when it is empty. A storage policy that hides
+  // rows FILTERS them rather than erroring, so "no files" and "not allowed to
+  // see the files" arrive here looking identical — which is exactly how a
+  // co-agent ended up being told a deal full of contracts had none. See
+  // listDealFiles() in src/lib/services/documents.js.
+  const [filesError, setFilesError] = useState('')
   const [envelopes, setEnvelopes] = useState([])
   const [steps, setSteps]         = useState([])
   const loadExtras = useCallback(async () => {
     if (!dealId) return
     const [f, e, s] = await Promise.all([
-      supabase.storage.from(BUCKETS.DEAL_DOCS).list(`deal-${dealId}`, { sortBy: { column: 'created_at', order: 'desc' } }),
+      listDealFiles(dealId),
       supabase.from(TABLES.BOLDSIGN_DOCUMENTS).select('*').eq('deal_id', dealId).order('created_at', { ascending: false }),
       listDealSteps(dealId),
     ])
-    setFiles((f.data || []).filter(x => x.name !== '.emptyFolderPlaceholder'))
+    setFiles(f.files)
+    setFilesError(f.bucketMissing ? 'Document storage is not set up yet — see Documents.' : (f.error || ''))
     setEnvelopes(e.data || [])
     setSteps(s.steps)
   }, [dealId])
@@ -718,7 +725,9 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
         {/* Documents & signatures */}
         <SectionCard title="Documents & Signatures" action={drawerLink('Send for signature', () => openDrawer('signatures'))}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {files.length === 0 && <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>No documents yet.</div>}
+            {filesError
+              ? <div style={{ fontSize: 12.5, color: 'var(--gw-red)' }}>{filesError}</div>
+              : files.length === 0 && <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>No documents yet.</div>}
             {files.slice(0, 8).map(f => (
               <div key={f.name} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <Icon name="document" size={13} />
