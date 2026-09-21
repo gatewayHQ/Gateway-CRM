@@ -3701,7 +3701,7 @@ language plpgsql
 stable
 security definer
 set search_path = public
-as $audit$
+as $$
 declare
   is_service boolean;
   -- The buckets whose contents are scoped to a deal. `form-packets` is a
@@ -3772,23 +3772,42 @@ begin
   -- This is the exact shape that hid a deal's documents from its co-agent. It
   -- is checked by BODY, not by name, because the next one will be named
   -- something else.
+  -- PERMISSIVE vs RESTRICTIVE is the whole story here, and 0049 missed it.
+  -- Permissive policies are OR'd, so a leftover can only widen and the deal
+  -- policies still grant. RESTRICTIVE policies are AND'd: a single one vetoes
+  -- every permissive policy there is, so an uploader-scoped restrictive rule
+  -- survives 0049 completely and the co-agent still sees nothing — with the
+  -- migration correctly applied. Measured: 0 files of 3 with it, 3 without.
   for r in
-    select p.policyname, p.cmd, coalesce(p.qual, '') || ' ' || coalesce(p.with_check, '') as body
+    select p.policyname, p.cmd, p.permissive,
+           coalesce(p.qual, '') || ' ' || coalesce(p.with_check, '') as body
       from pg_policies p
      where p.schemaname = 'storage' and p.tablename = 'objects'
   loop
-    if r.body ~ 'deal-documents|closing-packets' and r.body ~ '\mowner\M' then
-      area   := 'storage policy';
-      item   := r.policyname;
+    if r.body !~ 'deal-documents|closing-packets' then
+      continue;
+    end if;
+    area := 'storage policy';
+    item := r.policyname;
+
+    if r.permissive = 'RESTRICTIVE' then
+      -- Always a FAIL, whatever its body says: nothing in this repository ever
+      -- creates a restrictive policy on these buckets, and one that exists can
+      -- only take access away from agents the deal already grants.
       status := 'FAIL';
-      detail := 'scopes a DEAL bucket by uploader (`owner`) — this is the rule that hid a deal''s documents from its co-agent. Drop it: drop policy "' || r.policyname || '" on storage.objects;';
+      detail := 'RESTRICTIVE policy on a deal bucket (' || r.cmd || '). Restrictive policies are ANDed, so this vetoes the deal check no matter what else is in place — the migration can look applied and change nothing. Run migration 0051, or: drop policy ' || quote_ident(r.policyname) || ' on storage.objects;';
       return next;
-    elsif r.body ~ 'deal-documents|closing-packets'
-      and not (r.policyname = any(known_storage_policies)) then
-      area   := 'storage policy';
-      item   := r.policyname;
+    elsif r.body ~ '\mowner\M' and not (r.policyname = any(known_storage_policies)) then
+      -- Permissive and uploader-scoped: it can only widen, so it is untidy
+      -- rather than harmful. Reported so it can be cleaned up deliberately —
+      -- dropping it blind could remove access to an object that sits outside
+      -- any deal- prefix.
       status := 'warn';
-      detail := 'unrecognised policy on a deal bucket (' || r.cmd || '). Read its body; if it does not defer to app_visible_deal_ids() it is widening or narrowing access outside version control.';
+      detail := 'permissive policy scoping a deal bucket by uploader (`owner`). It cannot block anything — permissive policies are ORed — but it is the shape that caused the original outage. Drop it once you are satisfied: drop policy ' || quote_ident(r.policyname) || ' on storage.objects;';
+      return next;
+    elsif not (r.policyname = any(known_storage_policies)) then
+      status := 'warn';
+      detail := 'unrecognised policy on a deal bucket (' || r.cmd || '). Read its body; if it does not defer to app_visible_deal_ids() it is changing access outside version control.';
       return next;
     end if;
   end loop;
@@ -3885,7 +3904,7 @@ begin
   end if;
   return next;
 end
-$audit$;
+$$;
 
 -- Execute is granted broadly; the function refuses a non-admin caller itself,
 -- which keeps the refusal message useful instead of a bare permission error.

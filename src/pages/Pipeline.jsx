@@ -1164,7 +1164,9 @@ function DocumentsTab({ deal }) {
             <div style={{ marginTop: 6 }}>
               Storage is still scoped to whoever uploaded each file. Apply
               <code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3, margin: '0 4px' }}>migrations/0049_deal_document_storage_rls.sql</code>
-              so a deal&rsquo;s documents follow the deal to every agent on it.
+              so a deal&rsquo;s documents follow the deal to every agent on it. If 0049 is already applied and this
+              persists, a leftover <strong>restrictive</strong> policy is vetoing it &mdash; run
+              <code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3, margin: '0 4px' }}>migrations/0051_storage_policy_authority.sql</code>.
             </div>
           )}
           <div style={{ marginTop: 8 }}>
