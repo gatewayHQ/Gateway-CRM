@@ -378,12 +378,15 @@ alter table commissions enable row level security;
 -- the browser bundle. See migration 0027, which closed exactly that hole on
 -- eight tables. Never write `for all using (true)` without a role here.
 do $$ begin
-  -- properties (the public landing pages read these through the service-key
-  -- api/property-public.js, which bypasses RLS — so no anon policy is needed)
-  drop policy if exists allow_all on properties;
-  if not exists (select 1 from pg_policies where tablename='properties' and policyname='allow_all_authenticated') then
-    create policy "allow_all_authenticated" on properties for all to authenticated using (true) with check (true);
-  end if;
+  -- properties: READ stays firm-wide for signed-in agents, but the WRITES are
+  -- scoped to the agents on the listing — see PROPERTIES in the RLS section at
+  -- the bottom of this file (migration 0055), which is where those policies
+  -- live because they call the helper functions defined down there. The legacy
+  -- wide-open policies are dropped here and are NOT recreated.
+  -- (The public landing pages read properties through the service-key
+  -- api/property-public.js, which bypasses RLS — so no anon policy is needed.)
+  drop policy if exists allow_all               on properties;
+  drop policy if exists allow_all_authenticated on properties;
   -- templates (shared across all agents by design)
   drop policy if exists allow_all on templates;
   if not exists (select 1 from pg_policies where tablename='templates' and policyname='allow_all_authenticated') then
@@ -408,11 +411,49 @@ end $$;
 -- regardless of which client (or a hand-crafted API call) issues the write.
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- Helper functions (also created in migration 0002; repeated idempotently here
--- so a fresh install has them before the policies below reference them).
+-- Helper functions (also created in migrations 0002 and 0055; repeated
+-- idempotently here so a fresh install has them before the policies below
+-- reference them). See the IDENTITY notes in the RLS section at the bottom for
+-- why these resolve by email as well as by auth_id.
+create or replace function app_jwt_email()
+returns text language plpgsql stable security definer set search_path = public as $$
+declare claims text; found text;
+begin
+  -- PostgREST puts the whole verified token in `request.jwt.claims`.
+  claims := current_setting('request.jwt.claims', true);
+  if claims is not null and claims <> '' then
+    found := lower(nullif(claims::jsonb ->> 'email', ''));
+    if found is not null then return found; end if;
+  end if;
+  -- Older PostgREST (and the repo's own validation shim) set each claim
+  -- separately instead. Checked second so the token always wins.
+  return lower(nullif(current_setting('request.jwt.claim.email', true), ''));
+exception when others then
+  return null;
+end $$;
+
+-- Every agents row belonging to the caller: the row linked to their login, and
+-- any UNLINKED row carrying the same verified email. A row already linked to a
+-- different login is that person's, whatever its email column says.
+create or replace function app_my_agent_ids()
+returns setof uuid language sql stable security definer set search_path = public as $$
+  select a.id from agents a where a.auth_id = auth.uid()
+  union
+  select a.id from agents a
+   where a.auth_id is null
+     and app_jwt_email() is not null
+     and lower(a.email) = app_jwt_email();
+$$;
+
 create or replace function app_current_agent_id()
 returns uuid language sql stable security definer set search_path = public as $$
-  select id from agents where auth_id = auth.uid() limit 1;
+  select a.id from agents a
+   where a.auth_id = auth.uid()
+      or (a.auth_id is null
+          and app_jwt_email() is not null
+          and lower(a.email) = app_jwt_email())
+   order by (a.auth_id = auth.uid()) desc nulls last, a.created_at
+   limit 1;
 $$;
 -- Office admin: the explicit agents.is_admin flag, plus a legacy role-string
 -- fallback for profiles created before that column (migration 0005). The
@@ -426,8 +467,10 @@ returns boolean language sql stable security definer set search_path = public as
     or (role ilike '%admin%'
         and lower(coalesce(email, '')) not in ('erin@gatewayreadvisors.com', 'daniel@gatewayreadvisors.com'))
   ), false)
-  from agents where auth_id = auth.uid();
+  from agents where id in (select app_my_agent_ids());
 $$;
+grant execute on function app_jwt_email()        to authenticated;
+grant execute on function app_my_agent_ids()     to authenticated;
 grant execute on function app_current_agent_id() to authenticated;
 grant execute on function app_is_admin()         to authenticated;
 
@@ -2318,12 +2361,20 @@ alter table deadline_reminders enable row level security;
 -- ═════════════════════════════════════════════════════════════════════════════
 -- SCOPED RLS POLICIES  (single source of truth for data visibility)
 --
--- Visibility model (decided 2026-06; see migrations/0011):
+-- Visibility model (decided 2026-06, see migrations/0011; derived from the
+-- listing as well as the deal since migration 0055):
 --   • An agent sees their OWN records, records of TEAM PEERS who share that
---     dimension (team_splits.share_*), and deals they are CO-LISTED on
---     (a participant row in commissions.participants pays them on the deal).
+--     dimension (team_splits.share_*), and every deal they are ON — named as
+--     an additional agent on the deal, named on the LISTING behind it (as its
+--     agent or one of its co-agents), or paid on it as a participant in
+--     commissions.participants. Any one of those is enough, at any time.
+--   • Everything that hangs off a deal follows the deal: documents (rows and
+--     storage objects), signature packets and their events, transaction steps,
+--     key dates, deal contacts, field layouts, audit log — and the deal's
+--     buyer and seller contacts.
 --   • Admins (agents.is_admin — the office admin / transaction coordinator)
---     see everything firm-wide. Tasks stay personal even for admins.
+--     see everything firm-wide. Tasks stay personal even for admins, and
+--     commissions stay admin-only even for co-agents on the same deal.
 --   • /api/* serverless functions use the service key and bypass RLS.
 --
 -- Defined last because the helpers reference team_splits and commissions.
@@ -2332,11 +2383,60 @@ alter table deadline_reminders enable row level security;
 -- with these until migration 0011 Phase B drops them.
 -- ═════════════════════════════════════════════════════════════════════════════
 
--- The agent row for the currently authenticated user.
+-- ─────────────────────────────────────────────────────────────────────────────
+-- IDENTITY (migration 0055)
+--
+-- Every policy below resolves to "which agent rows are mine". That used to be
+-- `auth_id = auth.uid()` and nothing else — so an agent whose roster row was
+-- never linked to their login resolved to NULL, matched no policy, and saw a
+-- blank CRM no matter what any co-agent column said. Identity now also matches
+-- the verified email on the request's JWT, and `app_my_agent_ids()` returns
+-- EVERY row that is the caller's, so an office with a duplicate roster row
+-- (one linked, one not, and a listing pointing at the wrong one) is not a
+-- silent blackout either.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- The verified email on the request's JWT, lowercased. plpgsql with an
+-- exception guard because `request.jwt.claims` is absent in a plain psql
+-- session and must not raise there.
+create or replace function app_jwt_email()
+returns text
+language plpgsql stable security definer set search_path = public as $$
+declare claims text;
+begin
+  claims := current_setting('request.jwt.claims', true);
+  if claims is null or claims = '' then return null; end if;
+  return lower(nullif(claims::jsonb ->> 'email', ''));
+exception when others then
+  return null;
+end $$;
+
+-- Every agents row belonging to the caller. Only UNLINKED rows are claimed by
+-- email: a row already linked to a different login is that person's row,
+-- whatever its email column says.
+create or replace function app_my_agent_ids()
+returns setof uuid
+language sql stable security definer set search_path = public as $$
+  select a.id from agents a where a.auth_id = auth.uid()
+  union
+  select a.id from agents a
+   where a.auth_id is null
+     and app_jwt_email() is not null
+     and lower(a.email) = app_jwt_email();
+$$;
+
+-- ONE id, for the places that stamp authorship (activities.agent_id,
+-- tasks.agent_id, audit_log.actor_id). The linked row wins.
 create or replace function app_current_agent_id()
 returns uuid
 language sql stable security definer set search_path = public as $$
-  select id from agents where auth_id = auth.uid() limit 1;
+  select a.id from agents a
+   where a.auth_id = auth.uid()
+      or (a.auth_id is null
+          and app_jwt_email() is not null
+          and lower(a.email) = app_jwt_email())
+   order by (a.auth_id = auth.uid()) desc nulls last, a.created_at
+   limit 1;
 $$;
 
 -- Office admin / transaction coordinator: explicit flag, with the legacy
@@ -2350,7 +2450,7 @@ language sql stable security definer set search_path = public as $$
     or (role ilike '%admin%'
         and lower(coalesce(email, '')) not in ('erin@gatewayreadvisors.com', 'daniel@gatewayreadvisors.com'))
   ), false)
-  from agents where auth_id = auth.uid();
+  from agents where id in (select app_my_agent_ids());
 $$;
 
 -- The set of agent_ids whose data the current user may see for a given
@@ -2359,14 +2459,14 @@ $$;
 create or replace function app_visible_agent_ids(dimension text)
 returns setof uuid
 language sql stable security definer set search_path = public as $$
-  select app_current_agent_id()
+  select id from agents where id in (select app_my_agent_ids())
   union
   select peer.agent_id
   from team_splits me
   join team_splits peer
     on peer.team_id = me.team_id
    and peer.agent_id <> me.agent_id
-  where me.agent_id = app_current_agent_id()
+  where me.agent_id in (select app_my_agent_ids())
     and case dimension
           when 'contacts'   then peer.share_contacts
           when 'properties' then peer.share_properties
@@ -2375,10 +2475,40 @@ language sql stable security definer set search_path = public as $$
         end is not false;
 $$;
 
--- Every deal the current user may see: all (admin), own + team-shared, or
--- co-listed — either named in deals.co_agent_ids (copied from the property at
--- conversion, migration 0025) or appearing as a participant on the deal's
--- commission.
+-- The uuid list inside a `details.co_agent_ids` blob. It is free-form jsonb, so
+-- it can hold a non-array value from an older shape, '' from a cleared picker,
+-- or a name typed where an id belongs. One forgiving parse, used by the
+-- policies AND the triggers, so they cannot disagree about who is on a listing.
+create or replace function app_jsonb_uuid_array(j jsonb)
+returns uuid[]
+language sql immutable set search_path = public as $$
+  select coalesce(array_agg(distinct v::uuid), '{}'::uuid[])
+    from jsonb_array_elements_text(
+           case when jsonb_typeof(j) = 'array' then j else '[]'::jsonb end) t(v)
+   where v ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+$$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Every deal the current user may see — DERIVED from all five records of
+-- membership, never from a copy (migration 0055):
+--
+--     deals.agent_id                   the deal's own agent (+ sharing peers)
+--     deals.co_agent_ids               additional agents on the deal
+--     properties.assigned_agent_id     the listing agent
+--     properties.details.co_agent_ids  the listing's co-agents
+--     commissions.participants         whoever gets paid on it
+--
+-- The two property arms are the fix for the bug that outlived four migrations:
+-- `deals.co_agent_ids` is a COPY taken at conversion time, so an agent added
+-- to a listing AFTER its deal was started never reached it. The UI read the
+-- listing as a fallback and showed them on the team; RLS read only the copy
+-- and hid the deal, its documents, its storage objects and its whole history
+-- from them. Deriving from the listing means adding an agent to it — before
+-- the deal, after the deal, a year later — is all it takes.
+--
+-- Every `deal_id in (select app_visible_deal_ids())` policy in this file, and
+-- the storage policies from migration 0053, inherit this definition.
+-- ─────────────────────────────────────────────────────────────────────────────
 create or replace function app_visible_deal_ids()
 returns setof uuid
 language sql stable security definer set search_path = public as $$
@@ -2387,9 +2517,19 @@ language sql stable security definer set search_path = public as $$
   select d.id from deals d
   where d.agent_id in (select app_visible_agent_ids('deals'))
   union
-  -- co-listed via the co-agents carried over from the property
+  -- additional agents recorded on the deal
   select d.id from deals d
-  where app_current_agent_id() = any(coalesce(d.co_agent_ids, '{}'))
+  where coalesce(d.co_agent_ids, '{}') && array(select m from app_my_agent_ids() m)
+  union
+  -- the listing agent of the property this deal is on
+  select d.id from deals d
+  join properties p on p.id = d.property_id
+  where p.assigned_agent_id in (select app_my_agent_ids())
+  union
+  -- co-agents named on the listing, whenever they were added
+  select d.id from deals d
+  join properties p on p.id = d.property_id
+  where app_jsonb_uuid_array(p.details -> 'co_agent_ids') && array(select m from app_my_agent_ids() m)
   union
   -- co-listed via structured commission participants
   select c.deal_id
@@ -2397,19 +2537,236 @@ language sql stable security definer set search_path = public as $$
   cross join lateral jsonb_array_elements(coalesce(c.participants, '[]'::jsonb)) p
   where (p->>'agent_id') is not null
     and (p->>'agent_id') ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-    and (p->>'agent_id')::uuid = app_current_agent_id();
+    and (p->>'agent_id')::uuid in (select app_my_agent_ids());
 $$;
 
+-- Properties the current user may see. RLS keeps `properties` readable
+-- firm-wide (the pickers and the duplicate-deal check in migration 0054 need
+-- that), so this is for the CLIENT: every property fetch filters through it.
+-- Those client filters are where a co-agent's listing used to vanish while the
+-- deal behind it stayed visible — one definition, called by both sides, can't
+-- drift apart.
+create or replace function app_visible_property_ids()
+returns setof uuid
+language sql stable security definer set search_path = public as $$
+  select p.id from properties p where app_is_admin()
+  union
+  select p.id from properties p
+  where p.assigned_agent_id in (select app_visible_agent_ids('properties'))
+  union
+  select p.id from properties p
+  where app_jsonb_uuid_array(p.details -> 'co_agent_ids') && array(select m from app_my_agent_ids() m)
+  union
+  -- the listing behind any deal the caller is on
+  select d.property_id from deals d
+  where d.property_id is not null
+    and d.id in (select app_visible_deal_ids());
+$$;
+
+-- Contacts the current user may see: their own book, their sharing team peers'
+-- — and the people named on a deal they are on. Seeing a deal without its
+-- buyer and seller is not something an agent can work: the client card is
+-- blank, the portal has nobody in it and no agreement can be prefilled.
+create or replace function app_visible_contact_ids()
+returns setof uuid
+language sql stable security definer set search_path = public as $$
+  select c.id from contacts c where app_is_admin()
+  union
+  select c.id from contacts c
+  where c.assigned_agent_id in (select app_visible_agent_ids('contacts'))
+  union
+  -- the parties on a visible deal
+  select x.cid
+  from deals d
+  cross join lateral (values (d.contact_id), (d.buyer_contact_id), (d.seller_contact_id)) x(cid)
+  where d.id in (select app_visible_deal_ids())
+    and x.cid is not null
+  union
+  -- additional contacts / co-signers linked to a visible deal
+  select dc.contact_id from deal_contacts dc
+  where dc.deal_id in (select app_visible_deal_ids());
+$$;
+
+grant execute on function app_jwt_email()             to authenticated;
+grant execute on function app_my_agent_ids()          to authenticated;
 grant execute on function app_current_agent_id()      to authenticated;
 grant execute on function app_is_admin()              to authenticated;
 grant execute on function app_visible_agent_ids(text) to authenticated;
+grant execute on function app_jsonb_uuid_array(jsonb) to authenticated;
 grant execute on function app_visible_deal_ids()      to authenticated;
+grant execute on function app_visible_property_ids()  to authenticated;
+grant execute on function app_visible_contact_ids()   to authenticated;
 
--- CONTACTS — own + sharing team peers; admins see all.
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PROPERTIES — read firm-wide, write only if you are on the listing.
+--
+-- This is the guard that lets deal visibility be derived from the listing
+-- (migration 0055). Before it, one `allow_all_authenticated` policy covered
+-- every command: any signed-in agent could UPDATE any property in the firm, so
+-- deriving membership from the listing would have been a self-service grant —
+-- write yourself onto a listing, see someone else's deal. Migration 0054's
+-- rule still holds: the owner widens the team, never the person wanting in.
+--
+-- SELECT stays open to every signed-in agent: it always has been, the agent and
+-- property pickers rely on it, and so does the duplicate-deal check that keeps
+-- two agents from starting two deals on one building. INSERT stays open too —
+-- agents add listings. UPDATE/DELETE require being on the listing: its agent, a
+-- sharing team peer, one of its co-agents, or an office admin. An unassigned
+-- listing stays claimable by anyone.
+--
+-- UPDATE deliberately has no `with check`: USING decides WHO may write this
+-- listing, and everyone who passes it is already on the team, so the row they
+-- leave behind — including handing the listing over, or taking themselves off
+-- it — is an ordinary office action rather than an escalation.
+-- ─────────────────────────────────────────────────────────────────────────────
+drop policy if exists allow_all               on properties;
+drop policy if exists allow_all_authenticated on properties;
+drop policy if exists properties_read         on properties;
+drop policy if exists properties_insert       on properties;
+drop policy if exists properties_update       on properties;
+drop policy if exists properties_delete       on properties;
+
+create policy properties_read on properties for select to authenticated
+  using (true);
+
+create policy properties_insert on properties for insert to authenticated
+  with check (true);
+
+create policy properties_update on properties for update to authenticated
+  using (
+    app_is_admin()
+    or assigned_agent_id is null
+    or assigned_agent_id in (select app_visible_agent_ids('properties'))
+    or app_jsonb_uuid_array(details -> 'co_agent_ids') && array(select m from app_my_agent_ids() m)
+  )
+  with check (true);
+
+create policy properties_delete on properties for delete to authenticated
+  using (
+    app_is_admin()
+    or assigned_agent_id is null
+    or assigned_agent_id in (select app_visible_agent_ids('properties'))
+    or app_jsonb_uuid_array(details -> 'co_agent_ids') && array(select m from app_my_agent_ids() m)
+  );
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- THE CO-AGENT CACHE, KEPT BY THE DATABASE (migration 0055)
+--
+-- Access no longer depends on `deals.co_agent_ids` being correct, but plenty of
+-- other things still read it: the commission seed (normalizeCommission), the
+-- BoldSign signer prefill, the deal announcement, /api/portal earnings. If
+-- those saw a different team from the one RLS grants, the card would say shared
+-- while the database said private — the exact divergence that made the original
+-- bug invisible. So the database keeps both lists in step, whatever screen or
+-- script did the writing.
+--
+-- `pg_trigger_depth() > 1` on both sides is the recursion stop: each direction
+-- fires only for a write that came from outside, never for the write its
+-- counterpart just made.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- LISTING → ITS DEALS, as an exact diff: adding a co-agent to a listing adds
+-- them to its deals, removing them takes them off. An agent added on the DEAL
+-- alone is untouched by a listing edit that never mentioned them.
+create or replace function app_sync_property_coagents_to_deals()
+returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  old_ids uuid[];
+  new_ids uuid[];
+  added   uuid[];
+  removed uuid[];
+begin
+  if pg_trigger_depth() > 1 then return new; end if;
+
+  old_ids := case when tg_op = 'UPDATE'
+                  then app_jsonb_uuid_array(old.details -> 'co_agent_ids')
+                  else '{}'::uuid[] end;
+  new_ids := app_jsonb_uuid_array(new.details -> 'co_agent_ids');
+
+  added   := array(select x from unnest(new_ids) x except select y from unnest(old_ids) y);
+  removed := array(select x from unnest(old_ids) x except select y from unnest(new_ids) y);
+  if added = '{}'::uuid[] and removed = '{}'::uuid[] then return new; end if;
+
+  update deals d
+     set co_agent_ids = (
+           select coalesce(array_agg(distinct s.x), '{}'::uuid[])
+             from (select unnest(coalesce(d.co_agent_ids, '{}')) as x
+                   union
+                   select unnest(added)) s
+            where s.x is not null
+              and s.x is distinct from d.agent_id
+              and not (s.x = any(removed))
+         )
+   where d.property_id = new.id;
+
+  return new;
+end $$;
+
+drop trigger if exists trg_property_coagents_to_deals on properties;
+create trigger trg_property_coagents_to_deals
+  after insert or update of details on properties
+  for each row execute function app_sync_property_coagents_to_deals();
+
+-- DEAL → ITS LISTING, union only. One property can carry several deals, so a
+-- co-agent dropped from one deal must not be stripped off the listing (and off
+-- the other deal with it). Removal is an edit to the listing, which the
+-- direction above then applies everywhere. A listing's assigned agent is never
+-- also one of its own co-agents.
+create or replace function app_sync_deal_coagents_to_property()
+returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  cur      uuid[];
+  merged   uuid[];
+  owner_id uuid;
+begin
+  if pg_trigger_depth() > 1 then return new; end if;
+  if new.property_id is null then return new; end if;
+  if coalesce(new.co_agent_ids, '{}') = '{}'::uuid[] then return new; end if;
+
+  select app_jsonb_uuid_array(p.details -> 'co_agent_ids'), p.assigned_agent_id
+    into cur, owner_id
+    from properties p where p.id = new.property_id;
+  if not found then return new; end if;
+
+  merged := array(
+    select distinct s.x
+      from (select unnest(cur) as x
+            union
+            select unnest(coalesce(new.co_agent_ids, '{}'))) s
+     where s.x is not null
+       and s.x is distinct from owner_id
+     order by s.x);
+
+  if cur @> merged and cur <@ merged then return new; end if;
+
+  update properties
+     set details = coalesce(details, '{}'::jsonb)
+                   || jsonb_build_object('co_agent_ids', to_jsonb(merged::text[]))
+   where id = new.property_id;
+
+  return new;
+end $$;
+
+drop trigger if exists trg_deal_coagents_to_property on deals;
+create trigger trg_deal_coagents_to_property
+  after insert or update of co_agent_ids, property_id on deals
+  for each row execute function app_sync_deal_coagents_to_property();
+
+-- CONTACTS — own + sharing team peers + the people on a deal you are on;
+-- admins see all. `with check` keeps the original rule for NEW rows (you may
+-- only file a contact under yourself or a sharing peer) and adds the deal arm,
+-- so a co-agent can fix the seller's phone number on a deal they are working
+-- without being handed the owner's whole book (migration 0055).
 drop policy if exists contacts_agent_scope on contacts;
 create policy contacts_agent_scope on contacts for all to authenticated
-  using      (app_is_admin() or assigned_agent_id in (select app_visible_agent_ids('contacts')))
-  with check (app_is_admin() or assigned_agent_id in (select app_visible_agent_ids('contacts')));
+  using      (app_is_admin() or id in (select app_visible_contact_ids()))
+  with check (
+    app_is_admin()
+    or assigned_agent_id in (select app_visible_agent_ids('contacts'))
+    or id in (select app_visible_contact_ids())
+  );
 
 -- ACTIVITIES — visible through the parent contact OR the parent deal; the
 -- author always sees their own entries; admins see all.
@@ -3704,6 +4061,9 @@ set search_path = public
 as $$
 declare
   is_service boolean;
+  -- The installed source of app_visible_deal_ids(), read out of the catalog to
+  -- tell whether migration 0055 is actually applied here (checks 8-11).
+  deal_fn text;
   -- The buckets whose contents are scoped to a deal. `form-packets` is a
   -- deliberately shared catalog and is checked separately.
   deal_buckets text[] := array['deal-documents', 'closing-packets'];
@@ -3875,12 +4235,17 @@ begin
     return next;
   end if;
 
-  -- ── 6. Co-agents displayed but not granted ───────────────────────────────
-  -- src/lib/coAgents.js falls back to the linked property to DISPLAY a deal's
-  -- co-agents, while RLS reads only deals.co_agent_ids. Where the two differ,
-  -- the "Agents on deal" card names someone the database has never heard of —
-  -- they see the card, and nothing else on the deal. Migration 0049 backfills
-  -- this; a deal converted by a pre-0025 client build can reintroduce it.
+  -- ── 6. The co-agent cache, behind its listing ────────────────────────────
+  -- This check used to mean "these agents have lost access": RLS read only
+  -- `deals.co_agent_ids`, so a co-agent the team card showed from the property
+  -- saw the card and nothing else on the deal.
+  --
+  -- Since migration 0055 access is DERIVED from the listing too, so a stale
+  -- column costs no access at all. What it still costs: the commission seed,
+  -- the signer prefill and /api/portal earnings read the cached column, so they
+  -- can name a smaller team than the deal page does. The sync triggers below
+  -- correct it on the next edit either side, which is why this is a warning
+  -- about payment and prefill rather than about access.
   area := 'co-agent visibility';
   item := 'deals displaying a co-agent RLS does not grant';
   -- Counts a PARTIAL mismatch, not just an empty column. The first version of
@@ -3900,7 +4265,7 @@ begin
      and not (coalesce(d.co_agent_ids, '{}') @> array[listed.shown]);
   if n > 0 then
     status := 'warn';
-    detail := n || ' deal(s) show a co-agent on the team card that RLS does not grant. Run migration 0053 — it MERGES the property''s co-agents in, where 0049/0051 only filled a column that was entirely empty.';
+    detail := n || ' deal(s) carry a co-agent cache that is behind their listing. Since migration 0055 this costs no ACCESS — the listing grants it directly — but the commission seed and the signer prefill read the cached column, so they may name a smaller team than the deal page does. The sync triggers fix this on the next edit either side.';
   else
     status := 'ok';
     detail := 'none';
@@ -3919,6 +4284,75 @@ begin
     status := 'ok';    detail := 'applied';
   else
     status := 'FAIL';  detail := 'NOT APPLIED — deal documents are still scoped by whoever uploaded them. Run migrations/0053_deal_documents_one_fix.sql.';
+  end if;
+  return next;
+
+  -- ── 8. Is the LISTING part of the model in this database? ────────────────
+  -- The check that would have caught the bug migration 0055 fixes. Read out of
+  -- the catalog, never assumed: a file in the repository proves nothing about
+  -- what is installed, and CI parses this file as text and passes either way.
+  area := 'migration';
+  item := '0055 deal team access';
+  select pg_get_functiondef(pr.oid) into deal_fn
+    from pg_proc pr join pg_namespace ns on ns.oid = pr.pronamespace
+   where ns.nspname = 'public' and pr.proname = 'app_visible_deal_ids'
+   limit 1;
+  if deal_fn is null then
+    status := 'FAIL';
+    detail := 'app_visible_deal_ids() is missing entirely — no agent can see any deal. Run migrations/0055_deal_team_access.sql.';
+  elsif deal_fn not like '%assigned_agent_id in (select app_my_agent_ids())%'
+     or deal_fn not like '%app_jsonb_uuid_array(p.details -> ''co_agent_ids'')%' then
+    status := 'FAIL';
+    detail := 'NOT APPLIED — deal access still comes only from the copy taken when the property was converted, so an agent added to a listing AFTER its deal was started cannot see the deal or its documents. Run migrations/0055_deal_team_access.sql.';
+  else
+    status := 'ok'; detail := 'deal access is derived from the listing as well as the deal';
+  end if;
+  return next;
+
+  -- ── 9. The guard that makes deriving from the listing safe ───────────────
+  area := 'table policy';
+  item := 'properties write scope';
+  select count(*) into n
+    from pg_policies
+   where schemaname = 'public' and tablename = 'properties'
+     and permissive = 'PERMISSIVE' and cmd = 'ALL'
+     and coalesce(qual, 'true') = 'true';
+  if n > 0 then
+    status := 'FAIL';
+    detail := n || ' wide-open for-ALL policy/policies on properties: every signed-in agent can rewrite any listing in the firm, which with listing-derived deal access lets anyone grant themselves someone else''s deal. Run migrations/0055_deal_team_access.sql.';
+  else
+    status := 'ok'; detail := 'reads are firm-wide; writes require being on the listing';
+  end if;
+  return next;
+
+  -- ── 10. The cache the commission seed and signer prefill read ────────────
+  area := 'co-agent sync';
+  item := 'listing <-> deal triggers';
+  select count(*) into n
+    from pg_trigger
+   where not tgisinternal
+     and tgname in ('trg_property_coagents_to_deals', 'trg_deal_coagents_to_property');
+  if n = 2 then
+    status := 'ok'; detail := 'both directions installed';
+  else
+    status := 'FAIL';
+    detail := n || ' of 2 sync triggers present. Without them the team a deal DISPLAYS can drift from the team it pays. Run migrations/0055_deal_team_access.sql.';
+  end if;
+  return next;
+
+  -- ── 11. Agents whose login may not resolve to their roster row ──────────
+  -- Reported, never repaired: an access control that rewrites identity at 3am
+  -- is worse than one that tells a human. Since migration 0055 they resolve by
+  -- the verified email on their login, so this is a warning rather than the
+  -- silent blackout it used to be.
+  area := 'identity';
+  item := 'agents with no login link';
+  select count(*) into n from agents where auth_id is null;
+  if n = 0 then
+    status := 'ok'; detail := 'every agent row is linked to a login';
+  else
+    status := 'warn';
+    detail := n || ' agent row(s) have agents.auth_id = NULL. They resolve by the verified email on their login instead of seeing nothing — but only if that email matches the row exactly. Check them, and set auth_id by hand where it does not.';
   end if;
   return next;
 end

@@ -106,3 +106,71 @@ export async function upsertContact(supabase, payload, existingRows = []) {
 // to the same model at the same time — it cannot import this module (different
 // runtime, no access to the caller's loaded rows).
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCOPED CONTACT READS (migration 0055)
+//
+// A co-agent could be granted a deal and still open it to a blank client card:
+// `contacts` was scoped to own + sharing-team-peers, on both sides — the RLS
+// policy AND App.jsx's `.in('assigned_agent_id', …)` fetch. So the buyer and
+// seller on a colleague's deal were invisible to the very agent working it, the
+// portal had nobody in it, and no listing agreement could be prefilled.
+//
+// `app_visible_contact_ids()` adds the people named on a deal the agent is on —
+// the deal's primary, buyer and seller contacts plus any deal_contacts
+// co-signers. It is the same function the contacts policy now uses, so the
+// fetch and the grant cannot disagree.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The ids `app_visible_contact_ids()` grants. Returns null, not [], when the
+ * function is absent (migration not applied, or a client without `.rpc`), so
+ * callers keep their own arms rather than reading it as "you may see nothing".
+ */
+export async function fetchGrantedContactIds(client) {
+  if (typeof client?.rpc !== 'function') return null
+  try {
+    const { data, error } = await client.rpc('app_visible_contact_ids')
+    if (error) return null
+    return (data || [])
+      .map(row => (row && typeof row === 'object' ? Object.values(row)[0] : row))
+      .filter(Boolean)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Every contact the agent may see, newest first: their own book, their sharing
+ * team peers' books, and the people on the deals they are on. Admins get the
+ * firm.
+ *
+ * `contactAgentIds` is the team-scoped owner list (teamVisibility.js). Each arm
+ * is additive — a failed lookup never costs the agent their own book.
+ */
+export async function fetchVisibleContacts(client, { isAdmin, agentId, contactAgentIds }) {
+  const byNewest = (a, b) => new Date(b.created_at) - new Date(a.created_at)
+  if (isAdmin) {
+    return client.from('contacts').select('*').order('created_at', { ascending: false })
+  }
+  const owners = contactAgentIds?.length ? contactAgentIds : (agentId ? [agentId] : [])
+  if (!owners.length && !agentId) return { data: [], error: null }
+
+  const [ownRes, grantedIds] = await Promise.all([
+    owners.length
+      ? client.from('contacts').select('*').in('assigned_agent_id', owners)
+          .order('created_at', { ascending: false })
+      : Promise.resolve({ data: [], error: null }),
+    fetchGrantedContactIds(client),
+  ])
+  if (ownRes.error) return ownRes
+
+  const rows = [...(ownRes.data || [])]
+  const seen = new Set(rows.map(c => c.id))
+  const missing = (grantedIds || []).filter(id => !seen.has(id))
+  if (missing.length) {
+    const extra = await client.from('contacts').select('*').in('id', missing)
+    for (const c of extra.data || []) if (!seen.has(c.id)) { seen.add(c.id); rows.push(c) }
+  }
+  return { data: rows.sort(byNewest), error: null }
+}

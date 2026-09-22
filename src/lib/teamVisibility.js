@@ -13,9 +13,17 @@
 // behavior of a database that predates the columns.
 //
 // The database enforces the same split for contacts and deals
-// (app_visible_agent_ids(dimension) in schema.sql). It does NOT for properties:
-// that table is `allow_all_authenticated`, so for properties this list is the
-// entire scoping story client-side.
+// (app_visible_agent_ids(dimension) in schema.sql). For properties it enforces
+// it on WRITES only (migration 0055: you may edit a listing you are on); reads
+// stay firm-wide, so for property READS this list — together with the co-agent
+// and deal arms in src/lib/services/properties.js — is the whole scoping story
+// client-side.
+//
+// These lists are the TEAM dimension only. Being on a deal or a listing grants
+// access no team flag can revoke, and that is asked of the database rather than
+// derived here: app_visible_deal_ids() / app_visible_property_ids() /
+// app_visible_contact_ids(). A second implementation of the rule in the browser
+// is what let a co-agent be granted a deal by RLS and still never see it.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const FLAGS = {

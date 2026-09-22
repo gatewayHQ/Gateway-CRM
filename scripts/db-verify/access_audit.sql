@@ -145,23 +145,106 @@ anon_checks as (
      and p.policyname <> 'public_insert'
 ),
 
--- ── 6. Co-agents displayed but not granted ────────────────────────────────
--- src/lib/coAgents.js falls back to the linked property to DISPLAY a deal's
--- co-agents, while RLS reads only deals.co_agent_ids. Where they differ, the
--- "Agents on deal" card names someone who cannot open the deal.
+-- ── 6. The co-agent cache, behind its listing ─────────────────────────────
+-- This used to mean "these agents have lost access": RLS read only
+-- deals.co_agent_ids, so a co-agent the team card showed from the property saw
+-- the card and nothing else on the deal.
+--
+-- Since migration 0055 access is DERIVED from the listing too, so a stale
+-- column costs no access. What it still costs: the commission seed, the signer
+-- prefill and /api/portal earnings read the cached column, so they can name a
+-- smaller team than the deal page does. The sync triggers (check 10) correct it
+-- on the next edit either side.
 coagent_check as (
   select 'co-agent visibility' as area,
          'deals displaying a co-agent RLS does not grant' as item,
          case when count(*) > 0 then 'warn' else 'ok' end as status,
          case when count(*) > 0
-           then count(*) || ' deal(s) show a co-agent on the team card who cannot open the deal. Re-run the backfill at the end of migration 0049.'
+           then count(*) || ' deal(s) carry a co-agent cache behind their listing. Since migration 0055 this costs no ACCESS, but the commission seed and signer prefill read the cached column. Fixed on the next edit either side; migration 0055 also aligns it once on apply.'
            else 'none'
          end as detail
     from deals d
     join properties p on p.id = d.property_id
-   where coalesce(array_length(d.co_agent_ids, 1), 0) = 0
-     and jsonb_typeof(p.details->'co_agent_ids') = 'array'
-     and jsonb_array_length(p.details->'co_agent_ids') > 0
+   cross join lateral (
+     select nullif(v, '')::uuid as shown
+       from jsonb_array_elements_text(p.details->'co_agent_ids') as t(v)
+      where v ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+   ) listed
+   where jsonb_typeof(p.details->'co_agent_ids') = 'array'
+     and listed.shown is distinct from d.agent_id
+     and not (coalesce(d.co_agent_ids, '{}') @> array[listed.shown])
+),
+
+-- ── 6b. Is the LISTING part of the model in THIS database? ────────────────
+-- The check that would have caught the bug 0055 fixes. `deals.co_agent_ids` is
+-- a copy taken when the property was converted, and an existing deal never
+-- re-seeds — so an agent added to a listing AFTER its deal was started reached
+-- the team card and nothing else. Read out of the catalog: a file in the
+-- repository proves nothing about what is installed.
+deal_team_check as (
+  select 'migration' as area, '0055 deal team access' as item,
+         case
+           when fn is null then 'FAIL'
+           when fn like '%assigned_agent_id in (select app_my_agent_ids())%'
+            and fn like '%app_jsonb_uuid_array(p.details -> ''co_agent_ids'')%' then 'ok'
+           else 'FAIL'
+         end as status,
+         case
+           when fn is null then 'app_visible_deal_ids() is missing entirely — no agent can see any deal. Run migrations/0055_deal_team_access.sql.'
+           when fn like '%assigned_agent_id in (select app_my_agent_ids())%'
+            and fn like '%app_jsonb_uuid_array(p.details -> ''co_agent_ids'')%'
+             then 'deal access is derived from the listing as well as the deal'
+           else 'NOT APPLIED — deal access still comes only from the copy taken when the property was converted, so an agent added to a listing AFTER its deal was started cannot see the deal or its documents. Run migrations/0055_deal_team_access.sql.'
+         end as detail
+    from (
+      select (select pg_get_functiondef(pr.oid)
+                from pg_proc pr join pg_namespace ns on ns.oid = pr.pronamespace
+               where ns.nspname = 'public' and pr.proname = 'app_visible_deal_ids'
+               limit 1) as fn
+    ) f
+),
+
+-- ── 6c. The guard that makes deriving from the listing safe ───────────────
+-- properties was `allow_all_authenticated` for every command: any signed-in
+-- agent could rewrite any listing in the firm. With listing-derived deal access
+-- that is a self-service grant — write yourself onto a listing, see someone
+-- else's deal.
+property_write_check as (
+  select 'table policy' as area, 'properties write scope' as item,
+         case when count(*) > 0 then 'FAIL' else 'ok' end as status,
+         case when count(*) > 0
+           then count(*) || ' wide-open for-ALL policy/policies on properties: every signed-in agent can rewrite any listing, which with listing-derived deal access lets anyone grant themselves someone else''s deal. Run migrations/0055_deal_team_access.sql.'
+           else 'reads are firm-wide; writes require being on the listing'
+         end as detail
+    from pg_policies
+   where schemaname = 'public' and tablename = 'properties'
+     and permissive = 'PERMISSIVE' and cmd = 'ALL'
+     and coalesce(qual, 'true') = 'true'
+),
+
+-- ── 6d. The triggers that keep the cache in step ──────────────────────────
+sync_trigger_check as (
+  select 'co-agent sync' as area, 'listing <-> deal triggers' as item,
+         case when count(*) = 2 then 'ok' else 'FAIL' end as status,
+         case when count(*) = 2 then 'both directions installed'
+           else count(*) || ' of 2 sync triggers present. Without them the team a deal DISPLAYS can drift from the team it pays. Run migrations/0055_deal_team_access.sql.'
+         end as detail
+    from pg_trigger
+   where not tgisinternal
+     and tgname in ('trg_property_coagents_to_deals', 'trg_deal_coagents_to_property')
+),
+
+-- ── 6e. Agents whose login may not resolve to their roster row ────────────
+-- Before migration 0055 a NULL auth_id meant matching no policy anywhere: a
+-- blank CRM, whatever the co-agent columns said. They now resolve by the
+-- verified email on their login — but only if it matches the row exactly.
+identity_check as (
+  select 'identity' as area, 'agents with no login link' as item,
+         case when count(*) = 0 then 'ok' else 'warn' end as status,
+         case when count(*) = 0 then 'every agent row is linked to a login'
+           else count(*) || ' agent row(s) have agents.auth_id = NULL. They resolve by the verified email on their login instead of seeing nothing — but only if that email matches the row exactly. Set auth_id by hand where it does not.'
+         end as detail
+    from agents where auth_id is null
 ),
 
 -- ── 7. Are the migrations actually applied? ───────────────────────────────
@@ -199,6 +282,10 @@ select area, item, status, detail from (
   union all select * from table_checks
   union all select * from anon_checks
   union all select * from coagent_check
+  union all select * from deal_team_check
+  union all select * from property_write_check
+  union all select * from sync_trigger_check
+  union all select * from identity_check
   union all select * from migration_checks
 ) findings
 order by case status when 'FAIL' then 0 when 'warn' then 1 else 2 end, area, item;

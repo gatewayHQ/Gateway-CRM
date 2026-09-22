@@ -12,10 +12,17 @@
 // the deal at conversion (src/lib/coAgents.js), so without this the deal stayed
 // visible while the property behind it vanished.
 //
-// NOTE: `properties` is `allow_all_authenticated` in RLS — unlike contacts and
-// deals, the database does not scope it. These filters are the whole of a
+// NOTE: `properties` is READABLE firm-wide in RLS — unlike contacts and deals,
+// the database does not scope reads (the pickers and the duplicate-deal check
+// in migration 0054 need the whole roster). These filters are the whole of a
 // non-admin's property visibility, which is why every property read goes
-// through here rather than being open-coded per page.
+// through here rather than being open-coded per page. WRITES are scoped by RLS
+// to the agents on the listing (migration 0055).
+//
+// Which is also why the primary arm here is now the database's own answer:
+// `app_visible_property_ids()`, the same function the deal-visibility model is
+// built on. A client-side reimplementation of the rule is what let the deal
+// stay visible while the listing behind it vanished.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const byNewest = (a, b) => new Date(b.created_at) - new Date(a.created_at)
@@ -31,27 +38,60 @@ async function fetchCoAgentProperties(client, agentId) {
 }
 
 /**
- * Every property the agent may see, newest first.
- * Admins get the firm; everyone else gets assigned + team-shared + co-agent.
+ * The ids `app_visible_property_ids()` grants (migration 0055): assigned +
+ * team-shared + co-agent + the listing behind any deal the agent is on. That
+ * last arm is the one no client filter had — an agent added to a deal could
+ * open it and find the property gone.
+ *
+ * Returns null, not [], when the function is absent (migration not applied, or
+ * a client without `.rpc`), so callers fall back to their own arms instead of
+ * reading it as "you may see nothing".
+ */
+export async function fetchGrantedPropertyIds(client) {
+  if (typeof client?.rpc !== 'function') return null
+  try {
+    const { data, error } = await client.rpc('app_visible_property_ids')
+    if (error) return null
+    return (data || [])
+      .map(row => (row && typeof row === 'object' ? Object.values(row)[0] : row))
+      .filter(Boolean)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Every property the agent may see, newest first. Admins get the firm; everyone
+ * else gets assigned + team-shared + co-agent + the listings behind their deals.
  */
 export async function fetchVisibleProperties(client, { isAdmin, agentId, propertyAgentIds }) {
   if (isAdmin) {
     return client.from('properties').select('*').order('created_at', { ascending: false })
   }
   const owners = propertyAgentIds?.length ? propertyAgentIds : (agentId ? [agentId] : [])
-  if (!owners.length) return { data: [], error: null }
+  if (!owners.length && !agentId) return { data: [], error: null }
 
-  const [ownRes, coRes] = await Promise.all([
-    client.from('properties').select('*').in('assigned_agent_id', owners)
-      .order('created_at', { ascending: false }),
+  const [ownRes, coRes, grantedIds] = await Promise.all([
+    owners.length
+      ? client.from('properties').select('*').in('assigned_agent_id', owners)
+          .order('created_at', { ascending: false })
+      : Promise.resolve({ data: [], error: null }),
     fetchCoAgentProperties(client, agentId),
+    fetchGrantedPropertyIds(client),
   ])
   if (ownRes.error) return ownRes
 
-  // Co-listing is additive: a failed lookup must not cost the agent the
+  // Every arm is additive: a failed lookup must not cost the agent the
   // properties they own outright.
-  const seen = new Set((ownRes.data || []).map(p => p.id))
-  const extra = (coRes.data || []).filter(p => !seen.has(p.id))
-  if (!extra.length) return ownRes
-  return { data: [...(ownRes.data || []), ...extra].sort(byNewest), error: null }
+  const rows = [...(ownRes.data || [])]
+  const seen = new Set(rows.map(p => p.id))
+  for (const p of coRes.data || []) if (!seen.has(p.id)) { seen.add(p.id); rows.push(p) }
+
+  const missing = (grantedIds || []).filter(id => !seen.has(id))
+  if (missing.length) {
+    const grantedRes = await client.from('properties').select('*').in('id', missing)
+    for (const p of grantedRes.data || []) if (!seen.has(p.id)) { seen.add(p.id); rows.push(p) }
+  }
+
+  return { data: rows.sort(byNewest), error: null }
 }
