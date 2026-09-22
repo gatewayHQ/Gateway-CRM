@@ -943,6 +943,26 @@ alter table ms_graph_connections enable row level security;
 -- access is server-side via the service key (api/email-send.js, ?action=outlook-*).
 -- Even AES-256-GCM ciphertext should never reach the browser.
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- set_updated_at() — defined HERE, above its first use.
+--
+-- It used to be declared ~650 lines further down, next to the deals trigger it
+-- was written for. Postgres resolves a trigger's function at CREATE TRIGGER
+-- time, so on a FRESH database the two triggers above that point —
+-- ms_graph_connections_updated_at and contact_email_sync_updated_at — failed
+-- with "function set_updated_at() does not exist" and were silently never
+-- created: those two tables' updated_at stayed frozen at insert time. Existing
+-- databases were fine, because the function was already there by the time the
+-- file was re-run, which is exactly why this never showed up.
+-- ─────────────────────────────────────────────────────────────────────────────
+create or replace function set_updated_at()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
 drop trigger if exists ms_graph_connections_updated_at on ms_graph_connections;
 create trigger ms_graph_connections_updated_at
   before update on ms_graph_connections
@@ -1598,14 +1618,8 @@ $$;
 -- ─────────────────────────────────────────────────────────────────────────────
 -- UPDATED_AT TRIGGER  (auto-stamp deals.updated_at on every update)
 -- ─────────────────────────────────────────────────────────────────────────────
-
-create or replace function set_updated_at()
-returns trigger language plpgsql as $$
-begin
-  new.updated_at = now();
-  return new;
-end;
-$$;
+-- `set_updated_at()` itself is defined much earlier in this file, above its
+-- first use — see the note there for why.
 
 drop trigger if exists deals_updated_at on deals;
 create trigger deals_updated_at
