@@ -7078,6 +7078,21 @@ function StageHeader({ stage, label, canRename, onRename }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Which deals belong on the Deals board.
+//
+// Everyone sees the deals RLS handed them; an ADMIN can narrow to one agent,
+// and "that agent's deals" means the deals they are ON — not the ones they own.
+// Filtering on `agent_id` alone showed a shared deal under the OWNER only, so
+// an admin checking two agents who co-list a listing saw it on one pipeline and
+// not the other, and read that as the deal failing to sync between them. Both
+// agents' own logins showed it correctly the whole time, which is what makes
+// this one so misleading: the tool used to diagnose the bug reported it.
+export function dealsOnBoard({ deals = [], propertyMap = {}, isAdmin = false, agentFilter = 'all' } = {}) {
+  if (!isAdmin || agentFilter === 'all') return deals
+  return deals.filter(d => agentIdsOnDeal(d, propertyMap[d.property_id]).includes(agentFilter))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Which listings belong on the Listings board.
 //
 // "Mine" means the listings this agent is ON, not only the ones assigned to
@@ -7202,11 +7217,18 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const agentMap    = useMemo(() => Object.fromEntries(agents.map(a => [a.id, a])),     [agents])
   const propertyMap = useMemo(() => Object.fromEntries(properties.map(p => [p.id, p])), [properties])
 
-  // Filter deals for admin view (by agent) or show all
-  const visibleDeals = useMemo(() => {
-    if (!isAdmin || agentFilter === 'all') return deals
-    return deals.filter(d => d.agent_id === agentFilter)
-  }, [deals, isAdmin, agentFilter])
+  // Filter deals for admin view (by agent) or show all.
+  //
+  // "That agent's deals" means the deals they are ON, not the ones they own.
+  // Filtering on `agent_id` alone showed a shared deal under the OWNER only, so
+  // an admin checking two agents who co-list would see it on one pipeline and
+  // not the other — and read that as the deal failing to sync between them,
+  // when both agents' own logins showed it correctly all along. Third instance
+  // of the same mistake (the deal grant in #151, the Listings board in #152):
+  // an access question answered by ownership instead of membership.
+  const visibleDeals = useMemo(
+    () => dealsOnBoard({ deals, propertyMap, isAdmin, agentFilter }),
+    [deals, propertyMap, isAdmin, agentFilter])
 
   // One unified pipeline — every deal on the same board (no res/comm split).
   const resolvedTrack = UNIFIED

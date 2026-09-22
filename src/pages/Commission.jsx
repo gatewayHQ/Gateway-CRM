@@ -867,7 +867,21 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
   let filtered = deals
   if (filterStage === 'closed') filtered = filtered.filter(d => d.stage === 'closed')
   if (filterStage === 'active') filtered = filtered.filter(d => d.stage !== 'closed' && d.stage !== 'lost')
-  if (filterAgent) filtered = filtered.filter(d => d.agent_id === filterAgent)
+  // "This agent's deals" — the deals they are ON, matching agentBreakdown and
+  // the cap tracker above, which both already count a co-agent on someone
+  // else's deal. This line alone filtered on ownership, so narrowing the table
+  // to a co-agent dropped exactly the deals whose split the reader came to
+  // check.
+  //
+  // The listing's own co-agents reach this through `deals.co_agent_ids`, which
+  // the migration 0055 triggers keep in step with the property — this page has
+  // no `properties` in scope and does not need them for one filter.
+  if (filterAgent) {
+    filtered = filtered.filter(d =>
+      d.agent_id === filterAgent
+      || (d.co_agent_ids || []).includes(filterAgent)
+      || breakdownForDeal(d, getComm(d.id), agents).participants.some(p => p.agent_id === filterAgent))
+  }
   if (filterCategory === 'residential') filtered = filtered.filter(d => !d.prop_category || d.prop_category === 'residential')
   if (filterCategory === 'commercial')  filtered = filtered.filter(d => d.prop_category === 'commercial')
 
