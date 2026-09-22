@@ -1,12 +1,19 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Scoped deal/commission reads shared by every page that (re)loads them.
 //
-// Visibility model (decided 2026-06, enforced in the DB by migration 0011):
+// Visibility model (decided 2026-06, enforced in the DB by migration 0011;
+// derived from the listing as well since migration 0055):
 //   • An agent sees deals they OWN, deals of TEAM PEERS who share deals
-//     (team_splits.share_deals), and deals they are CO-LISTED on — i.e. they
-//     appear as a paid participant in commissions.participants.
+//     (team_splits.share_deals), and every deal they are ON — named as an
+//     additional agent on the deal, named on the LISTING behind it (as its
+//     agent or one of its co-agents), or paid on it as a participant in
+//     commissions.participants.
 //   • Commissions follow the deal.
 //   • Admins (office admin / transaction coordinator) see everything.
+//
+// The listing arms are asked of the database rather than reimplemented here —
+// see fetchGrantedDealIds() below for why that distinction is the fix and not
+// a refactor.
 //
 // Before this, App.jsx fetched deals by owner only (a co-listed agent couldn't
 // see a deal they were paid on unless they shared a team with the owner), and
@@ -32,25 +39,65 @@ async function selectInChunks(client, table, column, ids, order) {
   return { data: out, error: null }
 }
 
-// IDs of deals the agent is co-listed on, from both sources:
-//   1. structured commission participants (jsonb containment:
-//      participants @> [{"agent_id": "..."}]) — the canonical model, and
-//   2. deals.co_agent_ids uuid[] — the co-agents carried over from the property
-//      at conversion (migration 0025; before that, a legacy column present only
-//      in the original production database). Its query errors harmlessly on a
-//      database where 0025 hasn't been applied yet.
-// Returns an error only when BOTH sources fail.
+// ─────────────────────────────────────────────────────────────────────────────
+// THE DATABASE'S OWN ANSWER (migration 0055)
+//
+// `app_visible_deal_ids()` is the function every deal-scoped RLS policy and
+// every deal-documents storage policy is written against. Calling it directly
+// is how this module stops guessing at the rule and asks for it.
+//
+// That matters because the client's own filters were a SECOND implementation of
+// the visibility model, and the two drifted: the database grants a deal to
+// whoever is on its LISTING, and no client filter knew to look there. An agent
+// added to a listing after its deal was started could be granted the deal by
+// RLS and still never see it, because nothing fetched it.
+//
+// Returns null — not [] — when the function isn't there (migration not applied,
+// or an older client with no `.rpc`). Callers treat null as "no answer" and
+// fall back to their own arms; [] would read as "you may see nothing".
+// ─────────────────────────────────────────────────────────────────────────────
+export async function fetchGrantedDealIds(client) {
+  if (typeof client?.rpc !== 'function') return null
+  try {
+    const { data, error } = await client.rpc('app_visible_deal_ids')
+    if (error) return null
+    return (data || [])
+      .map(row => (row && typeof row === 'object' ? Object.values(row)[0] : row))
+      .filter(Boolean)
+  } catch {
+    return null
+  }
+}
+
+// IDs of deals the agent is on beyond the ones they own, from three sources:
+//   1. `app_visible_deal_ids()` — the database's own answer, which covers every
+//      arm of the model including the listing arms that are the whole point of
+//      migration 0055, and
+//   2. structured commission participants (jsonb containment:
+//      participants @> [{"agent_id": "..."}]), and
+//   3. deals.co_agent_ids uuid[] — the additional agents recorded on the deal
+//      (migration 0025; before that, a legacy column present only in the
+//      original production database). Its query errors harmlessly on a database
+//      where 0025 hasn't been applied yet.
+//
+// 2 and 3 are kept as fallbacks so this still works against a database that is
+// behind on migrations — the pattern the whole module uses.
+// Returns an error only when EVERY source fails.
 export async function fetchCoListedDealIds(client, agentId) {
   if (!agentId) return { data: [], error: null }
-  const [viaParticipants, viaLegacy] = await Promise.all([
+  const [granted, viaParticipants, viaLegacy] = await Promise.all([
+    fetchGrantedDealIds(client),
     client.from('commissions').select('deal_id')
       .contains('participants', JSON.stringify([{ agent_id: agentId }])),
     client.from('deals').select('id').contains('co_agent_ids', [agentId]),
   ])
   const ids = new Set()
+  for (const id of granted || []) ids.add(id)
   if (!viaParticipants.error) for (const r of viaParticipants.data || []) { if (r.deal_id) ids.add(r.deal_id) }
   if (!viaLegacy.error) for (const r of viaLegacy.data || []) { if (r.id) ids.add(r.id) }
-  const error = viaParticipants.error && viaLegacy.error ? viaParticipants.error : null
+  const error = granted === null && viaParticipants.error && viaLegacy.error
+    ? viaParticipants.error
+    : null
   return { data: [...ids], error }
 }
 

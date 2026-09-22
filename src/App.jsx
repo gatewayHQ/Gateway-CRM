@@ -3,6 +3,7 @@ import { supabase } from './lib/supabase.js'
 import { primeCache, invalidate } from './lib/queryCache.js'
 import { fetchVisibleDeals, fetchVisibleCommissions } from './lib/services/deals.js'
 import { fetchVisibleProperties } from './lib/services/properties.js'
+import { fetchVisibleContacts } from './lib/services/contacts.js'
 import { resolveStageLabels } from './lib/stageLabels.js'
 import { isOfficeAdmin } from './lib/officeAdmins.js'
 import { teamVisibleAgentIds } from './lib/teamVisibility.js'
@@ -438,9 +439,12 @@ export default function App() {
       // data and the admin's own tasks are all that's useful to them.
       // Regular agents receive only rows scoped to their computed lists above.
       const [contacts, properties, deals, tasks, templates, activitiesRes, dealContactsRes, propertyContactsRes] = await Promise.all([
-        isAdminAgent
-          ? supabase.from('contacts').select('*').order('created_at', { ascending: false })
-          : supabase.from('contacts').select('*').in('assigned_agent_id', myVisible).order('created_at', { ascending: false }),
+        // Own book + team peers sharing contacts + the buyer and seller on any
+        // deal this agent is on. That last arm (migration 0055) is what stops a
+        // co-agent opening a deal they can see and finding no client on it.
+        fetchVisibleContacts(supabase, {
+          isAdmin: isAdminAgent, agentId: matched.id, contactAgentIds: myVisible,
+        }),
         // Assigned to me + team peers sharing properties + anything I co-agent
         fetchVisibleProperties(supabase, {
           isAdmin: isAdminAgent, agentId: matched.id, propertyAgentIds: myPropertyVisible,

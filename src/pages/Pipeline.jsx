@@ -14,7 +14,7 @@ import {
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
 import { describeDealCommission } from '../lib/commission.js'
-import { agentIdsOnDeal, coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
+import { agentIdsOnDeal, coAgentIdsForNewDeal, dealCoAgentIds, propertyCoAgentIds, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import {
   propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty,
   REPRESENTING_OPTIONS, SIDE_LABELS, representingFor, sidesFor,
@@ -6224,6 +6224,13 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       // drawer shows that person where they belong instead of an empty field.
       buyer_contact_id:  primaryContactIdFor(deal, 'buyer')  || '',
       seller_contact_id: primaryContactIdFor(deal, 'seller') || '',
+      // Additional Agents shows everyone the DATABASE counts as on this deal —
+      // the deal's own column unioned with the listing's co-agents — not just
+      // the copy taken when the property was converted. Showing only the copy is
+      // how an agent added to the listing afterwards stayed invisible here while
+      // RLS granted them the deal (migration 0055): the field looked complete,
+      // so nobody thought to re-add them, and saving wrote the short list back.
+      co_agent_ids: dealCoAgentIds(deal, (properties || []).find(p => p.id === deal.property_id) || null),
     } : blank)
     setErrors({})
     setTab(deal?.id ? initialTab : 'details')
@@ -6389,6 +6396,16 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       // from the property above — never the primary agent, never duplicated.
       const finalCoAgentIds = [...new Set([...additionalAgentIds, ...seededCoAgents])].filter(id => id && id !== form.agent_id)
 
+      // Anyone taken OFF the field who is still on the listing. Access is
+      // derived from both records (migration 0055), so removing them from the
+      // deal alone revokes nothing — the listing would keep granting them the
+      // deal and every document on it. Removing them here means removing them
+      // from the listing, which is also how the database then propagates it to
+      // the listing's other deals. Additions travel the other way on their own,
+      // through the deal → listing trigger.
+      const removedFromListing = propertyCoAgentIds(linkedProperty)
+        .filter(id => id && id !== form.agent_id && !finalCoAgentIds.includes(id))
+
       // Only the sides this deal actually represents are saved: flipping Both →
       // Buyer must not leave a seller contact on the row for a form to print.
       // The picked people stay in drawer state, so flipping back restores them.
@@ -6514,6 +6531,30 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       // People card read the rows that now exist.
       if (savedId && await syncDealContacts(savedId, savedExtras)) {
         await reloadDealContacts(setDb, savedId)
+      }
+
+      // ── Take the removed agents off the listing ────────────────────────────
+      // Best-effort and AFTER the deal is saved: the edit is never lost to this.
+      // RLS lets it through because anyone editing this deal is on the listing
+      // (properties_update, migration 0055); if it is refused, say so rather
+      // than leaving the agent believing access was revoked when it was not.
+      if (savedId && linkedProperty && removedFromListing.length) {
+        const keptOnListing = propertyCoAgentIds(linkedProperty)
+          .filter(id => !removedFromListing.includes(id))
+        const { error: listingErr } = await supabase.from('properties')
+          .update({ details: { ...(linkedProperty.details || {}), co_agent_ids: keptOnListing } })
+          .eq('id', linkedProperty.id)
+        if (listingErr) {
+          console.warn('[DealDrawer] could not update the listing team:', listingErr)
+          pushToast('Deal saved, but those agents are still on the listing — ask an office admin to remove them there.', 'error')
+        } else if (setDb) {
+          setDb(prev => ({
+            ...prev,
+            properties: (prev.properties || []).map(p => p.id === linkedProperty.id
+              ? { ...p, details: { ...(p.details || {}), co_agent_ids: keptOnListing } }
+              : p),
+          }))
+        }
       }
 
       // ── Price round-trip ───────────────────────────────────────────────────

@@ -44,12 +44,22 @@ describe('coAgentIdsForNewDeal', () => {
 })
 
 describe('dealCoAgentIds', () => {
-  it('prefers the deal column once the conversion has stamped it', () => {
+  // The bug this union exists for: the deal's column is a copy taken at
+  // conversion, so an agent added to the LISTING afterwards is only ever on the
+  // property. A "prefer the deal column" read showed one name while
+  // app_visible_deal_ids() granted both — the card said shared, the database
+  // said private, and nobody could see why.
+  it('unions the deal column with the listing, so a later addition is not lost', () => {
     const deal = { agent_id: 'a1', co_agent_ids: ['a2'] }
-    expect(dealCoAgentIds(deal, property(['a9']))).toEqual(['a2'])
+    expect(dealCoAgentIds(deal, property(['a9']))).toEqual(['a2', 'a9'])
   })
 
-  it('falls back to the linked property for deals converted before 0025', () => {
+  it('de-duplicates an agent recorded on both the deal and the listing', () => {
+    const deal = { agent_id: 'a1', co_agent_ids: ['a2'] }
+    expect(dealCoAgentIds(deal, property(['a2']))).toEqual(['a2'])
+  })
+
+  it('reads the linked property for deals converted before 0025', () => {
     const deal = { agent_id: 'a1', co_agent_ids: [] }
     expect(dealCoAgentIds(deal, property(['a2', 'a3']))).toEqual(['a2', 'a3'])
   })
@@ -63,7 +73,7 @@ describe('dealCoAgentIds', () => {
     expect(dealCoAgentIds({ agent_id: 'a1' }, property(['a1']))).toEqual([])
   })
 
-  it('returns [] with no property to fall back on', () => {
+  it('returns [] with no property to read', () => {
     expect(dealCoAgentIds({ agent_id: 'a1' })).toEqual([])
     expect(dealCoAgentIds(null)).toEqual([])
   })
@@ -81,6 +91,27 @@ describe('agentIdsOnDeal', () => {
 
   it('handles an unassigned deal', () => {
     expect(agentIdsOnDeal({ agent_id: null, co_agent_ids: ['a2'] })).toEqual(['a2'])
+  })
+
+  // The listing agent is granted the deal by app_visible_deal_ids() whoever
+  // started it, so the card has to name them or the UI is out of step again —
+  // this time on the deal a colleague started on your own listing.
+  it("includes the listing's assigned agent, who holds the property", () => {
+    const deal = { agent_id: 'a1', co_agent_ids: [] }
+    const listing = { ...property([]), assigned_agent_id: 'a7' }
+    expect(agentIdsOnDeal(deal, listing)).toEqual(['a1', 'a7'])
+  })
+
+  it('does not repeat the listing agent when they also own the deal', () => {
+    const deal = { agent_id: 'a1', co_agent_ids: ['a2'] }
+    const listing = { ...property([]), assigned_agent_id: 'a1' }
+    expect(agentIdsOnDeal(deal, listing)).toEqual(['a1', 'a2'])
+  })
+
+  it('names everyone on the listing and the deal, once each', () => {
+    const deal = { agent_id: 'a1', co_agent_ids: ['a2'] }
+    const listing = { ...property(['a2', 'a3']), assigned_agent_id: 'a4' }
+    expect(agentIdsOnDeal(deal, listing)).toEqual(['a1', 'a2', 'a3', 'a4'])
   })
 })
 

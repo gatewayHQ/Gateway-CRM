@@ -97,6 +97,75 @@ documents are deal-scoped (`eq('deal_id', …)`), so an admin who can open every
 deal can see every document and signature without extra plumbing. Tasks stay personal — a
 to-do list is not oversight data.
 
+### 3ab. Who is on a deal (migration 0055)
+
+An agent sees a deal when **any one** of these says they are on it:
+
+| Record | Where it is set |
+|---|---|
+| `deals.agent_id` | the deal's own agent — plus team peers who share deals |
+| `deals.co_agent_ids` | "Additional Agents" on the deal drawer |
+| `properties.assigned_agent_id` | the listing agent, whoever started the deal |
+| `properties.details.co_agent_ids` | the Co-Agents section on the listing |
+| `commissions.participants` | whoever gets paid on it |
+
+`app_visible_deal_ids()` is that list, and it is the single definition: every
+deal-scoped table policy (documents, document versions, BoldSign documents,
+signature packet events, transaction steps, deal contacts, field layouts,
+template drafts, deadline reminders, closing packets, audit log, nudges) and
+every deal-documents storage policy is written as
+`deal_id in (select app_visible_deal_ids())`. The deal's buyer and seller come
+with it, through `app_visible_contact_ids()`. **Commissions stay admin-only**
+even between co-agents on one deal, and tasks stay personal.
+
+**Why the two property rows are there.** `deals.co_agent_ids` is a *copy* of the
+listing's co-agents, taken once, when the property is converted into a deal —
+and an existing deal never re-seeds. So this sequence:
+
+> create the property → start the deal → **then** add the second agent to the
+> listing → upload documents
+
+wrote the second agent to the property and nowhere else. `src/lib/coAgents.js`
+read the property as a fallback and put them on the team card; RLS read only the
+copy and hid the deal, its documents and its whole history from them. The card
+said shared, the database said private, and four migrations of backfilling
+could not fix it, because the divergence is re-created every time a listing is
+edited after its deal exists. Access is derived from both records now, so there
+is nothing to keep in sync for access to work.
+
+**The cache is still kept in step, for a different reason.** The commission
+seed, the BoldSign signer prefill, the deal announcement and `/api/portal`
+earnings all read `deals.co_agent_ids`. Two triggers
+(`trg_property_coagents_to_deals`, `trg_deal_coagents_to_property`) mirror the
+two lists in both directions, so those cannot name a smaller team than the deal
+page does. A listing edit applies the exact diff (adding a co-agent adds them to
+its deals; removing them takes them off); the deal → listing direction only ever
+unions, because one property can carry a buyer-side and a seller-side deal.
+
+**The one thing this narrowed.** `properties` used to be
+`allow_all_authenticated` for every command: any signed-in agent could rewrite
+any listing in the firm. With membership derived from the listing that would be
+a self-service grant — write yourself onto a listing, see someone else's deal.
+Reads stay firm-wide (the pickers and the duplicate-deal check in 0054 need
+them); UPDATE and DELETE now require being on the listing already. Migration
+0054's rule still holds: the owner widens the team, never the person wanting in
+— `app_request_deal_access()` notifies them and grants nothing.
+
+**Identity comes first.** All of the above resolves through
+`app_my_agent_ids()`, which returns every `agents` row belonging to the caller:
+the one linked to their login, plus any *unlinked* row carrying the same
+verified email. Before that, an agent whose `agents.auth_id` was never set
+resolved to NULL, matched no policy, and saw a blank CRM no matter what any
+co-agent column said. The nightly audit reports those rows rather than repairing
+them (`identity / agents with no login link`).
+
+**The client asks the database.** `src/lib/services/{deals,properties,contacts}.js`
+call `app_visible_deal_ids()` / `app_visible_property_ids()` /
+`app_visible_contact_ids()` over RPC instead of reimplementing the rule in the
+browser. The old client-side filters were a second implementation that drifted:
+a deal RLS had already granted was never fetched, so being granted it changed
+nothing on screen.
+
 ### 3a. Where per-agent split settings are written (and how they used to vanish)
 
 `agents.default_split_pct` / `no_brokerage_split` / `cap_amount` /
