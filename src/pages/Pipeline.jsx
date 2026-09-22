@@ -7077,6 +7077,47 @@ function StageHeader({ stage, label, canRename, onRename }) {
   )
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Which listings belong on the Listings board.
+//
+// "Mine" means the listings this agent is ON, not only the ones assigned to
+// them. Migration 0055 made that the rule everywhere else — a co-agent named on
+// a listing, or on a deal linked to it, is on that listing — but this board
+// open-coded `assigned_agent_id === me`. So the second agent on a shared
+// listing saw the DEAL on the Deals tab and no listing behind it on the
+// Listings tab: the same class of bug 0055 fixed, a client-side
+// reimplementation of the access rule that drifted from the rule.
+//
+// For a NON-ADMIN every deal in `deals` is already a deal they are on (RLS plus
+// fetchVisibleDeals), so the property behind any of them is a listing they are
+// on — no extra fetch is needed to answer it. An ADMIN sees the firm and can
+// narrow to one agent, which asks "what is THEIR book" and so has to read the
+// team off each deal explicitly.
+export function listingsOnBoard({
+  properties = [], deals = [], propertyMap = {}, isAdmin = false,
+  agentFilter = 'all', activeAgentId = null,
+} = {}) {
+  if (!isAdmin || agentFilter === 'all') {
+    if (isAdmin) return properties
+    // No agent resolved yet: show nothing, not the firm. App gates the page on
+    // a matched agent so this should not happen, but the old inline version
+    // fell through to the unfiltered list here, which is the wrong way to fail.
+    if (!activeAgentId) return []
+    const behindMyDeals = new Set(deals.map(d => d.property_id).filter(Boolean))
+    return properties.filter(p =>
+      p.assigned_agent_id === activeAgentId
+      || propertyCoAgentIds(p).includes(activeAgentId)
+      || behindMyDeals.has(p.id))
+  }
+  const behindTheirDeals = new Set(
+    deals.filter(d => agentIdsOnDeal(d, propertyMap[d.property_id]).includes(agentFilter))
+         .map(d => d.property_id).filter(Boolean))
+  return properties.filter(p =>
+    p.assigned_agent_id === agentFilter
+    || propertyCoAgentIds(p).includes(agentFilter)
+    || behindTheirDeals.has(p.id))
+}
+
 export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgentIds, go }) {
   const [drawer, setDrawer] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -7237,14 +7278,21 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   const focusCount = focus.length
 
   // Listings board — filter by agent if needed, group by property status
-  const visibleListings = useMemo(() => {
-    const all = properties
-    if (!isAdmin || agentFilter === 'all') {
-      if (!isAdmin && activeAgent) return all.filter(p => p.assigned_agent_id === activeAgent.id)
-      return all
-    }
-    return all.filter(p => p.assigned_agent_id === agentFilter)
-  }, [properties, isAdmin, agentFilter, activeAgent])
+  //
+  // "Mine" here means the listings this agent is ON, not only the ones assigned
+  // to them. Migration 0055 made that the rule everywhere else — a co-agent
+  // named on a listing, or on a deal linked to it, is on that listing — but
+  // this board open-coded `assigned_agent_id === me`, so the second agent on a
+  // shared listing saw the DEAL on the Deals tab and no listing behind it on
+  // the Listings tab. Same class of bug as the one 0055 fixed: a client-side
+  // reimplementation of the access rule, drifted from the rule.
+  //
+  // For a non-admin, every deal in `deals` is already a deal they are on (RLS
+  // plus fetchVisibleDeals), so the property behind any of them is a listing
+  // they are on — no extra fetch needed to answer it.
+  const visibleListings = useMemo(
+    () => listingsOnBoard({ properties, deals, propertyMap, isAdmin, agentFilter, activeAgentId: activeAgent?.id }),
+    [properties, propertyMap, deals, isAdmin, agentFilter, activeAgent])
 
   const { listingGroups, listingTotals, totalListingValue } = useMemo(() => {
     const groups = Object.fromEntries(LISTING_STATUS_ORDER.map(s => [s, []]))
