@@ -84,3 +84,66 @@ export async function fetchVisibleCommissions(client, { isAdmin, dealIds }) {
   if (!dealIds?.length) return { data: [], error: null }
   return selectInChunks(client, 'commissions', 'deal_id', dealIds)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DUPLICATE DEALS
+//
+// Two agents each had a deal on 102 7th St. SE. Steph's carried 22 filled
+// terms, 3 documents and a task; Emma's was empty. Nothing failed to
+// synchronise — they were two ROWS, and everything on a deal hangs off its id.
+//
+// The second row is easy to create and impossible to notice: "Start Deal" was
+// a bare insert, and the property looked untouched to Emma because RLS only
+// shows her deals she is on. The access model manufactures the duplicate.
+//
+// Which is why this check CANNOT be done against the deals already in the
+// browser. That list is RLS-scoped — Emma's client never contained Steph's
+// deal, so any client-side "does this property have a deal?" answers false for
+// exactly the person who is about to create the duplicate. It has to be asked
+// of the database, through a security-definer function that can see past RLS
+// for this one narrow question (migration 0054).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** True when the RPC is absent because migration 0054 has not been applied. */
+const isMissingRpc = (message = '') =>
+  /does not exist|PGRST202|schema cache|could not find the function/i.test(message)
+
+/**
+ * Open deals already on this property, optionally narrowed to one side.
+ *
+ * Returns `{ deals, error, unavailable }`. `unavailable` means the migration
+ * has not been applied: callers treat that as "no duplicate found" and carry
+ * on, because a pending migration must never block an agent from starting a
+ * deal — the same degrade-and-continue rule the co-agent column uses.
+ *
+ * @param side 'buyer' | 'seller' | 'both' | null (null = any side)
+ */
+export async function findOpenDealsOnProperty(client, propertyId, side = null) {
+  if (!propertyId) return { deals: [], error: null, unavailable: false }
+  const { data, error } = await client.rpc('app_open_deal_on_property', {
+    p_property_id: propertyId,
+    p_side: side || null,
+  })
+  if (error) {
+    if (isMissingRpc(error.message || '')) return { deals: [], error: null, unavailable: true }
+    return { deals: [], error: error.message, unavailable: false }
+  }
+  return { deals: data || [], error: null, unavailable: false }
+}
+
+/**
+ * Ask the agent who owns a deal to add you to it.
+ *
+ * Notifies them; grants nothing. A function that let an agent add THEMSELVES
+ * to any deal would be a privilege escalation dressed up as a convenience, so
+ * the owner stays the only one who can widen their own deal's team.
+ */
+export async function requestDealAccess(client, dealId) {
+  if (!dealId) return { ok: false, error: 'deal missing' }
+  const { data, error } = await client.rpc('app_request_deal_access', { p_deal_id: dealId })
+  if (error) {
+    if (isMissingRpc(error.message || '')) return { ok: false, error: 'Run migration 0054 to enable access requests.' }
+    return { ok: false, error: error.message }
+  }
+  return { ok: data !== false, error: data === false ? 'Could not send that request.' : null }
+}

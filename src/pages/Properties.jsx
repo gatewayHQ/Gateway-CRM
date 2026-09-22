@@ -2,13 +2,14 @@ import React, { useState, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { formatCurrency } from '../lib/helpers.js'
-import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
 import { findMatchingBuyers } from '../lib/matching.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
 import { fetchVisibleProperties } from '../lib/services/properties.js'
 import { coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
+import { findOpenDealsOnProperty, requestDealAccess } from '../lib/services/deals.js'
 import { isMissingSideColumn } from '../lib/dealPeople.js'
 import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
@@ -819,10 +820,15 @@ async function reloadPropertyContacts(setDb, propertyId) {
   }))
 }
 
-function PropertyDrawer({ open, onClose, property, agents, contacts, propertyContacts = [], deals = [], activeAgent, onSave, go, setDb, announce }) {
+function PropertyDrawer({ open, onClose, property, agents, contacts, propertyContacts = [], deals = [], activeAgent, isAdmin = false, onSave, go, setDb, announce }) {
   const blank = { address:'', unit:'', city:'', state:'', zip:'', county:'', submarket:'', type:'residential', status:'active', list_price:'', sqft:'', beds:'', baths:'', garage:0, mls_number:'', linked_contact_id:'', assigned_agent_id:'', notes:'', details:{}, listing_expiry_date:'', price_history:[], comps:[] }
   const [form, setForm]             = useState(property || blank)
   const [errors, setErrors]         = useState({})
+  // An open deal somebody else already has on this property. Held rather than
+  // acted on: the agent decides whether to open it, ask to join it, or (office
+  // admins only) start a second one anyway.
+  const [dupeDeals, setDupeDeals]   = useState(null)
+  const [asking, setAsking]         = useState('')
   const [saving, setSaving]         = useState(false)
   const [startingDeal, setStartingDeal] = useState(false)
   const [tab, setTab]               = useState('details')
@@ -855,8 +861,27 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     set('details', { ...(form.details || {}), co_agent_ids: next })
   }
 
-  const startDeal = async () => {
+  // `force` is the office-admin override. Everyone else goes through the check.
+  const startDeal = async (force = false) => {
     setStartingDeal(true)
+    // Does this property already carry an open deal on the side this button
+    // creates? Asked of the DATABASE, not of the deals in this browser — the
+    // in-memory list is RLS-scoped, so a colleague's deal is invisible here and
+    // a client-side check would wave through exactly the duplicate it is meant
+    // to catch. "Start Deal" always creates a seller-side deal (see comp_data
+    // below), so that is the side we ask about.
+    if (!force) {
+      const { deals: existing, error: dupeErr } = await findOpenDealsOnProperty(supabase, property.id, 'seller')
+      if (dupeErr) {
+        // A failed check must not block the work. Log the reason and continue —
+        // the unique index from migration 0054 is the backstop.
+        console.warn('Duplicate-deal check failed, continuing:', dupeErr)
+      } else if (existing.length) {
+        setDupeDeals(existing)
+        setStartingDeal(false)
+        return
+      }
+    }
     const primaryAgentId = activeAgent?.id || form.assigned_agent_id || null
     const dealPayload = {
       // The suite is part of the address, so it is part of the deal's title —
@@ -930,6 +955,16 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
 
     const payload = {
       ...form,
+      // TRIM. The validator above already calls .trim() to decide whether the
+      // address is empty, but the value SAVED was the raw one — so
+      // '102 7th St. SE' and '102 7th St. SE ' became two different property
+      // rows, each with its own deals, invisible to every report that groups by
+      // property. Live data carried exactly that. See migration 0054, which
+      // also trims what is already stored.
+      address:              (form.address || '').trim(),
+      unit:                 form.unit ? form.unit.trim() : form.unit,
+      city:                 form.city ? form.city.trim() : form.city,
+      mls_number:           form.mls_number ? form.mls_number.trim() : form.mls_number,
       id:                   resolvedId,
       // 'Suite 200' / '#4' / '' — a bare "200" becomes "Suite 200", and an
       // empty field is stored as null rather than an empty string so the
@@ -1218,6 +1253,69 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
         {/* ── Possible Buyers — powered by the matching engine ── */}
         <PossibleBuyers form={form} contacts={contacts} />
       </div>
+      {/* ── Already has a deal ──────────────────────────────────────────────
+          Emma clicked Start Deal on a property Steph already had a deal on.
+          Steph's deal is invisible to Emma (RLS shows you only deals you are
+          on), so the property looked untouched and the CRM silently made a
+          second one. That is the whole bug: two rows, each with their own
+          documents, terms and tasks, neither aware of the other.
+
+          Naming the agent is a deliberate, narrow disclosure — properties and
+          the agent roster are already org-wide readable, so this adds only the
+          fact that a deal exists, which is precisely what was missing. */}
+      <Modal open={!!dupeDeals} onClose={() => setDupeDeals(null)} width={560}>
+        <div style={{ padding: 20 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>
+            This property already has a deal
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--gw-mist)', lineHeight: 1.7, marginBottom: 14 }}>
+            Starting another would split the work in two — documents, deal terms, key dates and
+            signatures all live on one deal and never cross between them.
+          </div>
+          {(dupeDeals || []).map(d => (
+            <div key={d.deal_id} style={{ border: '1px solid var(--gw-line, #e6e2da)', borderRadius: 'var(--radius)', padding: 12, marginBottom: 10 }}>
+              <div style={{ fontWeight: 600, fontSize: 13.5 }}>{d.title || 'Untitled deal'}</div>
+              <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 3 }}>
+                {d.agent_name || 'Unassigned'} · {String(d.stage || '').replace(/-/g, ' ')}
+                {d.side && d.side !== 'unknown' ? ` · ${d.side} side` : ''}
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                <button className="btn btn--secondary btn--sm" onClick={() => { setDupeDeals(null); onClose(); go && go('pipeline') }}>
+                  <Icon name="pipeline" size={12} /> Open in Pipeline
+                </button>
+                {d.agent_id !== activeAgent?.id && (
+                  <button
+                    className="btn btn--secondary btn--sm"
+                    disabled={asking === d.deal_id}
+                    onClick={async () => {
+                      setAsking(d.deal_id)
+                      const r = await requestDealAccess(supabase, d.deal_id)
+                      setAsking('')
+                      pushToast(
+                        r.ok ? `Asked ${d.agent_name || 'the owner'} to add you to this deal.` : (r.error || 'Could not send that request.'),
+                        r.ok ? 'success' : 'error'
+                      )
+                    }}>
+                    <Icon name="mail" size={12} /> {asking === d.deal_id ? 'Sending…' : `Ask ${(d.agent_name || 'owner').split(' ')[0]} to add me`}
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+            <button className="btn btn--secondary" onClick={() => setDupeDeals(null)}>Cancel</button>
+            {isAdmin && (
+              // Office admins only. There are real reasons for a second deal on
+              // one property; there is no reason for an agent to make one by
+              // accident because they could not see the first.
+              <button className="btn btn--danger" onClick={() => { setDupeDeals(null); startDeal(true) }}>
+                Start a second deal anyway
+              </button>
+            )}
+          </div>
+        </div>
+      </Modal>
+
       <div className="drawer__foot">
 
         {property?.id && (
@@ -1737,7 +1835,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAge
         </div>
       )}
 
-      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} propertyContacts={propertyContacts} deals={db.deals || []} activeAgent={activeAgent} onSave={handleSave} go={go} setDb={setDb} announce={announce} />
+      <PropertyDrawer open={drawer} onClose={() => setDrawer(false)} property={editing} agents={agents} contacts={contacts} propertyContacts={propertyContacts} deals={db.deals || []} activeAgent={activeAgent} isAdmin={isAdmin} onSave={handleSave} go={go} setDb={setDb} announce={announce} />
       {confirm && <ConfirmDialog message="This will permanently delete this property." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {radiusProp && (
         <RadiusMailingModal

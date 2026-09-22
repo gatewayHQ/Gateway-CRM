@@ -1,7 +1,7 @@
 import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { syncTaskCalendar } from '../lib/services/tasks.js'
-import { fetchVisibleDeals } from '../lib/services/deals.js'
+import { fetchVisibleDeals, findOpenDealsOnProperty } from '../lib/services/deals.js'
 import { formatCurrency, formatDate, STAGE_LABELS, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
 import { normalizeStageLabel, hasStageLabelOverrides, STAGE_LABEL_MAX } from '../lib/stageLabels.js'
@@ -6437,6 +6437,31 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         commission_pct:      form.commission_type !== 'flat' && form.commission_pct  !== '' && form.commission_pct  !== null ? Number(form.commission_pct)  : null,
         commission_flat:     form.commission_type === 'flat' && form.commission_flat !== '' && form.commission_flat !== null ? Number(form.commission_flat) : null,
       }
+      // The other way a duplicate gets made: a NEW deal in this drawer pointed
+      // at a property that already carries an open one on the same side. Same
+      // reasoning as Properties.jsx — the check has to reach the database,
+      // because the deals in this browser are RLS-scoped and a colleague's is
+      // not among them. Editing an existing deal is never blocked.
+      if (!deal?.id && payload.property_id) {
+        const side = String(payload.comp_data?.transaction_type || '').trim() || null
+        const { deals: clash, error: clashErr } = await findOpenDealsOnProperty(supabase, payload.property_id, side)
+        if (clashErr) {
+          console.warn('Duplicate-deal check failed, continuing:', clashErr)
+        } else {
+          const other = clash.filter(c => c.deal_id !== deal?.id)
+          if (other.length) {
+            setSaving(false)
+            const who = other[0].agent_name || 'Another agent'
+            pushToast(
+              `${who} already has an open ${other[0].side !== 'unknown' ? other[0].side + '-side ' : ''}deal on this property. ` +
+              `Add yourself to that deal instead of starting a second one — documents and terms do not cross between them.`,
+              'error'
+            )
+            return
+          }
+        }
+      }
+
       const write = async (body) => {
         if (deal?.id) {
           const { error } = await supabase.from('deals').update(body).eq('id', deal.id)
