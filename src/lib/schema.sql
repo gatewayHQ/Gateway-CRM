@@ -3930,3 +3930,118 @@ $$;
 -- Execute is granted broadly; the function refuses a non-admin caller itself,
 -- which keeps the refusal message useful instead of a bare permission error.
 grant execute on function app_access_audit() to authenticated, service_role;
+
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- DUPLICATE DEALS  (migration 0054)
+--
+-- Two agents each had a deal on one property: one carried 22 filled terms, 3
+-- documents and a task, the other was empty. Nothing failed to synchronise —
+-- they were two ROWS, and everything on a deal hangs off its id (comp_data,
+-- `deal-<uuid>/` storage, key dates, tasks, commission, signatures).
+--
+-- The second row is easy to create and impossible to notice: "Start Deal" was
+-- a bare insert, and the property looked untouched to the second agent because
+-- RLS only shows deals you are on. The access model manufactures the duplicate.
+--
+-- Which is why the check cannot live in the browser: the deals there are
+-- RLS-scoped, so a colleague's deal is absent and a client-side check answers
+-- "no duplicate" for exactly the person about to create one.
+-- `app_open_deal_on_property()` is `security definer` for that one narrow
+-- question. It returns no value, no commission and no contacts — only enough
+-- to say "Steph already has a deal here" instead of silently making a second.
+--
+-- PER SIDE, NOT PER PROPERTY: a buyer-side and a seller-side deal on one
+-- property is legitimate business (seen live, both closed). Two OPEN deals on
+-- the same property and the same side are the duplicates.
+-- ═════════════════════════════════════════════════════════════════════════════
+
+create or replace function app_open_deal_on_property(
+  p_property_id uuid,
+  p_side        text default null   -- null = any side
+)
+returns table (
+  deal_id    uuid,
+  title      text,
+  stage      text,
+  side       text,
+  agent_id   uuid,
+  agent_name text,
+  created_at timestamptz
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select d.id, d.title, d.stage,
+         coalesce(d.comp_data->>'transaction_type', 'unknown'),
+         d.agent_id, a.name, d.created_at
+    from deals d
+    left join agents a on a.id = d.agent_id
+   where d.property_id = p_property_id
+     and d.stage not in ('closed', 'lost')
+     and (p_side is null
+          or coalesce(d.comp_data->>'transaction_type', 'unknown')
+             = coalesce(nullif(btrim(p_side), ''), 'unknown'))
+   order by d.created_at
+$$;
+
+grant execute on function app_open_deal_on_property(uuid, text) to authenticated;
+
+-- ── 3. Ask the owner for access — never take it ────────────────────────────
+-- An agent who finds a colleague's deal needs a way forward that is not "make
+-- a second one". This notifies the owner; it grants NOTHING. A function that
+-- let any agent add themselves to any deal would be a privilege escalation
+-- dressed up as a convenience.
+create or replace function app_request_deal_access(p_deal_id uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  me uuid; me_name text; owner_id uuid; d_title text;
+begin
+  me := app_current_agent_id();
+  if me is null then return false; end if;
+
+  select d.agent_id, d.title into owner_id, d_title from deals d where d.id = p_deal_id;
+  if owner_id is null or owner_id = me then return false; end if;
+
+  -- One pending ask per agent per deal. Clicking twice must not page someone
+  -- twice, and a stuck request must not become a nightly reminder.
+  if exists (
+    select 1 from agent_notifications n
+     where n.agent_id = owner_id and n.deal_id = p_deal_id
+       and n.type = 'deal_access_request' and n.read = false
+       and n.message like '%' || me::text || '%'
+  ) then
+    return true;
+  end if;
+
+  select a.name into me_name from agents a where a.id = me;
+
+  insert into agent_notifications (agent_id, deal_id, title, message, type)
+  values (
+    owner_id,
+    coalesce(me_name, 'An agent') || ' wants access to ' || coalesce(d_title, 'a deal'),
+    coalesce(me_name, 'An agent') || ' opened this property and found your deal instead of starting their own. '
+      || 'Add them under Agents on deal if they are working it with you.  [' || me::text || ']',
+    'deal_access_request'
+  );
+  return true;
+end
+$$;
+
+grant execute on function app_request_deal_access(uuid) to authenticated;
+
+
+-- The backstop behind the UI check: two agents clicking at the same moment, an
+-- import, a hand-written insert. `coalesce(..., 'unknown')` is load-bearing —
+-- Postgres treats NULLs as DISTINCT in a unique index, so keying on the raw
+-- value would permit unlimited duplicates on every deal without a side set,
+-- which live data showed was most of them.
+create unique index if not exists deals_one_open_per_property_side
+  on deals (property_id, (coalesce(comp_data->>'transaction_type', 'unknown')))
+  where property_id is not null and stage not in ('closed', 'lost');

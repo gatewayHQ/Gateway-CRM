@@ -5,6 +5,13 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # Run it by hand from Actions -> CI -> Run workflow.
+  #
+  # Added because CI repeatedly did not fire on open pull requests (no run was
+  # created at all — not queued, not failed), leaving changes verifiable only
+  # locally. With no manual trigger there was no way to tell a GitHub-side
+  # problem from a configuration one, and no way to get a PR checked once it happened.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
