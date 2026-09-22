@@ -4025,6 +4025,7 @@ begin
   insert into agent_notifications (agent_id, deal_id, title, message, type)
   values (
     owner_id,
+    p_deal_id,
     coalesce(me_name, 'An agent') || ' wants access to ' || coalesce(d_title, 'a deal'),
     coalesce(me_name, 'An agent') || ' opened this property and found your deal instead of starting their own. '
       || 'Add them under Agents on deal if they are working it with you.  [' || me::text || ']',
