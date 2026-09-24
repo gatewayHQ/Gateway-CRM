@@ -109,12 +109,121 @@ export function downloadBlob(blob, filename, { doc = document, win = (typeof win
  * Every file in `packet`, as `[{ path, name }]`, newest scheme first.
  * `storage_paths` holds the whole package; `storage_path` is the pre-0022
  * single-file column, kept as the fallback for packets uploaded before it.
+ * A file with no recorded name is named from its path, less the upload prefix.
  */
 export function packetFiles(packet) {
   const many = Array.isArray(packet?.storage_paths) ? packet.storage_paths.filter(f => f?.path) : []
-  if (many.length) return many.map(f => ({ path: f.path, name: f.name || f.path.split('/').pop() }))
-  if (packet?.storage_path) return [{ path: packet.storage_path, name: packet.storage_path.split('/').pop() }]
+  if (many.length) return many.map(f => ({ path: f.path, name: f.name || nameFromPath(f.path) }))
+  if (packet?.storage_path) return [{ path: packet.storage_path, name: nameFromPath(packet.storage_path) }]
   return []
+}
+
+// ---------------------------------------------------------------------------
+// A packet whose record names ONE file may be lying.
+//
+// Until migration 0022 reached production the `storage_paths` column did not
+// exist, and FormLibrary's save() answered the missing column by retrying
+// without it: every PDF of a five-file packet was uploaded, the row kept only
+// `storage_path` -- file 1 -- and the admin was told "Form packet added". When
+// 0022 landed those rows got its default `[]`, and any later edit wrote the
+// one surviving file back as `storage_paths: [file 1]`. Either way packetFiles()
+// honestly reports one file, and Get Forms hands down file 1 as if it were the
+// packet.
+//
+// The rest of the packet was never lost: it is in the bucket, next to file 1,
+// under the name FormLibrary gives every upload -- `<Date.now()>-<i>-<name>`,
+// one index per file, uploaded one after another. So a single recorded file at
+// index 0 is checked against its folder, and the upload it came from is
+// delivered whole. Migration 0056 writes the same answer back into the rows;
+// this is what keeps agents from being handed file 1 until someone runs it.
+// ---------------------------------------------------------------------------
+
+const BATCH_NAME_RE = /^(\d+)-(\d+)-(.+)$/
+
+// Consecutive files of one save are uploaded back to back, so the gap between
+// their timestamps is one file's upload time -- seconds, or a few minutes for a
+// 25 MB scan on a slow uplink. A file further away than this is not the next
+// file of the same save, whatever its index says.
+export const MAX_BATCH_GAP_MS = 15 * 60 * 1000
+
+// Folder listings come back in pages; a folder is one state + transaction type.
+const LIST_PAGE = 1000
+const LIST_PAGE_LIMIT = 20
+
+function parseBatchName(name) {
+  const m = BATCH_NAME_RE.exec(String(name || ''))
+  return m ? { ts: Number(m[1]), idx: Number(m[2]), name: m[3] } : null
+}
+
+// "IA/buyer/1723…-0-Purchase Agreement.pdf" → "Purchase Agreement.pdf": the name
+// the admin uploaded, which is what an agent should find in their Downloads.
+function nameFromPath(path) {
+  const base = String(path || '').split('/').pop()
+  return parseBatchName(base)?.name || base
+}
+
+/**
+ * The upload `path` was saved in, reconstructed from `names` (the object names
+ * in its folder), as `[{ path, name }]` in upload order. Null when `path` is not
+ * the first file of a Form Library upload, so there is no batch to rebuild.
+ *
+ * File k belongs to the batch when it is index k, uploaded at or after file
+ * k-1, within MAX_BATCH_GAP_MS of it, and before the NEXT upload's first file.
+ * Two candidates for one index is not a guess this makes: it throws.
+ */
+export function uploadBatch(path, names) {
+  const slash = String(path || '').lastIndexOf('/')
+  const folder = slash >= 0 ? path.slice(0, slash) : ''
+  const anchor = parseBatchName(slash >= 0 ? path.slice(slash + 1) : path)
+  if (!anchor || anchor.idx !== 0) return null
+
+  const entries = (names || []).map(n => ({ file: n, ...parseBatchName(n) })).filter(e => e.name)
+  const nextUpload = entries.reduce((t, e) => (e.idx === 0 && e.ts > anchor.ts && e.ts < t ? e.ts : t), Infinity)
+  const join = (file) => (folder ? `${folder}/${file}` : file)
+
+  const batch = [{ path, name: anchor.name }]
+  let prev = anchor
+  for (let k = 1; ; k++) {
+    const next = entries.filter(e => e.idx === k && e.ts >= prev.ts && e.ts < nextUpload && e.ts - prev.ts <= MAX_BATCH_GAP_MS)
+    if (!next.length) return batch
+    if (next.length > 1) {
+      throw new Error(`Found ${next.length} candidates for file ${k + 1} of this packet in storage (${next.map(e => e.name).join(', ')}), so nothing was saved — an admin needs to re-upload this packet's PDFs in the Form Library`)
+    }
+    batch.push({ path: join(next[0].file), name: next[0].name })
+    prev = next[0]
+  }
+}
+
+// Every object name directly inside `folder`.
+async function listFolder(storage, folder) {
+  const names = []
+  for (let page = 0; page < LIST_PAGE_LIMIT; page++) {
+    const { data, error } = await storage.list(folder, { limit: LIST_PAGE, offset: page * LIST_PAGE })
+    if (error) throw new Error(`Couldn't check this packet's files: ${error.message}`)
+    // Sub-folders come back as entries with no id.
+    for (const o of data || []) if (o?.name && o.id !== null) names.push(o.name)
+    if ((data || []).length < LIST_PAGE) return names
+  }
+  // A listing cut short could drop a file from the middle of the packet.
+  throw new Error(`Couldn't check this packet's files: ${folder} holds more than ${LIST_PAGE * LIST_PAGE_LIMIT} files`)
+}
+
+/**
+ * The files to deliver for `packet`: what its record lists, or -- when the record
+ * lists one file that began a multi-file upload -- that whole upload.
+ * `recovered` is how many files the record was missing.
+ */
+export async function resolvePacketFiles(packet, { storage } = {}) {
+  const recorded = packetFiles(packet)
+  if (recorded.length !== 1) return { items: recorded, recovered: 0 }
+  const [only] = recorded
+  if (!uploadBatch(only.path, [])) return { items: recorded, recovered: 0 }   // not a Form Library upload
+
+  const slash = only.path.lastIndexOf('/')
+  const batch = uploadBatch(only.path, await listFolder(storage, slash >= 0 ? only.path.slice(0, slash) : ''))
+  if (batch.length === 1) return { items: recorded, recovered: 0 }
+  batch[0] = only   // keep the name the record gave file 1
+  return { items: batch, recovered: batch.length - 1 }
 }
 
 /** Point the browser at `url` as a download named `filename`. */
@@ -135,11 +244,16 @@ function downloadUrl(url, filename, { doc = document } = {}) {
  * because after the first await the clicks are outside the button's user
  * gesture and browsers block every download but the first.
  *
- * Resolves `{ files, zipped }`; throws with a message worth showing an agent.
+ * Resolves `{ files, zipped, recovered }` -- `recovered` counts files the
+ * packet's record was missing and the bucket supplied (see resolvePacketFiles).
+ * Throws with a message worth showing an agent.
  */
 export async function deliverPacket(packet, { storage, expiresIn = 300, doc, win, fetchImpl } = {}) {
-  const items = packetFiles(packet)
-  if (!items.length) throw new Error('No file uploaded for this packet')
+  if (!packetFiles(packet).length) throw new Error('No file uploaded for this packet')
+  const { items, recovered } = await resolvePacketFiles(packet, { storage })
+  if (recovered) {
+    console.warn(`[packetDownload] packet ${packet?.id} lists 1 file but its upload holds ${items.length} — delivering all of them; migration 0056 repairs the row`)
+  }
 
   if (items.length === 1) {
     const it = items[0]
@@ -148,7 +262,7 @@ export async function deliverPacket(packet, { storage, expiresIn = 300, doc, win
       throw new Error(`Couldn't fetch ${it.name || 'the file'}: ${error?.message || 'storage returned no link'}`)
     }
     downloadUrl(data.signedUrl, it.name, { doc })
-    return { files: 1, zipped: false }
+    return { files: 1, zipped: false, recovered: 0 }
   }
 
   const { data: signed, error: signErr } = await storage.createSignedUrls(items.map(it => it.path), expiresIn)
@@ -168,5 +282,5 @@ export async function deliverPacket(packet, { storage, expiresIn = 300, doc, win
   }
   const blob = await buildPacketZip(urls, fetchImpl ? { fetchImpl } : {})
   downloadBlob(blob, packetZipName(packet), { ...(doc ? { doc } : {}), ...(win ? { win } : {}) })
-  return { files: items.length, zipped: true }
+  return { files: items.length, zipped: true, recovered }
 }

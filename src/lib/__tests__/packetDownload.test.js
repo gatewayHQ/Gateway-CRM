@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { buildPacketZip, packetZipName, downloadBlob, packetFiles, deliverPacket } from '../packetDownload.js'
+import {
+  buildPacketZip, packetZipName, downloadBlob, packetFiles, deliverPacket,
+  uploadBatch, resolvePacketFiles, MAX_BATCH_GAP_MS,
+} from '../packetDownload.js'
 import { crc32, uniqueEntryNames, zipFiles } from '../zipFiles.js'
 
 // Minimal zip reader — enough to prove every file made it into the archive, which
@@ -169,10 +172,25 @@ const BUYER_AGENCY = {
 }
 
 // A stand-in for supabase.storage.from(bucket) that signs whatever it is asked for.
-function fakeStorage() {
+// `objects` is the bucket's contents; list() answers like Supabase's: the direct
+// children of a folder, sub-folders as { name, id: null }, a page at a time.
+function fakeStorage(objects = []) {
   const signed = []
+  const listed = []
   return {
     signed,
+    listed,
+    list: async (folder, { limit = 100, offset = 0 } = {}) => {
+      listed.push(folder)
+      const kids = new Map()
+      for (const path of objects) {
+        if (!path.startsWith(`${folder}/`)) continue
+        const rest = path.slice(folder.length + 1)
+        const cut = rest.indexOf('/')
+        kids.set(cut < 0 ? rest : rest.slice(0, cut), { name: cut < 0 ? rest : rest.slice(0, cut), id: cut < 0 ? rest : null })
+      }
+      return { data: [...kids.values()].slice(offset, offset + limit), error: null }
+    },
     createSignedUrl: async (path, _exp, opts) => {
       signed.push(path)
       return { data: { signedUrl: `https://s/${encodeURIComponent(path)}` }, error: null, opts }
@@ -205,12 +223,14 @@ describe('packetFiles', () => {
 
   it('falls back to the pre-0022 single-file column', () => {
     expect(packetFiles({ storage_path: 'IA/seller/9-0-Listing.pdf' }))
-      .toEqual([{ path: 'IA/seller/9-0-Listing.pdf', name: '9-0-Listing.pdf' }])
+      .toEqual([{ path: 'IA/seller/9-0-Listing.pdf', name: 'Listing.pdf' }])
     expect(packetFiles({ storage_paths: [] , storage_path: 'IA/seller/9-0-Listing.pdf' })).toHaveLength(1)
   })
 
-  it('names a file from its path when the row carries no name', () => {
-    expect(packetFiles({ storage_paths: [{ path: 'IA/buyer/1-0-Addendum.pdf' }] })[0].name).toBe('1-0-Addendum.pdf')
+  it('names a file from its path when the row carries no name — the uploaded name, not the storage key', () => {
+    expect(packetFiles({ storage_paths: [{ path: 'IA/buyer/1-0-Addendum.pdf' }] })[0].name).toBe('Addendum.pdf')
+    expect(packetFiles({ storage_path: 'IA/buyer/1723000000000-0-2024 Addendum 3-1.pdf' })[0].name).toBe('2024 Addendum 3-1.pdf')
+    expect(packetFiles({ storage_path: 'SD/seller/Listing Agreement.pdf' })[0].name).toBe('Listing Agreement.pdf')
   })
 
   it('is empty for a packet with nothing uploaded', () => {
@@ -230,7 +250,7 @@ describe('deliverPacket', () => {
 
     const res = await deliverPacket(IOWA_PURCHASE, { storage, fetchImpl: impl, ...dom })
 
-    expect(res).toEqual({ files: 5, zipped: true })
+    expect(res).toEqual({ files: 5, zipped: true, recovered: 0 })
     expect(storage.signed).toEqual(IOWA_PURCHASE.storage_paths.map(f => f.path))
     expect(dom.clicks).toEqual(['IA - Iowa Purchase Agreement.zip'])
   })
@@ -245,7 +265,7 @@ describe('deliverPacket', () => {
 
     const res = await deliverPacket(BUYER_AGENCY, { storage, fetchImpl: impl, ...dom })
 
-    expect(res).toEqual({ files: 3, zipped: true })
+    expect(res).toEqual({ files: 3, zipped: true, recovered: 0 })
     expect(storage.signed).toEqual(BUYER_AGENCY.storage_paths.map(f => f.path))
   })
 
@@ -256,7 +276,7 @@ describe('deliverPacket', () => {
       { id: 'x', state: 'IA', name: 'Lead Paint', storage_paths: [{ path: 'IA/buyer/3-0-Lead.pdf', name: 'Lead Paint.pdf' }] },
       { storage, ...dom },
     )
-    expect(res).toEqual({ files: 1, zipped: false })
+    expect(res).toEqual({ files: 1, zipped: false, recovered: 0 })
     expect(dom.clicks).toEqual(['Lead Paint.pdf'])
   })
 
@@ -287,5 +307,158 @@ describe('deliverPacket', () => {
   it('complains instead of downloading nothing when the packet has no files', async () => {
     await expect(deliverPacket({ id: 'empty' }, { storage: fakeStorage() }))
       .rejects.toThrow(/No file uploaded/)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regression: the record that lists one file of a five-file upload.
+//
+// Until migration 0022 reached production, FormLibrary's save() answered the
+// missing `storage_paths` column by retrying without it: every PDF went into the
+// bucket and the row kept `storage_path` — file 1. 0022 then defaulted those
+// rows to `[]`, and a later edit re-saved them as `storage_paths: [file 1]`.
+// Both shapes read as a one-file packet, so Get Forms handed out file 1 and
+// looked like it had worked. The rest of the upload is still in the bucket,
+// under the `<Date.now()>-<i>-<name>` scheme, and that is what is delivered now.
+// ─────────────────────────────────────────────────────────────────────────────
+const T = 1_723_000_000_000
+const IOWA_UPLOAD = [
+  `IA/buyer/${T}-0-Purchase Agreement.pdf`,
+  `IA/buyer/${T + 4_000}-1-Bill of Sale.pdf`,
+  `IA/buyer/${T + 9_000}-2-Groundwater Hazard.pdf`,
+  `IA/buyer/${T + 15_000}-3-Radon Disclosure.pdf`,
+  `IA/buyer/${T + 20_000}-4-Lead Paint Addendum.pdf`,
+]
+const IOWA_NAMES = ['Purchase Agreement.pdf', 'Bill of Sale.pdf', 'Groundwater Hazard.pdf', 'Radon Disclosure.pdf', 'Lead Paint Addendum.pdf']
+const TRUNCATED_BEFORE_0022 = { id: 'ia-buyer', state: 'IA', name: 'Iowa Buyer Contract Package', storage_path: IOWA_UPLOAD[0], storage_paths: [] }
+const TRUNCATED_THEN_RESAVED = {
+  ...TRUNCATED_BEFORE_0022,
+  storage_paths: [{ path: IOWA_UPLOAD[0], name: 'Purchase Agreement.pdf' }],
+}
+const folderNames = (paths, folder = 'IA/buyer') => paths.filter(p => p.startsWith(`${folder}/`)).map(p => p.slice(folder.length + 1))
+
+describe('uploadBatch', () => {
+  it('rebuilds a five-file upload, in upload order, from its first file', () => {
+    expect(uploadBatch(IOWA_UPLOAD[0], folderNames(IOWA_UPLOAD)))
+      .toEqual(IOWA_UPLOAD.map((path, i) => ({ path, name: IOWA_NAMES[i] })))
+  })
+
+  it('stops where the next upload into the folder begins', () => {
+    const single = `IA/buyer/${T}-0-Lead Paint.pdf`
+    const nextUpload = [`IA/buyer/${T + 100}-0-A.pdf`, `IA/buyer/${T + 200}-1-B.pdf`]
+    expect(uploadBatch(single, folderNames([single, ...nextUpload]))).toEqual([{ path: single, name: 'Lead Paint.pdf' }])
+  })
+
+  it('does not reach back to an earlier upload', () => {
+    const earlier = [`IA/buyer/${T - 5_000}-0-Old.pdf`, `IA/buyer/${T - 4_000}-1-Old addendum.pdf`]
+    const single = `IA/buyer/${T}-0-New.pdf`
+    expect(uploadBatch(single, folderNames([...earlier, single]))).toHaveLength(1)
+  })
+
+  it('will not join a file uploaded long after the one before it', () => {
+    const single = `IA/seller/${T}-0-X.pdf`
+    const orphan = `IA/seller/${T + MAX_BATCH_GAP_MS + 1}-1-Y.pdf`
+    expect(uploadBatch(single, folderNames([single, orphan], 'IA/seller'))).toHaveLength(1)
+  })
+
+  it('refuses to guess between two files claiming the same place', () => {
+    const files = [`IA/seller/${T}-0-Listing.pdf`, `IA/seller/${T + 100}-1-A.pdf`, `IA/seller/${T + 200}-1-B.pdf`]
+    expect(() => uploadBatch(files[0], folderNames(files, 'IA/seller'))).toThrow(/2 candidates for file 2.*nothing was saved/)
+  })
+
+  it('has nothing to rebuild for a file that did not start a Form Library upload', () => {
+    expect(uploadBatch('SD/seller/Listing Agreement.pdf', ['Listing Agreement.pdf', 'Disclosure.pdf'])).toBeNull()
+    expect(uploadBatch(IOWA_UPLOAD[1], folderNames(IOWA_UPLOAD))).toBeNull()
+  })
+})
+
+describe('resolvePacketFiles', () => {
+  it('trusts a record that already lists several files, without listing the bucket', async () => {
+    const storage = fakeStorage([...IOWA_UPLOAD, `IA/buyer/${T + 21_000}-5-Stray.pdf`])
+    const { items, recovered } = await resolvePacketFiles(IOWA_PURCHASE, { storage })
+    expect(items).toHaveLength(5)
+    expect(recovered).toBe(0)
+    expect(storage.listed).toEqual([])
+  })
+
+  it('ignores sub-folders when it lists', async () => {
+    const storage = fakeStorage([...IOWA_UPLOAD, `IA/buyer/archive/${T + 1_000}-1-Nested.pdf`])
+    const { items } = await resolvePacketFiles(TRUNCATED_BEFORE_0022, { storage })
+    expect(items.map(f => f.name)).toEqual(IOWA_NAMES)
+  })
+
+  it('reads a folder that runs past one page of listing', async () => {
+    const filler = Array.from({ length: 1500 }, (_, i) => `IA/buyer/${T - 10_000_000 + i}-0-Old ${i}.pdf`)
+    const { items } = await resolvePacketFiles(TRUNCATED_BEFORE_0022, { storage: fakeStorage([...filler, ...IOWA_UPLOAD]) })
+    expect(items).toHaveLength(5)
+  })
+
+  it('refuses rather than guessing when the folder cannot be read', async () => {
+    const storage = fakeStorage(IOWA_UPLOAD)
+    storage.list = async () => ({ data: null, error: { message: 'permission denied' } })
+    await expect(resolvePacketFiles(TRUNCATED_BEFORE_0022, { storage })).rejects.toThrow(/Couldn't check this packet's files: permission denied/)
+  })
+})
+
+describe('deliverPacket — a record that lists only file 1', () => {
+  const bodiesFor = (paths) => Object.fromEntries(paths.map((p, i) => [`https://s/${encodeURIComponent(p)}`, `form-${i}`]))
+
+  for (const [label, packet] of [['storage_paths = []', TRUNCATED_BEFORE_0022], ['storage_paths = [file 1]', TRUNCATED_THEN_RESAVED]]) {
+    it(`zips the whole upload when the row has ${label}`, async () => {
+      const storage = fakeStorage(IOWA_UPLOAD)
+      const dom = fakeDom()
+      const { impl } = bytesFetch(bodiesFor(IOWA_UPLOAD))
+
+      const res = await deliverPacket(packet, { storage, fetchImpl: impl, ...dom })
+
+      expect(res).toEqual({ files: 5, zipped: true, recovered: 4 })
+      expect(storage.listed).toEqual(['IA/buyer'])
+      expect(storage.signed).toEqual(IOWA_UPLOAD)
+      expect(dom.clicks).toEqual(['IA - Iowa Buyer Contract Package.zip'])
+    })
+  }
+
+  it('puts every form in the archive under its uploaded name, in upload order', async () => {
+    const blobs = []
+    const dom = fakeDom()
+    dom.win.URL.createObjectURL = (b) => { blobs.push(b); return 'blob:z' }
+    const { impl } = bytesFetch(bodiesFor(IOWA_UPLOAD))
+
+    await deliverPacket(TRUNCATED_BEFORE_0022, { storage: fakeStorage(IOWA_UPLOAD), fetchImpl: impl, ...dom })
+
+    const { entries, declared } = await readZip(blobs[0])
+    expect(declared).toBe(5)
+    expect(entries.map(e => e.name)).toEqual(IOWA_NAMES)
+    expect(entries.map(e => new TextDecoder().decode(e.data))).toEqual(['form-0', 'form-1', 'form-2', 'form-3', 'form-4'])
+  })
+
+  it('still refuses the whole packet when one recovered file cannot be fetched', async () => {
+    const dom = fakeDom()
+    const { impl } = bytesFetch(bodiesFor(IOWA_UPLOAD.slice(0, 4)))   // Lead Paint Addendum is gone
+    await expect(deliverPacket(TRUNCATED_BEFORE_0022, { storage: fakeStorage(IOWA_UPLOAD), fetchImpl: impl, ...dom }))
+      .rejects.toThrow(/1 of 5 forms could not be downloaded, so nothing was saved: Lead Paint Addendum\.pdf/)
+    expect(dom.clicks).toEqual([])
+  })
+
+  it('hands a genuine one-file packet down as the PDF itself, under its real name', async () => {
+    const single = `IA/buyer/${T}-0-Lead Paint.pdf`
+    const storage = fakeStorage([single, `IA/buyer/${T + 100}-0-A.pdf`, `IA/buyer/${T + 200}-1-B.pdf`])
+    const dom = fakeDom()
+
+    const res = await deliverPacket({ id: 'lp', state: 'IA', name: 'Lead Paint', storage_path: single }, { storage, ...dom })
+
+    expect(res).toEqual({ files: 1, zipped: false, recovered: 0 })
+    expect(storage.signed).toEqual([single])
+    expect(dom.clicks).toEqual(['Lead Paint.pdf'])
+  })
+
+  it('downloads nothing when it cannot tell which file is the packet', async () => {
+    const files = [`IA/seller/${T}-0-Listing.pdf`, `IA/seller/${T + 100}-1-A.pdf`, `IA/seller/${T + 200}-1-B.pdf`]
+    const storage = fakeStorage(files)
+    const dom = fakeDom()
+    await expect(deliverPacket({ id: 'amb', state: 'IA', name: 'Listing', storage_path: files[0] }, { storage, ...dom }))
+      .rejects.toThrow(/nothing was saved/)
+    expect(storage.signed).toEqual([])
+    expect(dom.clicks).toEqual([])
   })
 })

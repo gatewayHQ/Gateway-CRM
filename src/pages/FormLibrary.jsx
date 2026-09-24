@@ -35,6 +35,44 @@ const MAX_PACKET_BYTES = 25 * 1024 * 1024
 const packetStoragePath = (state, txType, file, i) =>
   `${String(state).trim().toUpperCase()}/${txType}/${Date.now()}-${i}-${file.name}`
 
+const missingColumn = (err, col) =>
+  !!err && (err.code === '42703' || err.code === 'PGRST204') && (err.message || '').includes(col)
+
+// Write a packet row with `upsert`, retrying without a column whose migration may
+// not be applied yet: storage_paths (0022) and required (0028).
+//
+// Only the column the error NAMES is dropped. A 42703/PGRST204 code alone says
+// SOME column is missing, and matching on the code is how a missing `required`
+// also threw away the file list. And storage_paths is dropped only for a one-file
+// packet: without it the row can name one file, which is the whole of a one-file
+// packet and file 1 of any other — the row Get Forms then handed out as "the
+// packet". Refusing is the only honest answer for several files.
+export async function upsertPacketRow(upsert, payload) {
+  const fileCount = Array.isArray(payload.storage_paths) ? payload.storage_paths.length : 0
+  let body = payload
+  let notice = ''
+  let { data, error } = await upsert(body)
+  for (let tries = 0; error && tries < 2; tries++) {
+    if (missingColumn(error, 'required') && 'required' in body) {
+      const { required, ...rest } = body
+      body = rest
+      notice = 'Saved, but "Required to close" needs migration 0028'
+    } else if (missingColumn(error, 'storage_paths') && 'storage_paths' in body) {
+      if (fileCount > 1) {
+        return {
+          data: null,
+          notice: '',
+          error: { message: `this packet has ${fileCount} PDFs and the database can only record one of them until migration 0022 is applied. The packet was not changed.` },
+        }
+      }
+      const { storage_paths, ...rest } = body
+      body = rest
+    } else break
+    ;({ data, error } = await upsert(body))
+  }
+  return { data, error, notice: error ? '' : notice }
+}
+
 function formatBytes(b) {
   if (!b) return ''
   if (b < 1024) return `${b} B`
@@ -272,22 +310,9 @@ function UploadModal({ packet, onClose, onSaved }) {
       const upsert = (p) => rowId
         ? supabase.from('form_packets').update(p).eq('id', rowId).select()
         : supabase.from('form_packets').insert([p]).select()
-      let { data, error } = await upsert(payload)
-      // Graceful fallback for columns whose migration may not be applied yet:
-      // storage_paths (0022) and required (0028). Retry without whichever the
-      // database is complaining about rather than losing the whole save.
-      const missingCol = (err, col) =>
-        err && (err.code === '42703' || err.code === 'PGRST204' || new RegExp(col).test(err.message || ''))
-      if (missingCol(error, 'required')) {
-        const { required, ...legacy } = payload
-        ;({ data, error } = await upsert(legacy))
-        if (!error) pushToast('Saved, but "Required to close" needs migration 0028', 'info')
-      }
-      if (missingCol(error, 'storage_paths')) {
-        const { storage_paths, ...legacy } = payload
-        ;({ data, error } = await upsert(legacy))
-      }
+      const { data, error, notice } = await upsertPacketRow(upsert, payload)
       if (error) { pushToast(`Couldn't save: ${error.message}`, 'error'); return }
+      if (notice) pushToast(notice, 'info')
       if (packet?.id && Array.isArray(data) && data.length === 0) {
         pushToast('Nothing was updated — the change did not persist.', 'error'); return
       }
@@ -557,8 +582,12 @@ export default function FormLibraryPage({ isAdmin }) {
     if (!packetFiles(packet).length) { pushToast('No file uploaded for this packet', 'error'); return }
     setDownloading(p => ({ ...p, [packet.id]: true }))
     try {
-      const { files, zipped } = await deliverPacket(packet, { storage: supabase.storage.from(BUCKET) })
+      const { files, zipped, recovered } = await deliverPacket(packet, { storage: supabase.storage.from(BUCKET) })
       if (zipped) pushToast(`Downloaded ${files} forms as a zip`, 'success')
+      // The agent got the whole packet from the bucket; only an admin can fix the row.
+      if (recovered && isAdmin) {
+        pushToast(`This packet's record lists 1 of its ${files} files — run migration 0056 to repair it.`, 'info')
+      }
     } catch (e) {
       pushToast(e.message, 'error')
     } finally {
