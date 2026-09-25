@@ -81,8 +81,10 @@ describe('the deal\'s people come with the deal', () => {
   inBoth('contacts are visible through a visible deal',
     /create or replace function app_visible_contact_ids\(\)/)
 
+  // 0057 puts row-local arms in front of the lookup (see
+  // insertReturningRls.test.js); the lookup itself must stay in `using`.
   inBoth('the contacts policy reads that list',
-    /create policy contacts_agent_scope on contacts for all to authenticated\s*\n\s*using\s+\(app_is_admin\(\) or id in \(select app_visible_contact_ids\(\)\)\)/)
+    /create policy contacts_agent_scope on contacts for all to authenticated\s*\n\s*using\s*\((?:(?!with check)[\s\S])*id in \(select app_visible_contact_ids\(\)\)/)
 
   inBoth('co-signers linked through deal_contacts count too',
     /from deal_contacts dc\s*\n\s*where dc\.deal_id in \(select app_visible_deal_ids\(\)\)/)
