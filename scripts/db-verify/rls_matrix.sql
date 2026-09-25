@@ -97,5 +97,31 @@ do $$ begin
   raise exception 'FAIL: cross-agent deal insert was accepted';
 exception when insufficient_privilege or sqlstate '42501' then raise notice 'PASS cross-agent insert rejected';
 end $$;
+do $$ begin
+  insert into contacts (first_name, last_name, assigned_agent_id)
+  values ('sneaky', 'contact', '00000000-0000-0000-0000-00000000000f');
+  raise exception 'FAIL: cross-agent contact insert was accepted';
+exception when insufficient_privilege or sqlstate '42501' then raise notice 'PASS cross-agent contact insert rejected';
+end $$;
+
+-- A row you may create, you may read back: the app saves with
+-- .insert().select(), i.e. INSERT ... RETURNING, which also checks the new
+-- row against the policy's USING (migration 0057).
+do $$ declare new_id uuid; begin
+  insert into contacts (first_name, last_name, assigned_agent_id)
+  values ('Own', 'Contact', '00000000-0000-0000-0000-00000000000d') returning id into new_id;
+  raise notice 'PASS agent reads back own new contact';
+end $$;
+do $$ declare new_id uuid; begin
+  insert into deals (title, agent_id) values ('own new', '00000000-0000-0000-0000-00000000000d')
+  returning id into new_id;
+  raise notice 'PASS agent reads back own new deal';
+end $$;
+set request.jwt.claim.sub = '10000000-0000-0000-0000-00000000000a';
+do $$ declare new_id uuid; begin
+  insert into deals (title, agent_id) values ('admin new', '00000000-0000-0000-0000-00000000000a')
+  returning id into new_id;
+  raise notice 'PASS admin reads back own new deal';
+end $$;
 reset role;
 select 'ALL RLS TESTS PASSED' as result;
