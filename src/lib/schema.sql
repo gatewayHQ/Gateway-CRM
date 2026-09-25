@@ -2773,9 +2773,16 @@ create trigger trg_deal_coagents_to_property
 -- only file a contact under yourself or a sharing peer) and adds the deal arm,
 -- so a co-agent can fix the seller's phone number on a deal they are working
 -- without being handed the owner's whole book (migration 0055).
+-- `using` repeats the row-local arms ahead of the lookup: INSERT ... RETURNING
+-- checks the new row against `using` too, and app_visible_contact_ids() reads
+-- a snapshot that cannot contain the row being inserted (migration 0057).
 drop policy if exists contacts_agent_scope on contacts;
 create policy contacts_agent_scope on contacts for all to authenticated
-  using      (app_is_admin() or id in (select app_visible_contact_ids()))
+  using (
+    app_is_admin()
+    or assigned_agent_id in (select app_visible_agent_ids('contacts'))
+    or id in (select app_visible_contact_ids())
+  )
   with check (
     app_is_admin()
     or assigned_agent_id in (select app_visible_agent_ids('contacts'))
@@ -2816,10 +2823,15 @@ create policy tasks_agent_scope on tasks for all to authenticated
 
 -- DEALS — own + team-shared + co-listed; admins see all. The with check arm
 -- lets an agent create deals owned by themselves / a sharing peer, and lets a
--- co-listed participant edit a deal they can already see.
+-- co-listed participant edit a deal they can already see. `using` repeats the
+-- row-local arms so a new deal can be read back by its creator (0057).
 drop policy if exists deals_agent_scope on deals;
 create policy deals_agent_scope on deals for all to authenticated
-  using (id in (select app_visible_deal_ids()))
+  using (
+    app_is_admin()
+    or agent_id in (select app_visible_agent_ids('deals'))
+    or id in (select app_visible_deal_ids())
+  )
   with check (
     app_is_admin()
     or agent_id in (select app_visible_agent_ids('deals'))
