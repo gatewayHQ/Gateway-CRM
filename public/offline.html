@@ -1,0 +1,41 @@
+<!doctype html>
+<!--
+  Served by public/sw.js ONLY when a page navigation fails because the device is
+  offline. Self-contained on purpose: no app bundle, no web fonts, one image that
+  the service worker precaches alongside this file.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#1e2642" />
+  <title>Offline — Gateway CRM</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 18px; padding: 24px; box-sizing: border-box; text-align: center;
+      background: #0b0b0b; color: #f5f3ef;
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    }
+    img { width: 120px; height: 120px; }
+    h1 { margin: 0; font-family: Georgia, serif; font-weight: 600; font-size: 24px; letter-spacing: 0.02em; }
+    p { margin: 0; max-width: 320px; font-size: 14px; line-height: 1.5; color: #9aa3b2; }
+    button {
+      margin-top: 6px; padding: 10px 22px; border: none; border-radius: 6px;
+      background: #c9a84c; color: #1a1a2e; font: inherit; font-weight: 600; cursor: pointer;
+    }
+    button:focus-visible { outline: 2px solid #f0e4c0; outline-offset: 2px; }
+  </style>
+</head>
+<body>
+  <img src="/icons/icon-192.png" alt="" width="120" height="120" />
+  <h1>You're offline</h1>
+  <p>Gateway CRM needs a connection to load your contacts and deals. It will reconnect on its own when you're back online.</p>
+  <button type="button" onclick="location.reload()">Try again</button>
+  <script>
+    // Reload the page the agent was trying to open as soon as the network is back.
+    window.addEventListener('online', function () { location.reload() })
+  </script>
+</body>
+</html>

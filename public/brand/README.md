@@ -13,6 +13,7 @@ derived sizes.
 | `wolf-crm-logo.jfif` | original artwork, 2048×2048, source of record |
 | `wolf-crm-logo-512.png` / `.webp` | boot screen (220px CSS, covers 2x) |
 | `wolf-crm-logo-128.png` / `.webp` | header slot (32–36px CSS, covers 3x) |
+| `../icons/*.png` | installed-app icons: manifest (`icon-192`, `maskable-*`), iOS home screen (`apple-touch-icon`), browser tab (`favicon-32`). The 512 `any` manifest icon is `wolf-crm-logo-512.png` itself. See `docs/pwa.md`. |
 
 `BrandLogo` serves the `-128` and `-512` files through a `srcset`/`sizes` pair,
 so the browser picks the right one for the slot and the device pixel ratio.

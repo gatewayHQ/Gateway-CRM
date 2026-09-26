@@ -776,6 +776,39 @@ select.form-control { cursor: pointer; }
   .fab-wrap { bottom: 82px; right: 20px; }
 }
 
+/* ── Install prompt (components/InstallPrompt.jsx) ──
+   Desktop: stacked above the Quick Add button, clear of the sidebar's account
+   and settings links at bottom-left. Phone: spans the width above the bottom
+   nav, stopping short of the FAB. */
+.install-prompt {
+  position: fixed; right: 28px; bottom: 96px; z-index: 450;
+  width: 360px; max-width: calc(100vw - 48px);
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 10px 12px 12px;
+  background: var(--gw-slate); color: #fff;
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-modal);
+  animation: slideUp 220ms ease;
+}
+.install-prompt__icon { width: 40px; height: 40px; flex-shrink: 0; }
+.install-prompt__body { flex: 1; min-width: 0; }
+.install-prompt__title { font-size: 13px; font-weight: 600; }
+.install-prompt__text { font-size: 12px; line-height: 1.4; color: rgba(255,255,255,0.7); margin-top: 2px; }
+.install-prompt__text strong { color: #fff; font-weight: 600; }
+.install-prompt__cta { background: var(--gw-gold); color: var(--gw-ink); flex-shrink: 0; }
+.install-prompt__cta:hover { background: var(--gw-gold-light); }
+.install-prompt__close {
+  flex-shrink: 0; display: flex; padding: 6px; border: none; border-radius: var(--radius);
+  background: none; color: rgba(255,255,255,0.5); cursor: pointer;
+}
+.install-prompt__close:hover { color: #fff; background: rgba(255,255,255,0.08); }
+.install-prompt__close:focus-visible { outline: 2px solid var(--gw-gold); outline-offset: 1px; }
+@media (max-width: 768px) {
+  .install-prompt {
+    left: 12px; right: 84px; width: auto; max-width: none; padding-right: 6px;
+    bottom: calc(70px + env(safe-area-inset-bottom));
+  }
+}
+
 /* ── Activity Log ── */
 .activity-log { display: flex; flex-direction: column; height: 100%; }
 .activity-log__form {

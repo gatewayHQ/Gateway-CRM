@@ -37,6 +37,7 @@ const MarkupPreviewPage = React.lazy(() => import('./pages/MarkupPreview.jsx'))
 import LoginPage from './pages/Login.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
 import GlobalSearch from './components/GlobalSearch.jsx'
+import InstallPrompt from './components/InstallPrompt.jsx'
 import { Analytics } from '@vercel/analytics/react'
 // ComposeModal is a named export — wrap in a lazy default-export shim
 const ComposeModalLazy = React.lazy(() =>
@@ -885,6 +886,7 @@ export default function App() {
       )}
 
       <QuickAdd db={db} setDb={setDb} activeAgent={activeAgent} />
+      <InstallPrompt />
       <ToastHost />
       <Analytics />
     </div>
