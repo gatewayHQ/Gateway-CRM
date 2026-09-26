@@ -1,5 +1,20 @@
 # Cutting Supabase cached egress (image bytes)
 
+> **Storage quota full?** That is a different number from egress: it counts
+> every file kept, and most of it is deal PDFs. Deleting a deal leaves its files
+> behind (`deal-<id>/` in `deal-documents` and `closing-packets`).
+> `scripts/cleanup-deleted-deal-files.mjs` deletes those — and only those; files
+> of live deals are never touched. It previews by default and writes the full
+> list to `deleted-deal-files.csv`:
+>
+> ```bash
+> SUPABASE_URL="https://<your-project>.supabase.co" \
+> SUPABASE_SERVICE_KEY="<service-role-key>" \
+> node scripts/cleanup-deleted-deal-files.mjs                  # preview
+> # then, keeping a local copy of everything it deletes:
+> ... node scripts/cleanup-deleted-deal-files.mjs --backup ./deal-files-backup --delete
+> ```
+
 ## What was happening
 
 Supabase "Cached Egress" is image bytes served from the public Storage buckets

@@ -3,3 +3,7 @@ dist/
 .env
 .env.local
 .env*.local
+
+# scripts/cleanup-deleted-deal-files.mjs output — file lists and backups of deal paperwork
+deleted-deal-files.csv
+deal-files-backup/
