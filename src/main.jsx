@@ -12,6 +12,7 @@ import AdvisorProfile from './pages/AdvisorProfile.jsx'
 import { DEMO_LISTING } from './pages/landingDemoData.js'
 import ClientPortal from './pages/ClientPortal.jsx'
 import { initWebVitals } from './lib/perf.js'
+import { enableInstallableApp } from './lib/pwa.js'
 import './styles/app.css'
 
 initWebVitals()
@@ -69,6 +70,10 @@ else if (unsubMatch)     publicView = <Unsubscribe        token={unsubMatch[1]} 
 else if (advisorMatch)   publicView = <AdvisorProfile     agentId={advisorMatch[1]} />
 else if (portalMatch)    publicView = <ClientPortal       token={portalMatch[1]} />
 else if (isLeadPage)     publicView = <LeadCapturePage />
+
+// Only the agent app is installable — a client saving a landing page to their
+// home screen must not get an icon that opens the agents' login (src/lib/pwa.js).
+if (!publicView) enableInstallableApp()
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <ErrorBoundary>
