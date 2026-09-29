@@ -22,7 +22,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
+import { compressForUpload, IMMUTABLE_CACHE, isWebpUrl } from '../lib/imageCompress.js'
 import { Icon, Badge, EmptyState, SearchDropdown, pushToast, ConfirmDialog } from '../components/UI.jsx'
 import AudienceFilter from '../components/AudienceFilter.jsx'
 import BlastReport from '../components/BlastReport.jsx'
@@ -48,6 +48,39 @@ const STEPS = [
 const card = {
   border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)',
   background: '#fff', padding: 16, marginBottom: 14,
+}
+
+// Every image in a mass email is stored once under campaign-images/announcements
+// in the email preset's format (JPEG): the per-send upload and the converted
+// copy of an old WebP property photo take the same path.
+async function uploadEmailImage(file) {
+  const { blob, ext, type, original } = await compressForUpload(file, 'email')
+  const path = `announcements/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
+  const { error } = await supabase.storage.from('campaign-images')
+    .upload(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
+  if (error) throw error
+  const { data: { publicUrl } } = supabase.storage.from('campaign-images').getPublicUrl(path)
+  return { publicUrl, original, type }
+}
+
+/**
+ * The photo URL to actually send. Property photos uploaded before the gallery
+ * switched to JPEG are WebP, which classic Outlook shows as an empty box — so
+ * one of those is re-encoded to a JPEG copy here, once, at send time. The
+ * property's own gallery is left alone; only this send points at the copy.
+ * Anything else passes straight through.
+ */
+async function emailSafePhotoUrl(url) {
+  if (!url || !isWebpUrl(url)) return url
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`could not read the photo (HTTP ${res.status})`)
+  const data = await res.blob()
+  const file = new File([data], 'photo.webp', { type: data.type || 'image/webp' })
+  const { publicUrl, type } = await uploadEmailImage(file)
+  // compressForUpload falls back to the original bytes when it cannot decode;
+  // a re-upload of the same WebP would fix nothing, so say so instead.
+  if (/webp/.test(type)) throw new Error('this browser could not convert it')
+  return publicUrl
 }
 
 async function authedPost(action, payload) {
@@ -213,7 +246,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
   // nothing on this property to show" instead of offering to hide a blank.
   const factValues = useMemo(() => {
     const t = announcementTokens({ property, status: dealStatus, agent: activeAgent, contact: {}, terms, customMessage })
-    return { address: t.propertyAddress, assetType: t.assetType, units: t.unitCount, price: t.price, terms: t.terms }
+    return { assetType: t.assetType, units: t.unitCount, price: t.price, terms: t.terms }
   }, [property, dealStatus, activeAgent, terms, customMessage])
 
   // A hidden row whose token is still typed into the subject or the body prints
@@ -230,16 +263,12 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
 
   const uploadPhoto = async (file) => {
     if (!file) return
+    if (file.size > 10 * 1024 * 1024) { pushToast('That image is over 10 MB — export it smaller and try again', 'error'); return }
     setUploading(true)
     try {
       // 'email', not 'landing': JPEG rather than WebP (classic Outlook shows
       // WebP as a blank box) and a width-only cap so a tall graphic stays sharp.
-      const { blob, ext, type } = await compressForUpload(file, 'email')
-      const path = `announcements/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
-      const { error } = await supabase.storage.from('campaign-images')
-        .upload(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
-      if (error) throw error
-      const { data: { publicUrl } } = supabase.storage.from('campaign-images').getPublicUrl(path)
+      const { publicUrl } = await uploadEmailImage(file)
       setPhotoUrl(publicUrl)
       setPhotoTouched(true)
       pushToast(needsProperty ? 'Photo uploaded for this send' : 'Graphic uploaded for this send')
@@ -277,12 +306,21 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
       // everyone who already received it a second time.
       let blastId = progress?.blastId || null
       if (!blastId) {
+        // Converted before the blast exists, so the stored photo_url — the one
+        // every batch sends, today and on a resume tomorrow — is the JPEG.
+        let sendPhotoUrl = photoUrl || null
+        try {
+          sendPhotoUrl = await emailSafePhotoUrl(sendPhotoUrl)
+          if (sendPhotoUrl !== photoUrl) { setPhotoUrl(sendPhotoUrl); setPhotoTouched(true) }
+        } catch (err) {
+          pushToast(`Sending the original photo — converting it for Outlook failed: ${err.message}`, 'error')
+        }
         const { blast } = await authedPost('blast-create', {
           propertyId: propertyId || null,
           templateId: templateId || null,
           dealStatus, subject, body, terms, customMessage, hiddenFacts,
           customHeader: dealStatus === 'other' ? normalizeCustomHeader(customHeader) : null,
-          photoUrl: photoUrl || null,
+          photoUrl: sendPhotoUrl,
           audience: { ...audience, manual },
           contactIds: resolved.recipients.map(c => c.id),
           listRecipients,
@@ -469,19 +507,9 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
             </div>
           </div>
 
+          {needsProperty || property ? (
           <div style={card}>
-            {needsProperty || property ? (
-              <label className="form-label">Photo <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}>— the property's first photo unless you pick another</span></label>
-            ) : (
-              <>
-                <label className="form-label">Graphic <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}>— the image you designed for this update</span></label>
-                <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 10 }}>
-                  Shown full width at the top of the email. Export it as a PNG or JPG about 1200px wide
-                  (Canva's "Email header" or any portrait size works) so the text stays sharp. Put the key
-                  numbers in your message too — many inboxes hide images until the reader clicks "show".
-                </div>
-              </>
-            )}
+            <label className="form-label">Photo <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}>— the property's first photo unless you pick another</span></label>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
               {photos.map(url => (
                 <button key={url} type="button" onClick={() => { setPhotoUrl(url); setPhotoTouched(true) }}
@@ -500,19 +528,30 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
               )}
             </div>
             <label className="btn btn--ghost btn--sm" style={{ cursor: 'pointer' }}>
-              {uploading ? 'Uploading…'
-                : needsProperty || property ? 'Upload a different photo'
-                : photoUrl ? 'Replace graphic' : 'Upload your graphic'}
+              {uploading ? 'Uploading…' : 'Upload a different photo'}
               <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: 'none' }}
                 onChange={e => { uploadPhoto(e.target.files?.[0]); e.target.value = '' }} />
             </label>
             {photoUrl && (
               <button type="button" className="btn btn--ghost btn--sm" style={{ marginLeft: 8 }}
                 onClick={() => { setPhotoUrl(''); setPhotoTouched(true) }}>
-                {needsProperty || property ? 'Send without a photo' : 'Remove graphic'}
+                Send without a photo
               </button>
             )}
           </div>
+          ) : (
+          <div style={card}>
+            <label className="form-label">Graphic <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}>— the image you designed for this update</span></label>
+            <GraphicDrop url={photoUrl} uploading={uploading}
+              onFile={uploadPhoto}
+              onRemove={() => { setPhotoUrl(''); setPhotoTouched(true) }} />
+            <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 10, lineHeight: 1.5 }}>
+              Shown full width at the top of the email. Export a PNG or JPG about 1200px wide — Canva's
+              "Email header" or any portrait size works — so the text stays sharp. Put the key numbers in
+              your message too: many inboxes hide images until the reader clicks "show".
+            </div>
+          </div>
+          )}
 
           {/* ── Which details to show ──
               The reason this exists: a property under contract is announced to
@@ -785,6 +824,77 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
           message="Add a property first — a deal announcement is built from a property record. A Market Update needs none." />
       )}
     </div>
+  )
+}
+
+/**
+ * The drop zone for a market-update graphic. Empty, it is one big target —
+ * drag the Canva export onto it or click to pick. Filled, it shows the graphic
+ * the way the email will (full width, uncropped), with replace/remove on hover
+ * rather than a thumbnail cropped to a building-photo shape.
+ */
+function GraphicDrop({ url, uploading, onFile, onRemove }) {
+  const [over, setOver] = useState(false)
+  const inputId = 'mass-email-graphic'
+  const drop = (e) => {
+    e.preventDefault(); setOver(false)
+    const file = [...(e.dataTransfer?.files || [])].find(f => f.type.startsWith('image/'))
+    if (file) onFile(file)
+    else pushToast('Drop an image — PNG or JPG', 'error')
+  }
+  const dragProps = {
+    onDragOver: (e) => { e.preventDefault(); setOver(true) },
+    onDragLeave: () => setOver(false),
+    onDrop: drop,
+  }
+  const input = (
+    <input id={inputId} type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: 'none' }}
+      onChange={e => { onFile(e.target.files?.[0]); e.target.value = '' }} />
+  )
+
+  if (url) {
+    return (
+      <div {...dragProps} style={{
+        position: 'relative', borderRadius: 10, overflow: 'hidden', background: 'var(--gw-bone)',
+        border: `1px solid ${over ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+      }}>
+        <img src={url} alt="Graphic for this send"
+          style={{ display: 'block', width: '100%', maxHeight: 360, objectFit: 'contain', opacity: uploading ? 0.4 : 1 }} />
+        <div style={{ position: 'absolute', top: 10, right: 10, display: 'flex', gap: 6 }}>
+          <label htmlFor={inputId} className="btn btn--sm"
+            style={{ cursor: 'pointer', background: 'rgba(26,26,46,0.85)', color: '#fff', border: 'none', backdropFilter: 'blur(4px)' }}>
+            <Icon name="upload" size={12} style={{ marginRight: 6 }} />{uploading ? 'Uploading…' : 'Replace'}
+          </label>
+          <button type="button" className="btn btn--sm" onClick={onRemove}
+            style={{ background: 'rgba(255,255,255,0.92)', color: 'var(--gw-slate)', border: 'none' }}>
+            <Icon name="x" size={12} style={{ marginRight: 4 }} />Remove
+          </button>
+        </div>
+        {input}
+      </div>
+    )
+  }
+
+  return (
+    <label htmlFor={inputId} {...dragProps} style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8,
+      padding: '34px 16px', borderRadius: 10, cursor: 'pointer', textAlign: 'center',
+      border: `2px dashed ${over ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+      background: over ? 'var(--gw-sky)' : 'var(--gw-bone)',
+      transition: 'background 150ms, border-color 150ms',
+    }}>
+      <div style={{
+        width: 44, height: 44, borderRadius: 999, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: '#fff', color: 'var(--gw-azure)', boxShadow: '0 1px 3px rgba(26,26,46,0.08)',
+      }}>
+        <Icon name="upload" size={20} />
+      </div>
+      <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--gw-slate)' }}>
+        {uploading ? 'Uploading your graphic…' : 'Drop your graphic here, or click to upload'}
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>PNG or JPG · about 1200px wide</div>
+      {input}
+    </label>
   )
 }
 

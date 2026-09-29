@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { computeTargetDimensions, computeWidthCappedDimensions, IMAGE_PRESETS, IMMUTABLE_CACHE } from '../imageCompress.js'
+import { computeTargetDimensions, computeWidthCappedDimensions, IMAGE_PRESETS, IMMUTABLE_CACHE, isWebpUrl } from '../imageCompress.js'
 
 describe('computeTargetDimensions', () => {
   it('never upscales an image already within the cap', () => {
@@ -31,6 +31,16 @@ describe('presets + cache constant', () => {
   it('email images are JPEG, never WebP — classic Outlook cannot show WebP', () => {
     expect(IMAGE_PRESETS.email.type).toBe('image/jpeg')
     expect(IMAGE_PRESETS.email.maxWidth).toBeGreaterThanOrEqual(600)
+  })
+  it('property photos are JPEG too — the first one is every announcement’s hero image', () => {
+    expect(IMAGE_PRESETS.property.type).toBe('image/jpeg')
+  })
+  it('recognises a stored WebP photo by its URL', () => {
+    expect(isWebpUrl('https://x.supabase.co/storage/v1/object/public/property-photos/p1/123-abc.webp')).toBe(true)
+    expect(isWebpUrl('https://cdn/p.WEBP?v=2')).toBe(true)
+    expect(isWebpUrl('https://cdn/p.jpg')).toBe(false)
+    expect(isWebpUrl('https://cdn/webp-folder/p.png')).toBe(false)
+    expect(isWebpUrl(null)).toBe(false)
   })
   it('headshots cap tighter than landing/property images', () => {
     expect(IMAGE_PRESETS.headshot.maxDim).toBeLessThan(IMAGE_PRESETS.landing.maxDim)

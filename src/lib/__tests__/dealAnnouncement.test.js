@@ -193,7 +193,7 @@ describe('optional detail rows', () => {
   it('drops the detail table entirely rather than leaving an empty one', () => {
     const out = html({ hiddenFacts: ANNOUNCEMENT_FACT_FIELDS.map(f => f.key) })
     expect(out).not.toContain('>Price<')
-    expect(out).not.toContain('margin:0 0 20px 0')
+    expect(out).not.toContain('class="gw-tile"')
   })
 
   it('ignores junk from the stored jsonb column instead of dropping real rows', () => {
@@ -239,8 +239,8 @@ describe('market updates and custom-header sends', () => {
     expect(out).toContain('Market Update')
     expect(out).toContain('https://cdn.example/q3-graphic.jpg')
     expect(out).toContain('Cap rates held at 6.2% in Q3.')
-    expect(out).not.toContain('font-size:20px')
-    expect(out).not.toContain('width:110px')
+    expect(out).not.toContain('<h1')
+    expect(out).not.toContain('class="gw-tile"')
     expect(out).not.toContain('{{')
   })
 

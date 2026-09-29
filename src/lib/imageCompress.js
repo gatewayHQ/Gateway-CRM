@@ -8,7 +8,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Per-use-case targets. maxDim caps the longest edge; quality is the encoder
-// quality (0–1). Headshots are shown small, so they cap tighter.
+// quality (0–1); type is the output format (WebP when omitted). Headshots are
+// shown small, so they cap tighter.
+//
+// Property photos are JPEG, not WebP, because they don't stay on the web: a
+// property's first photo is the hero image of every deal announcement, and
+// classic Outlook for Windows does not display WebP — the recipient gets an
+// empty box where the building should be. JPEG costs roughly a quarter more
+// bytes than WebP at this quality; a photo that renders everywhere is worth it.
 //
 // `email` is different on both axes, for images that go out inside a mass
 // email. It caps WIDTH, not the longest edge: an agent's market-update graphic
@@ -18,7 +25,7 @@
 // Windows does not display WebP at all — the recipient sees an empty box.
 export const IMAGE_PRESETS = {
   landing:  { maxDim: 1600, quality: 0.82 }, // campaign/landing collage photos
-  property: { maxDim: 1600, quality: 0.82 }, // property gallery
+  property: { maxDim: 1600, quality: 0.82, type: 'image/jpeg' }, // property gallery — also emailed
   headshot: { maxDim: 512,  quality: 0.85 }, // advisor card / profile photo
   email:    { maxWidth: 1200, quality: 0.9, type: 'image/jpeg' }, // 2× the 600px email column
 }
@@ -91,6 +98,9 @@ export async function compressForUpload(file, preset = 'landing') {
     return fallback
   }
 }
+
+/** A stored image URL that is WebP — photos uploaded before property photos moved to JPEG. */
+export const isWebpUrl = (url) => /\.webp(?:[?#]|$)/i.test(String(url || ''))
 
 // One year, immutable — safe because every upload path uses a unique
 // timestamp+random filename, so a stored object never changes. Lets returning
