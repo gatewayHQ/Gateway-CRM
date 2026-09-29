@@ -27,13 +27,18 @@
 // body: the narrowness above is a privacy property worth keeping, and an agent
 // who wants to read the reply has it in their own inbox already.
 //
+// ── BOUNCES ──────────────────────────────────────────────────────────────────
+// And it reads the "Undeliverable" notices a receiving server sends back, to
+// mark which recipients of a send never got it (api/_lib/bounces.js).
+//
 // Polling, not a Graph webhook subscription: a subscription needs a public
 // notification endpoint and expires every ~3 days requiring renewal — real
 // complexity for a feature that doesn't need to be real-time for 7-8 agents.
 // A daily poll (the only cadence Vercel Hobby cron schedules support anyway)
 // is a simpler, equally reliable trade for this scale.
 // ─────────────────────────────────────────────────────────────────────────────
-import { getValidAccessToken, fetchInboxDelta } from './msGraph.js'
+import { getValidAccessToken, fetchInboxDelta, fetchMessageText } from './msGraph.js'
+import { markBlastBounces } from './bounces.js'
 
 const MAX_PAGES_PER_AGENT = 10   // bounds one agent's sync within the function's time budget
 
@@ -66,13 +71,19 @@ export async function syncAgentInbox(svc, connection) {
   const senderEmails = [...new Set(
     messages.map(m => m.from?.emailAddress?.address?.toLowerCase()).filter(Boolean)
   )]
-  if (!senderEmails.length) return { scanned: messages.length, matched: 0 }
+  if (!senderEmails.length) return { scanned: messages.length, matched: 0, replies: 0, bounces: 0 }
 
   const { data: contacts } = await svc.from('contacts')
     .select('id, email').in('email', senderEmails)
   const contactByEmail = new Map((contacts || []).map(c => [c.email.toLowerCase(), c]))
 
   const replies = await markBlastReplies(svc, messages)
+  // Best-effort like replies: a bounce pass that fails must not stop contact
+  // mail from importing.
+  const bounces = await markBlastBounces(svc, {
+    agentId: connection.agent_id, messages,
+    fetchText: (id) => fetchMessageText(accessToken, id),
+  }).catch(() => 0)
 
   let matched = 0
   for (const m of messages) {
@@ -109,7 +120,7 @@ export async function syncAgentInbox(svc, connection) {
     }])
   }
 
-  return { scanned: messages.length, matched, replies }
+  return { scanned: messages.length, matched, replies, bounces }
 }
 
 // How far back a reply can still be attributed to a send. A month covers the
@@ -196,10 +207,10 @@ export async function syncAllInboxes(svc) {
   const { data: connections } = await svc.from('ms_graph_connections')
     .select('agent_id, mail_delta_link, status').eq('status', 'connected')
   if (!connections?.length) {
-    return { ok: true, agents: 0, scanned: 0, matched: 0, replies: 0, errors: [] }
+    return { ok: true, agents: 0, scanned: 0, matched: 0, replies: 0, bounces: 0, errors: [] }
   }
 
-  let scanned = 0, matched = 0, replies = 0
+  let scanned = 0, matched = 0, replies = 0, bounces = 0
   const errors = []
   for (const conn of connections) {
     try {
@@ -207,10 +218,11 @@ export async function syncAllInboxes(svc) {
       scanned += r.scanned
       matched += r.matched
       replies += r.replies || 0
+      bounces += r.bounces || 0
     } catch (err) {
       errors.push({ agent_id: conn.agent_id, error: err.message })
     }
   }
 
-  return { ok: true, agents: connections.length, scanned, matched, replies, errors }
+  return { ok: true, agents: connections.length, scanned, matched, replies, bounces, errors }
 }

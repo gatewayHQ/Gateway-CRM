@@ -621,6 +621,16 @@ describe('address-level opt-out', () => {
     expect(reasons).toEqual(['Unsubscribed', 'Unsubscribed'])
   })
 
+  it('says an address is skipped because it bounced before, not because it unsubscribed', async () => {
+    const db = makeDb({
+      agents: [AGENT],
+      email_suppressions: [{ id: 's1', email: 'dead@x.com', reason: 'bounced' }],
+    })
+    await seedMixedBlast(db, { listRecipients: [listRow('dead@x.com'), listRow('fine@x.com')] })
+    const skipped = db.tables.email_blast_recipients.find(r => r.status === 'skipped')
+    expect(skipped.skip_reason).toBe('Bounced on an earlier send')
+  })
+
   it('matches a suppression regardless of how the address was capitalised', async () => {
     const db = makeDb({
       agents: [AGENT],

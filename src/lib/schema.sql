@@ -1191,6 +1191,7 @@ create table if not exists email_blasts (
   opened_count     integer not null default 0,
   replied_count    integer not null default 0,
   unsubscribed_count integer not null default 0,
+  bounced_count    integer not null default 0,   -- migration 0059
   -- How many recipients came off a pasted/uploaded list rather than the contact
   -- book, and what that list was called, so the send is recognisable later.
   list_recipient_count integer not null default 0,
@@ -1240,6 +1241,12 @@ create table if not exists email_blast_recipients (
   unsubscribed_at  timestamptz,
   replied_at       timestamptz,
   reply_subject    text,
+  -- A bounce notice for this message arrived in the agent's inbox (migration
+  -- 0059). Status stays 'sent' — Microsoft did send it; this is what happened
+  -- after. Only a permanent bounce adds the address to email_suppressions.
+  bounced_at       timestamptz,
+  bounce_reason    text,
+  bounce_permanent boolean,
   created_at       timestamptz default now()
 );
 -- The double-send guard: one row per (blast, contact) and per (blast, address),

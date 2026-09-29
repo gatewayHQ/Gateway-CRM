@@ -913,6 +913,80 @@ export default async function handler(req, res) {
       return json(res, 200, { mailing: { ...m, landing_config: publicLandingConfig(m.landing_config) } })
     }
 
+    // ── Public: email open pixel (no login) ──────────────────────────────────
+    // GET /e/:token.gif (rewritten here in vercel.json). Stamps the open on the
+    // blast recipient row the token names.
+    //
+    // It MUST sit above the "POST only" gate further down. It used to live
+    // below it, among the write actions, so every pixel fetch — a GET, as an
+    // image always is — was answered 405 with JSON before this code ran: no
+    // open was ever recorded, and every recipient got a broken image.
+    //
+    // ALWAYS RETURNS THE IMAGE — valid token, forged token, dead database, all
+    // of it. Two reasons. A broken image in a marketing email is a visible
+    // defect the recipient blames the sender for, and a response that varies
+    // with whether the token resolved would let anyone probe which tokens are
+    // real. Tracking is the side effect; serving the pixel is the job.
+    //
+    // WHAT AN OPEN IS WORTH. Outlook and Gmail block or proxy remote images by
+    // default, and some proxies fetch them once on delivery whether or not
+    // anybody looked. So a recorded open is weak evidence somebody read it, and
+    // a missing open is no evidence at all. The obvious machine traffic is
+    // filtered out below with the same classifier the QR scan path uses, which
+    // improves the number without making it trustworthy — nothing here should
+    // be presented to an agent as a read receipt.
+    if (action === 'open') {
+      const token = String(req.query?.token || '').replace(/\.gif$/i, '').trim()
+      noStore(res)
+
+      try {
+        const claim = token ? readOpenToken(token) : null
+        const { isBot } = classifyBot(req, req.headers['user-agent'] || '')
+        if (claim && !isBot) {
+          const now = new Date().toISOString()
+          // Read-then-write rather than an increment: first_opened_at must
+          // survive every later open, and this path has no transaction. The
+          // race (two opens landing together) can only lose a count, never
+          // corrupt the first-open time, which is the field anybody reads.
+          const { data: row } = await db()
+            .from('email_blast_recipients')
+            .select('id, blast_id, open_count, first_opened_at')
+            .eq('id', claim.recipientId)
+            .maybeSingle()
+          if (row) {
+            await db().from('email_blast_recipients').update({
+              first_opened_at: row.first_opened_at || now,
+              last_opened_at:  now,
+              open_count:      (row.open_count || 0) + 1,
+            }).eq('id', row.id)
+
+            // Roll the blast's opened_count forward only on a FIRST open, so
+            // the report counts people rather than page-loads.
+            if (!row.first_opened_at && row.blast_id) {
+              const { count } = await db()
+                .from('email_blast_recipients')
+                .select('id', { count: 'exact', head: true })
+                .eq('blast_id', row.blast_id)
+                .not('first_opened_at', 'is', null)
+              await db().from('email_blasts')
+                .update({ opened_count: count || 0 })
+                .eq('id', row.blast_id)
+            }
+          }
+        }
+      } catch (err) {
+        // Never let bookkeeping break the image. An agent would rather have a
+        // clean email with a missing open than a grey box in every inbox.
+        log.warn('open_pixel.record_failed', { error: err.message })
+      }
+
+      // 1×1 transparent GIF, the smallest thing a mail client will render.
+      const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
+      res.setHeader('Content-Type', 'image/gif')
+      res.setHeader('Content-Length', String(gif.length))
+      return res.status(200).send(gif)
+    }
+
     // ── Health check ────────────────────────────────────────────────────────
     if (action === 'health') {
       return json(res, 200, { ok: true, ts: new Date().toISOString() })
@@ -1598,75 +1672,6 @@ export default async function handler(req, res) {
       } catch { /* pre-0031 database, or nothing to link */ }
 
       return json(res, 200, { ok: true, subscriber_id: subscriber?.id || null })
-    }
-
-    // ── Public: email open pixel (no login) ──────────────────────────────────
-    // GET /e/:token.gif (rewritten here in vercel.json). Stamps the open on the
-    // blast recipient row the token names.
-    //
-    // ALWAYS RETURNS THE IMAGE — valid token, forged token, dead database, all
-    // of it. Two reasons. A broken image in a marketing email is a visible
-    // defect the recipient blames the sender for, and a response that varies
-    // with whether the token resolved would let anyone probe which tokens are
-    // real. Tracking is the side effect; serving the pixel is the job.
-    //
-    // WHAT AN OPEN IS WORTH. Outlook and Gmail block or proxy remote images by
-    // default, and some proxies fetch them once on delivery whether or not
-    // anybody looked. So a recorded open is weak evidence somebody read it, and
-    // a missing open is no evidence at all. The obvious machine traffic is
-    // filtered out below with the same classifier the QR scan path uses, which
-    // improves the number without making it trustworthy — nothing here should
-    // be presented to an agent as a read receipt.
-    if (action === 'open') {
-      const token = String(req.query?.token || '').replace(/\.gif$/i, '').trim()
-      noStore(res)
-
-      try {
-        const claim = token ? readOpenToken(token) : null
-        const { isBot } = classifyBot(req, req.headers['user-agent'] || '')
-        if (claim && !isBot) {
-          const now = new Date().toISOString()
-          // Read-then-write rather than an increment: first_opened_at must
-          // survive every later open, and this path has no transaction. The
-          // race (two opens landing together) can only lose a count, never
-          // corrupt the first-open time, which is the field anybody reads.
-          const { data: row } = await db()
-            .from('email_blast_recipients')
-            .select('id, blast_id, open_count, first_opened_at')
-            .eq('id', claim.recipientId)
-            .maybeSingle()
-          if (row) {
-            await db().from('email_blast_recipients').update({
-              first_opened_at: row.first_opened_at || now,
-              last_opened_at:  now,
-              open_count:      (row.open_count || 0) + 1,
-            }).eq('id', row.id)
-
-            // Roll the blast's opened_count forward only on a FIRST open, so
-            // the report counts people rather than page-loads.
-            if (!row.first_opened_at && row.blast_id) {
-              const { count } = await db()
-                .from('email_blast_recipients')
-                .select('id', { count: 'exact', head: true })
-                .eq('blast_id', row.blast_id)
-                .not('first_opened_at', 'is', null)
-              await db().from('email_blasts')
-                .update({ opened_count: count || 0 })
-                .eq('id', row.blast_id)
-            }
-          }
-        }
-      } catch (err) {
-        // Never let bookkeeping break the image. An agent would rather have a
-        // clean email with a missing open than a grey box in every inbox.
-        log.warn('open_pixel.record_failed', { error: err.message })
-      }
-
-      // 1×1 transparent GIF, the smallest thing a mail client will render.
-      const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
-      res.setHeader('Content-Type', 'image/gif')
-      res.setHeader('Content-Length', String(gif.length))
-      return res.status(200).send(gif)
     }
 
     // ── Public: one-click unsubscribe (no login) ─────────────────────────────

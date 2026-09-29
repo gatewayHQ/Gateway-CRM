@@ -14,6 +14,13 @@
 // server-side gate would be a copy of a rule that is already enforced where it
 // can't be bypassed.
 //
+// "FAILED" HAS TWO HALVES. A message Microsoft refused is 'failed' the moment
+// it is sent. A message Microsoft accepted and the receiving server later
+// rejected comes back as a bounce notice in the agent's inbox, which the inbox
+// sync reads (api/_lib/bounces.js, migration 0059). Both are "didn't arrive",
+// and the recipient filter below puts them in one list so an agent can see
+// exactly who to follow up with another way.
+//
 // ON OPEN RATES, SAID OUT LOUD IN THE UI. Outlook and Gmail block or proxy
 // remote images by default, and some proxies fetch the pixel on delivery
 // whether or not a human looked. A recorded open is weak evidence somebody
@@ -25,7 +32,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { Badge, EmptyState } from './UI.jsx'
+import { Badge, EmptyState, Icon, pushToast } from './UI.jsx'
 import { announcementHeader } from '../lib/dealAnnouncement.js'
 
 const card = {
@@ -34,6 +41,31 @@ const card = {
 }
 
 const RECENT_LIMIT = 25
+
+const RECIPIENT_COLS = 'id, email, first_name, last_name, status, source, skip_reason, error_message, sent_at, first_opened_at, open_count, replied_at, reply_subject, unsubscribed_at'
+const BOUNCE_COLS    = 'bounced_at, bounce_reason, bounce_permanent'
+
+// The recipient list's filter chips. `didntArrive` is the one an agent needs
+// after a send: everyone who has to be reached some other way.
+const FILTERS = [
+  { key: 'all',         label: 'Everyone',       test: () => true },
+  { key: 'opened',      label: 'Opened',         test: r => Boolean(r.first_opened_at) },
+  { key: 'replied',     label: 'Replied',        test: r => Boolean(r.replied_at) },
+  { key: 'didntArrive', label: "Didn't arrive",  test: r => r.status === 'failed' || Boolean(r.bounced_at) },
+  { key: 'skipped',     label: 'Skipped',        test: r => r.status === 'skipped' },
+]
+
+async function authedPost(action, payload = {}) {
+  const { data: { session } } = await supabase.auth.getSession()
+  const res = await fetch(`/api/email-send?action=${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
+    body: JSON.stringify(payload),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `Request failed (HTTP ${res.status})`)
+  return data
+}
 
 const fmtDate = (iso) => {
   if (!iso) return ''
@@ -56,6 +88,9 @@ export default function BlastReport({ activeAgent }) {
   const [openId, setOpenId]   = useState(null)
   const [rows, setRows]       = useState({})     // blastId -> recipient rows
   const [loadingRows, setLoadingRows] = useState(false)
+  const [filter, setFilter]   = useState('all')
+  const [checking, setChecking] = useState(false)
+  const [reloadKey, setReloadKey] = useState(0)
 
   useEffect(() => {
     let live = true
@@ -70,18 +105,42 @@ export default function BlastReport({ activeAgent }) {
       setBlasts(data || [])
     })()
     return () => { live = false }
-  }, [activeAgent?.id])
+  }, [activeAgent?.id, reloadKey])
+
+  // Runs the same inbox pass as the nightly sync, for this agent, now — the
+  // cron only runs once a day, and a bounce from this morning's send is most
+  // useful this morning.
+  const checkInbox = async () => {
+    setChecking(true)
+    try {
+      const { replies = 0, bounces = 0 } = await authedPost('blast-inbox-refresh')
+      pushToast(replies || bounces
+        ? `Found ${replies} new repl${replies === 1 ? 'y' : 'ies'} and ${bounces} bounce${bounces === 1 ? '' : 's'}`
+        : 'Inbox checked — nothing new since the last check')
+      setRows({})
+      setOpenId(null)
+      setReloadKey(k => k + 1)
+    } catch (err) {
+      pushToast(err.message, 'error')
+    }
+    setChecking(false)
+  }
 
   const toggle = async (blast) => {
     if (openId === blast.id) { setOpenId(null); return }
     setOpenId(blast.id)
+    setFilter('all')
     if (rows[blast.id]) return
     setLoadingRows(true)
-    const { data, error: err } = await supabase
+    const read = (cols) => supabase
       .from('email_blast_recipients')
-      .select('id, email, first_name, last_name, status, source, skip_reason, error_message, sent_at, first_opened_at, open_count, replied_at, reply_subject, unsubscribed_at')
+      .select(cols)
       .eq('blast_id', blast.id)
       .order('status', { ascending: true })
+    // The bounce columns arrive with migration 0059; until then the report
+    // reads everything else rather than failing outright.
+    let { data, error: err } = await read(`${RECIPIENT_COLS}, ${BOUNCE_COLS}`)
+    if (err) ({ data, error: err } = await read(RECIPIENT_COLS))
     setLoadingRows(false)
     if (err) { setError(err.message); return }
     setRows(r => ({ ...r, [blast.id]: data || [] }))
@@ -108,18 +167,30 @@ export default function BlastReport({ activeAgent }) {
 
   return (
     <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 220, fontSize: 12.5, color: 'var(--gw-mist)' }}>
+          Replies and bounces are picked up from your Outlook inbox every morning.
+        </div>
+        <button type="button" className="btn btn--ghost btn--sm" onClick={checkInbox} disabled={checking}>
+          <Icon name="refresh" size={12} style={{ marginRight: 6 }} />
+          {checking ? 'Checking your inbox…' : 'Check for replies & bounces now'}
+        </button>
+      </div>
       {blasts.map(b => {
         const isOpen    = openId === b.id
         const recipients = rows[b.id] || []
         const sent      = b.sent_count || 0
         const openRate  = pct(b.opened_count || 0, sent)
+        const didntArrive = (b.failed_count || 0) + (b.bounced_count || 0)
+        const active    = FILTERS.find(f => f.key === filter) || FILTERS[0]
+        const shown     = recipients.filter(active.test)
 
         return (
           <div key={b.id} style={card}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
               <Badge variant={badgeVariant(b.status)}>{b.status}</Badge>
               <div style={{ fontWeight: 600, fontSize: 14, flex: 1, minWidth: 200 }}>
-                {b.deal_status ? `${announcementHeader(b.deal_status, b.custom_header)} — ` : ''}{b.subject}
+                {titleOf(b)}
               </div>
               <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>
                 {fmtDate(b.completed_at || b.started_at || b.created_at)}
@@ -135,7 +206,10 @@ export default function BlastReport({ activeAgent }) {
                       sub={openRate === null ? '' : `${openRate}% of sent`} />
               <Metric label="Replied" value={b.replied_count || 0} />
               <Metric label="Unsubscribed" value={b.unsubscribed_count || 0} />
-              {b.failed_count > 0  && <Metric label="Failed"  value={b.failed_count} tone="#b91c1c" />}
+              {b.failed_count > 0  && <Metric label="Failed"  value={b.failed_count} tone="#b91c1c"
+                                              sub="Microsoft refused it" />}
+              {b.bounced_count > 0 && <Metric label="Bounced" value={b.bounced_count} tone="#b91c1c"
+                                              sub="Rejected on arrival" />}
               {b.skipped_count > 0 && <Metric label="Skipped" value={b.skipped_count} />}
             </div>
 
@@ -155,6 +229,16 @@ export default function BlastReport({ activeAgent }) {
               </div>
             )}
 
+            {didntArrive > 0 && (
+              <button type="button" onClick={() => { if (!isOpen) toggle(b); setFilter('didntArrive') }}
+                style={{
+                  marginTop: 10, padding: '6px 10px', borderRadius: 6, fontSize: 12.5, cursor: 'pointer',
+                  border: '1px solid #fecaca', background: '#fef2f2', color: '#991b1b', fontFamily: 'var(--font-body)',
+                }}>
+                {didntArrive} {didntArrive === 1 ? 'person' : 'people'} didn't get this email — see who
+              </button>
+            )}
+
             {b.last_error && (
               <div style={{ fontSize: 12, color: '#b91c1c', marginTop: 8 }}>{b.last_error}</div>
             )}
@@ -165,9 +249,32 @@ export default function BlastReport({ activeAgent }) {
                   <div style={{ fontSize: 12.5, color: 'var(--gw-mist)' }}>Loading recipients…</div>
                 )}
                 {recipients.length > 0 && (
-                  <div style={{ maxHeight: 340, overflowY: 'auto', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)' }}>
-                    {recipients.map(r => <RecipientRow key={r.id} r={r} />)}
-                  </div>
+                  <>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                      {FILTERS.map(f => {
+                        const n  = recipients.filter(f.test).length
+                        const on = f.key === filter
+                        return (
+                          <button key={f.key} type="button" onClick={() => setFilter(f.key)}
+                            style={{
+                              padding: '4px 10px', borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                              fontFamily: 'var(--font-body)',
+                              border: `1px solid ${on ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+                              background: on ? 'var(--gw-azure)' : '#fff',
+                              color: on ? '#fff' : n === 0 ? 'var(--gw-mist)' : 'var(--gw-slate)',
+                            }}>
+                            {f.label} · {n}
+                          </button>
+                        )
+                      })}
+                    </div>
+                    <div style={{ maxHeight: 340, overflowY: 'auto', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)' }}>
+                      {shown.map(r => <RecipientRow key={r.id} r={r} />)}
+                      {shown.length === 0 && (
+                        <div style={{ padding: 12, fontSize: 12.5, color: 'var(--gw-mist)' }}>Nobody in this group.</div>
+                      )}
+                    </div>
+                  </>
                 )}
               </div>
             )}
@@ -176,6 +283,15 @@ export default function BlastReport({ activeAgent }) {
       })}
     </div>
   )
+}
+
+// "Market Update — Market Update from Daniel" says it twice; the header only
+// prefixes a subject that doesn't already carry it.
+function titleOf(b) {
+  const header = b.deal_status ? announcementHeader(b.deal_status, b.custom_header) : ''
+  const subject = b.subject || ''
+  if (!header || subject.toLowerCase().includes(header.toLowerCase())) return subject
+  return `${header} — ${subject}`
 }
 
 function Metric({ label, value, sub = '', tone }) {
@@ -194,6 +310,9 @@ function RecipientRow({ r }) {
   // outranks an open, because it is the thing that changes what the agent may
   // do next.
   const marks = [
+    r.status === 'failed' && { text: 'Failed to send', color: '#b91c1c' },
+    r.bounced_at      && { text: `Bounced — ${r.bounce_reason || 'not delivered'}`, color: '#b91c1c' },
+    r.status === 'skipped' && { text: 'Skipped', color: 'var(--gw-mist)' },
     r.unsubscribed_at && { text: 'Unsubscribed', color: '#b91c1c' },
     r.replied_at      && { text: r.reply_subject ? `Replied — "${r.reply_subject}"` : 'Replied', color: '#0f766e' },
     r.first_opened_at && { text: r.open_count > 1 ? `Opened ×${r.open_count}` : 'Opened', color: 'var(--gw-azure)' },
@@ -214,10 +333,12 @@ function RecipientRow({ r }) {
             }}>FROM LIST</span>
           )}
         </div>
-        <div style={{ color: 'var(--gw-mist)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <div title={r.error_message || r.skip_reason || ''}
+          style={{ color: 'var(--gw-mist)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {r.email}
           {r.skip_reason    ? ` · skipped: ${r.skip_reason}` : ''}
           {r.error_message  ? ` · failed: ${r.error_message}` : ''}
+          {r.bounced_at && r.bounce_permanent ? ' · removed from future sends' : ''}
         </div>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
