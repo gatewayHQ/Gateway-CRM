@@ -240,6 +240,24 @@ describe('createBlast', () => {
       .toBe('Duplicate address in this send')
   })
 
+  it("stores the agent's header on an 'other' send, and nothing on any other kind", async () => {
+    const db = makeDb()
+    db.tables.contacts.push(contact({ id: 'c1' }))
+    const other = await createBlast(db, db, {
+      agentId: AGENT.id, contactIds: ['c1'],
+      blast: { ...BLAST_INPUT, propertyId: null, dealStatus: 'other', customHeader: '  Q3 Overview ' },
+    })
+    expect(other.custom_header).toBe('Q3 Overview')
+    expect(other.property_id).toBeNull()
+
+    const closed = await createBlast(db, db, {
+      agentId: AGENT.id, contactIds: ['c1'], blast: { ...BLAST_INPUT, customHeader: 'stray' },
+    })
+    // Absent, not null: a deal announcement must still insert on a database
+    // that has not had migration 0058 applied.
+    expect('custom_header' in closed).toBe(false)
+  })
+
   it('refuses an empty recipient list rather than creating a send that mails nobody', async () => {
     const db = makeDb()
     await expect(createBlast(db, db, { agentId: AGENT.id, blast: BLAST_INPUT, contactIds: [] }))
@@ -272,6 +290,27 @@ describe('sendBlastBatch', () => {
     const addressed = sendGraphMail.mock.calls.map(([, m]) => m.to[0]).sort()
     expect(addressed).toEqual(['c1@example.com', 'c2@example.com', 'c3@example.com'])
     expect(progress).toMatchObject({ sent: 3, failed: 0, remaining: 0, done: true, status: 'sent' })
+  })
+
+  it("sends an 'other' email with the agent's header and no property", async () => {
+    const db = makeDb()
+    const contacts = [contact({ id: 'c1' })]
+    db.tables.contacts.push(...contacts)
+    const blast = await createBlast(db, db, {
+      agentId: AGENT.id, contactIds: ['c1'],
+      blast: {
+        ...BLAST_INPUT, propertyId: null, dealStatus: 'other', customHeader: 'Q3 Market Overview',
+        subject: '{{dealStatus}}', body: 'Hi {{firstName}},\n\n{{customMessage}}',
+      },
+    })
+    await runBatch(db, blast, contacts, { property: null })
+
+    const [, message] = sendGraphMail.mock.calls[0]
+    expect(message.subject).toBe('Q3 Market Overview')
+    expect(message.html).toContain('Q3 Market Overview')
+    expect(message.html).not.toContain('1200 Grand Ave')
+    // The contact timeline names the send by its header, not "Other".
+    expect(db.tables.activities[0].body).toContain('Q3 Market Overview')
   })
 
   it('personalises the subject and body per recipient', async () => {

@@ -102,7 +102,7 @@ export function renderEmailFooterHtml({ agentName = '', unsubscribeUrl: url = ''
   const who = [escapeHtml(agentName), escapeHtml(COMPANY.name)].filter(Boolean).join(' · ')
   const why = reason
     ? escapeHtml(reason)
-    : `You're receiving this because you're on the property-update list at ${escapeHtml(COMPANY.name)}.`
+    : `You're receiving this because you're on the mailing list at ${escapeHtml(COMPANY.name)}.`
 
   // No link, no line. An unsubscribe row pointing nowhere is worse than an
   // honest omission — it reads as an opt-out that silently does nothing.
@@ -113,7 +113,7 @@ export function renderEmailFooterHtml({ agentName = '', unsubscribeUrl: url = ''
 
   return `
           <tr>
-            <td style="padding:16px 24px;border-top:1px solid #e5e7eb;font-size:12px;line-height:1.6;color:#6b7280">
+            <td class="gw-pad" style="padding:20px 32px 24px 32px;background:#faf9f6;border-top:1px solid #ece8df;font-size:12px;line-height:1.6;color:#6b7280">
               <div style="color:#374151;font-weight:600">${who}</div>
               <div>${escapeHtml(COMPANY.address)}${COMPANY.phone ? ` · ${escapeHtml(COMPANY.phone)}` : ''}</div>
               <div style="margin:8px 0 0 0">${why}</div>${optOut}

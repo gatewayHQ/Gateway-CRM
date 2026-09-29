@@ -7,7 +7,9 @@
  * multifamily buyer and seller I work with".
  *
  * Four steps, in the order an agent actually thinks:
- *   1. Property + deal status  — what are we announcing?
+ *   1. Topic                   — what are we sending, and about which property?
+ *                                (A Market Update, or "Other" with a header the
+ *                                agent writes, needs no property at all.)
  *   2. Message                 — template, photo, tokens, custom note, preview
  *   3. Audience                — who gets it (src/components/AudienceFilter.jsx)
  *   4. Review & send           — the numbers, then a paced, resumable send
@@ -20,7 +22,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
+import { compressForUpload, IMMUTABLE_CACHE, isWebpUrl } from '../lib/imageCompress.js'
 import { Icon, Badge, EmptyState, SearchDropdown, pushToast, ConfirmDialog } from '../components/UI.jsx'
 import AudienceFilter from '../components/AudienceFilter.jsx'
 import BlastReport from '../components/BlastReport.jsx'
@@ -30,13 +32,14 @@ import {
   DEAL_ANNOUNCEMENT_STATUSES, DEAL_ANNOUNCEMENT_STATUS_LABELS, DEAL_ANNOUNCEMENT_STATUS_COLORS,
   ANNOUNCEMENT_TOKENS, defaultAnnouncementBody, defaultAnnouncementSubject,
   renderAnnouncementHtml, renderTokens, announcementTokens,
-  propertyPhotos, defaultPhotoUrl, fullAddress, statusLabel,
+  propertyPhotos, defaultPhotoUrl, fullAddress,
   ANNOUNCEMENT_FACT_FIELDS, defaultHiddenFacts, hiddenFactTokensUsed,
+  requiresProperty, announcementHeader, normalizeCustomHeader, CUSTOM_HEADER_MAX,
 } from '../lib/dealAnnouncement.js'
 import { PREVIEW_UNSUBSCRIBE_URL } from '../lib/emailFooter.js'
 
 const STEPS = [
-  { id: 1, label: 'Property' },
+  { id: 1, label: 'Topic'    },
   { id: 2, label: 'Message'  },
   { id: 3, label: 'Audience' },
   { id: 4, label: 'Review'   },
@@ -45,6 +48,39 @@ const STEPS = [
 const card = {
   border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)',
   background: '#fff', padding: 16, marginBottom: 14,
+}
+
+// Every image in a mass email is stored once under campaign-images/announcements
+// in the email preset's format (JPEG): the per-send upload and the converted
+// copy of an old WebP property photo take the same path.
+async function uploadEmailImage(file) {
+  const { blob, ext, type, original } = await compressForUpload(file, 'email')
+  const path = `announcements/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
+  const { error } = await supabase.storage.from('campaign-images')
+    .upload(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
+  if (error) throw error
+  const { data: { publicUrl } } = supabase.storage.from('campaign-images').getPublicUrl(path)
+  return { publicUrl, original, type }
+}
+
+/**
+ * The photo URL to actually send. Property photos uploaded before the gallery
+ * switched to JPEG are WebP, which classic Outlook shows as an empty box — so
+ * one of those is re-encoded to a JPEG copy here, once, at send time. The
+ * property's own gallery is left alone; only this send points at the copy.
+ * Anything else passes straight through.
+ */
+async function emailSafePhotoUrl(url) {
+  if (!url || !isWebpUrl(url)) return url
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`could not read the photo (HTTP ${res.status})`)
+  const data = await res.blob()
+  const file = new File([data], 'photo.webp', { type: data.type || 'image/webp' })
+  const { publicUrl, type } = await uploadEmailImage(file)
+  // compressForUpload falls back to the original bytes when it cannot decode;
+  // a re-upload of the same WebP would fix nothing, so say so instead.
+  if (/webp/.test(type)) throw new Error('this browser could not convert it')
+  return publicUrl
 }
 
 async function authedPost(action, payload) {
@@ -61,15 +97,18 @@ async function authedPost(action, payload) {
 
 // What the step bar says. A disabled button with no explanation is a dead end;
 // naming the one missing thing turns it into an instruction.
-function blockedNote(step) {
-  if (step === 1) return 'Pick a property and what you are announcing.'
+function blockedNote(step, { dealStatus, customHeader } = {}) {
+  if (step === 1) {
+    if (dealStatus === 'other' && !normalizeCustomHeader(customHeader)) return 'Write the header for this email.'
+    return 'Pick the property this announcement is about.'
+  }
   if (step === 2) return 'A subject and a body are needed before this can go out.'
   if (step === 3) return 'Nobody is selected yet — choose an audience, or paste a list and add it.'
   return ''
 }
 
-function readyNote(step, { property, subject, total = 0, fromList = 0 } = {}) {
-  if (step === 1) return property ? `Announcing ${property.address || 'this property'}.` : ''
+function readyNote(step, { property, header, subject, total = 0, fromList = 0 } = {}) {
+  if (step === 1) return property ? `${header}: ${property.address || 'this property'}.` : `${header} — no property attached.`
   if (step === 2) return subject ? `Subject: ${subject}` : ''
   if (step === 3) {
     const tail = fromList > 0 ? ` (${fromList} from your list)` : ''
@@ -88,6 +127,8 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
   // ── Step 1 ──
   const [propertyId, setPropertyId] = useState(focusProperty || '')
   const [dealStatus, setDealStatus] = useState('closed')
+  // The ribbon text for an 'other' send — the agent's own header.
+  const [customHeader, setCustomHeader] = useState('')
 
   // ── Step 2 ──
   const [templateId, setTemplateId]       = useState('')
@@ -124,6 +165,10 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
   const properties = db?.properties || []
   const templates  = (db?.templates || []).filter(t => t.category === 'deal-announcement')
   const property   = properties.find(p => p.id === propertyId) || null
+  // A market update is about the market, not a listing: the property is
+  // optional there, and without one the email is the graphic plus the words.
+  const needsProperty = requiresProperty(dealStatus)
+  const header        = announcementHeader(dealStatus, customHeader)
 
   // Contacts the filter resolved plus addresses off the list. Every count, gate
   // and confirmation on this page reads this rather than one half of it — the
@@ -190,18 +235,18 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
   const previewHtml = useMemo(() => renderAnnouncementHtml({
     property, status: dealStatus, agent: activeAgent,
     contact: resolved.recipients[0] || { first_name: 'Pat', last_name: 'Ryan' },
-    terms, customMessage, photoUrl, body, hiddenFacts,
+    terms, customMessage, customHeader, photoUrl, body, hiddenFacts,
     // The real link is minted per recipient at send time and must never be live
     // in a preview — clicking your own preview would opt out the contact it was
     // drawn for. The footer still renders, so what is approved is what is sent.
     unsubscribeUrl: PREVIEW_UNSUBSCRIBE_URL,
-  }), [property, dealStatus, activeAgent, resolved.recipients, terms, customMessage, photoUrl, body, hiddenFacts])
+  }), [property, dealStatus, activeAgent, resolved.recipients, terms, customMessage, customHeader, photoUrl, body, hiddenFacts])
 
   // The value each detail row WOULD print, so a switch can say "there is
   // nothing on this property to show" instead of offering to hide a blank.
   const factValues = useMemo(() => {
     const t = announcementTokens({ property, status: dealStatus, agent: activeAgent, contact: {}, terms, customMessage })
-    return { address: t.propertyAddress, assetType: t.assetType, units: t.unitCount, price: t.price, terms: t.terms }
+    return { assetType: t.assetType, units: t.unitCount, price: t.price, terms: t.terms }
   }, [property, dealStatus, activeAgent, terms, customMessage])
 
   // A hidden row whose token is still typed into the subject or the body prints
@@ -213,22 +258,20 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
 
   const previewSubject = useMemo(() => renderTokens(subject, announcementTokens({
     property, status: dealStatus, agent: activeAgent,
-    contact: resolved.recipients[0] || { first_name: 'Pat' }, terms, customMessage,
-  })), [subject, property, dealStatus, activeAgent, resolved.recipients, terms, customMessage])
+    contact: resolved.recipients[0] || { first_name: 'Pat' }, terms, customMessage, customHeader,
+  })), [subject, property, dealStatus, activeAgent, resolved.recipients, terms, customMessage, customHeader])
 
   const uploadPhoto = async (file) => {
     if (!file) return
+    if (file.size > 10 * 1024 * 1024) { pushToast('That image is over 10 MB — export it smaller and try again', 'error'); return }
     setUploading(true)
     try {
-      const { blob, ext, type } = await compressForUpload(file, 'landing')
-      const path = `announcements/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
-      const { error } = await supabase.storage.from('campaign-images')
-        .upload(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
-      if (error) throw error
-      const { data: { publicUrl } } = supabase.storage.from('campaign-images').getPublicUrl(path)
+      // 'email', not 'landing': JPEG rather than WebP (classic Outlook shows
+      // WebP as a blank box) and a width-only cap so a tall graphic stays sharp.
+      const { publicUrl } = await uploadEmailImage(file)
       setPhotoUrl(publicUrl)
       setPhotoTouched(true)
-      pushToast('Photo uploaded for this send')
+      pushToast(needsProperty ? 'Photo uploaded for this send' : 'Graphic uploaded for this send')
     } catch (err) {
       pushToast(`Upload failed: ${err.message}`, 'error')
     }
@@ -238,7 +281,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
   const saveAsTemplate = async () => {
     setSavingTemplate(true)
     const { error } = await supabase.from('templates').insert([{
-      name:     `${statusLabel(dealStatus)} — ${property?.address || 'Announcement'}`,
+      name:     property?.address ? `${header} — ${property.address}` : header,
       subject, body,
       category: 'deal-announcement',
       agent_id: activeAgent?.id || null,
@@ -263,11 +306,21 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
       // everyone who already received it a second time.
       let blastId = progress?.blastId || null
       if (!blastId) {
+        // Converted before the blast exists, so the stored photo_url — the one
+        // every batch sends, today and on a resume tomorrow — is the JPEG.
+        let sendPhotoUrl = photoUrl || null
+        try {
+          sendPhotoUrl = await emailSafePhotoUrl(sendPhotoUrl)
+          if (sendPhotoUrl !== photoUrl) { setPhotoUrl(sendPhotoUrl); setPhotoTouched(true) }
+        } catch (err) {
+          pushToast(`Sending the original photo — converting it for Outlook failed: ${err.message}`, 'error')
+        }
         const { blast } = await authedPost('blast-create', {
           propertyId: propertyId || null,
           templateId: templateId || null,
           dealStatus, subject, body, terms, customMessage, hiddenFacts,
-          photoUrl: photoUrl || null,
+          customHeader: dealStatus === 'other' ? normalizeCustomHeader(customHeader) : null,
+          photoUrl: sendPhotoUrl,
           audience: { ...audience, manual },
           contactIds: resolved.recipients.map(c => c.id),
           listRecipients,
@@ -292,7 +345,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
       setProgress({ ...final, blastId })
       pushToast(final.failed > 0
         ? `Sent to ${final.sent} of ${final.total} — ${final.failed} failed`
-        : `Announcement sent to ${final.sent} contact${final.sent === 1 ? '' : 's'}`,
+        : `Sent to ${final.sent} contact${final.sent === 1 ? '' : 's'}`,
         final.failed > 0 ? 'error' : 'success')
     } catch (err) {
       pushToast(err.message, 'error')
@@ -303,7 +356,9 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
 
   // ── Gates ──────────────────────────────────────────────────────────────────
   const stepReady = {
-    1: Boolean(propertyId && dealStatus),
+    1: Boolean(dealStatus
+      && (!needsProperty || propertyId)
+      && (dealStatus !== 'other' || normalizeCustomHeader(customHeader))),
     2: Boolean(subject.trim() && body.trim()),
     3: totalRecipients > 0,
     4: true,
@@ -350,41 +405,13 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
 
       {showReport && <BlastReport activeAgent={activeAgent} />}
 
-      {/* ── Step 1: property + status ── */}
+      {/* ── Step 1: what are we sending + property ──
+          The type comes first because it decides whether a property is needed
+          at all: a Market Update is the agent's graphic and commentary. */}
       {!showReport && step === 1 && (
         <>
           <div style={card}>
-            <label className="form-label required">Property</label>
-            <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 8 }}>
-              The announcement pulls its address, asset type, unit count, price and photo from this record.
-            </div>
-            <SearchDropdown items={propertyItems} value={propertyId}
-              onSelect={(id) => { setPropertyId(id); setPhotoTouched(false) }}
-              placeholder="Search properties…" />
-            {property && (
-              <div style={{ marginTop: 12, display: 'flex', gap: 12, alignItems: 'center' }}>
-                {defaultPhotoUrl(property) && (
-                  <img src={defaultPhotoUrl(property)} alt="" style={{ width: 96, height: 72, objectFit: 'cover', borderRadius: 6 }} />
-                )}
-                <div style={{ fontSize: 13 }}>
-                  <div style={{ fontWeight: 600 }}>{fullAddress(property)}</div>
-                  <div style={{ color: 'var(--gw-mist)' }}>
-                    {property.type}
-                    {property.details?.total_units ? ` · ${property.details.total_units} units` : ''}
-                    {property.list_price ? ` · list ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(property.list_price)}` : ''}
-                  </div>
-                  {photos.length === 0 && (
-                    <div style={{ color: '#b45309', fontSize: 12, marginTop: 4 }}>
-                      No photos on this property — the email will send without one unless you upload it in the next step.
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div style={card}>
-            <label className="form-label required">Deal status</label>
+            <label className="form-label required">What are you sending?</label>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
               {DEAL_ANNOUNCEMENT_STATUSES.map(s => (
                 <button key={s} type="button" onClick={() => setDealStatus(s)}
@@ -395,10 +422,66 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
                     background: dealStatus === s ? DEAL_ANNOUNCEMENT_STATUS_COLORS[s] : '#fff',
                     color: dealStatus === s ? '#fff' : 'var(--gw-slate)',
                   }}>
-                  {DEAL_ANNOUNCEMENT_STATUS_LABELS[s]}
+                  {s === 'other' ? 'Other — write your own header' : DEAL_ANNOUNCEMENT_STATUS_LABELS[s]}
                 </button>
               ))}
             </div>
+            {dealStatus === 'market-update' && (
+              <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 10 }}>
+                No property needed — you'll upload your own graphic and write your commentary on the next step.
+              </div>
+            )}
+            {dealStatus === 'other' && (
+              <div className="form-group" style={{ margin: '12px 0 0' }}>
+                <label className="form-label required">Header</label>
+                <input className="form-control" value={customHeader} maxLength={CUSTOM_HEADER_MAX}
+                  onChange={e => setCustomHeader(e.target.value)}
+                  placeholder="e.g. Market Overview · Q3 Multifamily Report · Open House Saturday" />
+                <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 6 }}>
+                  Prints in the coloured band at the top of the email, and is the default subject line.
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div style={card}>
+            <label className={`form-label${needsProperty ? ' required' : ''}`}>
+              Property{!needsProperty && <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}> — optional</span>}
+            </label>
+            <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 8 }}>
+              {needsProperty
+                ? 'The announcement pulls its address, asset type, unit count, price and photo from this record.'
+                : 'Leave this blank for a general update. Pick one only if the email should also show a property\'s address and details.'}
+            </div>
+            <SearchDropdown items={propertyItems} value={propertyId}
+              onSelect={(id) => { setPropertyId(id); setPhotoTouched(false) }}
+              placeholder="Search properties…" />
+            {property && (
+              <div style={{ marginTop: 12, display: 'flex', gap: 12, alignItems: 'center' }}>
+                {defaultPhotoUrl(property) && (
+                  <img src={defaultPhotoUrl(property)} alt="" style={{ width: 96, height: 72, objectFit: 'cover', borderRadius: 6 }} />
+                )}
+                <div style={{ fontSize: 13, flex: 1 }}>
+                  <div style={{ fontWeight: 600 }}>{fullAddress(property)}</div>
+                  <div style={{ color: 'var(--gw-mist)' }}>
+                    {property.type}
+                    {property.details?.total_units ? ` · ${property.details.total_units} units` : ''}
+                    {property.list_price ? ` · list ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(property.list_price)}` : ''}
+                  </div>
+                  {photos.length === 0 && needsProperty && (
+                    <div style={{ color: '#b45309', fontSize: 12, marginTop: 4 }}>
+                      No photos on this property — the email will send without one unless you upload it in the next step.
+                    </div>
+                  )}
+                </div>
+                {!needsProperty && (
+                  <button type="button" className="btn btn--ghost btn--sm"
+                    onClick={() => { setPropertyId(''); if (!photoTouched) setPhotoUrl('') }}>
+                    Remove
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </>
       )}
@@ -416,7 +499,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
           <div style={card}>
             <label className="form-label">Start from a template</label>
             <select className="form-control" value={templateId} onChange={e => applyTemplate(e.target.value)}>
-              <option value="">Default {statusLabel(dealStatus)} wording</option>
+              <option value="">Default {header} wording</option>
               {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
             <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 6 }}>
@@ -424,6 +507,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
             </div>
           </div>
 
+          {needsProperty || property ? (
           <div style={card}>
             <label className="form-label">Photo <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}>— the property's first photo unless you pick another</span></label>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
@@ -445,8 +529,8 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
             </div>
             <label className="btn btn--ghost btn--sm" style={{ cursor: 'pointer' }}>
               {uploading ? 'Uploading…' : 'Upload a different photo'}
-              <input type="file" accept="image/*" style={{ display: 'none' }}
-                onChange={e => uploadPhoto(e.target.files?.[0])} />
+              <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: 'none' }}
+                onChange={e => { uploadPhoto(e.target.files?.[0]); e.target.value = '' }} />
             </label>
             {photoUrl && (
               <button type="button" className="btn btn--ghost btn--sm" style={{ marginLeft: 8 }}
@@ -455,6 +539,19 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
               </button>
             )}
           </div>
+          ) : (
+          <div style={card}>
+            <label className="form-label">Graphic <span style={{ fontWeight: 400, color: 'var(--gw-mist)' }}>— the image you designed for this update</span></label>
+            <GraphicDrop url={photoUrl} uploading={uploading}
+              onFile={uploadPhoto}
+              onRemove={() => { setPhotoUrl(''); setPhotoTouched(true) }} />
+            <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 10, lineHeight: 1.5 }}>
+              Shown full width at the top of the email. Export a PNG or JPG about 1200px wide — Canva's
+              "Email header" or any portrait size works — so the text stays sharp. Put the key numbers in
+              your message too: many inboxes hide images until the reader clicks "show".
+            </div>
+          </div>
+          )}
 
           {/* ── Which details to show ──
               The reason this exists: a property under contract is announced to
@@ -463,6 +560,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
               Contract. Every row is a switch for the same reason in miniature —
               an agent who does not want to lead with a 6-unit count shouldn't
               have to delete the property's data to leave it out of one email. */}
+          {property && (
           <div style={card}>
             <label className="form-label">
               Details to include
@@ -509,6 +607,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
               </div>
             )}
           </div>
+          )}
 
           <div style={card}>
             <div className="form-group">
@@ -537,7 +636,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
               <textarea className="form-control form-control--textarea" style={{ minHeight: 180 }}
                 value={body} onChange={e => { setBody(e.target.value); setContentTouched(true) }} />
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 8 }}>
-                {ANNOUNCEMENT_TOKENS.map(t => (
+                {ANNOUNCEMENT_TOKENS.filter(t => property || !t.property).map(t => (
                   <button key={t.token} type="button" title={t.label}
                     onClick={() => { setBody(b => `${b}${t.token}`); setContentTouched(true) }}
                     style={{
@@ -595,8 +694,8 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
           <div style={card}>
             <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
               <Stat label="Recipients" value={totalRecipients} />
-              <Stat label="Announcing" value={statusLabel(dealStatus)} />
-              <Stat label="Property" value={property?.address || '—'} />
+              <Stat label="Sending" value={header} />
+              {(needsProperty || property) && <Stat label="Property" value={property?.address || '—'} />}
               <Stat label="Sending as" value={outlook?.email || activeAgent?.email || '—'} />
             </div>
             {hiddenFacts.length > 0 && (
@@ -678,7 +777,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
           {confirmSend && (
             <ConfirmDialog
               eyebrow="Confirm Send"
-              title={`Send this announcement to ${totalRecipients} recipient${totalRecipients === 1 ? '' : 's'}?`}
+              title={`Send this email to ${totalRecipients} recipient${totalRecipients === 1 ? '' : 's'}?`}
               message={`Each one gets their own email from ${outlook?.email || 'your mailbox'}. This cannot be unsent.`}
               confirmLabel="Send now"
               confirmVariant="btn--primary"
@@ -707,8 +806,8 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
           {step > 1 && <button className="btn btn--ghost" onClick={() => setStep(s => s - 1)}>Back</button>}
           <span style={{ flex: 1, fontSize: 12.5, color: 'var(--gw-mist)', minWidth: 160 }}>
             {stepReady[step]
-              ? readyNote(step, { property, subject, total: totalRecipients, fromList: listRecipients.length })
-              : blockedNote(step)}
+              ? readyNote(step, { property, header, subject, total: totalRecipients, fromList: listRecipients.length })
+              : blockedNote(step, { dealStatus, customHeader })}
           </span>
           {step < 4 && (
             <button className="btn btn--primary" disabled={!stepReady[step]} onClick={() => setStep(s => s + 1)}>
@@ -720,11 +819,82 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
         </div>
       )}
 
-      {properties.length === 0 && step === 1 && !showReport && (
+      {properties.length === 0 && needsProperty && step === 1 && !showReport && (
         <EmptyState icon="building" title="No properties yet"
-          message="Add a property first — a deal announcement is built from a property record." />
+          message="Add a property first — a deal announcement is built from a property record. A Market Update needs none." />
       )}
     </div>
+  )
+}
+
+/**
+ * The drop zone for a market-update graphic. Empty, it is one big target —
+ * drag the Canva export onto it or click to pick. Filled, it shows the graphic
+ * the way the email will (full width, uncropped), with replace/remove on hover
+ * rather than a thumbnail cropped to a building-photo shape.
+ */
+function GraphicDrop({ url, uploading, onFile, onRemove }) {
+  const [over, setOver] = useState(false)
+  const inputId = 'mass-email-graphic'
+  const drop = (e) => {
+    e.preventDefault(); setOver(false)
+    const file = [...(e.dataTransfer?.files || [])].find(f => f.type.startsWith('image/'))
+    if (file) onFile(file)
+    else pushToast('Drop an image — PNG or JPG', 'error')
+  }
+  const dragProps = {
+    onDragOver: (e) => { e.preventDefault(); setOver(true) },
+    onDragLeave: () => setOver(false),
+    onDrop: drop,
+  }
+  const input = (
+    <input id={inputId} type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: 'none' }}
+      onChange={e => { onFile(e.target.files?.[0]); e.target.value = '' }} />
+  )
+
+  if (url) {
+    return (
+      <div {...dragProps} style={{
+        position: 'relative', borderRadius: 10, overflow: 'hidden', background: 'var(--gw-bone)',
+        border: `1px solid ${over ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+      }}>
+        <img src={url} alt="Graphic for this send"
+          style={{ display: 'block', width: '100%', maxHeight: 360, objectFit: 'contain', opacity: uploading ? 0.4 : 1 }} />
+        <div style={{ position: 'absolute', top: 10, right: 10, display: 'flex', gap: 6 }}>
+          <label htmlFor={inputId} className="btn btn--sm"
+            style={{ cursor: 'pointer', background: 'rgba(26,26,46,0.85)', color: '#fff', border: 'none', backdropFilter: 'blur(4px)' }}>
+            <Icon name="upload" size={12} style={{ marginRight: 6 }} />{uploading ? 'Uploading…' : 'Replace'}
+          </label>
+          <button type="button" className="btn btn--sm" onClick={onRemove}
+            style={{ background: 'rgba(255,255,255,0.92)', color: 'var(--gw-slate)', border: 'none' }}>
+            <Icon name="x" size={12} style={{ marginRight: 4 }} />Remove
+          </button>
+        </div>
+        {input}
+      </div>
+    )
+  }
+
+  return (
+    <label htmlFor={inputId} {...dragProps} style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8,
+      padding: '34px 16px', borderRadius: 10, cursor: 'pointer', textAlign: 'center',
+      border: `2px dashed ${over ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
+      background: over ? 'var(--gw-sky)' : 'var(--gw-bone)',
+      transition: 'background 150ms, border-color 150ms',
+    }}>
+      <div style={{
+        width: 44, height: 44, borderRadius: 999, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: '#fff', color: 'var(--gw-azure)', boxShadow: '0 1px 3px rgba(26,26,46,0.08)',
+      }}>
+        <Icon name="upload" size={20} />
+      </div>
+      <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--gw-slate)' }}>
+        {uploading ? 'Uploading your graphic…' : 'Drop your graphic here, or click to upload'}
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>PNG or JPG · about 1200px wide</div>
+      {input}
+    </label>
   )
 }
 

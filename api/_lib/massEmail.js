@@ -44,8 +44,8 @@ import {
   mintRecipientUnsubscribeToken, mintOpenToken, canMintUnsubscribeTokens,
 } from './unsubscribeToken.js'
 import {
-  renderAnnouncementHtml, renderTokens, announcementTokens, statusLabel,
-  normalizeHiddenFacts,
+  renderAnnouncementHtml, renderTokens, announcementTokens, announcementHeader,
+  normalizeHiddenFacts, normalizeCustomHeader,
 } from '../../src/lib/dealAnnouncement.js'
 import { unsubscribeUrl, openPixelUrl } from '../../src/lib/emailFooter.js'
 
@@ -199,8 +199,14 @@ export async function createBlast(svc, user, { agentId, blast, contactIds, listR
   const totalResolved = (contacts || []).length + pasted.length
   if (totalResolved > MAX_RECIPIENTS) throw tooMany(totalResolved)
 
+  // The agent-written header of an 'other' send (migration 0058). Only put on
+  // the row when there is one, so a deal announcement still inserts on a
+  // database that has not had the column added yet.
+  const customHeader = blast.dealStatus === 'other' ? normalizeCustomHeader(blast.customHeader) : ''
+
   const { data: created, error: blastErr } = await svc.from('email_blasts').insert([{
     agent_id:       agentId,
+    ...(customHeader ? { custom_header: customHeader } : {}),
     property_id:    blast.propertyId || null,
     template_id:    blast.templateId || null,
     deal_status:    blast.dealStatus || null,
@@ -428,6 +434,7 @@ export async function sendBlastBatch(svc, { blast, agent, contactsById = {}, pro
     const tokenArgs = {
       property, status: blast.deal_status, agent, contact,
       terms: blast.terms || '', customMessage: blast.custom_message || '',
+      customHeader: blast.custom_header || '',
     }
     // Subject and body resolve from the SAME token map the preview used, so
     // what the agent approved is what each recipient receives.
@@ -500,7 +507,7 @@ async function logDelivery(svc, { blast, agent, row, subject, html, property }) 
   // send's own report is where an agent reads them.
   if (!row.contact_id) return
 
-  const label = statusLabel(blast.deal_status)
+  const label = announcementHeader(blast.deal_status, blast.custom_header)
   const where = property?.address ? ` — ${property.address}` : ''
   const { data: activity } = await svc.from('activities').insert([{
     contact_id: row.contact_id,
@@ -515,7 +522,7 @@ async function logDelivery(svc, { blast, agent, row, subject, html, property }) 
     activity_id:   activity?.id || null,
     blast_id:      blast.id,
     subject,
-    body_preview:  `${statusLabel(blast.deal_status)}${where}`.slice(0, 280),
+    body_preview:  `${label}${where}`.slice(0, 280),
     body_html:     html,
     to_recipients: [{ email: row.email }],
     status:        'sent',

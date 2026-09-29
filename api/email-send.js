@@ -109,6 +109,7 @@ import {
   createBlast, loadSendableBlast, sendBlastBatch, blastProgress,
 } from './_lib/massEmail.js'
 import { readPropertiesWithUnit } from '../src/lib/address.js'
+import { normalizeCustomHeader } from '../src/lib/dealAnnouncement.js'
 
 const SHARED_HEADERS = {
   'Access-Control-Allow-Origin':  '*',
@@ -565,6 +566,9 @@ async function handleBlastCreate(req, res) {
   }
   if (!blast.body || !String(blast.body).trim()) {
     return res.status(400).json({ error: 'The message body is empty' })
+  }
+  if (blast.dealStatus === 'other' && !normalizeCustomHeader(blast.customHeader)) {
+    return res.status(400).json({ error: 'Write a header for this email' })
   }
 
   const created = await createBlast(svc, user, {

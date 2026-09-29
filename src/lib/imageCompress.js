@@ -8,11 +8,26 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Per-use-case targets. maxDim caps the longest edge; quality is the encoder
-// quality (0–1). Headshots are shown small, so they cap tighter.
+// quality (0–1); type is the output format (WebP when omitted). Headshots are
+// shown small, so they cap tighter.
+//
+// Property photos are JPEG, not WebP, because they don't stay on the web: a
+// property's first photo is the hero image of every deal announcement, and
+// classic Outlook for Windows does not display WebP — the recipient gets an
+// empty box where the building should be. JPEG costs roughly a quarter more
+// bytes than WebP at this quality; a photo that renders everywhere is worth it.
+//
+// `email` is different on both axes, for images that go out inside a mass
+// email. It caps WIDTH, not the longest edge: an agent's market-update graphic
+// is often a tall infographic, and a 1600px longest-edge cap would shrink a
+// 1080×3000 one to 576px wide — under the 600px the email shows it at, so its
+// text goes soft. And it encodes JPEG, not WebP, because classic Outlook for
+// Windows does not display WebP at all — the recipient sees an empty box.
 export const IMAGE_PRESETS = {
   landing:  { maxDim: 1600, quality: 0.82 }, // campaign/landing collage photos
-  property: { maxDim: 1600, quality: 0.82 }, // property gallery
+  property: { maxDim: 1600, quality: 0.82, type: 'image/jpeg' }, // property gallery — also emailed
   headshot: { maxDim: 512,  quality: 0.85 }, // advisor card / profile photo
+  email:    { maxWidth: 1200, quality: 0.9, type: 'image/jpeg' }, // 2× the 600px email column
 }
 
 // Pure: the scaled dimensions for a maxDim cap, never upscaling. Exported for
@@ -23,6 +38,14 @@ export function computeTargetDimensions(w, h, maxDim) {
   if (longest <= maxDim) return { width: w, height: h }
   const scale = maxDim / longest
   return { width: Math.round(w * scale), height: Math.round(h * scale) }
+}
+
+// Pure: scale down to a width cap only, never upscaling. Height follows.
+export function computeWidthCappedDimensions(w, h, maxWidth) {
+  if (!w || !h) return { width: w || 0, height: h || 0 }
+  if (w <= maxWidth) return { width: w, height: h }
+  const scale = maxWidth / w
+  return { width: maxWidth, height: Math.round(h * scale) }
 }
 
 const loadImage = (file) => new Promise((resolve, reject) => {
@@ -53,19 +76,31 @@ export async function compressForUpload(file, preset = 'landing') {
 
   try {
     const img = await loadImage(file)
-    const { width, height } = computeTargetDimensions(img.naturalWidth, img.naturalHeight, cfg.maxDim)
+    const { width, height } = cfg.maxWidth
+      ? computeWidthCappedDimensions(img.naturalWidth, img.naturalHeight, cfg.maxWidth)
+      : computeTargetDimensions(img.naturalWidth, img.naturalHeight, cfg.maxDim)
     const canvas = document.createElement('canvas')
     canvas.width = width; canvas.height = height
     const ctx = canvas.getContext('2d')
+    const type = cfg.type || 'image/webp'
+    // JPEG has no alpha: without a fill, a transparent PNG graphic turns black.
+    if (type === 'image/jpeg') { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, width, height) }
     ctx.drawImage(img, 0, 0, width, height)
 
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/webp', cfg.quality))
-    if (!blob || blob.size >= file.size) return fallback   // no win → keep original
-    return { blob, ext: 'webp', type: 'image/webp', original: false }
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, type, cfg.quality))
+    // No win → keep the original — unless the original is a format the preset
+    // exists to avoid (a WebP graphic headed for an email), where bigger-but-
+    // visible beats smaller-and-blank.
+    const originalAcceptable = !cfg.type || /jpe?g|png/.test(file.type)
+    if (!blob || (blob.size >= file.size && originalAcceptable)) return fallback
+    return { blob, ext: type === 'image/jpeg' ? 'jpg' : 'webp', type, original: false }
   } catch {
     return fallback
   }
 }
+
+/** A stored image URL that is WebP — photos uploaded before property photos moved to JPEG. */
+export const isWebpUrl = (url) => /\.webp(?:[?#]|$)/i.test(String(url || ''))
 
 // One year, immutable — safe because every upload path uses a unique
 // timestamp+random filename, so a stored object never changes. Lets returning
