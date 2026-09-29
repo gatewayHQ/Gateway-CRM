@@ -1157,8 +1157,12 @@ create table if not exists email_blasts (
   -- The announcement headline ('closed', 'under-contract', …) — its own
   -- vocabulary, not properties.status or deals.stage. Free text (no CHECK) so a
   -- new announcement type needs no migration; the app offers the fixed list in
-  -- DEAL_ANNOUNCEMENT_STATUSES (src/lib/dealAnnouncement.js).
+  -- DEAL_ANNOUNCEMENT_STATUSES (src/lib/dealAnnouncement.js). 'market-update'
+  -- and 'other' are sends with no property required (property_id null).
   deal_status      text,
+  -- The header an agent wrote for an 'other' send, printed in the email's
+  -- ribbon in place of a status label (migration 0058). Null otherwise.
+  custom_header    text,
   subject          text not null,
   -- The body WITH its {{tokens}} intact: the reproducible source of the send.
   -- The rendered, per-recipient HTML lands on each email_messages row instead.

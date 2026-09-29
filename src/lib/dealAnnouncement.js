@@ -1,6 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Deal announcements — the "Just Closed / Under Contract / New Listing / Price
-// Reduced" mass email built from a property record.
+// Reduced" mass email built from a property record, plus the two sends that are
+// not about one property: a Market Update, and "Other" with a header the agent
+// writes themselves.
 //
 // Pure module (no React, no Supabase), imported by BOTH the browser wizard and
 // the server-side send handler (api/_lib/massEmail.js). That sharing is the
@@ -22,7 +24,10 @@ import { renderEmailFooterHtml, escapeHtml } from './emailFooter.js'
 // status was never moved, and a price reduction is not a status at all. Kept as
 // its own vocabulary rather than derived, so the announcement says what the
 // agent means it to say.
-export const DEAL_ANNOUNCEMENT_STATUSES = ['closed', 'under-contract', 'new-listing', 'price-reduced', 'coming-soon']
+export const DEAL_ANNOUNCEMENT_STATUSES = [
+  'closed', 'under-contract', 'new-listing', 'price-reduced', 'coming-soon',
+  'market-update', 'other',
+]
 
 export const DEAL_ANNOUNCEMENT_STATUS_LABELS = {
   closed:           'Just Closed',
@@ -30,7 +35,21 @@ export const DEAL_ANNOUNCEMENT_STATUS_LABELS = {
   'new-listing':    'New Listing',
   'price-reduced':  'Price Reduced',
   'coming-soon':    'Coming Soon',
+  'market-update':  'Market Update',
+  other:            'Other',
 }
+
+// Sends that are not about one property. A market update is the agent's read on
+// the market — its picture is a graphic they designed, not a listing photo — so
+// the property is optional rather than required, and without one the email
+// drops the address headline and the detail table instead of printing blanks.
+export const PROPERTY_OPTIONAL_STATUSES = ['market-update', 'other']
+export const requiresProperty = (s) => !PROPERTY_OPTIONAL_STATUSES.includes(s)
+
+// 'other' carries a header the agent types ("Q3 Multifamily Overview", "Open
+// House Saturday"). Capped because it prints in a one-line ribbon.
+export const CUSTOM_HEADER_MAX = 60
+export const normalizeCustomHeader = (h) => String(h || '').replace(/\s+/g, ' ').trim().slice(0, CUSTOM_HEADER_MAX)
 
 // Accent colour for the status ribbon in the email. Inline hex rather than the
 // app's CSS variables — an email client has no stylesheet of ours.
@@ -40,9 +59,21 @@ export const DEAL_ANNOUNCEMENT_STATUS_COLORS = {
   'new-listing':    '#1d4ed8',
   'price-reduced':  '#be123c',
   'coming-soon':    '#4338ca',
+  'market-update':  '#6d28d9',
+  other:            '#374151',
 }
 
 export const statusLabel = (s) => DEAL_ANNOUNCEMENT_STATUS_LABELS[s] || 'Announcement'
+
+/**
+ * The words in the email's ribbon (and {{dealStatus}}). The status label,
+ * except for 'other', where it is the header the agent wrote — falling back to
+ * a neutral word rather than printing "Other" to a client.
+ */
+export function announcementHeader(status, customHeader = '') {
+  if (status === 'other') return normalizeCustomHeader(customHeader) || 'Announcement'
+  return statusLabel(status)
+}
 
 // ─── Merge tokens ─────────────────────────────────────────────────────────────
 // Surfaced in the template editor as clickable chips, and the contract the
@@ -53,12 +84,12 @@ export const ANNOUNCEMENT_TOKENS = [
   { token: '{{firstName}}',       label: 'Recipient first name' },
   { token: '{{lastName}}',        label: 'Recipient last name'  },
   { token: '{{agentName}}',       label: 'Your name'            },
-  { token: '{{propertyAddress}}', label: 'Property address'     },
-  { token: '{{assetType}}',       label: 'Asset type'           },
-  { token: '{{unitCount}}',       label: 'Unit count'           },
-  { token: '{{price}}',           label: 'Price'                },
+  { token: '{{propertyAddress}}', label: 'Property address', property: true },
+  { token: '{{assetType}}',       label: 'Asset type',       property: true },
+  { token: '{{unitCount}}',       label: 'Unit count',       property: true },
+  { token: '{{price}}',           label: 'Price',            property: true },
   { token: '{{terms}}',           label: 'Price / terms note'   },
-  { token: '{{dealStatus}}',      label: 'Deal status'          },
+  { token: '{{dealStatus}}',      label: 'Header / deal status' },
   { token: '{{customMessage}}',   label: 'Your custom message'  },
 ]
 
@@ -176,7 +207,7 @@ export const fullAddress = composeFullAddress
  * Token values for one (property, status, recipient) triple.
  * `terms` and `customMessage` are per-send free text, not property fields.
  */
-export function announcementTokens({ property, status, agent, contact, terms = '', customMessage = '' }) {
+export function announcementTokens({ property, status, agent, contact, terms = '', customMessage = '', customHeader = '' }) {
   return {
     firstName:       contact?.first_name || 'there',
     lastName:        contact?.last_name  || '',
@@ -186,7 +217,7 @@ export function announcementTokens({ property, status, agent, contact, terms = '
     unitCount:       unitCount(property),
     price:           announcementPrice(property, status),
     terms:           terms || '',
-    dealStatus:      statusLabel(status),
+    dealStatus:      announcementHeader(status, customHeader),
     customMessage:   customMessage || '',
   }
 }
@@ -224,6 +255,19 @@ export function defaultAnnouncementBody(status) {
     'coming-soon':    '{{propertyAddress}} is coming to market soon.',
   }[status] || 'Sharing an update on {{propertyAddress}}.'
 
+  if (status === 'market-update') {
+    return [
+      'Hi {{firstName}},',
+      'Here\'s my latest look at the market.',
+      '{{customMessage}}',
+      'If you\'d like to talk through what this means for your property or your next acquisition, just reply — happy to run the numbers with you.',
+      'Best,\n{{agentName}}',
+    ].join('\n\n')
+  }
+  if (status === 'other') {
+    return ['Hi {{firstName}},', '{{customMessage}}', 'Best,\n{{agentName}}'].join('\n\n')
+  }
+
   return [
     'Hi {{firstName}},',
     opener,
@@ -235,6 +279,8 @@ export function defaultAnnouncementBody(status) {
 
 /** The default subject line for a status. */
 export function defaultAnnouncementSubject(status) {
+  if (status === 'market-update') return 'Market Update from {{agentName}}'
+  if (status === 'other') return '{{dealStatus}}'
   return `${statusLabel(status)} — {{propertyAddress}}`
 }
 
@@ -247,9 +293,9 @@ export function defaultAnnouncementSubject(status) {
  */
 export function renderAnnouncementHtml({
   property, status, agent, contact, terms = '', customMessage = '', photoUrl, body,
-  unsubscribeUrl = '', hiddenFacts = [], openPixelUrl = '',
+  unsubscribeUrl = '', hiddenFacts = [], openPixelUrl = '', customHeader = '',
 }) {
-  const tokens = announcementTokens({ property, status, agent, contact, terms, customMessage })
+  const tokens = announcementTokens({ property, status, agent, contact, terms, customMessage, customHeader })
   const bodyText = renderTokens(body || defaultAnnouncementBody(status), tokens)
   const accent   = DEAL_ANNOUNCEMENT_STATUS_COLORS[status] || '#1f2937'
   const photo    = photoUrl || defaultPhotoUrl(property)
@@ -271,7 +317,9 @@ export function renderAnnouncementHtml({
     .filter(f => !hidden.includes(f.key) && values[f.key])
     .map(f => [f.label, values[f.key]])
 
-  const factRows = facts.map(([label, value]) => `
+  // A send with no property (a market update) has no fact table at all — not
+  // even a lone Terms row, which reads as a stray field without an address.
+  const factRows = !property ? '' : facts.map(([label, value]) => `
           <tr>
             <td style="padding:6px 0;font-size:13px;color:#6b7280;width:110px;vertical-align:top">${escapeHtml(label)}</td>
             <td style="padding:6px 0;font-size:14px;color:#111827;font-weight:600">${escapeHtml(value)}</td>
@@ -304,10 +352,14 @@ export function renderAnnouncementHtml({
   const photoBlock = photo ? `
       <tr>
         <td style="padding:0">
-          <img src="${escapeHtml(photo)}" alt="${escapeHtml(tokens.propertyAddress || 'Property')}"
+          <img src="${escapeHtml(photo)}" alt="${escapeHtml(tokens.propertyAddress || tokens.dealStatus)}"
                width="600" style="display:block;width:100%;max-width:600px;height:auto;border:0" />
         </td>
       </tr>` : ''
+
+  const headline = tokens.propertyAddress
+    ? `<div style="font-size:20px;font-weight:700;color:#111827;margin:0 0 16px 0">${escapeHtml(tokens.propertyAddress)}</div>`
+    : ''
 
   return `<!DOCTYPE html>
 <html>
@@ -324,7 +376,7 @@ export function renderAnnouncementHtml({
           </tr>${photoBlock}
           <tr>
             <td style="padding:24px">
-              <div style="font-size:20px;font-weight:700;color:#111827;margin:0 0 16px 0">${escapeHtml(tokens.propertyAddress)}</div>
+              ${headline}
               ${factsTable}
               <div style="font-size:14px;line-height:1.65;color:#374151">${textToHtml(bodyText)}</div>
             </td>

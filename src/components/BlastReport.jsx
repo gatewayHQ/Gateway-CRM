@@ -26,7 +26,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Badge, EmptyState } from './UI.jsx'
-import { statusLabel } from '../lib/dealAnnouncement.js'
+import { announcementHeader } from '../lib/dealAnnouncement.js'
 
 const card = {
   border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)',
@@ -119,7 +119,7 @@ export default function BlastReport({ activeAgent }) {
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
               <Badge variant={badgeVariant(b.status)}>{b.status}</Badge>
               <div style={{ fontWeight: 600, fontSize: 14, flex: 1, minWidth: 200 }}>
-                {b.deal_status ? `${statusLabel(b.deal_status)} — ` : ''}{b.subject}
+                {b.deal_status ? `${announcementHeader(b.deal_status, b.custom_header)} — ` : ''}{b.subject}
               </div>
               <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>
                 {fmtDate(b.completed_at || b.started_at || b.created_at)}

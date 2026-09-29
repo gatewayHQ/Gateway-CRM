@@ -4,7 +4,8 @@ import {
   propertyPhotos, unitCount, announcementPrice, assetTypeLabel, fullAddress,
   defaultAnnouncementBody, defaultAnnouncementSubject, statusLabel,
   defaultHiddenFacts, normalizeHiddenFacts, hiddenFactTokensUsed,
-  ANNOUNCEMENT_FACT_FIELDS,
+  ANNOUNCEMENT_FACT_FIELDS, ANNOUNCEMENT_TOKENS, DEAL_ANNOUNCEMENT_STATUSES,
+  announcementHeader, requiresProperty, normalizeCustomHeader, CUSTOM_HEADER_MAX,
 } from '../dealAnnouncement.js'
 import { COMPANY } from '../emailFooter.js'
 
@@ -214,5 +215,74 @@ describe('optional detail rows', () => {
     expect(hiddenFactTokensUsed('Under contract at {{price}}.', ['price'])).toEqual(['{{price}}'])
     expect(hiddenFactTokensUsed('Under contract.', ['price'])).toEqual([])
     expect(hiddenFactTokensUsed('{{price}}', [])).toEqual([])
+  })
+})
+
+describe('market updates and custom-header sends', () => {
+  const html = (over = {}) => renderAnnouncementHtml({
+    property: null, status: 'market-update', agent, contact,
+    customMessage: 'Cap rates held at 6.2% in Q3.',
+    photoUrl: 'https://cdn.example/q3-graphic.jpg',
+    body: defaultAnnouncementBody('market-update'),
+    ...over,
+  })
+
+  it('offers both types, and neither needs a property', () => {
+    expect(DEAL_ANNOUNCEMENT_STATUSES).toEqual(expect.arrayContaining(['market-update', 'other']))
+    expect(requiresProperty('market-update')).toBe(false)
+    expect(requiresProperty('other')).toBe(false)
+    expect(requiresProperty('closed')).toBe(true)
+  })
+
+  it('renders a market update with no property: ribbon, graphic, message — no headline or detail table', () => {
+    const out = html()
+    expect(out).toContain('Market Update')
+    expect(out).toContain('https://cdn.example/q3-graphic.jpg')
+    expect(out).toContain('Cap rates held at 6.2% in Q3.')
+    expect(out).not.toContain('font-size:20px')
+    expect(out).not.toContain('width:110px')
+    expect(out).not.toContain('{{')
+  })
+
+  it('does not print a lone Terms row on a send with no property', () => {
+    expect(html({ terms: 'All cash' })).not.toContain('All cash')
+  })
+
+  it('uses the graphic’s header as its alt text when there is no address', () => {
+    expect(html()).toContain('alt="Market Update"')
+  })
+
+  it("prints the agent's own header for an 'other' send, in the ribbon and in {{dealStatus}}", () => {
+    const out = html({ status: 'other', customHeader: 'Q3 Multifamily Overview', body: 'Hi {{firstName}} — {{dealStatus}}' })
+    expect(out).toContain('Q3 Multifamily Overview')
+    expect(out).not.toContain('>Other<')
+    const tokens = announcementTokens({ status: 'other', customHeader: 'Q3 Multifamily Overview', contact })
+    expect(renderTokens(defaultAnnouncementSubject('other'), tokens)).toBe('Q3 Multifamily Overview')
+  })
+
+  it('never prints the word "Other" to a client when the header is blank', () => {
+    expect(announcementHeader('other', '   ')).toBe('Announcement')
+    expect(announcementHeader('market-update', 'ignored')).toBe('Market Update')
+  })
+
+  it('tidies and caps the header', () => {
+    expect(normalizeCustomHeader('  Open   House\nSaturday ')).toBe('Open House Saturday')
+    expect(normalizeCustomHeader('x'.repeat(200))).toHaveLength(CUSTOM_HEADER_MAX)
+  })
+
+  it('escapes the header like any other agent-typed text', () => {
+    expect(html({ status: 'other', customHeader: '<b>Q3</b>' })).toContain('&lt;b&gt;Q3&lt;/b&gt;')
+  })
+
+  it('still shows the address and details when a property IS attached to a market update', () => {
+    const out = html({ property })
+    expect(out).toContain('1200 Grand Ave')
+    expect(out).toContain('24')
+  })
+
+  it('has a market-update body that uses no property tokens', () => {
+    const propertyTokens = ANNOUNCEMENT_TOKENS.filter(t => t.property).map(t => t.token)
+    const text = defaultAnnouncementBody('market-update') + defaultAnnouncementSubject('market-update')
+    for (const t of propertyTokens) expect(text).not.toContain(t)
   })
 })
