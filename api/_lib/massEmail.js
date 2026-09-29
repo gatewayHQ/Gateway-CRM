@@ -113,23 +113,32 @@ export async function suppressedEmails(svc, emails = []) {
   const list = [...new Set(emails.map(e => String(e || '').trim().toLowerCase()).filter(Boolean))]
   if (!list.length) return new Set()
 
-  const found = new Set()
+  // address → why it is suppressed ('unsubscribed', 'bounced', 'manual').
+  // A Map rather than a Set so a skipped recipient can be told the real reason.
+  const found = new Map()
   // Chunked: a 500-recipient send would otherwise build a single `in` list long
   // enough to be refused as a URL.
   for (let i = 0; i < list.length; i += 200) {
     const slice = list.slice(i, i + 200)
     const { data, error } = await svc
       .from('email_suppressions')
-      .select('email')
+      .select('email, reason')
       .in('email', slice)
     if (error) {
       const e = new Error(`Could not check the unsubscribe list — nothing was sent. (${error.message})`)
       e.status = 500
       throw e
     }
-    for (const row of (data || [])) found.add(String(row.email || '').toLowerCase())
+    for (const row of (data || [])) found.set(String(row.email || '').toLowerCase(), row.reason || 'unsubscribed')
   }
   return found
+}
+
+/** The skip reason a recipient row shows for a suppressed address. */
+export function suppressionLabel(reason) {
+  if (reason === 'bounced') return 'Bounced on an earlier send'
+  if (reason === 'manual')  return 'Asked not to be emailed'
+  return 'Unsubscribed'
 }
 
 /** A pasted "Firstname Lastname" split into the two columns a row wants. */
@@ -252,7 +261,7 @@ export async function createBlast(svc, user, { agentId, blast, contactIds, listR
     if (!email)                    skip = 'No email on file'
     else if (!isValidEmail(email)) skip = 'Invalid email address'
     else if (c.email_opt_out)      skip = 'Opted out of email'
-    else if (suppressed.has(key))  skip = 'Unsubscribed'
+    else if (suppressed.has(key))  skip = suppressionLabel(suppressed.get(key))
     else if (seen.has(key))        skip = 'Duplicate address in this send'
     if (!skip) seen.add(key)
 
@@ -276,7 +285,7 @@ export async function createBlast(svc, user, { agentId, blast, contactIds, listR
     let skip = null
     if (!email)                    skip = 'No email address'
     else if (!isValidEmail(email)) skip = 'Invalid email address'
-    else if (suppressed.has(key))  skip = 'Unsubscribed'
+    else if (suppressed.has(key))  skip = suppressionLabel(suppressed.get(key))
     else if (seen.has(key))        skip = 'Duplicate address in this send'
     if (!skip) seen.add(key)
 
@@ -561,6 +570,10 @@ async function refreshCounters(svc, blastId) {
     sent_count: sent, failed_count: failed, skipped_count: skipped,
     opened_count: opened, replied_count: replied, unsubscribed_count: unsubscribed,
   }).eq('id', blastId)
+  // Bounces (migration 0059) in their own write, so a database without the
+  // column yet still gets every other counter above.
+  const bounced = await countStamped('bounced_at')
+  await svc.from('email_blasts').update({ bounced_count: bounced }).eq('id', blastId)
 }
 
 /**

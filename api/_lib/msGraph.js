@@ -459,6 +459,22 @@ export async function fetchInboxDelta(accessToken, { link, sinceDays = 30 } = {}
   return data   // { value: [...], '@odata.nextLink'?, '@odata.deltaLink'? }
 }
 
+// The plain-text body of one message. Used only for bounce notices whose
+// preview is too short to name the address that bounced (api/_lib/bounces.js)
+// — the delta feed deliberately doesn't select bodies for everything.
+export async function fetchMessageText(accessToken, messageId) {
+  const res = await fetch(`${GRAPH_BASE}/me/messages/${encodeURIComponent(messageId)}?$select=body`, {
+    headers: { Authorization: `Bearer ${accessToken}`, Prefer: 'outlook.body-content-type="text"' },
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    const e = new Error(data?.error?.message || `Graph message read failed (HTTP ${res.status})`)
+    e.status = res.status
+    throw e
+  }
+  return String(data?.body?.content || '')
+}
+
 // ─── Contact enrichment (agent's own Outlook contacts) ────────────────────────
 // Delegated /me/contacts only — never another agent's contacts, and never
 // written back to Outlook, just read to help fill in blank CRM fields.

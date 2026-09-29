@@ -105,6 +105,7 @@ import {
 } from './_lib/msGraph.js'
 import { syncDealCalendar, syncTaskCalendar } from './_lib/calendarSync.js'
 import { syncContactMail, readMirroredThread, readSyncState } from './_lib/contactMail.js'
+import { syncAgentInbox } from './_lib/inboxSync.js'
 import {
   createBlast, loadSendableBlast, sendBlastBatch, blastProgress,
 } from './_lib/massEmail.js'
@@ -651,6 +652,26 @@ async function handleBlastCancel(req, res) {
   return res.status(200).json({ ok: true, ...(await blastProgress(svc, blast.id)) })
 }
 
+// ─── Mass email: check the inbox now ─────────────────────────────────────────
+// The nightly inbox sync is what finds replies and bounce notices, and Vercel
+// Hobby only runs it once a day. This runs the same sync for the calling agent
+// alone, on demand, from the Past sends report — so a bounce from this
+// morning's send shows up this morning rather than tomorrow.
+async function handleBlastInboxRefresh(req, res) {
+  const { agent } = await requireAgent(req)
+  const svc = getServiceClient()
+  const { data: conn } = await svc
+    .from('ms_graph_connections')
+    .select('agent_id, mail_delta_link, status')
+    .eq('agent_id', agent.id)
+    .maybeSingle()
+  if (!conn || conn.status !== 'connected') {
+    return res.status(409).json({ error: 'Outlook is not connected — connect it in Integrations' })
+  }
+  const result = await syncAgentInbox(svc, conn)
+  return res.status(200).json({ ok: true, replies: result.replies || 0, bounces: result.bounces || 0 })
+}
+
 // ─── Resend (legacy default path — unchanged) ────────────────────────────────
 async function handleResendSend(req, res) {
   // ── Rate limit ────────────────────────────────────────────────────────────
@@ -821,6 +842,10 @@ async function handler(req, res) {
     if (action === 'blast-cancel') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
       return await handleBlastCancel(req, res)
+    }
+    if (action === 'blast-inbox-refresh') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+      return await handleBlastInboxRefresh(req, res)
     }
     if (action === 'outlook-freebusy') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
