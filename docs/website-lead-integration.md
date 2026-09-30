@@ -37,6 +37,7 @@ x-gateway-secret: <WEBSITE_LEAD_WEBHOOK_SECRET>
     { "url": "https://gatewayre.com/p/456-oak-ave", "title": "456 Oak Ave", "viewed_at": "2026-08-19T14:02:00Z" },
     "123 Main St, Sioux City"
   ],
+  "search": { "beds_min": 3, "baths_min": 4, "price_max": 250000, "area": "Sioux City" },
   "message": "I'd like a showing this weekend",
   "event_id": "manus-evt-8891"
 }
@@ -51,6 +52,7 @@ x-gateway-secret: <WEBSITE_LEAD_WEBHOOK_SECRET>
 | `phone` | — | Any format; stored as digits. |
 | `interest_type` | — | `residential` \| `commercial` \| `both`. Anything else falls back to `residential` rather than rejecting the lead. |
 | `viewed_properties` | — | Array of strings (URL **or** title) or objects (`url`, `title`, `viewed_at`). Max 25; extras are dropped. |
+| `search` | — | The visitor's home search: `beds_min`, `baths_min`, `price_min`, `price_max`, `area` — all optional. Also accepted as top-level fields under the names IDX tools use (`beds`/`bedrooms`, `baths`/`bathrooms`, `min_price`, `max_price`/`budget`, `area`/`location`/`city`). Money may be `250000`, `"$250,000"` or `"250k"`. Saved on the contact (`search_*`, area → `submarket`) and on the lead (`search_criteria`), and used to personalize the drip. |
 | `message` | — | Free text, 2000 chars. |
 | `event_id` | — | **Send this if you can.** It is the idempotency key — a retry with the same id is a no-op. Without it the CRM hashes the payload with a 10-minute window instead. |
 | `source_detail` | — | Campaign / page label. Defaults to `manus-website`. |
@@ -64,7 +66,8 @@ x-gateway-secret: <WEBSITE_LEAD_WEBHOOK_SECRET>
   "interest_type": "residential", "lane": "residential",
   "assignment": "round_robin",
   "properties_linked": 3, "properties_matched": 2,
-  "drip_status": "enrolled",
+  "drip_status": "enrolled", "drip_first_step": "sent",
+  "search_criteria": { "beds_min": 3, "baths_min": 4, "price_max": 250000, "area": "Sioux City" },
   "notified": { "primary": { "in_app": true, "email": true } } }
 ```
 
@@ -105,15 +108,27 @@ already in the CRM.
    backfilled; one already on file is never overwritten.
 4. **Viewed properties** are stored and matched to CRM listings where the URL
    or title resolves. An unmatched address is kept, not dropped.
-5. **The drip** — the contact is enrolled in the lane's auto-enroll sequence,
-   which `/api/cron?task=sequence` already runs each morning.
+5. **The drip** — the contact is enrolled in the **assigned agent's own**
+   auto-start sequence for the lane (each agent marks one per lane on their
+   Drip Sequences page; sequences are private to the agent — migration 0060).
+   No auto-start sequence → `drip_status: "skipped"`, which is normal.
 6. **A timeline activity** is logged on the contact.
 7. **The agent is notified** — in-app (bell, realtime, no refresh) and by email
    with the lead details and the properties viewed, most recent first.
+8. **The drip's Day-0 step runs immediately**, from the agent's own Outlook
+   (`drip_first_step`: `sent`, `call_task`, `scheduled` when the first step has
+   a delay, or `error` — e.g. the agent's Outlook is not connected; the step
+   then waits, with the reason shown on the enrollment). Every later step is
+   sent by `/api/cron?task=sequence` once a day. A reply from the lead, an
+   unsubscribe, or a bounce ends the drip.
 
 ---
 
 ## The rotation
+
+Office admins manage it in the CRM: **Website Leads → Round Robin** (pause /
+resume an agent, reorder, add an agent to a lane, see who is next up). The SQL
+below is the same thing by hand.
 
 Two independent rings, `residential` and `commercial`, each with a durable
 cursor in `lead_rotations`. Membership is `lead_rotation_members`.

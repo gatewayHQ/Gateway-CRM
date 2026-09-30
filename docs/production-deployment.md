@@ -29,7 +29,7 @@ disaster-recovery fallback.
    │  campaigns, cron,       │                      │  • Auth (JWT)            │
    │  boldsign, email-send,  │   anon key + JWT     │  • Storage (headshots,   │
    │  twilio-*, portal, …    │ ◀─── browser ──────▶ │    campaign-images)      │
-   │  Cron: sequence(9:00),  │                      │  • Realtime (notifs)     │
+   │  Cron: sequence(15:00), │                      │  • Realtime (notifs)     │
    │        reminders(8:00)  │                      └──────────────────────────┘
    └───────────┬─────────────┘
                │  outbound
@@ -178,7 +178,7 @@ Functions. This is DR scope, not day-one.
 - Function 5xx rate > 2% over 5 min.
 - p95 function latency > 2s over 10 min.
 - Supabase connections > 80% of pool.
-- A daily cron (`sequence` 09:00, `reminders` 08:00) didn't report success.
+- A daily cron (`sequence` 15:00 UTC, `reminders` 08:00) didn't report success.
 - LCP p75 > 2.5s (regression budget).
 
 **Logging hygiene**: never log the service-role key, JWTs, PII, or lead phone

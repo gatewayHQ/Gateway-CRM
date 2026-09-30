@@ -17,6 +17,8 @@
  *     "phone": "712-555-0142",
  *     "interest_type": "residential" | "commercial" | "both",
  *     "viewed_properties": ["https://site.com/listing/<uuid>", "123 Main St"],
+ *     "search": { "beds_min": 3, "baths_min": 4, "price_max": 250000,
+ *                 "price_min": 150000, "area": "Sioux City" },   // all optional
  *     "message": "optional",
  *     "event_id": "optional — the sender's own id, used for idempotency" }
  *
@@ -26,9 +28,14 @@
  *      twice for one delivery.
  *   3. Assigns an owner: the contact's existing agent if the CRM already knows
  *      them, otherwise one atomic round-robin step (migrations/0037).
- *   4. Creates or matches the contact, links the viewed properties, logs the
- *      timeline activity, hands off to the drip.
+ *   4. Creates or matches the contact (saving their home search), links the
+ *      viewed properties, logs the timeline activity, and starts the ASSIGNED
+ *      agent's own auto-start drip sequence.
  *   5. Notifies the agent — bell + email.
+ *   6. Sends the drip's Day-0 email right away, from that agent's Outlook.
+ *
+ * The search criteria may also arrive as top-level fields (beds, baths,
+ * price_min, price_max / budget, area / city) — see normalizeSearchCriteria().
  *
  * ── STATUS CODES, AND WHY ───────────────────────────────────────────────────
  * A webhook sender retries on 5xx and gives up on 4xx, so the codes are part of
@@ -43,15 +50,19 @@
  *       lead that is already in the CRM.
  */
 import crypto from 'node:crypto'
+import { createClient } from '@supabase/supabase-js'
 
 import {
   serviceCreds, insertRow, patchRow, rest,
   clean, normalizeEmail, normalizePhone, normalizeInterest,
   normalizeViewedProperties, matchViewedProperties,
   findContactByEmail, createContact, assignAgents, enrollInDrip,
+  normalizeSearchCriteria, criteriaToContactFields,
   MAX_VIEWED_PROPERTIES,
 } from '../_lib/leadIntake.js'
 import { notifyAgentOfLead } from '../_lib/leadNotify.js'
+import { runDripSequences } from '../_lib/dripRunner.js'
+import { searchSummary } from '../../src/lib/dripTokens.js'
 
 // A lead payload is a handful of short strings and at most 25 URLs. Anything
 // past this is a mistake or an attack, and rejecting it early keeps a hostile
@@ -106,6 +117,10 @@ function trimmedPayload(body) {
     'name', 'first_name', 'last_name', 'email', 'phone', 'interest_type',
     'viewed_properties', 'message', 'source', 'source_detail', 'event_id',
     'utm_source', 'utm_medium', 'utm_campaign', 'page_url', 'session_key',
+    // Home-search criteria (normalizeSearchCriteria reads these).
+    'search', 'beds', 'beds_min', 'min_beds', 'bedrooms', 'baths', 'baths_min',
+    'min_baths', 'bathrooms', 'price_min', 'min_price', 'price_max', 'max_price',
+    'budget', 'area', 'location', 'city', 'neighborhood',
   ]
   const out = {}
   for (const k of keep) if (body[k] !== undefined) out[k] = body[k]
@@ -170,6 +185,7 @@ export default async function handleWebsiteLead(req, res) {
   const interestType = normalizeInterest(body.interest_type)
   const message      = clean(body.message, 2000)
   const views        = normalizeViewedProperties(body.viewed_properties)
+  const criteria     = normalizeSearchCriteria(body)
   const sourceDetail = clean(body.source_detail, 120)
     || clean(body.source, 120)
     || clean(body.utm_source, 120)
@@ -234,8 +250,10 @@ export default async function handleWebsiteLead(req, res) {
     contact_id: null, contact_created: false,
     assigned_agent_id: null, secondary_agent_id: null, lane: null,
     assignment: null, properties_linked: 0, properties_matched: 0,
-    drip_status: 'pending', notified: {},
+    drip_status: 'pending', drip_first_step: null, notified: {},
+    search_criteria: criteria,
   }
+  let dripEnrollmentId = null
 
   try {
     // ── 2. Who owns it ─────────────────────────────────────────────────────
@@ -284,9 +302,16 @@ export default async function handleWebsiteLead(req, res) {
       if (phone) {
         await patchRow(creds, 'contacts', `id=eq.${contactId}&phone=is.null`, { phone })
       }
+      // Their latest search on the website is the best statement of what they
+      // want now, so it replaces whatever the CRM had — field by field, only
+      // for what this inquiry actually sent.
+      const fields = criteriaToContactFields(criteria)
+      if (Object.keys(fields).length) {
+        await patchRow(creds, 'contacts', `id=eq.${contactId}`, fields)
+      }
     } else {
       const c = await createContact(creds, {
-        name, email, phone, interestType, message, agentId: primaryAgentId,
+        name, email, phone, interestType, message, agentId: primaryAgentId, criteria,
       })
       contactId = c.contactId
       result.contact_created = Boolean(c.contactId)
@@ -321,9 +346,10 @@ export default async function handleWebsiteLead(req, res) {
 
     // ── 5. Drip hand-off ───────────────────────────────────────────────────
     const drip = await enrollInDrip(creds, {
-      contactId, lane: lane || 'residential', agentId: primaryAgentId,
+      contactId, lane: lane || 'residential', agentId: primaryAgentId, leadId,
     })
     result.drip_status = drip.drip_status
+    dripEnrollmentId   = drip.enrollmentId
 
     // ── 6. Finish the lead row ─────────────────────────────────────────────
     await patchRow(creds, 'leads', `id=eq.${leadId}`, {
@@ -335,17 +361,26 @@ export default async function handleWebsiteLead(req, res) {
       drip_status:        drip.drip_status,
       drip_sequence_id:   drip.drip_sequence_id,
     })
+    // Separate write: a database without the 0060 column must not lose the
+    // assignment above over it.
+    if (Object.keys(criteria).length) {
+      await patchRow(creds, 'leads', `id=eq.${leadId}`, { search_criteria: criteria })
+    }
 
     // ── 7. Timeline ────────────────────────────────────────────────────────
     if (contactId) {
-      const viewLines = linkedViews.length
+      const criteriaLine = searchSummary({
+      bedsMin: criteria.beds_min, bathsMin: criteria.baths_min,
+      priceMin: criteria.price_min, priceMax: criteria.price_max, area: criteria.area,
+    })
+    const viewLines = linkedViews.length
         ? `\nViewed: ${linkedViews.map(v => v.title || v.url).join(' | ')}`
         : ''
       await insertRow(creds, 'activities', {
         contact_id: contactId,
         agent_id:   primaryAgentId,
         type:       'note',
-        body:       `Website lead received (${interestType})${message ? `\nMessage: ${message}` : ''}${viewLines}`,
+        body:       `Website lead received (${interestType})${criteriaLine ? `\nSearching: ${criteriaLine}` : ''}${message ? `\nMessage: ${message}` : ''}${viewLines}`,
       }, { returning: false })
     }
 
@@ -379,6 +414,14 @@ export default async function handleWebsiteLead(req, res) {
         })
       }
     }
+
+    // ── 9. The drip's first touch, now ─────────────────────────────────────
+    // Speed to lead: a Day-0 email that waits for tomorrow's cron arrives after
+    // the lead has already called someone else. Runs only the enrollment just
+    // created, from the assigned agent's own Outlook.
+    if (dripEnrollmentId) {
+      result.drip_first_step = await runFirstDripStep(dripEnrollmentId, req)
+    }
   } catch (err) {
     // The lead row exists, so this is still a successful delivery. Retrying
     // would only re-run the enrichment that just failed, against a dedupe key
@@ -388,6 +431,30 @@ export default async function handleWebsiteLead(req, res) {
   }
 
   return res.status(200).json(result)
+}
+
+/**
+ * Send the enrollment's due step (Day 0) now. Never throws: a mailbox that is
+ * not connected leaves the step for the daily run, with the reason recorded
+ * on the enrollment for the agent to see.
+ */
+async function runFirstDripStep(enrollmentId, req) {
+  try {
+    const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL
+    const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
+    const svc = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } })
+    const run = await runDripSequences(svc, {
+      enrollmentIds: [enrollmentId], baseUrl: crmBaseUrl(req) || '', gapMs: 0,
+    })
+    const b = run.body || {}
+    if (b.sent) return 'sent'
+    if (b.calls) return 'call_task'
+    if (b.errors) return 'error'
+    return 'scheduled'
+  } catch (err) {
+    console.error('[website-lead] first drip step failed:', err.message)
+    return 'error'
+  }
 }
 
 /** Absolute CRM base for the links in the email. */

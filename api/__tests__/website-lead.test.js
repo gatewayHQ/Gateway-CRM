@@ -486,6 +486,37 @@ describe('drip hand-off', () => {
     })
   })
 
+  it("starts the ASSIGNED agent's own auto-start sequence — not an office-wide one", async () => {
+    plan.sequences = [{ id: 'seq-1' }]
+    const res = mockRes()
+    await handler(mockReq({ name: 'Jane Smith', email: 'jane@example.com' }), res)
+    const lookup = calls.find(c => c.method === 'GET' && c.url.includes('/rest/v1/sequences'))
+    expect(lookup.url).toContain(`agent_id=eq.${AGENT_A.id}`)
+    expect(lookup.url).toContain('auto_enroll_lane=eq.residential')
+    expect(postsTo('contact_sequences')[0].body).toMatchObject({
+      agent_id: AGENT_A.id, lead_id: LEAD_ID,
+    })
+  })
+
+  it('sends the Day-0 step right away for a new enrollment instead of waiting for the cron', async () => {
+    plan.sequences = [{ id: 'seq-1' }]
+    const realFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      if (String(url).includes('/rest/v1/contact_sequences') && (init.method || 'GET') === 'POST') {
+        calls.push({ url: String(url), method: 'POST', body: JSON.parse(init.body) })
+        return jsonRes(201, [{ id: 'enr-9' }])
+      }
+      return realFetch(url, init)
+    })
+    const res = mockRes()
+    await handler(mockReq({ name: 'Jane Smith', email: 'jane@example.com' }), res)
+    expect(res.statusCode).toBe(200)
+    // The runner looked up exactly the enrollment just created.
+    const runnerRead = calls.find(c => c.method === 'GET' && c.url.includes('/rest/v1/contact_sequences') && c.url.includes('enr-9'))
+    expect(runnerRead).toBeDefined()
+    expect(res.body.drip_first_step).toBeTruthy()
+  })
+
   it("skips — not fails — when no sequence is configured for the lane", async () => {
     plan.sequences = []
     const res = mockRes()
@@ -493,5 +524,50 @@ describe('drip hand-off', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body.drip_status).toBe('skipped')
     expect(postsTo('contact_sequences')).toHaveLength(0)
+  })
+})
+
+describe('home-search criteria', () => {
+  it('saves what the visitor searched for on the new contact and the lead', async () => {
+    const res = mockRes()
+    await handler(mockReq({
+      name: 'Jane Smith', email: 'jane@example.com',
+      search: { beds_min: '3', baths_min: 4, price_max: '$250k', area: 'Sioux City' },
+    }), res)
+    expect(res.statusCode).toBe(200)
+    expect(postsTo('contacts')[0].body).toMatchObject({
+      search_beds_min: 3, search_baths_min: 4, search_price_max: 250000, submarket: 'Sioux City',
+    })
+    const criteriaPatch = patchesTo('leads').find(p => p.body.search_criteria)
+    expect(criteriaPatch.body.search_criteria).toEqual({ beds_min: 3, baths_min: 4, price_max: 250000, area: 'Sioux City' })
+  })
+
+  it('accepts flat field names too, and updates an existing contact with their latest search', async () => {
+    plan.existingContact = { id: 'contact-1', assigned_agent_id: AGENT_B.id }
+    const res = mockRes()
+    await handler(mockReq({ name: 'Jane Smith', email: 'jane@example.com', bedrooms: 2, budget: '1.2M' }), res)
+    const patch = patchesTo('contacts').find(p => p.body.search_beds_min)
+    expect(patch.body).toMatchObject({ search_beds_min: 2, search_price_max: 1200000 })
+  })
+
+  it('a lead with no search still goes through untouched', async () => {
+    const res = mockRes()
+    await handler(mockReq({ name: 'Jane Smith', email: 'jane@example.com' }), res)
+    expect(res.statusCode).toBe(200)
+    expect(postsTo('contacts')[0].body.search_beds_min).toBeUndefined()
+    expect(patchesTo('leads').some(p => p.body.search_criteria)).toBe(false)
+  })
+})
+
+describe('normalizeSearchCriteria', () => {
+  it('parses money the way people type it and swaps an inverted range', async () => {
+    const { normalizeSearchCriteria, parseMoney } = await import('../_lib/leadIntake.js')
+    expect(parseMoney('$250,000')).toBe(250000)
+    expect(parseMoney('250k')).toBe(250000)
+    expect(parseMoney('1.5m')).toBe(1500000)
+    expect(parseMoney('lots')).toBeNull()
+    expect(normalizeSearchCriteria({ price_min: 300000, price_max: 200000 }))
+      .toEqual({ price_min: 200000, price_max: 300000 })
+    expect(normalizeSearchCriteria({ beds: '3+', baths: 'nine hundred' })).toEqual({ beds_min: 3 })
   })
 })

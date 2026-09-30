@@ -2,7 +2,7 @@
  * Gateway CRM — Unified Cron Runner
  *
  * GET /api/cron?task=reminders      — daily deadline reminders (email + in-app)
- * GET /api/cron?task=sequence       — drip-sequence step runner (email)
+ * GET /api/cron?task=sequence       — drip-sequence step runner (each agent's Outlook)
  * GET /api/cron?task=nudges         — transaction-layer agent nudges
  * GET /api/cron?task=boldsign-sync  — nightly Form Library ↔ BoldSign template drift sync
  *                                     + auto-reminders for stale signature requests
@@ -30,7 +30,8 @@
  *
  * Env vars:
  *   SUPABASE_URL, SUPABASE_SERVICE_KEY            (required)
- *   RESEND_API_KEY, RESEND_FROM                   (required for sequence; optional for reminders)
+ *   RESEND_API_KEY, RESEND_FROM                   (optional — reminder emails only; drips send via Outlook)
+ *   PUBLIC_BASE_URL                               (listing + unsubscribe links in drip emails)
  *   GATEWAY_CRON_SECRET                           (recommended in production)
  *
  * Notifications are EMAIL and IN-APP only. This runner sends no SMS.
@@ -44,6 +45,7 @@ import { ALL_DEAL_STAGES, isOpenStage } from '../src/lib/stages.js'
 import { streetLine, readPropertiesWithUnit } from '../src/lib/address.js'
 import { syncAllDealCalendars, syncAllTaskCalendars, pruneAllDuplicateCalendarEvents } from './_lib/calendarSync.js'
 import { syncAllInboxes } from './_lib/inboxSync.js'
+import { runDripSequences, publicBaseUrl } from './_lib/dripRunner.js'
 
 // Every stage a deal can sit in while still in flight — derived from the stage
 // registry rather than hand-listed, because the hand-listed version silently
@@ -257,124 +259,15 @@ async function runReminders(supabase) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Task: drip-sequence runner (formerly /api/sequence-run)
+// Task: drip-sequence runner
+//
+// Every due step goes out from the sequence owner's own Outlook (Microsoft
+// Graph), not a shared sender — see api/_lib/dripRunner.js. Call steps become
+// tasks on the agent's list. New website leads and hand enrollments get their
+// Day-0 step immediately; this daily sweep sends everything after that.
 // ─────────────────────────────────────────────────────────────────────────────
-const MAX_SENDS_PER_RUN = 100
-
-function renderTemplate(str, contact, agent) {
-  if (!str) return ''
-  return str
-    .replace(/\{\{firstName\}\}/g,       contact?.first_name || '')
-    .replace(/\{\{lastName\}\}/g,        contact?.last_name  || '')
-    .replace(/\{\{email\}\}/g,           contact?.email      || '')
-    .replace(/\{\{agentName\}\}/g,       agent?.name         || '')
-    .replace(/\{\{agentEmail\}\}/g,      agent?.email        || '')
-    .replace(/\{\{propertyAddress\}\}/g, contact?.owner_address || '')
-    .replace(/\{\{dealValue\}\}/g,       '')
-}
-
-function htmlFromText(text) {
-  return text
-    .split(/\n\n+/)
-    .map(p => `<p style="margin:0 0 16px 0">${p.replace(/\n/g, '<br>')}</p>`)
-    .join('')
-}
-
-async function runSequences(supabase) {
-  const resendKey = process.env.RESEND_API_KEY
-  const resendFrom = process.env.RESEND_FROM
-  if (!resendKey || !resendFrom) {
-    return { status: 500, body: { error: 'RESEND_API_KEY or RESEND_FROM missing' } }
-  }
-
-  const { data: enrollments, error: enrollErr } = await supabase
-    .from('contact_sequences')
-    .select('*')
-    .eq('status', 'active')
-    .limit(500)
-  if (enrollErr) return { status: 500, body: { error: enrollErr.message } }
-  if (!enrollments?.length) {
-    return { status: 200, body: { ok: true, sent: 0, message: 'No active sequences' } }
-  }
-
-  const contactIds  = [...new Set(enrollments.map(e => e.contact_id).filter(Boolean))]
-  const sequenceIds = [...new Set(enrollments.map(e => e.sequence_id).filter(Boolean))]
-  const agentIds    = [...new Set(enrollments.map(e => e.agent_id).filter(Boolean))]
-
-  const [contactsRes, agentsRes, stepsRes] = await Promise.all([
-    supabase.from('contacts').select('*').in('id', contactIds),
-    supabase.from('agents').select('*').in('id', agentIds),
-    supabase.from('sequence_steps').select('*').in('sequence_id', sequenceIds).order('sort_order'),
-  ])
-
-  const contactMap = new Map((contactsRes.data || []).map(c => [c.id, c]))
-  const agentMap   = new Map((agentsRes.data   || []).map(a => [a.id, a]))
-  const stepsBySequence = new Map()
-  for (const s of stepsRes.data || []) {
-    if (!stepsBySequence.has(s.sequence_id)) stepsBySequence.set(s.sequence_id, [])
-    stepsBySequence.get(s.sequence_id).push(s)
-  }
-
-  const results = { sent: 0, skipped: 0, errors: 0, details: [] }
-  const now = Date.now()
-
-  for (const e of enrollments) {
-    if (results.sent >= MAX_SENDS_PER_RUN) break
-
-    const contact = contactMap.get(e.contact_id)
-    const steps   = stepsBySequence.get(e.sequence_id) || []
-    if (!contact?.email || steps.length === 0) { results.skipped++; continue }
-
-    const nextStepIdx = e.current_step || 0
-    if (nextStepIdx >= steps.length) {
-      await supabase.from('contact_sequences').update({ status: 'completed' }).eq('id', e.id)
-      results.skipped++
-      continue
-    }
-
-    const step = steps[nextStepIdx]
-    const referenceTs = nextStepIdx === 0
-      ? new Date(e.started_at).getTime()
-      : new Date(e.last_sent_at || e.started_at).getTime()
-    const dueAt = referenceTs + (step.delay_days || 0) * 86400_000
-    if (now < dueAt) { results.skipped++; continue }
-
-    const agent = agentMap.get(e.agent_id) || {}
-    const subject = renderTemplate(step.subject, contact, agent)
-    const bodyText = renderTemplate(step.body, contact, agent)
-    const bodyHtml = htmlFromText(bodyText)
-    const idempotencyKey = `seq-${e.id}-step-${step.id}`
-
-    const sendResult = await sendResend(resendKey, resendFrom, contact.email, subject, bodyHtml, bodyText, idempotencyKey)
-
-    await supabase.from('email_log').insert({
-      enrollment_id:    e.id,
-      sequence_id:      e.sequence_id,
-      sequence_step_id: step.id,
-      contact_id:       contact.id,
-      agent_id:         e.agent_id,
-      to_email:         contact.email,
-      subject,
-      status:           sendResult.ok ? 'sent' : 'failed',
-      provider_id:      sendResult.id || null,
-      error:            sendResult.ok ? null : (sendResult.error || `HTTP ${sendResult.status}`),
-    }).then(() => {}).catch(() => {})
-
-    if (sendResult.ok) {
-      await supabase.from('contact_sequences').update({
-        current_step: nextStepIdx + 1,
-        last_sent_at: new Date().toISOString(),
-        status: nextStepIdx + 1 >= steps.length ? 'completed' : 'active',
-      }).eq('id', e.id)
-      results.sent++
-      results.details.push({ to: contact.email, step: nextStepIdx, id: sendResult.id })
-    } else {
-      results.errors++
-      results.details.push({ to: contact.email, step: nextStepIdx, error: sendResult.error })
-    }
-  }
-
-  return { status: 200, body: { ok: true, ...results } }
+async function runSequences(supabase, req) {
+  return runDripSequences(supabase, { baseUrl: publicBaseUrl(req) })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -402,7 +295,7 @@ export default async function handler(req, res) {
   if (task === 'reminders') {
     result = await runReminders(supabase)
   } else if (task === 'sequence' || task === 'sequence-run' || task === 'sequences') {
-    result = await runSequences(supabase)
+    result = await runSequences(supabase, req)
   } else if (task === 'nudges') {
     result = await runNudges(supabase)
   } else if (task === 'boldsign-sync' || task === 'boldsign-template-sync') {

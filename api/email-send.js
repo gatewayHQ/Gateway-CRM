@@ -83,6 +83,11 @@
  *   POST ?action=blast-cancel         (auth) → stop a running blast; already
  *                                     sent messages are already gone, the rest
  *                                     are left unsent
+ *   POST ?action=drip-run             (auth) → { enrollmentIds } -> send the
+ *                                     due step of drip enrollments the caller
+ *                                     just created, from THEIR Outlook, instead
+ *                                     of waiting for the daily cron. Only the
+ *                                     caller's own sequences are touched.
  *   POST ?action=outlook-freebusy     (auth) → { date } -> the agent's OWN
  *                                     busy blocks that day (self-check only —
  *                                     see api/_lib/msGraph.js#getFreeBusy for
@@ -109,6 +114,7 @@ import { syncAgentInbox } from './_lib/inboxSync.js'
 import {
   createBlast, loadSendableBlast, sendBlastBatch, blastProgress,
 } from './_lib/massEmail.js'
+import { runDripSequences, publicBaseUrl } from './_lib/dripRunner.js'
 import { readPropertiesWithUnit } from '../src/lib/address.js'
 import { normalizeCustomHeader } from '../src/lib/dealAnnouncement.js'
 
@@ -786,6 +792,30 @@ async function handleResendSend(req, res) {
   })
 }
 
+// ─── Drip: send a fresh enrollment's Day-0 step now ──────────────────────────
+// The daily cron would get to it tomorrow morning; a contact an agent just
+// enrolled by hand should hear from them today. The service client runs the
+// send, so ownership is checked here: only enrollments in sequences the caller
+// owns are run, whatever ids the browser posts.
+async function handleDripRun(req, res) {
+  const { agent } = await requireAgent(req)
+  const ids = Array.isArray(req.body?.enrollmentIds)
+    ? [...new Set(req.body.enrollmentIds.map(String))].slice(0, 100) : []
+  if (!ids.length) return res.status(400).json({ error: 'enrollmentIds is required' })
+
+  const svc = getServiceClient()
+  const { data: rows, error } = await svc
+    .from('contact_sequences')
+    .select('id, sequences!inner(agent_id)')
+    .in('id', ids)
+  if (error) return errorResponse(res, Object.assign(new Error(error.message), { status: 500 }))
+  const mine = (rows || []).filter(r => r.sequences?.agent_id === agent.id).map(r => r.id)
+  if (!mine.length) return res.status(200).json({ ok: true, sent: 0, calls: 0, errors: 0 })
+
+  const run = await runDripSequences(svc, { enrollmentIds: mine, baseUrl: publicBaseUrl(req) })
+  return res.status(run.status).json(run.body)
+}
+
 // ─── Router ───────────────────────────────────────────────────────────────────
 
 async function handler(req, res) {
@@ -846,6 +876,10 @@ async function handler(req, res) {
     if (action === 'blast-inbox-refresh') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
       return await handleBlastInboxRefresh(req, res)
+    }
+    if (action === 'drip-run') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+      return await handleDripRun(req, res)
     }
     if (action === 'outlook-freebusy') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
