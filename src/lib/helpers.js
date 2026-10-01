@@ -10,6 +10,13 @@ export const formatCurrency = (val) => {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(val)
 }
 
+// Money with cents — commission figures are stored to the cent and must be
+// shown that way (formatCurrency rounds to whole dollars for prices/volume).
+export const formatMoney = (val) => {
+  if (!val && val !== 0) return '—'
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(val)
+}
+
 export const formatDate = (val) => {
   if (!val) return '—'
   return new Date(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
