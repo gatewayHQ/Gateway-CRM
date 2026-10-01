@@ -126,9 +126,12 @@ function UploadModal({ packet, onClose, onSaved }) {
       }
       ok.push(f)
     }
-    if (ok.length) setFiles(p => [...p, ...ok])
+    if (ok.length) { setFiles(p => [...p, ...ok]); setBuiltPaths([]) }
   }
-  const removeFile = (i) => setFiles(p => p.filter((_, j) => j !== i))
+  // Changing the selection after "Build in BoldSign" makes builtPaths describe
+  // files that are no longer the packet. save() reused them whenever the COUNT
+  // matched, so swapping one PDF for another kept the old file on record.
+  const removeFile = (i) => { setFiles(p => p.filter((_, j) => j !== i)); setBuiltPaths([]) }
   // Files already stored on an existing packet (multi-file, with single-file back-compat).
   const existingFiles = (Array.isArray(packet?.storage_paths) && packet.storage_paths.length)
     ? packet.storage_paths
