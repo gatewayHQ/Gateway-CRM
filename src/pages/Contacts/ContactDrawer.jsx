@@ -22,6 +22,7 @@ const BLANK = {
   spouse_name: '', spouse_phone: '', spouse_notes: '',
   submarket: '', submarkets: [], asset_types: [],
   size_min: '', size_max: '', size_unit: 'sqft',
+  search_beds_min: '', search_baths_min: '', search_price_min: '', search_price_max: '',
 }
 const BLANK_PROP = { address: '', list_price: '', type: 'residential', subtype: '', beds: '', baths: '', sqft: '', garage: '', details: {} }
 
@@ -183,7 +184,12 @@ export default function ContactDrawer({
       return
     }
 
-    const { submarket, submarkets, asset_types, size_min, size_max, size_unit, ...baseForm } = form
+    const {
+      submarket, submarkets, asset_types, size_min, size_max, size_unit,
+      search_beds_min, search_baths_min, search_price_min, search_price_max,
+      ...baseForm
+    } = form
+    const numOrNull = (v) => (v === '' || v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v))
     const submarketList = Array.isArray(submarkets) ? submarkets.filter(Boolean) : []
 
     const payload = {
@@ -207,6 +213,12 @@ export default function ContactDrawer({
         size_min:    size_min ? Number(size_min) : null,
         size_max:    isBuyer && size_max ? Number(size_max) : null,
         size_unit:   size_unit || 'sqft',
+      }),
+      ...(isBuyer && {
+        search_beds_min:  numOrNull(search_beds_min),
+        search_baths_min: numOrNull(search_baths_min),
+        search_price_min: numOrNull(search_price_min),
+        search_price_max: numOrNull(search_price_max),
       }),
     }
 
@@ -233,7 +245,11 @@ export default function ContactDrawer({
       const { spouse_name: _sn, spouse_phone: _sp, spouse_notes: _snt, email_opt_out: _eo, ...retryPayload } = payload
       let next = retryPayload
       if (isBuyer) {
-        const { submarket: _s, submarkets: _ss, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u, ...payloadNoCriteria } = next
+        const {
+          submarket: _s, submarkets: _ss, asset_types: _a, size_min: _mn, size_max: _mx, size_unit: _u,
+          search_beds_min: _b, search_baths_min: _ba, search_price_min: _pn, search_price_max: _px,
+          ...payloadNoCriteria
+        } = next
         next = payloadNoCriteria
       }
       ;({ data: saved, error, status } = await saveWithRetry(next))
@@ -460,6 +476,28 @@ export default function ContactDrawer({
                 form={form}
                 set={set}
               />
+            )}
+
+            {/* ── Home search (residential buyers) ─────────────────────────────
+                What the drip personalizes with ({{beds}}, {{maxPrice}}, matching
+                listings). Filled automatically from a website lead's search. */}
+            {isBuyer && (
+              <div className="form-group">
+                <label className="form-label">
+                  Home Search
+                  <span style={{ fontWeight: 400, color: 'var(--gw-mist)', fontSize: 11 }}> — optional; personalizes drip emails</span>
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8 }}>
+                  <input className="form-control" type="number" min="0" placeholder="Beds (min)"
+                    value={form.search_beds_min ?? ''} onChange={e => set('search_beds_min', e.target.value)} />
+                  <input className="form-control" type="number" min="0" step="0.5" placeholder="Baths (min)"
+                    value={form.search_baths_min ?? ''} onChange={e => set('search_baths_min', e.target.value)} />
+                  <input className="form-control" type="number" min="0" step="1000" placeholder="Min $"
+                    value={form.search_price_min ?? ''} onChange={e => set('search_price_min', e.target.value)} />
+                  <input className="form-control" type="number" min="0" step="1000" placeholder="Top budget $"
+                    value={form.search_price_max ?? ''} onChange={e => set('search_price_max', e.target.value)} />
+                </div>
+              </div>
             )}
 
             {/* Tags — compact select-style: shows selected chips + search to add */}

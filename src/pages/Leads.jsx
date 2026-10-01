@@ -3,6 +3,17 @@ import { upsertContact } from '../lib/services/contacts.js'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Badge, Avatar, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatDate } from '../lib/helpers.js'
+import { searchSummary } from '../lib/dripTokens.js'
+import RoundRobinPanel from './leads/RoundRobinPanel.jsx'
+
+const DRIP_LABEL = { enrolled: 'Drip started', skipped: 'No auto-start drip', pending: 'Pending' }
+
+/** The criteria the website posted, as one readable line. */
+function criteriaLine(c = {}) {
+  return searchSummary({
+    bedsMin: c.beds_min, bathsMin: c.baths_min, priceMin: c.price_min, priceMax: c.price_max, area: c.area,
+  })
+}
 
 function StatCard({ label, value, sub }) {
   return (
@@ -14,8 +25,9 @@ function StatCard({ label, value, sub }) {
   )
 }
 
-export default function LeadsPage({ db }) {
-  const [tab, setTab] = useState('visitors')
+export default function LeadsPage({ db, isAdmin }) {
+  const [tab, setTab] = useState('inquiries')
+  const [inquiries, setInquiries] = useState(null)   // null = leads table missing
   const [events, setEvents] = useState([])
   const [captures, setCaptures] = useState([])
   const [loading, setLoading] = useState(true)
@@ -28,10 +40,16 @@ export default function LeadsPage({ db }) {
 
   const load = async () => {
     setLoading(true)
-    const [ev, cap] = await Promise.all([
+    // The round-robin inquiries (migration 0037). Loaded on their own so a
+    // database without the legacy capture tables still shows them.
+    const [ev, cap, inq] = await Promise.all([
       supabase.from('visitor_events').select('*').order('created_at', { ascending: false }),
       supabase.from('lead_captures').select('*').order('created_at', { ascending: false }),
+      supabase.from('leads')
+        .select('*, lead_property_views(title, url, position)')
+        .order('created_at', { ascending: false }).limit(300),
     ])
+    setInquiries(inq.error ? null : (inq.data || []))
     if (ev.error || cap.error) {
       setError('Tables not set up yet. Run the SQL schema in Supabase to enable this feature.')
     } else {
@@ -95,7 +113,7 @@ export default function LeadsPage({ db }) {
 
   if (loading) return <div className="page-content"><div className="loading"><div className="spinner" /> Loading…</div></div>
 
-  if (error) return (
+  if (error && !inquiries) return (
     <div className="page-content">
       <div className="page-header"><div><div className="page-title">Website Leads</div></div></div>
       <div style={{ background: 'var(--gw-amber-light)', border: '1px solid var(--gw-amber)', borderRadius: 'var(--radius-lg)', padding: 24 }}>
@@ -111,7 +129,7 @@ export default function LeadsPage({ db }) {
       <div className="page-header">
         <div>
           <div className="page-title">Website Leads</div>
-          <div className="page-sub">{sessions.length} visitor sessions · {identifiedLeads} captured leads</div>
+          <div className="page-sub">{inquiries?.length || 0} inquiries · {sessions.length} visitor sessions · {identifiedLeads} landing-page captures</div>
         </div>
         <button className="btn btn--secondary btn--sm" onClick={load}><Icon name="refresh" size={13} /> Refresh</button>
       </div>
@@ -123,9 +141,58 @@ export default function LeadsPage({ db }) {
       </div>
 
       <div style={{ display: 'flex', gap: 4, marginBottom: 16, background: 'var(--gw-bone)', borderRadius: 'var(--radius)', padding: 4, width: 'fit-content' }}>
+        <button style={tabStyle('inquiries')} onClick={() => setTab('inquiries')}>Inquiries ({inquiries?.length || 0})</button>
+        <button style={tabStyle('rotation')} onClick={() => setTab('rotation')}>Round Robin</button>
         <button style={tabStyle('visitors')} onClick={() => setTab('visitors')}>Visitor Sessions ({sessions.length})</button>
         <button style={tabStyle('captures')} onClick={() => setTab('captures')}>Captured Leads ({identifiedLeads})</button>
       </div>
+
+      {tab === 'rotation' && <RoundRobinPanel agents={db.agents || []} isAdmin={isAdmin} />}
+
+      {tab === 'inquiries' && (
+        !inquiries || inquiries.length === 0
+          ? <EmptyState icon="leads" title="No website inquiries yet"
+              message="When someone asks about a home on the website, they are assigned to the next agent in the round robin and show up here — with what they searched for and the drip that started." />
+          : <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+              <div className="data-table-wrap">
+              <table className="data-table">
+                <thead><tr>
+                  <th>Lead</th><th>Looking for</th><th>Viewed</th><th>Assigned to</th><th>Drip</th><th>Received</th>
+                </tr></thead>
+                <tbody>
+                  {inquiries.map(l => {
+                    const agent = db.agents.find(a => a.id === l.assigned_agent_id)
+                    const viewed = [...(l.lead_property_views || [])].sort((a, b) => a.position - b.position)
+                    const wants = criteriaLine(l.search_criteria || {})
+                    return (
+                      <tr key={l.id}>
+                        <td>
+                          <strong>{l.name}</strong>
+                          <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>{[l.email, l.phone].filter(Boolean).join(' · ')}</div>
+                        </td>
+                        <td style={{ fontSize: 12 }}>
+                          {wants || <span style={{ color: 'var(--gw-mist)' }}>—</span>}
+                          <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>{l.lane || l.interest_type}</div>
+                        </td>
+                        <td style={{ fontSize: 12, maxWidth: 240 }}>
+                          {viewed.length ? viewed.slice(0, 2).map((v, i) => <div key={i}>{v.title || v.url}</div>) : '—'}
+                          {viewed.length > 2 && <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>+{viewed.length - 2} more</div>}
+                        </td>
+                        <td>{agent
+                          ? <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Avatar agent={agent} size={22} /><span style={{ fontSize: 12 }}>{agent.name}</span></div>
+                          : <Badge variant="high">Unassigned</Badge>}</td>
+                        <td style={{ fontSize: 12, color: l.drip_status === 'enrolled' ? 'var(--gw-green)' : 'var(--gw-mist)', fontWeight: l.drip_status === 'enrolled' ? 600 : 400 }}>
+                          {DRIP_LABEL[l.drip_status] || l.drip_status}
+                        </td>
+                        <td style={{ fontSize: 12, color: 'var(--gw-mist)' }}>{formatDate(l.created_at)}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+              </div>
+            </div>
+      )}
 
       {tab === 'visitors' && (
         sessions.length === 0

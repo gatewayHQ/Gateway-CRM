@@ -16,7 +16,7 @@
  * one RPC that advances a locked cursor: see migrations/0037.
  *
  * Everything after assignment is BEST EFFORT and must never throw a lead away.
- * A Resend outage, a missing sequence, an unparseable property URL — each of
+ * A mail outage, a missing sequence, an unparseable property URL — each of
  * those degrades one field of one lead. Losing the lead loses a commission.
  */
 
@@ -173,6 +173,63 @@ export function normalizeViewedProperties(input) {
     if (out.length >= MAX_VIEWED_PROPERTIES) break
   }
 
+  return out
+}
+
+// ── Home-search criteria ─────────────────────────────────────────────────────
+
+/** "$250k" / "250,000" / "1.2M" / 250000 → 250000. Null for anything else. */
+export function parseMoney(value) {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? Math.round(value) : null
+  const m = String(value).toLowerCase().replace(/[$,\s]/g, '').match(/^(\d+(?:\.\d+)?)([km])?\+?$/)
+  if (!m) return null
+  const n = Number(m[1]) * (m[2] === 'm' ? 1_000_000 : m[2] === 'k' ? 1_000 : 1)
+  return n > 0 && n < 1e10 ? Math.round(n) : null
+}
+
+/** "3", "3+", 3 → 3. Bounded so a typo cannot store 3000 bedrooms. */
+function parseCount(value, max = 50) {
+  if (value === null || value === undefined || value === '') return null
+  const n = Number(String(value).replace(/\+$/, '').trim())
+  return Number.isFinite(n) && n > 0 && n <= max ? Math.round(n * 2) / 2 : null
+}
+
+/**
+ * The search the visitor set on the website — beds, baths, price range, area.
+ * Accepts the fields either nested under `search` or at the top level, under
+ * the handful of names IDX and form builders actually use. Every field is
+ * optional; what is missing stays null and the drip's fallbacks cover it.
+ */
+export function normalizeSearchCriteria(body = {}) {
+  const src = body && typeof body.search === 'object' && body.search !== null
+    ? { ...body, ...body.search } : (body || {})
+  const pick = (...keys) => { for (const k of keys) if (src[k] !== undefined && src[k] !== '') return src[k]; return null }
+
+  const bedsMin  = parseCount(pick('beds_min', 'min_beds', 'beds', 'bedrooms'))
+  const bathsMin = parseCount(pick('baths_min', 'min_baths', 'baths', 'bathrooms'))
+  let priceMin   = parseMoney(pick('price_min', 'min_price', 'minPrice'))
+  let priceMax   = parseMoney(pick('price_max', 'max_price', 'maxPrice', 'budget'))
+  if (priceMin && priceMax && priceMin > priceMax) [priceMin, priceMax] = [priceMax, priceMin]
+  const area     = clean(pick('area', 'location', 'city', 'neighborhood'), 120)
+
+  const out = {}
+  if (bedsMin)  out.beds_min  = bedsMin
+  if (bathsMin) out.baths_min = bathsMin
+  if (priceMin) out.price_min = priceMin
+  if (priceMax) out.price_max = priceMax
+  if (area)     out.area      = area
+  return out
+}
+
+/** The criteria as contacts columns — only the ones the lead actually sent. */
+export function criteriaToContactFields(criteria = {}) {
+  const out = {}
+  if (criteria.beds_min)  out.search_beds_min  = Math.floor(criteria.beds_min)
+  if (criteria.baths_min) out.search_baths_min = criteria.baths_min
+  if (criteria.price_min) out.search_price_min = criteria.price_min
+  if (criteria.price_max) out.search_price_max = criteria.price_max
+  if (criteria.area)      out.submarket        = criteria.area
   return out
 }
 
@@ -430,7 +487,7 @@ export async function findContactByEmail(creds, email) {
   return row || null
 }
 
-export async function createContact(creds, { name, email, phone, interestType, message, agentId }) {
+export async function createContact(creds, { name, email, phone, interestType, message, agentId, criteria = {} }) {
   const { first, last } = splitName(name)
   const notes = [
     `Website lead — interest: ${interestType}`,
@@ -448,51 +505,68 @@ export async function createContact(creds, { name, email, phone, interestType, m
     status:            'lead',
     assigned_agent_id: agentId || null,
     notes,
+    ...criteriaToContactFields(criteria),
   })
-  if (error || !row) return { contactId: null, error }
+  if (error || !row) {
+    // A database that has not run 0060 has no search_* columns. The contact
+    // matters far more than its criteria — save it without them.
+    if (Object.keys(criteria).length && /search_|schema cache|column/i.test(error || '')) {
+      return createContact(creds, { name, email, phone, interestType, message, agentId })
+    }
+    return { contactId: null, error }
+  }
   return { contactId: row.id }
 }
 
 // ── Drip hand-off ────────────────────────────────────────────────────────────
 
 /**
- * Enroll the lead's contact in the lane's auto-enroll sequence, which
- * /api/cron?task=sequence already runs every morning. No new scheduler.
+ * Start the ASSIGNED AGENT'S auto-start sequence for this lane. Each agent
+ * marks at most one of their own sequences per lane (sequences.agent_id +
+ * auto_enroll_lane, migration 0060), so a round-robin lead begins the drip of
+ * whoever it went to — in their voice, from their Outlook.
  *
- * Returns the drip_status to store: 'enrolled', or 'skipped' when no sequence
- * is flagged for the lane (or the contact is already in it). 'skipped' is a
- * normal state, not an error — the lead is complete either way, and flagging a
- * sequence later starts enrolling without a deploy.
+ * Returns the drip_status to store: 'enrolled', or 'skipped' when the agent
+ * has not flagged a sequence for the lane (or the contact is already in it).
+ * 'skipped' is a normal state, not an error — the lead is complete either way.
+ * `enrollmentId` is set only for a NEW enrollment, which the caller runs
+ * straight away so the Day-0 email does not wait for the morning cron.
  */
-export async function enrollInDrip(creds, { contactId, lane, agentId }) {
-  if (!contactId || !lane) return { drip_status: 'skipped', drip_sequence_id: null }
+export async function enrollInDrip(creds, { contactId, lane, agentId, leadId = null }) {
+  const none = { drip_status: 'skipped', drip_sequence_id: null, enrollmentId: null }
+  if (!contactId || !lane || !agentId) return none
 
   const [sequence] = await rest(
     creds,
-    `sequences?auto_enroll_lane=eq.${lane}&select=id&limit=1`
+    `sequences?agent_id=eq.${agentId}&auto_enroll_lane=eq.${lane}&select=id&limit=1`
   )
-  if (!sequence?.id) return { drip_status: 'skipped', drip_sequence_id: null }
+  if (!sequence?.id) return none
 
   // Re-enrolling a contact who is already mid-drip would email them the whole
   // sequence twice.
   const already = await rest(
     creds,
     `contact_sequences?contact_id=eq.${contactId}&sequence_id=eq.${sequence.id}` +
-    `&status=eq.active&select=id&limit=1`
+    `&status=in.(active,paused)&select=id&limit=1`
   )
-  if (already.length) return { drip_status: 'enrolled', drip_sequence_id: sequence.id }
+  if (already.length) return { drip_status: 'enrolled', drip_sequence_id: sequence.id, enrollmentId: null }
 
-  const { error } = await insertRow(creds, 'contact_sequences', {
+  const row = {
     contact_id:   contactId,
     sequence_id:  sequence.id,
-    agent_id:     agentId || null,
+    agent_id:     agentId,
     current_step: 0,
     status:       'active',
-  }, { returning: false })
+    started_at:   new Date().toISOString(),
+  }
+  let res = await insertRow(creds, 'contact_sequences', leadId ? { ...row, lead_id: leadId } : row)
+  // Pre-0060 database: no lead_id column. Enroll without it.
+  if (res.error && leadId) res = await insertRow(creds, 'contact_sequences', row)
+  if (res.conflict) return { drip_status: 'enrolled', drip_sequence_id: sequence.id, enrollmentId: null }
 
-  return error
-    ? { drip_status: 'skipped',  drip_sequence_id: null }
-    : { drip_status: 'enrolled', drip_sequence_id: sequence.id }
+  return res.error
+    ? none
+    : { drip_status: 'enrolled', drip_sequence_id: sequence.id, enrollmentId: res.row?.id || null }
 }
 
 export { rest, insertRow, patchRow, LANES }
