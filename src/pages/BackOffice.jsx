@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react'
 import { saveAgentProfile } from '../lib/services/agentProfile.js'
 import { Icon, Avatar, Badge, pushToast } from '../components/UI.jsx'
-import { formatCurrency, formatDate } from '../lib/helpers.js'
+import { formatMoney, formatDate } from '../lib/helpers.js'
 import { agentSliceForDeal, capWindowStart } from '../lib/commission.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -10,7 +10,7 @@ import { agentSliceForDeal, capWindowStart } from '../lib/commission.js'
 // engine as My Earnings and the tracker, so every surface agrees to the cent.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const fmt = (n) => formatCurrency(Math.round((n + Number.EPSILON) * 100) / 100)
+const fmt = (n) => formatMoney(Math.round((n + Number.EPSILON) * 100) / 100)
 
 // Reporting periods: quarters + years, newest first
 function buildPeriods(now = new Date()) {

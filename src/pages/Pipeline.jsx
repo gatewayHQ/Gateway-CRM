@@ -4272,10 +4272,15 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const property = properties?.find(p => p.id === deal?.property_id)
 
   // Filter templates to the deal's state (comp_data.state preferred, else the
-  // normalized property state); fall back to all if none match.
+  // normalized property state) PLUS the general / other forms — a packet filed
+  // as "General / Other", or under no operating state, is usable on any deal.
+  // Other states' forms stay hidden. With no deal state, show everything.
   const dealState = normalizeState(deal?.comp_data?.state || property?.state || '')
-  const matched   = templates.filter(t => !t.state || normalizeState(t.state) === dealState)
-  const visible   = (dealState && matched.length) ? matched : templates
+  const isGeneral = t => !t.state || t.transaction_type === 'general'
+    || !OPERATING_STATES.some(s => s.code === normalizeState(t.state))
+  const visible   = dealState
+    ? templates.filter(t => isGeneral(t) || normalizeState(t.state) === dealState)
+    : templates
 
   // The defaults live in constants because they are also the BASELINE the
   // "has this agent changed anything?" comparison runs against (see `seeded`
