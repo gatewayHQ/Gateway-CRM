@@ -665,6 +665,18 @@ create unique index if not exists uq_form_packets_boldsign_tid
         )}
       </div>
 
+      {/* WHAT THIS PAGE IS FOR. Blank forms to download and print. Agents
+          came here to send a form for e-signature, which starts on the deal
+          instead — and nothing on this page said so. */}
+      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', background: 'var(--gw-bone)', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', padding: '10px 14px', marginBottom: 16, fontSize: 12.5, lineHeight: 1.55 }}>
+        <Icon name="send" size={14} style={{ color: 'var(--gw-azure)', flexShrink: 0, marginTop: 2 }} />
+        <span>
+          <strong>Blank forms to download and print.</strong> To send a form for e-signature, open the deal in
+          Pipeline → <strong>Signatures</strong> tab → <strong>Send from Template</strong> — it fills in from the
+          deal automatically.
+        </span>
+      </div>
+
       {/* Filters */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 18, flexWrap: 'wrap' }}>
         <select className="form-control" style={{ maxWidth: 120, fontSize: 13 }} value={filter.state} onChange={e => setFilter(p => ({ ...p, state: e.target.value }))}>
@@ -725,7 +737,9 @@ create unique index if not exists uq_form_packets_boldsign_tid
                   <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--gw-ink)', display: 'flex', alignItems: 'center', gap: 8 }}>
                     {packet.name}
                     {packet.boldsign_template_id && (
-                      <span style={{ padding: '1px 7px', borderRadius: 8, fontSize: 10, fontWeight: 700, background: packet.active ? 'var(--gw-green-light)' : 'var(--gw-bone)', color: packet.active ? 'var(--gw-green)' : 'var(--gw-mist)' }}>
+                      <span
+                        title={packet.active ? 'Send it from a deal: Signatures tab → Send from Template' : 'Linked to BoldSign but switched off — an admin can turn it back on'}
+                        style={{ padding: '1px 7px', borderRadius: 8, fontSize: 10, fontWeight: 700, background: packet.active ? 'var(--gw-green-light)' : 'var(--gw-bone)', color: packet.active ? 'var(--gw-green)' : 'var(--gw-mist)' }}>
                         {packet.active ? 'Sendable' : 'Sendable (disabled)'}
                       </span>
                     )}
