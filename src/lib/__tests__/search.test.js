@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
-  MIN_SEARCH_CHARS, PER_SECTION, contactName, propertyLine, matches,
+  MIN_SEARCH_CHARS, PER_SECTION, contactName, propertyLine, matches, phoneMatches, mergeContactHits,
   isSearchable, searchAgentIds, filterContacts, filterProperties, filterDeals,
   flattenResults, moveCursor, routeForResult,
 } from '../search.js'
@@ -179,5 +179,26 @@ describe('the box is actually wired up', () => {
   it('search is no longer hidden on mobile', () => {
     const css = read('../../styles/app.css')
     expect(css).not.toMatch(/\.topbar__search \{ display: none; \}/)
+  })
+})
+
+describe('phone search by digits', () => {
+  it('matches however the number is typed', () => {
+    for (const t of ['515-555', '(515) 555', '5155550123', '+1 515 555 0123', '555-0123']) {
+      expect(phoneMatches(t, '+15155550123')).toBe(true)
+    }
+  })
+  it('needs three digits, and a phone', () => {
+    expect(phoneMatches('51', '+15155550123')).toBe(false)
+    expect(phoneMatches('515', null)).toBe(false)
+    expect(phoneMatches('jane', '+15155550123')).toBe(false)
+  })
+  it('the in-memory contact filter finds a formatted number', () => {
+    const rows = [{ id: 'a', first_name: 'Jane', last_name: 'Doe', phone: '+15155550123' }]
+    expect(filterContacts(rows, '(515) 555').map(c => c.id)).toEqual(['a'])
+  })
+  it('merges server hits with loaded ones, server first, no duplicates', () => {
+    const out = mergeContactHits([{ id: 'a' }, { id: 'b' }], [{ id: 'b' }, { id: 'c' }])
+    expect(out.map(c => c.id)).toEqual(['a', 'b', 'c'])
   })
 })

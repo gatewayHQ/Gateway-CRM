@@ -2,6 +2,7 @@ import React, { useRef, useState, useEffect, useMemo } from 'react'
 import { Icon, Avatar, Badge, HeatBadge } from '../../components/UI.jsx'
 import { formatPhone } from '../../lib/phone.js'
 import { formatDate } from '../../lib/helpers.js'
+import { titleCase } from '../../lib/enums.js'
 
 /**
  * ContactsTable — virtualized, inline-editable contacts grid.
@@ -82,19 +83,13 @@ export default function ContactsTable({
     return next
   })
 
-  const SortArrow = ({ k }) => {
-    if (sortKey !== k) return <Icon name="chevronDown" size={10} style={{ opacity: 0.3 }} />
-    return <Icon name={sortDir === 'asc' ? 'chevronDown' : 'chevronDown'} size={10}
-                 style={{ transform: sortDir === 'asc' ? 'rotate(180deg)' : 'none' }} />
-  }
 
   return (
     <div className="card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 400 }}>
       {/* ── Sticky header ── */}
       <div
+        className="ct-grid ct-head"
         style={{
-          display: 'grid',
-          gridTemplateColumns: '36px 1.8fr 80px 90px 100px 1.2fr 1.6fr 1.2fr 120px 100px',
           alignItems: 'center',
           padding: '0 16px',
           height: 38,
@@ -131,6 +126,7 @@ export default function ContactsTable({
       {/* ── Scrollable virtualized body ── */}
       <div
         ref={containerRef}
+        className="ct-scroll"
         onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
         style={{
           flex: 1,
@@ -221,14 +217,13 @@ const ContactRow = React.memo(function ContactRow({
         if (e.target.closest('[data-action]')) return
         onOpen()
       }}
+      className="ct-grid ct-row"
       style={{
         position: 'absolute',
         top: index * ROW_HEIGHT,
         left: 0,
         right: 0,
         height: ROW_HEIGHT,
-        display: 'grid',
-        gridTemplateColumns: '36px 1.8fr 80px 90px 100px 1.2fr 1.6fr 1.2fr 120px 100px',
         alignItems: 'center',
         padding: '0 16px',
         gap: 0,
@@ -239,7 +234,7 @@ const ContactRow = React.memo(function ContactRow({
       }}
     >
       {/* Selection */}
-      <div data-action onClick={(e) => { e.stopPropagation(); onToggleSelect() }}>
+      <div className="ct-wide" data-action onClick={(e) => { e.stopPropagation(); onToggleSelect() }}>
         <input
           type="checkbox"
           checked={isSelected}
@@ -264,21 +259,25 @@ const ContactRow = React.memo(function ContactRow({
             {c.first_name} {c.last_name}
           </div>
           {c.tags?.length > 0 && (
-            <div style={{ fontSize: 10, color: 'var(--gw-mist)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <div className="ct-wide" style={{ fontSize: 10, color: 'var(--gw-mist)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {c.tags.slice(0, 3).join(' · ')}
             </div>
           )}
+          {/* Phones: the columns this row drops, as one line. */}
+          <div className="ct-narrow ct-sub">
+            {[c.type && titleCase(c.type), c.last_contacted_at ? `Last contact ${formatDate(c.last_contacted_at)}` : 'Not contacted yet'].filter(Boolean).join(' · ')}
+          </div>
         </div>
       </div>
 
       {/* Heat */}
-      <div><HeatBadge score={heat || 'cold'} /></div>
+      <div className="ct-wide"><HeatBadge score={heat || 'cold'} /></div>
 
       {/* Type */}
-      <div><Badge variant={c.type}>{c.type}</Badge></div>
+      <div className="ct-wide"><Badge variant={c.type}>{c.type}</Badge></div>
 
       {/* Status — inline editable */}
-      <div data-action onClick={(e) => { e.stopPropagation(); onStartEdit('status') }}>
+      <div className="ct-wide" data-action onClick={(e) => { e.stopPropagation(); onStartEdit('status') }}>
         {isEditing === 'status' ? (
           <select
             autoFocus
@@ -303,18 +302,23 @@ const ContactRow = React.memo(function ContactRow({
         )}
       </div>
 
-      {/* Phone */}
-      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+      {/* Phone — a call button on phones */}
+      {c.phone && (
+        <a className="ct-narrow ct-call" data-action href={`tel:${c.phone}`} onClick={(e) => e.stopPropagation()} aria-label={`Call ${c.first_name || ''} ${c.last_name || ''}`.trim()}>
+          <Icon name="phone" size={16} />
+        </a>
+      )}
+      <div className="ct-wide" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {formatPhone(c.phone) || '—'}
       </div>
 
       {/* Email */}
-      <div style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: c.email ? 'inherit' : 'var(--gw-mist)' }}>
+      <div className="ct-wide" style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: c.email ? 'inherit' : 'var(--gw-mist)' }}>
         {c.email || '—'}
       </div>
 
       {/* Agent — inline editable */}
-      <div data-action onClick={(e) => { e.stopPropagation(); onStartEdit('assigned_agent_id') }}>
+      <div className="ct-wide" data-action onClick={(e) => { e.stopPropagation(); onStartEdit('assigned_agent_id') }}>
         {isEditing === 'assigned_agent_id' ? (
           <select
             autoFocus
@@ -330,7 +334,7 @@ const ContactRow = React.memo(function ContactRow({
               fontFamily: 'var(--font-body)',
             }}
           >
-            <option value="">Unassigned</option>
+            {!c.assigned_agent_id && <option value="">Unassigned</option>}
             {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
           </select>
         ) : (
@@ -346,12 +350,12 @@ const ContactRow = React.memo(function ContactRow({
       </div>
 
       {/* Last contact */}
-      <div style={{ fontSize: 12, color: 'var(--gw-mist)', whiteSpace: 'nowrap' }}>
+      <div className="ct-wide" style={{ fontSize: 12, color: 'var(--gw-mist)', whiteSpace: 'nowrap' }}>
         {formatDate(c.last_contacted_at) || '—'}
       </div>
 
       {/* Actions */}
-      <div data-action onClick={(e) => e.stopPropagation()} style={{ display: 'flex', gap: 2, justifyContent: 'flex-end', opacity: isFocused ? 1 : 0.0, transition: 'opacity 120ms' }}>
+      <div className="ct-wide" data-action onClick={(e) => e.stopPropagation()} style={{ display: 'flex', gap: 2, justifyContent: 'flex-end', opacity: isFocused ? 1 : 0.0, transition: 'opacity 120ms' }}>
         {c.email && (
           <button
             className="btn btn--ghost btn--icon"

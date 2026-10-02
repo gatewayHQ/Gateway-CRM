@@ -1,10 +1,11 @@
 import React, { useState, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { syncTaskCalendar, deleteTask } from '../lib/services/tasks.js'
+import { syncTaskCalendar, deleteTask, setTaskCompleted } from '../lib/services/tasks.js'
+import { mutationErrorMessage } from '../lib/services/db.js'
 import { formatDate, toDateTimeLocalInput, fromDateTimeLocalInput } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
 
-function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave, activeAgent }) {
+function TaskDrawer({ open, onClose, task, contacts, deals, onSave, activeAgent }) {
   const blank = { title:'', type:'follow-up', priority:'medium', due_date:'', contact_id:'', deal_id:'', agent_id:'', notes:'', completed:false }
   const [form, setForm] = useState(blank)
   const [errors, setErrors] = useState({})
@@ -13,7 +14,9 @@ function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave, acti
   const [availability, setAvailability] = useState(null)   // null | 'loading' | { busyBlocks }
 
   React.useEffect(() => {
-    setForm(task ? { ...task, due_date: toDateTimeLocalInput(task.due_date) } : blank)
+    // Tasks are personal — the database only accepts a task assigned to the
+    // agent saving it (tasks_agent_scope) — so a new one is always theirs.
+    setForm(task ? { ...task, due_date: toDateTimeLocalInput(task.due_date) } : { ...blank, agent_id: activeAgent?.id || '' })
     setErrors({})
   }, [task, open])
   const set = (k, v) => setForm(p => ({...p, [k]: v}))
@@ -74,7 +77,7 @@ function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave, acti
         due_date:   fromDateTimeLocalInput(form.due_date),
         contact_id: form.contact_id || null,
         deal_id:    form.deal_id    || null,
-        agent_id:   form.agent_id   || null,
+        agent_id:   form.agent_id   || activeAgent?.id || null,
         notes:      form.notes      || null,
         completed:  form.completed,
       }
@@ -126,7 +129,6 @@ function TaskDrawer({ open, onClose, task, agents, contacts, deals, onSave, acti
         </div>
         <div className="form-group"><label className="form-label">Contact</label><SearchDropdown items={contacts} value={form.contact_id} onSelect={v=>set('contact_id',v)} placeholder="Search contacts…" labelKey={c=>`${c.first_name} ${c.last_name}`} /></div>
         <div className="form-group"><label className="form-label">Deal</label><SearchDropdown items={deals} value={form.deal_id} onSelect={v=>set('deal_id',v)} placeholder="Search deals…" labelKey="title" /></div>
-        <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
         <div className="form-group"><label className="form-label">Notes</label><textarea className="form-control form-control--textarea" value={form.notes||''} onChange={e=>set('notes',e.target.value)} /></div>
       </div>
       <div className="drawer__foot">
@@ -239,9 +241,8 @@ export default function TasksPage({ db, setDb, activeAgent }) {
 
   const toggle = useCallback(async (task) => {
     const completed = !task.completed
-    await supabase.from('tasks').update({ completed }).eq('id', task.id)
-    // Completing a task takes its calendar event down; reopening puts it back.
-    syncTaskCalendar(task.id)
+    const { error } = await setTaskCompleted(task.id, completed)
+    if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
     setDb(p => ({ ...p, tasks: p.tasks.map(t => t.id === task.id ? { ...t, completed } : t) }))
     pushToast(completed ? 'Task completed! ✓' : 'Task reopened')
   }, [setDb])
@@ -283,7 +284,7 @@ export default function TasksPage({ db, setDb, activeAgent }) {
         </>
       )}
 
-      <TaskDrawer open={drawer} onClose={() => setDrawer(false)} task={editing} agents={agents} contacts={contacts} deals={deals} onSave={reload} activeAgent={activeAgent} />
+      <TaskDrawer open={drawer} onClose={() => setDrawer(false)} task={editing} contacts={contacts} deals={deals} onSave={reload} activeAgent={activeAgent} />
       {confirm && <ConfirmDialog message="Delete this task?" onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
     </div>
   )

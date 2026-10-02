@@ -26,9 +26,11 @@
 
 import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { calcHeatScore } from '../lib/helpers.js'
+import { heatScoresFor } from '../lib/helpers.js'
 import { CONTACT_TYPES, CONTACT_STATUSES, titleCase } from '../lib/enums.js'
 import { normalizePhone } from '../lib/phone.js'
+import { phoneMatches } from '../lib/search.js'
+import { mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, EmptyState, ConfirmDialog, pushToast } from '../components/UI.jsx'
 import { useDebounce } from '../hooks/useDebounce.js'
 import { useKeyboard } from '../hooks/useKeyboard.js'
@@ -65,6 +67,10 @@ function compareValues(a, b, dir = 'asc') {
 
 const HEAT_ORDER = { hot: 0, warm: 1, cold: 2 }
 
+// Activity types that count as reaching the contact — the same list the
+// database trigger uses (migration 0062). A note isn't contact.
+const CONTACT_TOUCH_TYPES = ['call', 'email', 'meeting', 'showing']
+
 export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, visibleAgentIds, isAdmin, focusRecord, onFocusHandled }) {
   // ── Persistent filter state ─────────────────────────────────────────────
   const [search, setSearch] = useState('')
@@ -82,14 +88,22 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
   const [importModal, setImportModal] = useState(false)
   const [selected, setSelected] = useState(new Set())
 
-  // A global-search hit routes here with the record to open. Resolve it against
-  // the loaded rows and open its drawer, then clear so it fires only once.
+  // A global-search hit, a bell item or a lead email's link routes here with
+  // the record to open. Resolve it against the loaded rows and open its drawer,
+  // then clear so it fires only once. A lead that arrived after the book loaded
+  // isn't in it yet, so it's fetched (and added) rather than silently dropped.
   useEffect(() => {
     if (focusRecord?.type === 'new-contact') { setEditing(null); setDrawerOpen(true); onFocusHandled?.(); return }
     if (focusRecord?.type !== 'contact') return
-    const hit = (db.contacts || []).find(c => c.id === focusRecord.id)
-    if (hit) { setEditing(hit); setDrawerOpen(true) }
+    const id = focusRecord.id
     onFocusHandled?.()
+    const hit = (db.contacts || []).find(c => c.id === id)
+    if (hit) { setEditing(hit); setDrawerOpen(true); return }
+    supabase.from('contacts').select('*').eq('id', id).maybeSingle().then(({ data }) => {
+      if (!data) { pushToast("That contact isn't in your book — it may have been reassigned.", 'info'); return }
+      setDb(p => ({ ...p, contacts: [data, ...(p.contacts || []).filter(c => c.id !== data.id)] }))
+      setEditing(data); setDrawerOpen(true)
+    })
   }, [focusRecord, db.contacts])
   const [reassignTo, setReassignTo] = useState('')
   const [focusedIndex, setFocusedIndex] = useState(0)
@@ -102,11 +116,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
   const deals      = db.deals      || []
 
   // ── Heat scores: memoized once per data change ─────────────────────────
-  const heatScores = useMemo(() => {
-    const map = {}
-    for (const c of contacts) map[c.id] = calcHeatScore(c, activities, deals)
-    return map
-  }, [contacts, activities, deals])
+  const heatScores = useMemo(() => heatScoresFor(contacts, activities, deals), [contacts, activities, deals])
 
   // ── Active deal index for view predicate ────────────────────────────────
   const activeDealContactIds = useMemo(() => {
@@ -144,7 +154,8 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
         const phone = (c.phone || '').toLowerCase()
         const city  = (c.owner_city || '').toLowerCase()
         const tags  = (c.tags || []).join(' ').toLowerCase()
-        if (!name.includes(q) && !email.includes(q) && !phone.includes(q) && !city.includes(q) && !tags.includes(q)) return false
+        if (!name.includes(q) && !email.includes(q) && !phone.includes(q) && !city.includes(q) && !tags.includes(q)
+            && !phoneMatches(q, c.phone)) return false
       }
 
       // Filters
@@ -272,7 +283,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
     optimisticUpdate(id, { [field]: value })
     const { error } = await supabase.from('contacts').update({ [field]: value }).eq('id', id)
     if (error) {
-      pushToast(error.message, 'error')
+      pushToast(mutationErrorMessage(error), 'error')
       reload()  // restore truth
     }
   }, [optimisticUpdate, reload])
@@ -286,7 +297,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
       contacts: (prev.contacts || []).map(c => ids.includes(c.id) ? { ...c, assigned_agent_id: agentId } : c),
     }))
     const { error } = await supabase.from('contacts').update({ assigned_agent_id: agentId }).in('id', ids)
-    if (error) { pushToast(error.message, 'error'); reload(); return }
+    if (error) { pushToast(mutationErrorMessage(error), 'error'); reload(); return }
     const agent = agents.find(a => a.id === agentId)
     pushToast(`${ids.length} reassigned to ${agent?.name || 'agent'}`)
     setSelected(new Set())
@@ -468,7 +479,14 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
         activeAgent={activeAgent}
         allTags={allTags}
         properties={db.properties || []}
-        onActivityAdded={(act) => setDb(p => ({ ...p, activities: [act, ...(p.activities || [])] }))}
+        onActivityAdded={(act) => setDb(p => ({
+          ...p,
+          activities: [act, ...(p.activities || [])],
+          contacts: CONTACT_TOUCH_TYPES.includes(act.type)
+            ? (p.contacts || []).map(c => c.id === act.contact_id ? { ...c, last_contacted_at: act.created_at } : c)
+            : p.contacts,
+        }))}
+        onTaskAdded={(task) => setDb(p => ({ ...p, tasks: [task, ...(p.tasks || [])] }))}
         onSave={(saved) => {
           if (saved) {
             setDb(p => {

@@ -6,6 +6,7 @@ import { STAGE_ORDER, toDateTimeLocalInput, fromDateTimeLocalInput } from '../li
 import { useStageLabels } from '../lib/stageLabelContext.js'
 import { upsertContact } from '../lib/services/contacts.js'
 import { CONTACT_SOURCES } from '../lib/enums.js'
+import { mutationErrorMessage } from '../lib/services/db.js'
 
 function QuickContactDrawer({ open, onClose, agents, activeAgent, contacts = [], onSaved }) {
   const blank = () => ({ first_name: '', last_name: '', phone: '', email: '', type: 'buyer', source: 'referral', assigned_agent_id: activeAgent?.id || '' })
@@ -21,17 +22,24 @@ function QuickContactDrawer({ open, onClose, agents, activeAgent, contacts = [],
     // `source` is captured, not hardcoded to 'other' — lead-source attribution
     // is the input every ROI report depends on, and it was being destroyed at
     // the point of capture.
-    const { created, error } = await upsertContact(
+    const owner = form.assigned_agent_id || activeAgent?.id || null
+    const handingOff = Boolean(owner) && owner !== activeAgent?.id
+    const { contact, created, error } = await upsertContact(
       supabase,
-      { ...form, status: 'active', tags: [], assigned_agent_id: form.assigned_agent_id || null },
+      { ...form, status: 'active', tags: [], assigned_agent_id: owner },
       contacts,
+      { readBack: !handingOff },
     )
     setSaving(false)
-    if (error) { pushToast(error, 'error'); return }
-    pushToast(created
-      ? `${form.first_name} ${form.last_name} added to Contacts`
-      : `${form.first_name} ${form.last_name} already existed — record updated`)
-    onSaved(); onClose()
+    if (error) { pushToast(mutationErrorMessage({ message: error }), 'error'); return }
+    const name = `${form.first_name} ${form.last_name}`
+    const toName = agents.find(a => a.id === owner)?.name
+    pushToast(!created ? `${name} already existed — record updated`
+      : handingOff ? `${name} handed to ${toName || 'another agent'} — it's in their book now`
+      : `${name} added to Contacts`)
+    // A handed-off contact is in someone else's book, not this one.
+    if (!handingOff) onSaved(contact)
+    onClose()
   }
 
   return (
@@ -72,8 +80,7 @@ function QuickContactDrawer({ open, onClose, agents, activeAgent, contacts = [],
         <div className="form-group">
           <label className="form-label">Assign To</label>
           <select className="form-control" value={form.assigned_agent_id} onChange={e => set('assigned_agent_id', e.target.value)}>
-            <option value="">Unassigned</option>
-            {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            {agents.map(a => <option key={a.id} value={a.id}>{a.id === activeAgent?.id ? `${a.name} (you)` : a.name}</option>)}
           </select>
         </div>
       </div>
@@ -85,7 +92,11 @@ function QuickContactDrawer({ open, onClose, agents, activeAgent, contacts = [],
   )
 }
 
-function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
+// Where a quick-added deal can start. Never Closed or Lost: closing runs the
+// compliance checks on the deal page, and a quick add would skip them.
+const QUICK_STAGES = STAGE_ORDER.filter(s => s !== 'closed' && s !== 'lost')
+
+function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved, onOpen }) {
   const stageLabels = useStageLabels()
   const blank = () => ({ title: '', value: '', stage: 'lead', agent_id: activeAgent?.id || '' })
   const [form, setForm] = useState(blank())
@@ -97,17 +108,19 @@ function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
   const save = async () => {
     if (!form.title.trim()) { pushToast('Deal title required', 'error'); return }
     setSaving(true)
-    const { error } = await supabase.from('deals').insert([{
+    const { data, error } = await supabase.from('deals').insert([{
       ...form,
       value: form.value ? Number(form.value) : null,
       probability: 25,
       updated_at: new Date().toISOString(),
-      agent_id: form.agent_id || null,
-    }])
+      agent_id: form.agent_id || activeAgent?.id || null,
+    }]).select().single()
     setSaving(false)
-    if (error) { pushToast(error.message, 'error'); return }
+    if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
     pushToast(`Deal "${form.title}" added`)
-    onSaved(); onClose()
+    onSaved(data); onClose()
+    // Straight to the new deal: its property, contact and checklist are next.
+    if (data?.id) onOpen?.(`deal/${data.id}`)
   }
 
   return (
@@ -125,15 +138,14 @@ function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
           <div className="form-group">
             <label className="form-label">Stage</label>
             <select className="form-control" value={form.stage} onChange={e => set('stage', e.target.value)}>
-              {STAGE_ORDER.map(s => <option key={s} value={s}>{stageLabels[s]}</option>)}
+              {QUICK_STAGES.map(s => <option key={s} value={s}>{stageLabels[s]}</option>)}
             </select>
           </div>
         </div>
         <div className="form-group">
           <label className="form-label">Assign To</label>
           <select className="form-control" value={form.agent_id} onChange={e => set('agent_id', e.target.value)}>
-            <option value="">Unassigned</option>
-            {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            {agents.map(a => <option key={a.id} value={a.id}>{a.id === activeAgent?.id ? `${a.name} (you)` : a.name}</option>)}
           </select>
         </div>
       </div>
@@ -145,11 +157,11 @@ function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved }) {
   )
 }
 
-function QuickTaskDrawer({ open, onClose, agents, activeAgent, onSaved }) {
+function QuickTaskDrawer({ open, onClose, activeAgent, onSaved }) {
   // Tomorrow at 9am in the AGENT's own zone — `toDateTimeLocalInput` keeps the
   // input showing 09:00 instead of the UTC-shifted 14:00 the ISO slice showed.
   const defaultDue = () => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); return toDateTimeLocalInput(d) }
-  const blank = () => ({ title: '', type: 'follow-up', priority: 'medium', due_date: defaultDue(), agent_id: activeAgent?.id || '' })
+  const blank = () => ({ title: '', type: 'follow-up', priority: 'medium', due_date: defaultDue() })
   const [form, setForm] = useState(blank())
   const [saving, setSaving] = useState(false)
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }))
@@ -163,13 +175,14 @@ function QuickTaskDrawer({ open, onClose, agents, activeAgent, onSaved }) {
       ...form,
       due_date: fromDateTimeLocalInput(form.due_date),
       completed: false,
-      agent_id: form.agent_id || null,
+      // Tasks are personal: always the agent adding it (tasks_agent_scope).
+      agent_id: activeAgent?.id || null,
     }]).select().single()
     setSaving(false)
-    if (error) { pushToast(error.message, 'error'); return }
+    if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
     syncTaskCalendar(data?.id)
     pushToast('Task added')
-    onSaved(); onClose()
+    onSaved(data); onClose()
   }
 
   return (
@@ -197,13 +210,6 @@ function QuickTaskDrawer({ open, onClose, agents, activeAgent, onSaved }) {
           <label className="form-label">Due</label>
           <input className="form-control" type="datetime-local" value={form.due_date} onChange={e => set('due_date', e.target.value)} />
         </div>
-        <div className="form-group">
-          <label className="form-label">Assign To</label>
-          <select className="form-control" value={form.agent_id} onChange={e => set('agent_id', e.target.value)}>
-            <option value="">Unassigned</option>
-            {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
-        </div>
       </div>
       <div className="drawer__foot">
         <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
@@ -219,13 +225,16 @@ const OPTIONS = [
   { id: 'contact', label: 'New Contact', icon: 'contacts', bg: '#c9a84c' },
 ]
 
-export default function QuickAdd({ db, setDb, activeAgent }) {
+export default function QuickAdd({ db, setDb, activeAgent, go }) {
   const [open, setOpen] = useState(false)
   const [mode, setMode] = useState(null)
 
-  const reload = (table, key, order = 'created_at') => async () => {
-    const { data } = await supabase.from(table).select('*').order(order, { ascending: table === 'tasks' })
-    setDb(p => ({ ...p, [key]: data || [] }))
+  // Put the saved row into the loaded list — the same row the database
+  // returned. Reloading the whole table here used to skip the app's
+  // visibility rules and could swap an agent's list for a different one.
+  const keep = (key) => (row) => {
+    if (!row?.id) return
+    setDb(p => ({ ...p, [key]: [row, ...(p[key] || []).filter(r => r.id !== row.id)] }))
   }
 
   return (
@@ -251,15 +260,15 @@ export default function QuickAdd({ db, setDb, activeAgent }) {
 
       <QuickContactDrawer open={mode === 'contact'} onClose={() => setMode(null)}
         agents={db.agents || []} activeAgent={activeAgent} contacts={db.contacts || []}
-        onSaved={reload('contacts', 'contacts')} />
+        onSaved={keep('contacts')} />
 
       <QuickDealDrawer open={mode === 'deal'} onClose={() => setMode(null)}
         agents={db.agents || []} activeAgent={activeAgent}
-        onSaved={reload('deals', 'deals')} />
+        onSaved={keep('deals')} onOpen={go} />
 
       <QuickTaskDrawer open={mode === 'task'} onClose={() => setMode(null)}
-        agents={db.agents || []} activeAgent={activeAgent}
-        onSaved={reload('tasks', 'tasks', 'due_date')} />
+        activeAgent={activeAgent}
+        onSaved={keep('tasks')} />
     </>
   )
 }

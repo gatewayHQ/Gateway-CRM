@@ -6,7 +6,7 @@ import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx
 import { readDealTerms, termsFilled } from '../lib/services/dealTerms.js'
 import { formatCurrency, formatDate, formatPhone } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
-import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage, isContractStage } from '../lib/stages.js'
+import { TRACKS, UNIFIED, boardStageFor, isOpenStage, isContractStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
 import SideSplit from '../components/SideSplit.jsx'
 import { agentIdsOnDeal } from '../lib/coAgents.js'
@@ -15,7 +15,8 @@ import { DealDrawer } from './Pipeline.jsx'
 import { getClosingGate, gateBadge } from '../lib/compliance.js'
 import { listRequiredForms } from '../lib/services/requiredForms.js'
 import { audit, useDealAudit } from '../lib/audit.js'
-import { BUCKETS, TABLES, REVIEW_STATUS } from '../lib/constants.js'
+import { changeDealStage } from '../lib/services/dealStage.js'
+import { TABLES, REVIEW_STATUS } from '../lib/constants.js'
 import { uploadDealDocument, signDealDocumentUrl, listDealFiles } from '../lib/services/documents.js'
 import { submitDealForReview, decideDealReview } from '../lib/services/review.js'
 import { generateClosingPacket, listClosingPackets, openClosingPacket } from '../lib/services/closingPacket.js'
@@ -287,28 +288,16 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
       const issueList = gate.issues.map(i => `• ${i.label}`).join('\n')
       if (!window.confirm(`This deal has open compliance items:\n\n${issueList}\n\nOverride and close anyway?`)) return
     }
-    const fromStage = deal.stage
-    // Stamp stage_since so days-in-stage / rotting stays accurate (no schema change)
-    const comp_data = { ...(deal.comp_data || {}), stage_since: new Date().toISOString() }
-    const { error, status } = await withRetry(() => supabase.from('deals').update({ stage: newStage, comp_data }).eq('id', deal.id))
-    if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
-    setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, stage: newStage, comp_data } : d) }))
+    const r = await changeDealStage(deal, newStage, { actorId: activeAgent?.id })
+    if (r.error) { pushToast(mutationErrorMessage(r.error, r.status), 'error'); return }
+    const { comp_data, task } = r
+    setDb(p => ({ ...p,
+      deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, stage: newStage, comp_data } : d),
+      tasks: task ? [task, ...(p.tasks || [])] : p.tasks,
+    }))
     setFetched(f => f && f.id === deal.id ? { ...f, stage: newStage, comp_data } : f)
     pushToast(`Moved to ${stageLabels[newStage]}`)
-    audit.stageChange(deal, fromStage, newStage, activeAgent?.id)
-    const auto = STAGE_AUTO_TASKS[newStage]
-    if (!auto) return
-    const due = new Date(); due.setDate(due.getDate() + auto.daysOut); due.setHours(9, 0, 0, 0)
-    const { data: newTask } = await supabase.from('tasks').insert([{
-      title: auto.title(deal), type: auto.type, priority: auto.priority,
-      due_date: due.toISOString(), agent_id: activeAgent?.id || deal.agent_id || null,
-      contact_id: deal.contact_id || null, deal_id: deal.id, completed: false,
-    }]).select().single()
-    if (newTask) {
-      syncTaskCalendar(newTask.id)
-      setDb(p => ({ ...p, tasks: [newTask, ...(p.tasks || [])] }))
-      pushToast(`Task auto-created: ${newTask.title}`, 'info')
-    }
+    if (task) pushToast(`Task auto-created: ${task.title}`, 'info')
   }
 
   // ── Submit for admin review (agent-initiated) ──────────────────────────────

@@ -21,7 +21,7 @@ import { Icon } from './UI.jsx'
 import { STAGE_LABELS } from '../lib/stages.js'
 import {
   PER_SECTION, isSearchable, searchAgentIds,
-  filterContacts, filterProperties, filterDeals,
+  filterContacts, filterProperties, filterDeals, mergeContactHits,
   flattenResults, moveCursor,
 } from '../lib/search.js'
 
@@ -63,7 +63,8 @@ export default function GlobalSearch({ db, visibleAgentIds = [], propertyAgentId
       if (cancelled) return
 
       // Fall back to the in-memory rows if an RPC is unavailable.
-      const contacts   = c.error ? filterContacts(db.contacts || [], term)     : (c.data || [])
+      const local      = filterContacts(db.contacts || [], term)
+      const contacts   = c.error ? local : mergeContactHits(c.data || [], local)
       const properties = p.error ? filterProperties(db.properties || [], term) : (p.data || [])
 
       setRemote({ contacts, properties })

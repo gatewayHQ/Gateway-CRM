@@ -397,6 +397,21 @@ export function BootScreen() {
   )
 }
 
+/** The boot screen when the first load failed: what happened, and a retry. */
+export function BootError({ message, onRetry, onSignOut }) {
+  return (
+    <div className="boot boot--error" role="alert">
+      <BrandLogo size={120} className="boot__seal" priority />
+      <div className="boot__error-title">Your CRM didn't load</div>
+      <div className="boot__error-msg">{message} Nothing has been lost — your records are safe.</div>
+      <div className="boot__error-actions">
+        <button type="button" className="btn btn--primary" onClick={onRetry}><Icon name="refresh" size={14} /> Try again</button>
+        {onSignOut && <button type="button" className="btn btn--ghost boot__error-signout" onClick={onSignOut}>Sign out</button>}
+      </div>
+    </div>
+  )
+}
+
 // ─── TABS ─────────────────────────────────────────────────────────────────────
 // ─── OVERFLOW MENU ────────────────────────────────────────────────────────────
 // The "…" a row's less-used actions live behind.

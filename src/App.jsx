@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from './lib/supabase.js'
-import { primeCache, invalidate } from './lib/queryCache.js'
+import { primeCache } from './lib/queryCache.js'
 import { fetchVisibleDeals, fetchVisibleCommissions } from './lib/services/deals.js'
 import { fetchVisibleProperties } from './lib/services/properties.js'
 import { fetchVisibleContacts } from './lib/services/contacts.js'
@@ -8,7 +8,9 @@ import { resolveStageLabels } from './lib/stageLabels.js'
 import { isOfficeAdmin } from './lib/officeAdmins.js'
 import { teamVisibleAgentIds } from './lib/teamVisibility.js'
 import { StageLabelContext } from './lib/stageLabelContext.js'
-import { Icon, Avatar, Modal, Badge, ToastHost, Loading, BootScreen, BrandLogo, ErrorBoundary, pushToast } from './components/UI.jsx'
+import { Icon, Avatar, ToastHost, Loading, BootScreen, BootError, BrandLogo, ErrorBoundary, pushToast } from './components/UI.jsx'
+import { fetchAllRows } from './lib/services/fetchAll.js'
+import { mutationErrorMessage } from './lib/services/db.js'
 // All pages are lazy-loaded — only the current route's bundle downloads
 const Dashboard        = React.lazy(() => import('./pages/Dashboard.jsx'))
 const ContactsPage     = React.lazy(() => import('./pages/Contacts.jsx'))
@@ -66,9 +68,9 @@ const NAV_OFFICE = [
 
 // Marketing & Tools: power features, collapsed for new users
 const NAV_TOOLS = [
-  { id: 'templates',    label: 'Email Templates', icon: 'mail'      },
+  { id: 'templates',    label: 'Email Templates', icon: 'file-text' },
   { id: 'sequences',    label: 'Drip Sequences',  icon: 'sequences' },
-  { id: 'mass-email',   label: 'Mass Email',      icon: 'mail'      },
+  { id: 'mass-email',   label: 'Mass Email',      icon: 'send'      },
   { id: 'form-library', label: 'Form Library',    icon: 'document'  },
   { id: 'toolkit',      label: 'Toolkit',         icon: 'sparkles'  },
   { id: 'leads',        label: 'Website Leads',   icon: 'leads'     },
@@ -95,12 +97,14 @@ const HIDEABLE_NAV = [
 
 // Always visible at the bottom — never buried
 const NAV_ADMIN = [
-  { id: 'integrations',   label: 'Integrations',    icon: 'pipeline'  },
+  { id: 'integrations',   label: 'Integrations',    icon: 'link'      },
   { id: 'data-management', label: 'Data Management', icon: 'tag', adminOnly: true },
   { id: 'settings',       label: 'Settings',        icon: 'settings' },
 ]
 
 const TOOLS_IDS = NAV_TOOLS.map(n => n.id)
+// The phone's bottom bar; everything else is under More.
+const MOBILE_TABS = ['dashboard', 'contacts', 'pipeline', 'tasks']
 const TOOLKIT_URL = 'https://gatewayhq.github.io/'
 
 const TITLES = {
@@ -241,6 +245,11 @@ export default function App() {
   const [compose, setCompose] = useState(null)
   const [mobileMore, setMobileMore] = useState(false)
   const [needsOnboarding, setNeedsOnboarding] = useState(false)
+  // A boot that couldn't reach the database. Shown as a retry screen — never
+  // as onboarding (which is what a failed agents read used to look like) or as
+  // an empty book (which is what a failed contacts read looked like).
+  const [bootError, setBootError] = useState(null)
+  const [bootAttempt, setBootAttempt] = useState(0)
   const [notifications,   setNotifications]   = useState([])
   const [notifOpen,       setNotifOpen]       = useState(false)
   // Set by a global-search hit so the destination page opens that record.
@@ -250,9 +259,6 @@ export default function App() {
   // the `route` state above); cleared once Mass Email has consumed it so a
   // later visit to the page starts blank instead of re-seeding a stale listing.
   const [announceProperty, setAnnounceProperty] = useState(null)
-  const [websiteEnabled, setWebsiteEnabled] = useState(
-    () => localStorage.getItem('gw_website_enabled') === 'true'
-  )
   const [toolsOpen, setToolsOpen] = useState(
     () => localStorage.getItem('gw_tools_open') === 'true'
   )
@@ -285,11 +291,19 @@ export default function App() {
   // this app has no real URL routing to land on. Same shape as the Outlook
   // callback above — route, then strip the query so a refresh doesn't re-route
   // an agent who has since navigated somewhere else.
+  //
+  // ?contact=<id> is the same for a contact: the new-lead email's "Open in the
+  // CRM". Lead emails sent before Oct 2026 link to /contacts?id=<id>, which
+  // still works.
   useEffect(() => {
-    const dealId = new URLSearchParams(window.location.search).get('deal')
-    if (!dealId) return
-    setRoute(`deal/${dealId}`)
-    window.history.replaceState(null, '', window.location.pathname)
+    const params = new URLSearchParams(window.location.search)
+    const dealId = params.get('deal')
+    const contactId = params.get('contact')
+      || (window.location.pathname.replace(/\/+$/, '') === '/contacts' ? params.get('id') : null)
+    if (!dealId && !contactId) return
+    if (dealId) setRoute(`deal/${dealId}`)
+    else { setFocusRecord({ type: 'contact', id: contactId }); setRoute('contacts') }
+    window.history.replaceState(null, '', contactId ? '/' : window.location.pathname)
   }, [])
 
   // ?preview=markup — the strike-through markup bench (src/pages/MarkupPreview.jsx).
@@ -304,9 +318,12 @@ export default function App() {
   }, [])
 
   // Per-agent hidden nav — loaded from agents table (nav_hidden column)
+  // Messages (two-way SMS) only means something to an agent with a Twilio
+  // number; for everyone else it was an empty inbox in their main nav.
   const hiddenNav = React.useMemo(() => {
     const agent = db.agents?.find(a => a.id === activeAgentId)
-    return agent?.nav_hidden || []
+    const hidden = agent?.nav_hidden || []
+    return agent && !agent.twilio_number ? [...hidden, 'messages'] : hidden
   }, [db.agents, activeAgentId])
 
   // If the current route is now hidden, redirect to dashboard
@@ -323,8 +340,9 @@ export default function App() {
     setRoute(id)
   }
 
-  // Flat list for mobile nav (filter leads + hidden items)
-  const toolsBase = websiteEnabled ? NAV_TOOLS : NAV_TOOLS.filter(n => n.id !== 'leads')
+  // Website Leads is always listed: new leads arrive there by round-robin, and
+  // a per-browser switch used to hide it from the agents receiving them.
+  const toolsBase = NAV_TOOLS
   // Admin-only items disappear from the nav for everyone else (isAdmin is also
   // computed lower for prop-passing, but the nav builds before that)
   const navAdmin = isOfficeAdmin(db.agents?.find(x => x.id === activeAgentId))
@@ -387,6 +405,7 @@ export default function App() {
           .then(r => r, () => ({ data: [] })),
       ])
 
+      if (agentsRes.error) { setBootError(agentsRes.error); setLoading(false); return }
       let agentsData      = agentsRes.data      || []
       const allTeamSplits = teamSplitsRes.data  || []
 
@@ -447,7 +466,9 @@ export default function App() {
       // office. Tasks stay personal even for admins — a to-do list isn't oversight
       // data and the admin's own tasks are all that's useful to them.
       // Regular agents receive only rows scoped to their computed lists above.
-      const [contacts, properties, deals, tasks, templates, activitiesRes, dealContactsRes, propertyContactsRes] = await Promise.all([
+      // Everything pages past PostgREST's 1,000-row cap (fetchAllRows), and
+      // commissions load alongside the rest rather than after it.
+      const [contacts, properties, deals, tasks, templates, activitiesRes, dealContactsRes, propertyContactsRes, commissionsRes] = await Promise.all([
         // Own book + team peers sharing contacts + the buyer and seller on any
         // deal this agent is on. That last arm (migration 0055) is what stops a
         // co-agent opening a deal they can see and finding no client on it.
@@ -461,22 +482,27 @@ export default function App() {
         // Own + team-shared + co-listed (commission participant) deals
         fetchVisibleDeals(supabase, { isAdmin: isAdminAgent, agentId: matched.id, dealAgentIds: myDealVisible }),
         // Tasks are personal — never shared, even for an admin
-        supabase.from('tasks').select('*').eq('agent_id', matched.id).order('due_date', { ascending: true }),
-        supabase.from('templates').select('*').order('created_at', { ascending: false }),
-        supabase.from('activities').select('*').order('created_at', { ascending: false }),
+        fetchAllRows(() => supabase.from('tasks').select('*').eq('agent_id', matched.id).order('due_date', { ascending: true })),
+        fetchAllRows(() => supabase.from('templates').select('*').order('created_at', { ascending: false })),
+        fetchAllRows(() => supabase.from('activities').select('*').order('created_at', { ascending: false })),
         // Additional-contact links (husband & wife etc. — migration 0021).
         // deal_contacts is RLS-scoped to visible deals; property_contacts is
         // open like properties. If the migration hasn't run yet these error and
         // the app degrades gracefully to single-contact behavior.
-        supabase.from('deal_contacts').select('*'),
-        supabase.from('property_contacts').select('*'),
+        fetchAllRows(() => supabase.from('deal_contacts').select('*')),
+        fetchAllRows(() => supabase.from('property_contacts').select('*')),
+        // Commissions are back-office data: only admins load raw rows. Agents
+        // get their own slice via /api/portal?action=my-earnings (the database
+        // enforces this too — non-admin queries return zero rows).
+        isAdminAgent
+          ? fetchVisibleCommissions(supabase, { isAdmin: true })
+          : Promise.resolve({ data: [], error: null }),
       ])
-      // Commissions are back-office data: only admins load raw rows. Agents
-      // get their own slice via /api/portal?action=my-earnings (the database
-      // enforces this too — non-admin queries return zero rows).
-      const commissionsRes = isAdminAgent
-        ? await fetchVisibleCommissions(supabase, { isAdmin: true })
-        : { data: [], error: null }
+      // The book itself must load. A failed read here would otherwise show as
+      // an agent with no contacts or deals — indistinguishable from data loss.
+      const coreError = [contacts, properties, deals, tasks].find(r => r?.error)?.error
+      if (coreError) { setBootError(coreError); setLoading(false); return }
+      setBootError(null)
 
       const dbPayload = {
         contacts:         contacts.data     || [],
@@ -506,10 +532,10 @@ export default function App() {
 
       setLoading(false)
     }
-    load()
+    load().catch(err => { setBootError(err); setLoading(false) })
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on WHO is signed
     // in, deliberately not on the session object; see the comment above.
-  }, [sessionUserId])
+  }, [sessionUserId, bootAttempt])
 
   // Realtime: listen for new agent_notifications for the active agent
   useEffect(() => {
@@ -544,6 +570,19 @@ export default function App() {
     setNotifications(prev => prev.filter(n => n.id !== id))
   }
 
+  // Where a bell item goes: its contact (a new lead) or its deal (reminders,
+  // nudges, signatures). Opening it also marks it read.
+  const openContact = (id) => { setFocusRecord({ type: 'contact', id }); setRoute('contacts') }
+  const openNotification = (n) => {
+    if (!n.contact_id && !n.deal_id) return null
+    return () => {
+      setNotifOpen(false)
+      markNotifRead(n.id)
+      if (n.contact_id) openContact(n.contact_id)
+      else setRoute(`deal/${n.deal_id}`)
+    }
+  }
+
   const markAllRead = async () => {
     const ids = notifications.map(n => n.id)
     if (ids.length === 0) return
@@ -556,6 +595,7 @@ export default function App() {
     setDb(EMPTY_DB)
     setNotifications([])
     setNeedsOnboarding(false)
+    setBootError(null)
     setLoading(true)
   }
 
@@ -580,9 +620,29 @@ export default function App() {
       setFocusRecord({ type: `new-${kind}` })
       setRoute({ contact: 'contacts', property: 'properties', deal: 'pipeline' }[kind])
     },
+    // Open one contact's drawer from anywhere (dashboard, bell, search).
+    openContact,
   }
 
   if (loading) return <BootScreen />
+  if (bootError) {
+    return (
+      <BootError
+        message={mutationErrorMessage(bootError, undefined, "We couldn't load your CRM.")}
+        onRetry={() => { setBootError(null); setLoading(true); setBootAttempt(n => n + 1) }}
+        onSignOut={signOut}
+      />
+    )
+  }
+
+  // A deal page has no TITLES entry (its route carries the id), so the bar was
+  // blank there; it reads as the deal, under Pipeline.
+  const routeDeal = route.startsWith('deal/') ? (db.deals || []).find(d => d.id === route.split('/')[1]) : null
+  const pageTitle = route.startsWith('deal/')
+    ? { title: routeDeal?.title || 'Deal', crumb: 'Pipeline · Deal' }
+    : (TITLES[route] || {})
+  // The bottom-nav tab a page belongs to — a deal is part of Pipeline.
+  const navRoute = route.startsWith('deal/') ? 'pipeline' : route
 
   return (
     <StageLabelContext.Provider value={stageLabels}>
@@ -713,8 +773,8 @@ export default function App() {
             <BrandLogo size={40} />
           </button>
           <div>
-            <div className="topbar__title">{TITLES[route]?.title}</div>
-            <div className="topbar__breadcrumb">{TITLES[route]?.crumb}</div>
+            <div className="topbar__title">{pageTitle.title}</div>
+            <div className="topbar__breadcrumb">{pageTitle.crumb}</div>
           </div>
           <GlobalSearch
             db={db}
@@ -723,7 +783,7 @@ export default function App() {
             isAdmin={isAdmin}
             onNavigate={(item) => {
               if (item.kind === 'deal')     { setRoute(`deal/${item.id}`); return }
-              if (item.kind === 'contact')  { setFocusRecord({ type: 'contact',  id: item.id }); setRoute('contacts');   return }
+              if (item.kind === 'contact')  { openContact(item.id); return }
               if (item.kind === 'property') { setFocusRecord({ type: 'property', id: item.id }); setRoute('properties') }
             }}
           />
@@ -778,14 +838,21 @@ export default function App() {
                   </div>
                 ) : (
                   <div style={{ maxHeight: 360, overflowY: 'auto' }}>
-                    {notifications.map(n => (
+                    {notifications.map(n => {
+                      const open = openNotification(n)
+                      return (
                       <div key={n.id} style={{
                         display: 'flex', gap: 10, padding: '10px 14px',
                         borderBottom: '1px solid var(--gw-border)',
                         background: '#f0fdf4',
                       }}>
-                        <Icon name="check" size={14} style={{ color: 'var(--gw-green)', flexShrink: 0, marginTop: 2 }} />
-                        <div style={{ flex: 1, minWidth: 0 }}>
+                        <Icon name={n.type === 'lead' ? 'leads' : 'check'} size={14} style={{ color: 'var(--gw-green)', flexShrink: 0, marginTop: 2 }} />
+                        <div
+                          style={{ flex: 1, minWidth: 0, cursor: open ? 'pointer' : 'default' }}
+                          role={open ? 'button' : undefined} tabIndex={open ? 0 : undefined}
+                          onClick={open || undefined}
+                          onKeyDown={open ? (e => { if (e.key === 'Enter') open() }) : undefined}
+                        >
                           <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--gw-ink)' }}>{n.title}</div>
                           <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2, lineHeight: 1.5 }}>{n.message}</div>
                           <div style={{ fontSize: 10, color: 'var(--gw-mist)', marginTop: 4 }}>
@@ -801,7 +868,8 @@ export default function App() {
                           <Icon name="x" size={11} />
                         </button>
                       </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 )}
               </div>
@@ -842,9 +910,9 @@ export default function App() {
           {route === 'review'     && <AdminReviewPage {...props} />}
           {route === 'form-library' && <FormLibraryPage isAdmin={isAdmin} />}
           {route === 'leads'      && <LeadsPage {...props} />}
-          {route === 'integrations'      && <IntegrationsPage />}
+          {route === 'integrations'      && <IntegrationsPage isAdmin={isAdmin} />}
           {route === 'data-management'   && isAdmin && <DataManagementPage />}
-          {route === 'settings'          && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} activeAgentId={activeAgentId} hideableNav={HIDEABLE_NAV} />}
+          {route === 'settings'          && <SettingsPage {...props} activeAgentId={activeAgentId} hideableNav={HIDEABLE_NAV} />}
           {route === 'markup-preview'    && <MarkupPreviewPage />}
         </ErrorBoundary>
         </React.Suspense>
@@ -859,12 +927,13 @@ export default function App() {
 
       {/* ── Mobile bottom nav ── */}
       <nav className="mobile-nav">
-        {['dashboard', ...(isAdmin ? [] : ['contacts']), 'pipeline', 'tasks'].map(id => {
+        {MOBILE_TABS.filter(id => !(isAdmin && id === 'contacts')).map(id => {
           const n = NAV.find(x => x.id === id)
           if (!n) return null
           return (
-            <button key={n.id} className={`mobile-nav__item${route === n.id ? ' active' : ''}`}
-              onClick={() => setRoute(n.id)}>
+            <button key={n.id} className={`mobile-nav__item${navRoute === n.id && !mobileMore ? ' active' : ''}`}
+              aria-current={navRoute === n.id ? 'page' : undefined}
+              onClick={() => { setMobileMore(false); setRoute(n.id) }}>
               <Icon name={n.icon} size={22} />
               <span>{n.label}</span>
             </button>
@@ -882,14 +951,29 @@ export default function App() {
         <div className="mobile-menu-backdrop" onClick={() => setMobileMore(false)}>
           <div className="mobile-menu" onClick={e => e.stopPropagation()}>
             <div className="mobile-menu__handle" />
-            <div className="mobile-menu__label">Navigation</div>
-            {NAV.filter(n => !['dashboard', 'contacts', 'pipeline', 'tasks'].includes(n.id)).map(n => (
-              <div key={n.id} className={`mobile-menu__item${route === n.id ? ' active' : ''}`}
-                onClick={() => { navTo(n.id); setMobileMore(false) }}>
-                <Icon name={n.icon} size={20} />
-                <span>{n.label}</span>
-              </div>
-            ))}
+            {/* Grouped like the sidebar, so a long list still reads at a glance. */}
+            {[
+              ['Work',      [...NAV_CORE, ...officeBase]],
+              ['Marketing & Tools', NAV_TOOLS],
+              ['Settings',  adminBase],
+            ].map(([label, items]) => {
+              const rows = items.filter(n => NAV.some(x => x.id === n.id) && !MOBILE_TABS.includes(n.id))
+              if (!rows.length) return null
+              return (
+                <React.Fragment key={label}>
+                  <div className="mobile-menu__label">{label}</div>
+                  {rows.map(n => (
+                    <div key={n.id} className={`mobile-menu__item${route === n.id ? ' active' : ''}`}
+                      role="button" tabIndex={0}
+                      onClick={() => { navTo(n.id); setMobileMore(false) }}
+                      onKeyDown={e => { if (e.key === 'Enter') { navTo(n.id); setMobileMore(false) } }}>
+                      <Icon name={n.icon} size={20} />
+                      <span>{n.label}</span>
+                    </div>
+                  ))}
+                </React.Fragment>
+              )
+            })}
             <div className="mobile-menu__divider" />
             <div className="mobile-menu__item danger" onClick={() => { setMobileMore(false); signOut() }}>
               <Icon name="logout" size={20} />
@@ -899,7 +983,7 @@ export default function App() {
         </div>
       )}
 
-      <QuickAdd db={db} setDb={setDb} activeAgent={activeAgent} />
+      <QuickAdd db={db} setDb={setDb} activeAgent={activeAgent} go={setRoute} />
       <InstallPrompt />
       <ToastHost />
       <Analytics />

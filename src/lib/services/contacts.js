@@ -12,6 +12,7 @@
 // the TODO at the bottom). It does make every client-side path agree on what
 // counts as "the same person", so converting twice updates rather than doubles.
 // ─────────────────────────────────────────────────────────────────────────────
+import { fetchAllRows } from './fetchAll.js'
 import { normalizePhone } from '../phone.js'
 
 /** Lower-cased, trimmed, or null. Emails are compared case-insensitively. */
@@ -55,7 +56,10 @@ export function findExistingContact(rows = [], incoming = {}) {
  * `existingRows` is the caller's already-loaded contact list. Passing it keeps
  * this a zero-extra-query helper on the common path.
  */
-export async function upsertContact(supabase, payload, existingRows = []) {
+// `readBack: false` saves without reading the row back — for a contact handed
+// to another agent, which the saver usually can no longer see (RLS refuses the
+// RETURNING read, so the save itself would fail). See migration 0062.
+export async function upsertContact(supabase, payload, existingRows = [], { readBack = true } = {}) {
   const incoming = {
     ...payload,
     email: normalizeEmail(payload.email),
@@ -83,12 +87,23 @@ export async function upsertContact(supabase, payload, existingRows = []) {
 
     if (!Object.keys(patch).length) return { contact: existing, created: false, error: null }
 
+    if (!readBack) {
+      const { error } = await supabase.from('contacts').update(patch).eq('id', existing.id)
+      if (error) return { contact: existing, created: false, error: error.message }
+      return { contact: { ...existing, ...patch }, created: false, error: null }
+    }
     const { data, error } = await supabase
       .from('contacts').update(patch).eq('id', existing.id).select().single()
     if (error) return { contact: existing, created: false, error: error.message }
     return { contact: data, created: false, error: null }
   }
 
+  if (!readBack) {
+    const row = { ...incoming, id: incoming.id || crypto.randomUUID() }
+    const { error } = await supabase.from('contacts').insert([row])
+    if (error) return { contact: null, created: false, error: error.message }
+    return { contact: row, created: true, error: null }
+  }
   const { data, error } = await supabase.from('contacts').insert([incoming]).select().single()
   if (error) return { contact: null, created: false, error: error.message }
   return { contact: data, created: true, error: null }
@@ -151,15 +166,15 @@ export async function fetchGrantedContactIds(client) {
 export async function fetchVisibleContacts(client, { isAdmin, agentId, contactAgentIds }) {
   const byNewest = (a, b) => new Date(b.created_at) - new Date(a.created_at)
   if (isAdmin) {
-    return client.from('contacts').select('*').order('created_at', { ascending: false })
+    return fetchAllRows(() => client.from('contacts').select('*').order('created_at', { ascending: false }))
   }
   const owners = contactAgentIds?.length ? contactAgentIds : (agentId ? [agentId] : [])
   if (!owners.length && !agentId) return { data: [], error: null }
 
   const [ownRes, grantedIds] = await Promise.all([
     owners.length
-      ? client.from('contacts').select('*').in('assigned_agent_id', owners)
-          .order('created_at', { ascending: false })
+      ? fetchAllRows(() => client.from('contacts').select('*').in('assigned_agent_id', owners)
+          .order('created_at', { ascending: false }))
       : Promise.resolve({ data: [], error: null }),
     fetchGrantedContactIds(client),
   ])

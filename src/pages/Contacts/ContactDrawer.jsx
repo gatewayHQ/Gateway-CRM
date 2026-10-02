@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { supabase } from '../../lib/supabase.js'
-import { Drawer, Tabs, pushToast } from '../../components/UI.jsx'
-import { normalizePhone } from '../../lib/phone.js'
+import { Icon, Drawer, Tabs, pushToast } from '../../components/UI.jsx'
+import { normalizePhone, formatPhone } from '../../lib/phone.js'
 import { validateEmail, validateRequired, validateForm } from '../../lib/validation.js'
-import { CONTACT_TYPES, CONTACT_STATUSES, CONTACT_SOURCES, COMMERCIAL_PROPERTY_TYPES, titleCase } from '../../lib/enums.js'
+import { CONTACT_TYPES, CONTACT_STATUSES, CONTACT_SOURCES, titleCase } from '../../lib/enums.js'
 import { withRetry, mutationErrorMessage } from '../../lib/services/db.js'
 import OptionMultiSelect from '../../components/OptionMultiSelect.jsx'
 import ChipToggleGroup from '../../components/ChipToggleGroup.jsx'
@@ -24,24 +24,19 @@ const BLANK = {
   size_min: '', size_max: '', size_unit: 'sqft',
   search_beds_min: '', search_baths_min: '', search_price_min: '', search_price_max: '',
 }
-const BLANK_PROP = { address: '', list_price: '', type: 'residential', subtype: '', beds: '', baths: '', sqft: '', garage: '', details: {} }
-
-const COMM_SUBTYPES = COMMERCIAL_PROPERTY_TYPES
 
 export default function ContactDrawer({
   open, onClose, contact, agents,
   deals, tasks, activities, activeAgent,
   allTags = [],
   properties = [],
-  onSave, onActivityAdded,
+  onSave, onActivityAdded, onTaskAdded,
   onDuplicateCheck,  // optional: (form) => existingContact | null
 }) {
   const [form, setForm] = useState(BLANK)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
   const [tab, setTab] = useState('details')
-  const [addProp, setAddProp] = useState(false)
-  const [propForm, setPropForm] = useState(BLANK_PROP)
   const [dirty, setDirty] = useState(false)
   const [duplicateWarn, setDuplicateWarn] = useState(null)
   const [showSpouse, setShowSpouse] = useState(false)
@@ -120,13 +115,16 @@ export default function ContactDrawer({
       // Expand the spouse/partner section automatically when there's data to show
       setShowSpouse(Boolean(contact.spouse_name || contact.spouse_phone || contact.spouse_notes))
     } else {
-      setForm(BLANK)
+      // A new contact is the signed-in agent's own unless they hand it to
+      // someone — new agents didn't know to pick themselves, and an
+      // unassigned contact is one the database won't let them save.
+      setForm({ ...BLANK, assigned_agent_id: activeAgent?.id || '' })
       setShowSpouse(false)
     }
     setErrors({})
-    setTab('details')
-    setAddProp(false)
-    setPropForm(BLANK_PROP)
+    // An existing contact opens on its history and the log box — what an agent
+    // opens a contact to do. A new one starts on its details.
+    setTab(contact?.id ? 'activity' : 'details')
     setDirty(false)
     setDuplicateWarn(null)
   }, [contact, open])
@@ -135,8 +133,6 @@ export default function ContactDrawer({
     setForm(p => ({ ...p, [k]: v }))
     setDirty(true)
   }, [])
-  const setP  = useCallback((k, v) => { setPropForm(p => ({ ...p, [k]: v })); setDirty(true) }, [])
-  const setPD = useCallback((k, v) => { setPropForm(p => ({ ...p, details: { ...(p.details || {}), [k]: v } })); setDirty(true) }, [])
 
   // Dirty-form warning on close
   const requestClose = () => {
@@ -146,7 +142,6 @@ export default function ContactDrawer({
     onClose()
   }
 
-  const isComm = propForm.type === 'commercial'
   const isBuyer  = form.type === 'buyer' || form.type === 'investor'
   const isSeller = form.type === 'seller' || form.type === 'landlord'
   const hasCriteria = isBuyer || isSeller
@@ -159,10 +154,6 @@ export default function ContactDrawer({
       email:      [(v) => validateEmail(v, { required: false })],
     })
     if (!valid) { setErrors(validationErrors); return }
-    if (addProp && !propForm.address.trim()) {
-      setErrors({ prop_address: 'Property address is required' })
-      return
-    }
     setErrors({})
 
     // Duplicate check (creating only — not editing)
@@ -227,9 +218,25 @@ export default function ContactDrawer({
     // PGRST116 — "Cannot coerce the result to a single JSON object" — surfacing a
     // scary error for a save that actually succeeded. maybeSingle() returns
     // { data: null, error: null } in that case, and we recover via the parent reload.
-    const doSave = (p) => contact?.id
-      ? supabase.from('contacts').update(p).eq('id', contact.id).select().maybeSingle()
-      : supabase.from('contacts').insert([p]).select().maybeSingle()
+    //
+    // A HANDOFF — the contact assigned to another agent — is saved without
+    // reading the row back: once it's theirs this agent may no longer be able to
+    // see it, and asking for it back would make the database refuse the whole
+    // save. A new contact gets its id here so the rest of the save can use it.
+    const handingOff = Boolean(payload.assigned_agent_id) && payload.assigned_agent_id !== activeAgent?.id
+      && payload.assigned_agent_id !== contact?.assigned_agent_id
+    const newId = contact?.id ? null : crypto.randomUUID()
+    const doSave = (p) => {
+      if (handingOff) {
+        return (contact?.id
+          ? supabase.from('contacts').update(p).eq('id', contact.id)
+          : supabase.from('contacts').insert([{ ...p, id: newId }])
+        ).then(r => (r.error ? r : { ...r, data: { ...p, id: contact?.id || newId } }))
+      }
+      return contact?.id
+        ? supabase.from('contacts').update(p).eq('id', contact.id).select().maybeSingle()
+        : supabase.from('contacts').insert([{ ...p, id: newId }]).select().maybeSingle()
+    }
 
     // Retry transient transport failures ("Failed to fetch") with short backoff before
     // giving up — a dropped/blocked request usually succeeds on a second attempt.
@@ -267,24 +274,9 @@ export default function ContactDrawer({
       return
     }
 
-    const contactId = saved?.id || contact?.id
-
-    if (addProp && propForm.address.trim() && contactId) {
-      const propPayload = {
-        address:    propForm.address.trim(),
-        type:       propForm.type === 'commercial' ? (propForm.subtype || 'commercial') : 'residential',
-        list_price: propForm.list_price ? Number(propForm.list_price) : null,
-        beds:       propForm.beds  ? Number(propForm.beds)  : null,
-        baths:      propForm.baths ? Number(propForm.baths) : null,
-        sqft:       propForm.sqft  ? Number(propForm.sqft)  : null,
-        garage:     propForm.garage ? Number(propForm.garage) : 0,
-        details:    { ...propForm.details, category: propForm.type },
-        linked_contact_id: contactId,
-        status:     'active',
-      }
-      const { error: pe } = await supabase.from('properties').insert([propPayload])
-      if (pe) pushToast(`Contact saved but property failed: ${pe.message}`, 'error')
-      else pushToast(criteriaDropped ? 'Contact & property saved (run DB migration to store buyer criteria)' : 'Contact & property saved')
+    if (handingOff) {
+      const to = agents.find(a => a.id === payload.assigned_agent_id)?.name || 'that agent'
+      pushToast(`${contact?.id ? 'Contact' : 'New contact'} handed to ${to} — it's in their book now.`)
     } else {
       pushToast(criteriaDropped
         ? 'Contact saved — run DB migration to store buyer criteria'
@@ -315,6 +307,28 @@ export default function ContactDrawer({
       title={contact?.id ? `${contact.first_name} ${contact.last_name}` : 'Add Contact'}
       width={500}
     >
+      {/* One tap to reach them. A call opens the log box ready for the
+          outcome; a text uses the phone's own messages app. */}
+      {contact?.id && (contact.phone || contact.email) && (
+        <div className="contact-actions">
+          {contact.phone && (
+            <a className="contact-action" href={`tel:${contact.phone}`} onClick={() => setTab('activity')}>
+              <Icon name="phone" size={14} /> Call <span className="contact-action__sub">{formatPhone(contact.phone)}</span>
+            </a>
+          )}
+          {contact.phone && (
+            <a className="contact-action" href={`sms:${contact.phone}`}>
+              <Icon name="send" size={14} /> Text
+            </a>
+          )}
+          {contact.email && (
+            <button type="button" className="contact-action" onClick={() => setTab('emails')}>
+              <Icon name="mail" size={14} /> Email
+            </button>
+          )}
+        </div>
+      )}
+
       {contact?.id && (
         <Tabs
           active={tab}
@@ -457,9 +471,12 @@ export default function ContactDrawer({
               <div className="form-group">
                 <label className="form-label">Assigned Agent</label>
                 <select className="form-control" value={form.assigned_agent_id || ''} onChange={(e) => set('assigned_agent_id', e.target.value)}>
-                  <option value="">Unassigned</option>
-                  {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  {!form.assigned_agent_id && <option value="">Choose an agent…</option>}
+                  {agents.map(a => <option key={a.id} value={a.id}>{a.id === activeAgent?.id ? `${a.name} (you)` : a.name}</option>)}
                 </select>
+                {form.assigned_agent_id && form.assigned_agent_id !== activeAgent?.id && form.assigned_agent_id !== contact?.assigned_agent_id && (
+                  <div className="form-hint">Saving hands this contact to {agents.find(a => a.id === form.assigned_agent_id)?.name || 'them'} — it moves to their book.</div>
+                )}
               </div>
             </div>
 
@@ -613,12 +630,14 @@ export default function ContactDrawer({
       {tab === 'activity' && (
         <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <ActivityTab
+            key={contact?.id}
             contact={contact}
             deals={deals}
             tasks={tasks}
             activities={activities}
             activeAgent={activeAgent}
             onActivityAdded={onActivityAdded}
+            onTaskAdded={onTaskAdded}
           />
         </div>
       )}

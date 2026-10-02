@@ -2,6 +2,10 @@ import React, { useState } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
 import { formatCurrency } from '../../lib/helpers.js'
+import { titleCase } from '../../lib/enums.js'
+import { mutationErrorMessage } from '../../lib/services/db.js'
+import { syncTaskCalendar } from '../../lib/services/tasks.js'
+import { FOLLOW_UP_CHOICES, CALL_OUTCOMES, followUpDue } from '../../lib/followUp.js'
 
 const ACTIVITY_TYPES  = ['note', 'call', 'email', 'meeting', 'showing']
 const ACTIVITY_ICONS  = { note: 'note', call: 'phone', email: 'mail', meeting: 'calendar', showing: 'building' }
@@ -19,9 +23,11 @@ const STAGE_COLORS = {
 }
 const fmt = (d) => new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 
-export default function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivityAdded }) {
-  const [type, setType] = useState('note')
+export default function ActivityTab({ contact, deals, tasks, activities, activeAgent, onActivityAdded, onTaskAdded }) {
+  // A call is what agents log most; a note is one tap away.
+  const [type, setType] = useState(contact?.phone ? 'call' : 'note')
   const [body, setBody] = useState('')
+  const [followUp, setFollowUp] = useState('')
   const [saving, setSaving] = useState(false)
 
   const contactDeals      = (deals      || []).filter(d => d.contact_id === contact?.id)
@@ -35,20 +41,42 @@ export default function ActivityTab({ contact, deals, tasks, activities, activeA
     ...(contact?.created_at    ? [{ kind: 'created',   date: contact.created_at, data: contact }] : []),
   ].sort((a, b) => new Date(b.date) - new Date(a.date))
 
-  const logActivity = async () => {
-    if (!body.trim()) return
+  const name = [contact?.first_name, contact?.last_name].filter(Boolean).join(' ') || 'contact'
+
+  // Log the touch and, when chosen, book the follow-up task in the same step.
+  const logActivity = async (text = body) => {
+    if (!text.trim()) return
     setSaving(true)
     const { data, error } = await supabase.from('activities').insert([{
       contact_id: contact.id,
       agent_id:   activeAgent?.id || null,
       type,
-      body: body.trim(),
+      body: text.trim(),
     }]).select().single()
-    setSaving(false)
-    if (error) { pushToast(error.message, 'error'); return }
-    pushToast(`${type.charAt(0).toUpperCase() + type.slice(1)} logged`)
-    setBody('')
+    if (error) { setSaving(false); pushToast(mutationErrorMessage(error), 'error'); return }
     onActivityAdded?.(data)
+    setBody('')
+
+    let task = null
+    if (followUp) {
+      const { data: t, error: te } = await supabase.from('tasks').insert([{
+        title: `Follow up with ${name}`,
+        type: type === 'email' ? 'email' : 'call',
+        priority: 'medium',
+        due_date: followUpDue(followUp).toISOString(),
+        agent_id: activeAgent?.id || null,
+        contact_id: contact.id,
+        completed: false,
+      }]).select().single()
+      if (te) pushToast(`Logged, but the follow-up wasn't saved: ${mutationErrorMessage(te)}`, 'error')
+      else { task = t; syncTaskCalendar(t.id); onTaskAdded?.(t) }
+      setFollowUp('')
+    }
+    setSaving(false)
+    const label = titleCase(type)
+    pushToast(task
+      ? `${label} logged — follow-up ${new Date(task.due_date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}`
+      : `${label} logged`)
   }
 
   return (
@@ -57,7 +85,7 @@ export default function ActivityTab({ contact, deals, tasks, activities, activeA
       <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--gw-border)', background: 'var(--gw-bone)', flexShrink: 0 }}>
         <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
           {ACTIVITY_TYPES.map(t => (
-            <button key={t} onClick={() => setType(t)} style={{
+            <button key={t} className="activity-type" onClick={() => setType(t)} style={{
               padding: '3px 10px',
               borderRadius: 14,
               border: `1px solid ${type === t ? 'var(--gw-azure)' : 'var(--gw-border)'}`,
@@ -72,20 +100,39 @@ export default function ActivityTab({ contact, deals, tasks, activities, activeA
             </button>
           ))}
         </div>
+        {type === 'call' && (
+          <div className="activity-outcomes">
+            {CALL_OUTCOMES.map(o => (
+              <button key={o} type="button" className="activity-outcome" disabled={saving}
+                onClick={() => logActivity(body.trim() ? `${o} — ${body.trim()}` : o)}>
+                {o}
+              </button>
+            ))}
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 8 }}>
           <input
             className="form-control"
             style={{ flex: 1, fontSize: 13 }}
-            placeholder={`Log a ${type}…`}
+            placeholder={type === 'call' ? 'Or type what was said…' : `Log a ${type}…`}
             value={body}
             onChange={(e) => setBody(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && logActivity()}
             disabled={saving}
           />
-          <button className="btn btn--primary btn--sm" onClick={logActivity} disabled={saving || !body.trim()} style={{ whiteSpace: 'nowrap' }}>
+          <button className="btn btn--primary btn--sm" onClick={() => logActivity()} disabled={saving || !body.trim()} style={{ whiteSpace: 'nowrap' }}>
             {saving ? '…' : 'Log'}
           </button>
         </div>
+        {type !== 'note' && (
+          <label className="activity-followup">
+            <Icon name="calendar" size={12} />
+            <span>Follow up</span>
+            <select className="form-control" value={followUp} onChange={e => setFollowUp(e.target.value)} disabled={saving}>
+              {FOLLOW_UP_CHOICES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+            </select>
+          </label>
+        )}
       </div>
 
       {/* Timeline */}

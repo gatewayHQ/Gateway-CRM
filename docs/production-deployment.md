@@ -34,7 +34,7 @@ disaster-recovery fallback.
    └───────────┬─────────────┘
                │  outbound
                ▼
-   Twilio (SMS) · Mailchimp/SMTP (email) · BoldSign (e-sign) · Anthropic (AI)
+   Twilio (SMS) · Resend/Outlook (email) · BoldSign (e-sign) · Anthropic (AI)
 ```
 
 **Trust boundaries**
@@ -172,7 +172,7 @@ Functions. This is DR scope, not day-one.
 | Functions | Vercel function logs + log drain → **Logflare/Datadog** | Per-invocation latency, 5xx rate, cold starts, cron success |
 | Database | Supabase dashboard + `pg_stat_statements` | Slow queries, connection saturation, index hit rate |
 | Uptime | **Better Uptime / Pingdom** on `/` + `/api/cron` health | External availability, TLS expiry, cron heartbeats |
-| Delivery | Twilio / Mailchimp / BoldSign dashboards + webhook logs | Send failures, bounce/opt-out, document status |
+| Delivery | Twilio / Resend / BoldSign dashboards + webhook logs | Send failures, bounce/opt-out, document status |
 
 **Recommended alerts (page → Slack/email):**
 - Function 5xx rate > 2% over 5 min.
@@ -234,7 +234,7 @@ numbers. Structured JSON from functions; redact at the edge.
 - **Public (browser) env**: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` only.
   These ship in the bundle — they are *meant* to be public; RLS is the guard.
 - **Server-only secrets** (Vercel env, never `VITE_`-prefixed): service-role
-  key, Twilio, Mailchimp/SMTP, BoldSign, Anthropic. See `.env.example`.
+  key, Twilio, Resend, BoldSign, Anthropic. See `.env.example`.
 - Rotate the service-role key on any suspected exposure; it bypasses RLS.
 
 ---
@@ -246,7 +246,7 @@ numbers. Structured JSON from functions; redact at the edge.
 - [ ] Verify RLS is **enabled** on every table; spot-check anon cannot read
       deals/commissions/contacts; confirm anon *can* read `agents`, `mailings`
       and insert `lead_captures` (public pages depend on this).
-- [ ] Set all server secrets in Vercel (service-role, Twilio, Mailchimp,
+- [ ] Set all server secrets in Vercel (service-role, Twilio, Resend,
       BoldSign, Anthropic); confirm none are `VITE_`-prefixed.
 - [ ] Set `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` for Production.
 - [ ] Custom domain + TLS attached; `index.html` is `no-store`, `/assets/*`

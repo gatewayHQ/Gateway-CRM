@@ -64,6 +64,18 @@ export function friendlyDbError(error) {
     return 'A linked record (such as the assigned agent) no longer exists. Refresh the page and try again.'
   }
 
+  // 42501 = insufficient_privilege — row-level security refused the write.
+  // For an agent that almost always means the record is assigned to someone
+  // they can't save for (a task assigned to a colleague, a deal with nobody
+  // on it), never "violates row-level security policy for table …".
+  if (code === '42501' || /row-level security/i.test(msg)) {
+    const m = msg.match(/for table "([^"]+)"/i)
+    const what = { tasks: 'task', deals: 'deal', contacts: 'contact', properties: 'property' }[m?.[1]] || 'record'
+    return what === 'task'
+      ? 'Tasks are personal — you can only save a task assigned to yourself.'
+      : `You can't save this ${what} as it's assigned. Assign it to yourself (or a teammate you share with) and try again.`
+  }
+
   // 23502 = not_null_violation
   if (code === '23502') {
     const m = msg.match(/column "([^"]+)"/i)

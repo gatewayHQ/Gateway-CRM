@@ -91,7 +91,8 @@ describe('geocoding', () => {
   })
 
   it('is what the pages that hit a geocoder or a map actually call', () => {
-    for (const rel of ['../../pages/Properties.jsx', '../../pages/Integrations.jsx']) {
+    // (Integrations.jsx geocoded for the Mailchimp radius sync, removed Oct 2026.)
+    for (const rel of ['../../pages/Properties.jsx']) {
       const src = read(rel)
       expect(src).toMatch(/geocodeQuery\(/)
       // No hand-rolled join feeding nominatim/maps — that is how the suite leaks in.

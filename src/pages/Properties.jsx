@@ -34,9 +34,6 @@ const TYPE_LABELS = {
   rental: 'Rental (Residential)',
 }
 
-// Returns a badge-friendly category label
-const typeCategory = (t) => isCommercial(t) ? 'commercial' : 'residential'
-
 function ResidentialFields({ form, set }) {
   return (
     <>
@@ -1403,20 +1400,11 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
   const [geoProgress, setGeoProgress]           = useState(null) // { done, total }
   const [results, setResults]                   = useState(null) // null = not run yet
   const [selected, setSelected]                 = useState(new Set())
-  const [syncing, setSyncing]                   = useState(false)
-  const [syncDone, setSyncDone]                 = useState(false)
-  const [mcConfig, setMcConfig]                 = useState(null)
 
   const contactMap = useMemo(() => Object.fromEntries(contacts.map(c => [c.id, c])), [contacts])
 
-  // Load saved Mailchimp config
-  React.useEffect(() => {
-    supabase.from('integrations').select('config').eq('type', 'mailchimp').single()
-      .then(({ data }) => { if (data?.config?.api_key) setMcConfig(data.config) })
-  }, [])
-
   const search = async () => {
-    setSearching(true); setResults(null); setSyncDone(false)
+    setSearching(true); setResults(null)
 
     // 1. Geocode source property (use stored coords if available)
     let src = property.lat && property.lng ? { lat: property.lat, lng: property.lng } : null
@@ -1457,8 +1445,10 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
       const dist = haversineMiles(src.lat, src.lng, p.lat, p.lng)
       if (dist > radius) continue
       if (p.linked_contact_id && !seen.has(p.linked_contact_id)) {
+        // Every owner nearby, with or without an email — a mailing goes to
+        // the property's address.
         const contact = contactMap[p.linked_contact_id]
-        if (contact?.email) {
+        if (contact) {
           seen.add(p.linked_contact_id)
           found.push({ contact, property: p, distance: dist })
         }
@@ -1477,42 +1467,25 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
     return next
   })
 
-  const syncToMailchimp = async () => {
-    if (!mcConfig?.api_key)  { pushToast('Mailchimp not connected — go to Integrations', 'error'); return }
-    if (!mcConfig?.list_id)  { pushToast('No default audience set — go to Integrations → Mailchimp', 'error'); return }
-    if (!selected.size)      { pushToast('Select at least one contact', 'error'); return }
-    setSyncing(true)
-    try {
-      const toSync = results.filter(r => selected.has(r.contact.id))
-      const label  = campaignType === 'Custom' ? customName : campaignType
-      const tag    = `${label} — ${streetLine(property)}`
-
-      const res = await fetch('/api/mailchimp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'syncMembers',
-          apiKey: mcConfig.api_key,
-          listId: mcConfig.list_id,
-          tag,
-          members: toSync.map(r => ({ email: r.contact.email, first_name: r.contact.first_name, last_name: r.contact.last_name })),
-        }),
-      })
-      const data = await res.json()
-      if (!res.ok) { pushToast(data.error || 'Mailchimp sync failed', 'error'); return }
-
-      await fireWebhooks('radius_sync', {
-        property: streetLine(property), campaign: label,
-        radius_miles: radius, contacts_synced: toSync.length, tag,
-      })
-
-      setSyncDone(true)
-      pushToast(`${toSync.length} contact${toSync.length !== 1 ? 's' : ''} synced → Mailchimp tag "${tag}"`)
-    } catch (err) {
-      pushToast(err.message, 'error')
-    } finally {
-      setSyncing(false)
-    }
+  // The mailing list as a spreadsheet for the print shop or mail house: one
+  // row per owner, addressed to the nearby property they own.
+  const downloadList = () => {
+    const rows = results.filter(r => selected.has(r.contact.id))
+    if (!rows.length) { pushToast('Select at least one contact', 'error'); return }
+    const cell = v => `"${String(v ?? '').replace(/"/g, '""')}"`
+    const lines = [
+      ['First Name', 'Last Name', 'Email', 'Phone', 'Address', 'City', 'State', 'Zip', 'Miles Away'].map(cell).join(','),
+      ...rows.map(({ contact: c, property: p, distance }) => [
+        c.first_name, c.last_name, c.email, c.phone, streetLine(p), p.city, p.state, p.zip, distance.toFixed(2),
+      ].map(cell).join(',')),
+    ]
+    const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${tag.replace(/[^\w\s-]+/g, '').replace(/\s+/g, '-').toLowerCase()}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+    pushToast(`${rows.length} contact${rows.length !== 1 ? 's' : ''} downloaded`)
   }
 
   const campaignLabel = campaignType === 'Custom' ? (customName || 'Custom') : campaignType
@@ -1580,7 +1553,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
           {results !== null && (
             results.length === 0 ? (
               <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--gw-mist)', fontSize: 13 }}>
-                No contacts with email addresses found within {radius} mi of this property.<br />
+                No contacts own a property within {radius} mi of this one.<br />
                 <span style={{ fontSize: 11, marginTop: 6, display: 'block' }}>
                   Tip: Link contacts to nearby properties in the Properties page to appear here.
                 </span>
@@ -1604,7 +1577,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
                       <input type="checkbox" checked={selected.has(contact.id)} readOnly style={{ flexShrink: 0 }} />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontWeight: 600, fontSize: 13 }}>{contact.first_name} {contact.last_name}</div>
-                        <div style={{ fontSize: 11, color: 'var(--gw-mist)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{contact.email} · {streetLine(p)}</div>
+                        <div style={{ fontSize: 11, color: 'var(--gw-mist)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{[contact.email, streetLine(p)].filter(Boolean).join(' · ')}</div>
                       </div>
                       <div style={{ fontSize: 11, color: 'var(--gw-mist)', flexShrink: 0 }}>{distance.toFixed(2)} mi</div>
                     </label>
@@ -1618,21 +1591,13 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
         {/* Footer */}
         {results !== null && results.length > 0 && (
           <div style={{ padding: '14px 24px', borderTop: '1px solid var(--gw-border)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            {mcConfig ? (
-              <div style={{ flex: 1, fontSize: 11, color: 'var(--gw-mist)', minWidth: 0 }}>
-                Mailchimp tag: <strong style={{ color: 'var(--gw-ink)' }}>"{tag}"</strong>
-              </div>
-            ) : (
-              <div style={{ flex: 1, fontSize: 12, color: 'var(--gw-red)' }}>⚠ Mailchimp not connected — go to Integrations</div>
-            )}
-            <button className="btn btn--secondary" onClick={onClose}>Cancel</button>
-            {!syncDone ? (
-              <button className="btn btn--primary" onClick={syncToMailchimp} disabled={syncing || !selected.size || !mcConfig}>
-                {syncing ? 'Syncing…' : `Sync ${selected.size} to Mailchimp`}
-              </button>
-            ) : (
-              <button className="btn btn--primary" style={{ background: 'var(--gw-green, #16a34a)' }} onClick={onClose}>✓ Done</button>
-            )}
+            <div style={{ flex: 1, fontSize: 11, color: 'var(--gw-mist)', minWidth: 0 }}>
+              A spreadsheet with each owner's name, contact details and property address.
+            </div>
+            <button className="btn btn--secondary" onClick={onClose}>Close</button>
+            <button className="btn btn--primary" onClick={downloadList} disabled={!selected.size}>
+              <Icon name="download" size={13} /> Download {selected.size} as CSV
+            </button>
           </div>
         )}
         {results !== null && results.length === 0 && (
@@ -1795,7 +1760,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAge
                     })()}
                     <button
                       className="btn btn--ghost btn--icon"
-                      title="Radius Mailing — sync nearby contacts to Mailchimp"
+                      title="Radius Mailing — list the owners near this property"
                       onClick={e => { e.stopPropagation(); setRadiusProp(p) }}
                       style={{ marginLeft:'auto', color:'var(--gw-azure)' }}
                     >
