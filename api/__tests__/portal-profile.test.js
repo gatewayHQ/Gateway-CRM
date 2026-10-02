@@ -205,3 +205,33 @@ describe('sanitizeProfilePayload — stage labels', () => {
       .toEqual({ stage_labels: {} })
   })
 })
+
+describe('cap confirmation (migration 0061)', () => {
+  it('only an admin can confirm a cap', () => {
+    expect(sanitizeProfilePayload({ cap_confirmed_at: '2026-03-10' }, { isAdmin: false }).payload).not.toHaveProperty('cap_confirmed_at')
+    expect(sanitizeProfilePayload({ cap_confirmed_at: '2026-03-10' }, { isAdmin: true }).payload.cap_confirmed_at).toBe('2026-03-10')
+  })
+  it('a blank date undoes the confirmation; a malformed one is refused', () => {
+    expect(sanitizeProfilePayload({ cap_confirmed_at: '' }, { isAdmin: true }).payload.cap_confirmed_at).toBeNull()
+    expect(sanitizeProfilePayload({ cap_confirmed_at: 'March 10' }, { isAdmin: true }).error).toMatch(/date/)
+  })
+  it('a confirmation the guard froze is reported, not swallowed', () => {
+    expect(verifyPrivilegedWrite({ cap_confirmed_at: '2026-03-10' }, { cap_confirmed_at: null })).toEqual(['cap_confirmed_at'])
+    expect(verifyPrivilegedWrite({ cap_confirmed_at: '2026-03-10' }, { cap_confirmed_at: '2026-03-10' })).toEqual([])
+  })
+  it('names the migration when the column is missing', () => {
+    expect(profileDbError({ message: 'column "cap_confirmed_at" of relation "agents" does not exist' })).toMatch(/0061/)
+  })
+})
+
+describe('per-agent transaction fee (migration 0061)', () => {
+  it('only an admin can set it, as a non-negative number; blank means the office standard', () => {
+    expect(sanitizeProfilePayload({ transaction_fee: '50' }, { isAdmin: false }).payload).not.toHaveProperty('transaction_fee')
+    expect(sanitizeProfilePayload({ transaction_fee: '50' }, { isAdmin: true }).payload.transaction_fee).toBe(50)
+    expect(sanitizeProfilePayload({ transaction_fee: '' }, { isAdmin: true }).payload.transaction_fee).toBeNull()
+    expect(sanitizeProfilePayload({ transaction_fee: '-5' }, { isAdmin: true }).error).toMatch(/below 0/)
+  })
+  it('names the migration when the column is missing', () => {
+    expect(profileDbError({ message: "Could not find the 'transaction_fee' column of 'agents' in the schema cache" })).toMatch(/0061/)
+  })
+})

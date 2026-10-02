@@ -176,14 +176,14 @@ describe('breakdownForDeal — an agent-entered deal with no commission row', ()
   it('a flat fee flows all the way through to take-home and house dollars', () => {
     const r = breakdownForDeal(deal({ commission_type: 'flat', commission_flat: 10_000 }), null, AGENTS)
     expect(r.gross_total).toBe(10_000)
-    expect(r.agent_total).toBeCloseTo(7_000, 2)   // 70% default split
-    expect(r.house_total).toBeCloseTo(3_000, 2)
+    expect(r.agent_total).toBeCloseTo(6_900, 2)   // 70% split − the standard $100 fee
+    expect(r.house_total).toBeCloseTo(3_100, 2)
     expect(r.effective_rate_pct).toBe(2)          // 10,000 / 500,000
   })
 
   it('a percentage flows through the same way', () => {
     const r = breakdownForDeal(deal({ commission_type: 'percent', commission_pct: 2 }), null, AGENTS)
     expect(r.gross_total).toBe(10_000)
-    expect(r.agent_total).toBeCloseTo(7_000, 2)
+    expect(r.agent_total).toBeCloseTo(6_900, 2)
   })
 })

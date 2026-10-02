@@ -304,7 +304,7 @@ async function handlePortalSignLink(req, res) {
 //             deals: [{deal_id, title, stage, value, closed_at, take, cap,
 //                      fees, split_pct, gross, closed}] }
 // ─────────────────────────────────────────────────────────────────────────────
-import { agentSliceForDeal, capWindowStart, addByParty } from '../src/lib/commission.js'
+import { agentSliceForDeal, capWindowStart, addByParty, capStatusFor } from '../src/lib/commission.js'
 import { normalizeStageLabels } from '../src/lib/stageLabels.js'
 import { canHoldOfficeAdmin } from '../src/lib/officeAdmins.js'
 import { streetLine, readPropertiesWithUnit } from '../src/lib/address.js'
@@ -332,13 +332,13 @@ const PROFILE_SELF_FIELDS = ['name', 'initials', 'email', 'phone', 'photo_url', 
 // Fields only an admin may set (role doubles as a legacy admin flag).
 // `is_admin` is deliberately absent: being an admin does not let you hand out
 // firm-wide visibility. That column has its own gate — see canSetOfficeAdmin.
-const PROFILE_ADMIN_FIELDS = ['role', 'default_split_pct', 'no_brokerage_split', 'cap_amount', 'cap_anniversary']
+const PROFILE_ADMIN_FIELDS = ['role', 'default_split_pct', 'no_brokerage_split', 'cap_amount', 'cap_anniversary', 'cap_confirmed_at', 'transaction_fee']
 
 // Money/permission columns the `agents_guard_privileged` trigger freezes for an
 // untrusted caller. If one of these comes back from the write different to what
 // we asked for, the write did NOT take effect and we must say so — see
 // verifyPrivilegedWrite below.
-const PROFILE_VERIFY_FIELDS = ['is_admin', 'default_split_pct', 'no_brokerage_split', 'cap_amount', 'cap_anniversary']
+const PROFILE_VERIFY_FIELDS = ['is_admin', 'default_split_pct', 'no_brokerage_split', 'cap_amount', 'cap_anniversary', 'cap_confirmed_at', 'transaction_fee']
 
 // Numeric coercion that keeps null meaningful: '' / null / undefined clear the
 // column, anything non-numeric is an error rather than a silent 0.
@@ -376,6 +376,20 @@ export function sanitizeProfilePayload(fields, { isAdmin, canSetOfficeAdmin = fa
     payload.cap_amount = r.value
   }
   if ('cap_anniversary' in payload && !payload.cap_anniversary) payload.cap_anniversary = null
+  // The agent's per-deal fee from their contract (migration 0061); blank = the
+  // office standard.
+  if ('transaction_fee' in payload) {
+    const r = coerceNumeric(payload.transaction_fee, 'Transaction fee', { min: 0 })
+    if (r.error) return { error: r.error }
+    payload.transaction_fee = r.value
+  }
+  // The day the office confirmed the cap (migration 0061). Blank clears it —
+  // that is how an admin undoes a confirmation made in error.
+  if ('cap_confirmed_at' in payload) {
+    const v = String(payload.cap_confirmed_at || '').trim()
+    if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) return { error: 'Cap confirmation date must be a date (YYYY-MM-DD).' }
+    payload.cap_confirmed_at = v || null
+  }
   if ('no_brokerage_split' in payload) payload.no_brokerage_split = !!payload.no_brokerage_split
   if ('is_admin' in payload) payload.is_admin = !!payload.is_admin
   if ('stage_labels' in payload) payload.stage_labels = normalizeStageLabels(payload.stage_labels)
@@ -394,6 +408,9 @@ export function profileDbError(error) {
     msg.match(/column "?([a-z_]+)"? .*does not exist/i)?.[1]
   if (missing === 'stage_labels') {
     return 'Custom pipeline headers need migration 0027 — ask an admin to apply it in Supabase, then try again.'
+  }
+  if (missing === 'cap_confirmed_at' || missing === 'transaction_fee') {
+    return 'Caps and per-agent fees need migration 0061 — apply migrations/0061_agent_cap_and_fee.sql in Supabase, then try again.'
   }
   if (missing) {
     return `The database is missing the "${missing}" column. Ask an admin to apply the latest migration, then try again.`
@@ -522,9 +539,16 @@ async function handleMyEarnings(req, res) {
   try {
     // Resolve the agent for this auth user (with the cap-window fields the
     // earnings computation needs).
-    const { data: me } = await svc.from('agents')
-      .select('id, name, cap_amount, cap_anniversary, no_brokerage_split')
-      .eq('auth_id', user.id).maybeSingle()
+    // cap_confirmed_at and transaction_fee are migration 0061: asked for
+    // optimistically and dropped on a database without them, where no cap
+    // reads as confirmed and every agent pays the standard fee.
+    const AGENT_COLUMNS = 'id, name, default_split_pct, cap_amount, cap_anniversary, no_brokerage_split'
+    const withOptional = async (build) => {
+      const r = await build(`${AGENT_COLUMNS}, cap_confirmed_at, transaction_fee`)
+      if (r.error && (r.error.code === '42703' || /cap_confirmed_at|transaction_fee/.test(r.error.message || ''))) return build(AGENT_COLUMNS)
+      return r
+    }
+    const { data: me } = await withOptional(cols => svc.from('agents').select(cols).eq('auth_id', user.id).maybeSingle())
     if (!me) return res.status(403).json({ error: 'No agent profile for this account' })
 
     // 3. Load context. Deals where the caller is owner, legacy co-agent, or a
@@ -548,7 +572,9 @@ async function handleMyEarnings(req, res) {
     const [{ data: deals }, { data: commissions }, { data: agents }] = await Promise.all([
       loadDeals(),
       svc.from('commissions').select('*'),
-      svc.from('agents').select('id, name, default_split_pct, no_brokerage_split'),
+      // Every agent's cap fields too: a co-agent's confirmed cap changes the
+      // split on a deal this agent shares with them.
+      withOptional(cols => svc.from('agents').select(cols)),
     ])
 
     const commByDeal = new Map((commissions || []).map(c => [c.deal_id, c]))
@@ -569,6 +595,9 @@ async function handleMyEarnings(req, res) {
         split_pct: slice.splitPct, gross: slice.gross,
         // [{ party: 'seller' | 'buyer' | 'unsplit', label, gross, take }]
         by_party: slice.byParty,
+        // Their share before the split, and why the split is what it is:
+        // 'split' | 'cap' (office-confirmed cap) | 'prepaid' | 'saved'.
+        allocation: slice.allocation, basis: slice.basis,
       })
       if (closed && new Date(closedAt) >= windowStart) {
         ytdTake += slice.take; ytdCapPaid += slice.cap; ytdFees += slice.fees; ytdDeals += 1
@@ -578,6 +607,10 @@ async function handleMyEarnings(req, res) {
     rows.sort((a, b) => new Date(b.closed_at || '2999') - new Date(a.closed_at || '2999'))
 
     const capAmount = me.cap_amount != null ? Number(me.cap_amount) : null
+    // Where they stand right now — the same answer the office sees in Agents &
+    // Caps. Only a cap the office has CONFIRMED pays 100%; reaching it shows as
+    // "awaiting confirmation" until then.
+    const standing = capStatusFor(me, { deals: deals || [], commissionsByDeal: commByDeal, agents: agents || [] })
     return res.status(200).json({
       agent_id: me.id,
       cap: {
@@ -587,7 +620,13 @@ async function handleMyEarnings(req, res) {
         prepaid: !!me.no_brokerage_split,
         ytd_cap_paid: Math.round(ytdCapPaid * 100) / 100,
         ytd_fees: Math.round(ytdFees * 100) / 100,
-        capped: !!me.no_brokerage_split || (capAmount != null && ytdCapPaid >= capAmount),
+        capped: !!me.no_brokerage_split || standing.confirmed,
+        confirmed: standing.confirmed,
+        confirmed_at: standing.confirmedAt,
+        confirmed_until: standing.until ? standing.until.toISOString().slice(0, 10) : null,
+        reached: standing.reached,
+        awaiting_confirmation: standing.awaiting,
+        split_pct: me.no_brokerage_split ? 100 : (me.default_split_pct ?? null),
       },
       ytd: { take: Math.round(ytdTake * 100) / 100, deals: ytdDeals, by_party: ytdByParty },
       deals: rows,

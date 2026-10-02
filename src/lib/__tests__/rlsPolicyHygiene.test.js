@@ -84,7 +84,7 @@ describe('RLS policy hygiene (migration 0027)', () => {
     const select = view[1]
     // Comp-plan and identity columns must never reach an anonymous caller.
     for (const forbidden of [
-      'cap_amount', 'cap_anniversary', 'default_split_pct', 'no_brokerage_split',
+      'cap_amount', 'cap_anniversary', 'cap_confirmed_at', 'default_split_pct', 'no_brokerage_split',
       'is_admin', 'auth_id', 'twilio_sid', 'twilio_number', 'nav_hidden',
     ]) {
       expect(select, `agents_public must not expose ${forbidden}`)

@@ -89,17 +89,18 @@ describe('breakdownForDeal / agentSliceForDeal — a co-listed deal pays both ag
   it('splits the net evenly and applies each agent’s own split', () => {
     const r = breakdownForDeal(coListed, null, AGENTS)
     expect(r.gross_total).toBe(15_000)              // 3% of 500k
-    // 7,500 each; Daniel keeps 70%, Sam keeps 60%. No transaction fee on an
-    // unsaved row (the $100 default only applies once the editor saves).
-    expect(r.participants.map(p => p.agent_take)).toEqual([5_250, 4_500])
-    expect(r.agent_total).toBeCloseTo(9_750, 2)
-    expect(r.house_total).toBeCloseTo(5_250, 2)
+    // 7,500 each; Daniel keeps 70%, Sam keeps 60%. An unsaved row carries the
+    // standard $100 transaction fee — what the editor would save — split $50
+    // each, so the take-home an agent sees is the one they'll actually get.
+    expect(r.participants.map(p => p.agent_take)).toEqual([5_200, 4_450])
+    expect(r.agent_total).toBeCloseTo(9_650, 2)
+    expect(r.house_total).toBeCloseTo(5_350, 2)
   })
 
   it('the co-agent now has a slice of the deal instead of nothing', () => {
     const sam = agentSliceForDeal(coListed, null, AGENTS, 'a-sam')
     expect(sam.onDeal).toBe(true)
-    expect(sam.take).toBeCloseTo(4_500, 2)
+    expect(sam.take).toBeCloseTo(4_450, 2)
     expect(sam.cap).toBeCloseTo(3_000, 2)           // brokerage split counts toward cap
   })
 
@@ -107,10 +108,10 @@ describe('breakdownForDeal / agentSliceForDeal — a co-listed deal pays both ag
     expect(agentSliceForDeal(coListed, null, AGENTS, 'a-capd').onDeal).toBe(false)
   })
 
-  it('a solo deal pays the primary exactly as before', () => {
+  it('a solo deal pays the primary their split, less the transaction fee', () => {
     const solo = deal({ commission_type: 'percent', commission_pct: 3 })
     const r = breakdownForDeal(solo, null, AGENTS)
-    expect(r.agent_total).toBeCloseTo(10_500, 2)    // 70% of 15,000
-    expect(agentSliceForDeal(solo, null, AGENTS, 'a-dan').take).toBeCloseTo(10_500, 2)
+    expect(r.agent_total).toBeCloseTo(10_400, 2)    // 70% of 15,000 − $100 fee
+    expect(agentSliceForDeal(solo, null, AGENTS, 'a-dan').take).toBeCloseTo(10_400, 2)
   })
 })

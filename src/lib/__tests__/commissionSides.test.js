@@ -66,11 +66,11 @@ describe('breakdown by side', () => {
     expect(r.gross_total).toBe(40_000)
     const [seller, buyer] = r.parties
     expect([seller.party, seller.gross, buyer.party, buyer.gross]).toEqual(['seller', 30_000, 'buyer', 10_000])
-    // Legacy default: the primary keeps 70% of the net, less nothing (no fee on a legacy row).
+    // Ann keeps her 70% less the $100 fee — $27,900 — split 3:1 by side.
     expect(seller.agent_take + buyer.agent_take).toBeCloseTo(r.agent_total, 2)
     expect(seller.house + buyer.house).toBeCloseTo(r.house_total, 2)
-    expect(seller.agent_take).toBeCloseTo(21_000, 2)
-    expect(buyer.agent_take).toBeCloseTo(7_000, 2)
+    expect(seller.agent_take).toBeCloseTo(20_925, 2)
+    expect(buyer.agent_take).toBeCloseTo(6_975, 2)
   })
 
   it('places a one-sided deal entirely on its side', () => {
