@@ -15,7 +15,7 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { describeDealCommission } from '../lib/commission.js'
+import { describeDealCommission, dealRepresents, totalEntryForSides, PARTY_LABELS } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, dealCoAgentIds, propertyCoAgentIds, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import {
   propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty,
@@ -6010,73 +6010,110 @@ export async function reloadDealContacts(setDb, dealId) {
 // share) is back-office data in the admin-only `commissions` table and never
 // appears here — this field is its input. `src/lib/commission.js` documents the
 // precedence: an admin's explicit entry wins, then this, then the legacy scalar.
-function CommissionFields({ form, set }) {
-  const type    = form.commission_type === 'flat' ? 'flat' : 'percent'
-  const value   = Number(form.value) || 0
-  const preview = describeDealCommission({ ...form, commission_type: type })
+// One commission entry — percentage or flat fee — with its live dollar figure.
+// The deal's single entry and each side of a both-sides deal are the same control.
+function CommissionEntry({ title, type, pct, flat, dealValue, onChange }) {
+  const preview = describeDealCommission({ value: dealValue, commission_type: type, commission_pct: pct, commission_flat: flat })
+  const gross = preview?.gross || 0
+  return (
+    <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:10 }}>
+      {title && <div style={{ fontSize:12, fontWeight:700, color:'var(--gw-ink)', marginBottom:8 }}>{title}</div>}
+      <div style={{ display:'flex', gap:0, border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden', marginBottom:10 }}>
+        {[['percent','Percentage'],['flat','Flat Fee']].map(([key, label]) => (
+          <button key={key} type="button" onClick={() => onChange({ type: key })}
+            style={{ flex:1, padding:'7px 0', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, transition:'all 150ms',
+              background: type === key ? 'var(--gw-slate)' : '#fff',
+              color:      type === key ? '#fff'            : 'var(--gw-mist)' }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {type === 'percent' ? (
+        <input className="form-control" type="number" min="0" max="100" step="0.05" aria-label={`${title || 'Commission'} rate (%)`}
+          value={pct ?? ''} onChange={e => onChange({ pct: e.target.value })} placeholder="Rate (%) — e.g. 3" />
+      ) : (
+        <input className="form-control" type="number" min="0" step="100" aria-label={`${title || 'Commission'} flat fee ($)`}
+          value={flat ?? ''} onChange={e => onChange({ flat: e.target.value })} placeholder="Flat fee ($) — e.g. 12500" />
+      )}
+      <div style={{ fontSize:11.5, color:'var(--gw-mist)', marginTop:6 }}>
+        {!preview
+          ? <>Enter {type === 'flat' ? 'a flat fee' : 'a rate'} to see the dollar amount.</>
+          : gross <= 0
+            ? <>{preview.pct}% — add a Sale / Deal Value above to see the dollar amount.</>
+            : <><strong style={{ color:'var(--gw-ink)' }}>{formatCurrency(gross)}</strong>
+                {type === 'flat'
+                  ? (Number(dealValue) > 0 ? <> · {(gross / Number(dealValue) * 100).toFixed(2)}% of {formatCurrency(dealValue)}</> : <> · flat fee</>)
+                  : <> · {preview.pct}% of {formatCurrency(dealValue)}</>}</>}
+      </div>
+    </div>
+  )
+}
+
+// The deal's commission, by side. A deal representing ONE side has one entry,
+// labeled with the side it comes from. A deal representing BOTH asks for each
+// side separately (comp_data.commission_sides) and writes their total back to
+// commission_type / commission_pct / commission_flat, so anything that reads
+// only the total — agreement fields, older reports — still gets the real number.
+export function CommissionFields({ form, set, apply }) {
+  const value = Number(form.value) || 0
+  const represents = dealRepresents(form)
+
+  if (represents !== 'both') {
+    const type = form.commission_type === 'flat' ? 'flat' : 'percent'
+    return (
+      <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
+        <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:12 }}>
+          Commission — {PARTY_LABELS[represents]}
+        </div>
+        <CommissionEntry
+          type={type} pct={form.commission_pct} flat={form.commission_flat} dealValue={value}
+          onChange={(patch) => {
+            if (patch.type) set('commission_type', patch.type)
+            if ('pct' in patch) set('commission_pct', patch.pct)
+            if ('flat' in patch) set('commission_flat', patch.flat)
+          }}
+        />
+        <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
+          The total commission on your {represents} side — the back office splits it from here.
+        </div>
+      </div>
+    )
+  }
+
+  const stored = form.comp_data?.commission_sides || {}
+  const sideOf = (party) => ({ type: 'percent', pct: '', flat: '', ...(stored[party] || {}) })
+  const setSide = (party, patch) => {
+    const next = { ...stored, [party]: { ...sideOf(party), ...patch } }
+    apply({ comp_data: { commission_sides: next }, ...totalEntryForSides(next, value) })
+  }
+  const summary = describeDealCommission({ ...form, comp_data: { ...(form.comp_data || {}), commission_sides: stored } })
+  const split = summary?.sides?.length && summary.sides[0].party !== 'unsplit'
+  const legacyTotal = !split && summary && summary.gross > 0 ? summary : null
 
   return (
     <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>
-      <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:12 }}>Commission</div>
-
-      {/* Percentage / Flat fee — same toggle pattern as Property Category */}
-      <div className="form-group">
-        <label className="form-label">How is it charged?</label>
-        <div style={{ display:'flex', gap:0, border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden' }}>
-          {[['percent','Percentage'],['flat','Flat Fee']].map(([key, label]) => (
-            <button key={key} type="button" onClick={() => set('commission_type', key)}
-              style={{ flex:1, padding:'7px 0', border:'none', cursor:'pointer', fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, transition:'all 150ms',
-                background: type === key ? 'var(--gw-slate)' : '#fff',
-                color:      type === key ? '#fff'            : 'var(--gw-mist)' }}>
-              {label}
-            </button>
-          ))}
-        </div>
+      <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.08em', color:'var(--gw-mist)', marginBottom:6 }}>Commission — both sides</div>
+      <div style={{ fontSize:12, color:'var(--gw-mist)', marginBottom:12, lineHeight:1.5 }}>
+        You represent the buyer and the seller, so enter each side&rsquo;s commission — every total in the CRM shows how much came from each.
       </div>
-
-      {type === 'percent' ? (
-        <div className="form-group">
-          <label className="form-label">Commission Rate (%)</label>
-          <input className="form-control" type="number" min="0" max="100" step="0.05"
-            value={form.commission_pct ?? ''} onChange={e=>set('commission_pct', e.target.value)} placeholder="e.g. 3" />
-        </div>
-      ) : (
-        <div className="form-group">
-          <label className="form-label">Flat Fee ($)</label>
-          <input className="form-control" type="number" min="0" step="100"
-            value={form.commission_flat ?? ''} onChange={e=>set('commission_flat', e.target.value)} placeholder="e.g. 12500" />
+      {legacyTotal && (
+        <div style={{ background:'var(--gw-amber-light)', border:'1px solid var(--gw-amber)', borderRadius:'var(--radius)', padding:'8px 10px', fontSize:12, marginBottom:10, lineHeight:1.5 }}>
+          Entered as one total so far ({formatCurrency(legacyTotal.gross)}). Fill in each side below to split it.
         </div>
       )}
-
-      {/* Live gross — the agent never has to do the math in their head. */}
-      <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12 }}>
-        {!preview ? (
-          <span style={{ color:'var(--gw-mist)' }}>
-            Enter {type === 'flat' ? 'a flat fee' : 'a rate'} to see the gross commission on this deal.
-          </span>
-        ) : preview.gross <= 0 ? (
-          <span style={{ color:'var(--gw-mist)' }}>
-            {preview.pct}% — add a Sale / Deal Value above to see the dollar amount.
-          </span>
-        ) : (
-          <>
-            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline' }}>
-              <span style={{ color:'var(--gw-mist)' }}>Gross commission</span>
-              <strong style={{ fontSize:14 }}>{formatCurrency(preview.gross)}</strong>
-            </div>
-            <div style={{ color:'var(--gw-mist)', marginTop:4, fontSize:11 }}>
-              {type === 'flat'
-                ? (value > 0
-                    ? <>Flat fee — {(preview.gross / value * 100).toFixed(2)}% of {formatCurrency(value)}.</>
-                    : <>Flat fee, independent of the deal value.</>)
-                : <>{preview.pct}% of {formatCurrency(value)}.</>}
-            </div>
-          </>
-        )}
-      </div>
-      <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
-        This is the total commission charged on the deal — the back office splits it from here.
-      </div>
+      {['seller', 'buyer'].map(party => {
+        const e = sideOf(party)
+        return (
+          <CommissionEntry key={party} title={PARTY_LABELS[party]} type={e.type === 'flat' ? 'flat' : 'percent'}
+            pct={e.pct} flat={e.flat} dealValue={value} onChange={(patch) => setSide(party, patch)} />
+        )
+      })}
+      {split && (
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12 }}>
+          <span style={{ color:'var(--gw-mist)' }}>Total commission</span>
+          <strong style={{ fontSize:14 }}>{formatCurrency(summary.gross)}</strong>
+        </div>
+      )}
     </div>
   )
 }
@@ -6737,7 +6774,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
             </div>
 
             {/* ── Commission ────────────────────────────────────── */}
-            <CommissionFields form={form} set={set} />
+            <CommissionFields form={form} set={set} apply={applyTrackChange} />
 
             {/* ── Comp Data ─────────────────────────────────────── */}
             <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>

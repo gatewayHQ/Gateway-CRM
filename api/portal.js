@@ -304,7 +304,7 @@ async function handlePortalSignLink(req, res) {
 //             deals: [{deal_id, title, stage, value, closed_at, take, cap,
 //                      fees, split_pct, gross, closed}] }
 // ─────────────────────────────────────────────────────────────────────────────
-import { agentSliceForDeal, capWindowStart } from '../src/lib/commission.js'
+import { agentSliceForDeal, capWindowStart, addByParty } from '../src/lib/commission.js'
 import { normalizeStageLabels } from '../src/lib/stageLabels.js'
 import { canHoldOfficeAdmin } from '../src/lib/officeAdmins.js'
 import { streetLine, readPropertiesWithUnit } from '../src/lib/address.js'
@@ -530,10 +530,23 @@ async function handleMyEarnings(req, res) {
     // 3. Load context. Deals where the caller is owner, legacy co-agent, or a
     //    commission participant — everything else is filtered out below anyway.
     const dealFilter = req.query?.deal_id ? { col: 'id', val: req.query.deal_id } : null
-    let dealQuery = svc.from('deals').select('id, title, stage, value, probability, agent_id, co_agent_ids, expected_close_date, updated_at, created_at, comp_data')
-    if (dealFilter) dealQuery = dealQuery.eq(dealFilter.col, dealFilter.val)
+    // The agent's own commission entry (commission_type/pct/flat, migration
+    // 0024) has to be read here too: without it the engine falls back to the
+    // default rate, and My Earnings disagreed with what the deal itself says.
+    // Asked for optimistically and dropped on a database without the columns.
+    const DEAL_COLUMNS = 'id, title, stage, value, probability, agent_id, co_agent_ids, expected_close_date, updated_at, created_at, comp_data'
+    const dealQuery = (columns) => {
+      const q = svc.from('deals').select(columns)
+      return dealFilter ? q.eq(dealFilter.col, dealFilter.val) : q
+    }
+    const loadDeals = async () => {
+      const withEntry = await dealQuery(`${DEAL_COLUMNS}, commission_type, commission_pct, commission_flat`)
+      if (!withEntry.error) return withEntry
+      if (withEntry.error.code === '42703' || /commission_(type|pct|flat)/.test(withEntry.error.message || '')) return dealQuery(DEAL_COLUMNS)
+      return withEntry
+    }
     const [{ data: deals }, { data: commissions }, { data: agents }] = await Promise.all([
-      dealQuery,
+      loadDeals(),
       svc.from('commissions').select('*'),
       svc.from('agents').select('id, name, default_split_pct, no_brokerage_split'),
     ])
@@ -543,6 +556,7 @@ async function handleMyEarnings(req, res) {
 
     const rows = []
     let ytdTake = 0, ytdCapPaid = 0, ytdFees = 0, ytdDeals = 0
+    let ytdByParty = {}   // the YTD take, seller side / buyer side
     for (const deal of deals || []) {
       const slice = agentSliceForDeal(deal, commByDeal.get(deal.id), agents || [], me.id)
       if (!slice.onDeal || (slice.take === 0 && slice.cap === 0 && slice.fees === 0 && deal.agent_id !== me.id)) continue
@@ -553,9 +567,12 @@ async function handleMyEarnings(req, res) {
         value: deal.value, closed, closed_at: closed ? closedAt : null,
         take: slice.take, cap: slice.cap, fees: slice.fees,
         split_pct: slice.splitPct, gross: slice.gross,
+        // [{ party: 'seller' | 'buyer' | 'unsplit', label, gross, take }]
+        by_party: slice.byParty,
       })
       if (closed && new Date(closedAt) >= windowStart) {
         ytdTake += slice.take; ytdCapPaid += slice.cap; ytdFees += slice.fees; ytdDeals += 1
+        ytdByParty = addByParty(ytdByParty, slice.byParty, 'take')
       }
     }
     rows.sort((a, b) => new Date(b.closed_at || '2999') - new Date(a.closed_at || '2999'))
@@ -572,7 +589,7 @@ async function handleMyEarnings(req, res) {
         ytd_fees: Math.round(ytdFees * 100) / 100,
         capped: !!me.no_brokerage_split || (capAmount != null && ytdCapPaid >= capAmount),
       },
-      ytd: { take: Math.round(ytdTake * 100) / 100, deals: ytdDeals },
+      ytd: { take: Math.round(ytdTake * 100) / 100, deals: ytdDeals, by_party: ytdByParty },
       deals: rows,
     })
   } catch (e) {

@@ -6,9 +6,11 @@ import { fetchVisibleDeals, fetchVisibleCommissions } from '../lib/services/deal
 import MyEarnings from './MyEarnings.jsx'
 import { BrokerageReport, CapsEditor } from './BackOffice.jsx'
 import {
-  computeCommission, normalizeCommission, breakdownForDeal,
-  makeSide, makeParticipant, describeDealCommission, DEFAULTS,
+  computeCommission, normalizeCommission, breakdownForDeal, agentSliceForDeal,
+  makeSide, makeParticipant, describeDealCommission, partyForSide, addByParty, partyAmounts,
+  PARTY_LABELS, DEFAULTS,
 } from '../lib/commission.js'
+import SideSplit from '../components/SideSplit.jsx'
 
 const D_GROSS = DEFAULTS.GROSS_PCT
 const D_BROKER = 30.0
@@ -58,11 +60,16 @@ function CapCelebration({ agentName, onClose }) {
 // complex one (both sides represented, a referral on only one side, multiple
 // agents each with their own brokerage arrangement) from the same form. The
 // agent never has to do mental math — the live breakdown shows every dollar.
+// The editor names a side by where its money comes from.
+const sideTitle = (key) => (key === 'listing' ? 'Seller side (listing)' : key === 'buyer' ? 'Buyer side' : 'Sale')
+
 function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave }) {
   // Seed the form from the stored row (legacy or structured), normalized.
   const buildInitial = () => {
     const norm = normalizeCommission(commission, { deal, agents })
-    const twoSided = norm.sides.length > 1
+    // Two sides, or one side already placed as listing/buyer (a both-sides
+    // deal with only one side entered so far) — either way, label the sides.
+    const twoSided = norm.sides.length > 1 || norm.sides.some(s => s.key !== 'sale')
     return {
       sides: norm.sides.map(s => ({ ...s })),
       // Per-side pricing mode. Not persisted — it's derived from which field the
@@ -101,9 +108,11 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
   ))
 
   // Live breakdown straight from the engine — identical math to the reports.
+  // Each side carries the party its money comes from, so the live breakdown
+  // splits by seller and buyer exactly as the reports will.
   const result = computeCommission({
     sale_price: sp,
-    sides: effectiveSides,
+    sides: effectiveSides.map(s => ({ ...s, party: partyForSide(s.key, deal) })),
     participants: form.participants,
     transaction_fee: form.transaction_fee,
   })
@@ -228,6 +237,9 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
                 {agentEntry.type === 'flat' ? `${formatMoney(agentEntry.flat)} flat` : `${agentEntry.pct}%`}
               </strong>
               {agentEntry.gross > 0 && <> → {formatMoney(agentEntry.gross)} gross</>}
+              {agentEntry.sides?.length > 0 && agentEntry.gross > 0 && (
+                <SideSplit parts={agentEntry.sides.map(x => ({ party: x.party, amount: x.gross }))} />
+              )}
             </div>
           )}
         </div>
@@ -247,7 +259,7 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
             const flat = form.sideModes?.[s.id] === 'flat'
             return (
               <div key={s.id} style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:8 }}>
-                {form.twoSided && <div style={{ fontSize:12, fontWeight:700, marginBottom:8 }}>{s.label}</div>}
+                {form.twoSided && <div style={{ fontSize:12, fontWeight:700, marginBottom:8 }}>{sideTitle(s.key)}</div>}
 
                 {/* Percentage of the sale price, or a flat fee for this side. */}
                 <div style={{ display:'flex', gap:0, border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', overflow:'hidden', marginBottom:10 }}>
@@ -368,6 +380,9 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
                   </span>
                   <span style={{ fontWeight:700, color:'var(--gw-green)' }}>{formatMoney(rp.agent_take || 0)}</span>
                 </div>
+                {result.parties.length > 1 && (
+                  <SideSplit align="right" parts={result.parties.map(pt => ({ party: pt.party, amount: rp.by_party?.[pt.party] || 0 }))} />
+                )}
               </div>
             )
           })}
@@ -384,15 +399,20 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
             {[
               { label:'Sale Price', val: sp, color:'var(--gw-ink)' },
               ...result.sides.flatMap(s => [
-                { label:`${form.twoSided ? s.label + ' — ' : ''}Gross (${Number(s.flat || 0) > 0 ? 'flat fee' : `${s.rate_pct}%`})`, val: s.gross, color:'var(--gw-ink)' },
+                { label:`${PARTY_LABELS[s.party] || 'Sale'} — gross (${Number(s.flat || 0) > 0 ? 'flat fee' : `${s.rate_pct}%`})`, val: s.gross, color:'var(--gw-ink)' },
                 s.referral > 0 && { label:`  Referral (${s.referral_pct}%)`, val:-s.referral, color:'var(--gw-red)' },
               ]),
               { label:'Net to Split', val: result.net_total, color:'var(--gw-ink)', rule:true },
-              ...result.participants.map(p => ({
-                label:`${p.name || 'Agent'}${p.no_split ? ' (100%)' : ` (${p.split_pct}%)`}`,
-                val: p.agent_take, color:'var(--gw-green)',
-              })),
+              ...result.participants.flatMap(p => [
+                { label:`${p.name || 'Agent'}${p.no_split ? ' (100%)' : ` (${p.split_pct}%)`}`, val: p.agent_take, color:'var(--gw-green)' },
+                ...(result.parties.length > 1
+                  ? result.parties.map(pt => ({ label:`  from ${PARTY_LABELS[pt.party].toLowerCase()}`, val: p.by_party?.[pt.party] || 0, color:'var(--gw-mist)' }))
+                  : []),
+              ]),
               { label:'Brokerage / House', val: result.house_total, color:'var(--gw-azure)', bold:true },
+              ...(result.parties.length > 1
+                ? result.parties.map(pt => ({ label:`  from ${PARTY_LABELS[pt.party].toLowerCase()}`, val: pt.house, color:'var(--gw-mist)' }))
+                : []),
               result.transaction_fee_total > 0 && { label:'  incl. transaction fee', val: result.transaction_fee_total, color:'var(--gw-mist)' },
             ].filter(Boolean).map((row, i) => (
               <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'3px 0', borderTop: row.bold || row.rule ? '1px solid var(--gw-border)' : 'none', marginTop: row.bold||row.rule ? 6 : 0, paddingTop: row.bold||row.rule ? 8 : 3, fontWeight: row.bold ? 700 : 400 }}>
@@ -782,24 +802,12 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
     }
   }
 
-  // One agent's slice of a deal (their take + the house fees they generated),
-  // summing every participant row that belongs to them. Used for per-agent
-  // rollups and the cap tracker so co-agents are attributed correctly.
+  // One agent's slice of a deal — the shared engine function My Earnings and
+  // the Brokerage Report use, so the three can never disagree. `agent` is its
+  // take, under the name this page's rollups already read.
   const agentSlice = (deal, agentId) => {
-    const r = breakdownForDeal(deal, getComm(deal.id), agents)
-    const mine = r.participants.filter(p => p.agent_id === agentId)
-    if (mine.length) {
-      return {
-        agent: mine.reduce((s,p)=>s+p.agent_take,0),
-        house: mine.reduce((s,p)=>s+p.house_from,0),
-        // Cap counts the brokerage SPLIT only — the flat transaction fee is on top.
-        cap:   mine.reduce((s,p)=>s+(p.house_split||0),0),
-      }
-    }
-    // No structured participant matched — fall back to deal.agent_id ownership.
-    return deal.agent_id === agentId
-      ? { agent: r.agent_total, house: r.house_total, cap: r.house_split_total }
-      : { agent: 0, house: 0, cap: 0 }
+    const slice = agentSliceForDeal(deal, getComm(deal.id), agents, agentId)
+    return { ...slice, agent: slice.take }
   }
 
   // Scoped exactly like the initial App.jsx load — a non-admin's refresh must
@@ -821,10 +829,19 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
   const closedComm  = closedDeals.filter(d => d.prop_category === 'commercial')
 
   // Brokerage total (all closed deals)
+  // Every total carries its seller/buyer split alongside it: gross, agent
+  // earnings and the house's share, each summed by side.
+  const addDealParties = (acc, parties) => {
+    acc.grossBy  = addByParty(acc.grossBy,  parties, 'gross')
+    acc.agentBy  = addByParty(acc.agentBy,  parties, 'agent_take')
+    acc.brokerBy = addByParty(acc.brokerBy, parties, 'house')
+  }
   const brokerageTotals = closedDeals.reduce((acc, d) => {
-    const { gross, brokerAmt, agentAmt } = calc(d)
-    acc.gross += gross; acc.broker += brokerAmt; acc.agent += agentAmt; return acc
-  }, { gross:0, broker:0, agent:0 })
+    const { gross, brokerAmt, agentAmt, parties } = calc(d)
+    acc.gross += gross; acc.broker += brokerAmt; acc.agent += agentAmt
+    addDealParties(acc, parties)
+    return acc
+  }, { gross:0, broker:0, agent:0, grossBy:{}, agentBy:{}, brokerBy:{} })
 
   // Per-agent breakdown (closed deals only) — attributes each participant's take
   // to their agent, so a co-agent on someone else's deal still gets credited.
@@ -835,8 +852,10 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
     })
     const totals = aDeals.reduce((acc, d) => {
       const slice = agentSlice(d, a.id)
-      acc.agent += slice.agent; acc.broker += slice.house; acc.deals++; return acc
-    }, { agent:0, broker:0, gross:0, deals:0 })
+      acc.agent += slice.agent; acc.broker += slice.house; acc.deals++
+      acc.agentBy = addByParty(acc.agentBy, slice.byParty, 'take')
+      return acc
+    }, { agent:0, broker:0, gross:0, deals:0, agentBy:{} })
     return { ...a, ...totals }
   }).filter(a => a.deals > 0).sort((a,b) => b.agent - a.agent)
 
@@ -886,9 +905,11 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
   if (filterCategory === 'commercial')  filtered = filtered.filter(d => d.prop_category === 'commercial')
 
   const totals = filtered.reduce((acc, d) => {
-    const { sp, gross, agentAmt, brokerAmt } = calc(d)
-    acc.sp += sp; acc.gross += gross; acc.agent += agentAmt; acc.broker += brokerAmt; return acc
-  }, { sp:0, gross:0, agent:0, broker:0 })
+    const { sp, gross, agentAmt, brokerAmt, parties } = calc(d)
+    acc.sp += sp; acc.gross += gross; acc.agent += agentAmt; acc.broker += brokerAmt
+    addDealParties(acc, parties)
+    return acc
+  }, { sp:0, gross:0, agent:0, broker:0, grossBy:{}, agentBy:{}, brokerBy:{} })
 
   if (!hasTable) return (
     <div className="page-content">
@@ -940,14 +961,17 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
         <div className="stat-card">
           <div className="stat-card__value">{formatMoney(brokerageTotals.gross)}</div>
           <div className="stat-card__label">Total Gross Comm</div>
+          <SideSplit parts={partyAmounts(brokerageTotals.grossBy)} />
         </div>
         <div className="stat-card" style={{ borderLeft:'3px solid var(--gw-green)' }}>
           <div className="stat-card__value" style={{ color:'var(--gw-green)' }}>{formatMoney(brokerageTotals.agent)}</div>
           <div className="stat-card__label">Total Agent Earnings</div>
+          <SideSplit parts={partyAmounts(brokerageTotals.agentBy)} />
         </div>
         <div className="stat-card" style={{ borderLeft:'3px solid var(--gw-azure)' }}>
           <div className="stat-card__value" style={{ color:'var(--gw-azure)' }}>{formatMoney(brokerageTotals.broker)}</div>
           <div className="stat-card__label">Brokerage / House</div>
+          <SideSplit parts={partyAmounts(brokerageTotals.brokerBy)} />
         </div>
       </div>
 
@@ -1042,6 +1066,7 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
               </div>
               <div style={{ textAlign:'right' }}>
                 <div style={{ fontWeight:700, color:'var(--gw-green)', fontSize:13 }}>{formatMoney(a.agent)}</div>
+                <SideSplit align="right" parts={partyAmounts(a.agentBy)} />
                 <div style={{ fontSize:11, color:'var(--gw-mist)' }}>House: {formatMoney(a.broker)}</div>
               </div>
               <div style={{ width:80 }}>
@@ -1102,7 +1127,8 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
               </thead>
               <tbody>
                 {filtered.map(deal => {
-                  const { gross_pct, agent_pct, sp, gross, agentAmt, brokerAmt } = calc(deal)
+                  const { gross_pct, agent_pct, sp, gross, agentAmt, brokerAmt, parties } = calc(deal)
+                  const split = parties.length > 1
                   const agent   = agents.find(a => a.id === deal.agent_id)
                   const contact = contacts.find(c => c.id === deal.contact_id)
                   const isCustom = !!getComm(deal.id)
@@ -1126,10 +1152,19 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
                       <td><Badge variant={deal.stage==='under-contract'?'active':deal.stage}>{deal.stage.replace('-',' ')}</Badge></td>
                       <td style={{ textAlign:'right', fontWeight:600 }}>{sp>0?formatCurrency(sp):'—'}</td>
                       <td style={{ textAlign:'right', color:'var(--gw-mist)', fontSize:12 }}>{gross_pct}%</td>
-                      <td style={{ textAlign:'right' }}>{sp>0?formatMoney(gross):'—'}</td>
+                      <td style={{ textAlign:'right' }}>
+                        {sp>0?formatMoney(gross):'—'}
+                        {sp>0 && <SideSplit align="right" parts={parties.map(p => ({ party: p.party, amount: p.gross }))} />}
+                      </td>
                       <td style={{ textAlign:'right', color:'var(--gw-mist)', fontSize:12 }}>{agent_pct}%</td>
-                      <td style={{ textAlign:'right', fontWeight:600, color:'var(--gw-green)' }}>{sp>0?formatMoney(agentAmt):'—'}</td>
-                      <td style={{ textAlign:'right', color:'var(--gw-azure)' }}>{sp>0?formatMoney(brokerAmt):'—'}</td>
+                      <td style={{ textAlign:'right', fontWeight:600, color:'var(--gw-green)' }}>
+                        {sp>0?formatMoney(agentAmt):'—'}
+                        {sp>0 && split && <SideSplit align="right" parts={parties.map(p => ({ party: p.party, amount: p.agent_take }))} />}
+                      </td>
+                      <td style={{ textAlign:'right', color:'var(--gw-azure)' }}>
+                        {sp>0?formatMoney(brokerAmt):'—'}
+                        {sp>0 && split && <SideSplit align="right" parts={parties.map(p => ({ party: p.party, amount: p.house }))} />}
+                      </td>
                       <td>
                         <button className="btn btn--ghost btn--icon btn--sm" onClick={()=>{setSelectedDeal(deal);setDrawer(true)}} title="Edit splits">
                           <Icon name="edit" size={13} />
@@ -1144,10 +1179,10 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
                   <td colSpan={4} style={{ padding:'10px 12px', fontSize:12, fontWeight:700, color:'var(--gw-mist)' }}>TOTALS — {filtered.length} deals</td>
                   <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700 }}>{formatCurrency(totals.sp)}</td>
                   <td></td>
-                  <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700 }}>{formatMoney(totals.gross)}</td>
+                  <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700 }}>{formatMoney(totals.gross)}<SideSplit align="right" parts={partyAmounts(totals.grossBy)} /></td>
                   <td></td>
-                  <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700, color:'var(--gw-green)' }}>{formatMoney(totals.agent)}</td>
-                  <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700, color:'var(--gw-azure)' }}>{formatMoney(totals.broker)}</td>
+                  <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700, color:'var(--gw-green)' }}>{formatMoney(totals.agent)}<SideSplit align="right" parts={partyAmounts(totals.agentBy)} /></td>
+                  <td style={{ textAlign:'right', padding:'10px 12px', fontWeight:700, color:'var(--gw-azure)' }}>{formatMoney(totals.broker)}<SideSplit align="right" parts={partyAmounts(totals.brokerBy)} /></td>
                   <td></td>
                 </tr>
               </tfoot>

@@ -3,11 +3,17 @@ import { supabase } from '../lib/supabase.js'
 import { Icon } from './UI.jsx'
 
 // ── Getting started ──────────────────────────────────────────────────────────
-// The first thing a new agent sees on the dashboard: the five steps from an
-// empty CRM to a first signed document, each one a button that opens the right
-// screen. Progress is read from data the app already has, never ticked by hand,
-// so the card can't claim a step the agent hasn't actually done. It hides itself
-// once everything is done, and an agent who doesn't need it can hide it sooner.
+// The first thing a NEW agent sees on the dashboard: the steps from an empty CRM
+// to a first deal, each one a button that opens the right screen. Progress is
+// read from data the app already has, never ticked by hand, so the card can't
+// claim a step the agent hasn't actually done.
+//
+// Only new agents see it. An agent with a deal of their own — open, closed or
+// lost — has been through this already, so the card never appears for them,
+// whatever else they haven't done; office admins never see it either. It also
+// leaves the moment a new agent starts their first deal, and can be hidden
+// sooner. Sending for signature isn't a step here: the deal's Signatures tab
+// walks them through that the first time they open it.
 
 const hiddenKey = (agentId) => `gw_getting_started_hidden_${agentId || 'default'}`
 
@@ -22,11 +28,16 @@ const writeHidden = (agentId) => {
 export const myDealsFor = (deals, agentId) => (deals || []).filter(d =>
   d.agent_id === agentId || (Array.isArray(d.co_agent_ids) && d.co_agent_ids.includes(agentId)))
 
+/** Whether this agent should see the card at all: new agents only. */
+export function isNewAgent({ agentId, isAdmin, deals = [] }) {
+  return Boolean(agentId) && !isAdmin && myDealsFor(deals, agentId).length === 0
+}
+
 /**
  * The steps, in order, each with whether it's done. Pure — the dashboard
  * passes in what it has loaded, and this decides nothing about rendering.
  */
-export function gettingStartedSteps({ agentId, contacts = [], properties = [], deals = [], outlookConnected, signatureSent }) {
+export function gettingStartedSteps({ agentId, contacts = [], properties = [], deals = [], outlookConnected }) {
   const myDeals = myDealsFor(deals, agentId)
   return [
     {
@@ -53,16 +64,9 @@ export function gettingStartedSteps({ agentId, contacts = [], properties = [], d
     {
       id: 'deal',
       title: 'Start a deal',
-      body: 'Link the contact and property. The checklist fills itself in.',
+      body: 'Link the contact and property. Its checklist and signature forms are ready on the deal.',
       cta: 'Start deal',
       done: myDeals.length > 0,
-    },
-    {
-      id: 'signature',
-      title: 'Send for signature',
-      body: 'On the deal: Signatures → Send from Template.',
-      cta: 'Open signatures',
-      done: Boolean(signatureSent),
     },
   ]
 }
@@ -88,6 +92,8 @@ function ProgressRing({ done, total }) {
 }
 
 
+const STEP_COUNT_WORDS = { 3: 'Three', 4: 'Four', 5: 'Five', 6: 'Six' }
+
 /** The card itself — layout only, so it can be rendered and checked on its own. */
 export function GettingStartedCard({ steps, currentId, doneCount, firstName, onRun, onHide }) {
   return (
@@ -99,7 +105,7 @@ export function GettingStartedCard({ steps, currentId, doneCount, firstName, onR
             {doneCount === 0 ? `Welcome aboard${firstName ? `, ${firstName}` : ''}` : 'Keep going — you’re on your way'}
           </h2>
           <p className="onboard__sub">
-            Five steps from an empty CRM to your first signed document. Each one opens the right screen.
+            {STEP_COUNT_WORDS[steps.length] || steps.length} steps from an empty CRM to your first deal. Each one opens the right screen.
           </p>
         </div>
         <ProgressRing done={doneCount} total={steps.length} />
@@ -139,53 +145,39 @@ export function GettingStartedCard({ steps, currentId, doneCount, firstName, onR
   )
 }
 
-export default function GettingStarted({ db, activeAgent, go, startNew }) {
+export default function GettingStarted({ db, activeAgent, isAdmin, go, startNew }) {
   const agentId = activeAgent?.id
+  const eligible = isNewAgent({ agentId, isAdmin, deals: db.deals })
   const [hidden, setHidden] = useState(() => readHidden(agentId))
   const [outlookConnected, setOutlookConnected] = useState(null)   // null = still checking
-  const [signatureSent, setSignatureSent] = useState(null)
-
-  const myDealIds = myDealsFor(db.deals, agentId).map(d => d.id)
-  const dealKey = myDealIds.join(',')
 
   useEffect(() => { setHidden(readHidden(agentId)) }, [agentId])
 
-  // The two steps the dashboard doesn't already have loaded. Both fail soft:
-  // an error reads as "not done yet", which only ever shows a step, never hides
-  // one the agent still needs.
+  // The one step the dashboard doesn't already have loaded. Fails soft: an
+  // error reads as "not done yet", which only ever shows a step, never hides one.
   useEffect(() => {
-    if (!agentId || hidden) return
+    if (!eligible || hidden) return
     let cancelled = false
     supabase.from('ms_graph_connection_status').select('status').maybeSingle()
       .then(({ data }) => { if (!cancelled) setOutlookConnected(data?.status === 'connected') })
       .catch(() => { if (!cancelled) setOutlookConnected(false) })
-    if (!myDealIds.length) { setSignatureSent(false) }
-    else {
-      supabase.from('boldsign_documents').select('id', { count: 'exact', head: true })
-        .in('deal_id', myDealIds).neq('status', 'draft')
-        .then(({ count }) => { if (!cancelled) setSignatureSent((count || 0) > 0) })
-        .catch(() => { if (!cancelled) setSignatureSent(false) })
-    }
     return () => { cancelled = true }
-  }, [agentId, hidden, dealKey])
+  }, [agentId, eligible, hidden])
 
-  if (!agentId || hidden || outlookConnected === null || signatureSent === null) return null
+  if (!eligible || hidden || outlookConnected === null) return null
 
   const steps = gettingStartedSteps({
-    agentId, contacts: db.contacts, properties: db.properties, deals: db.deals,
-    outlookConnected, signatureSent,
+    agentId, contacts: db.contacts, properties: db.properties, deals: db.deals, outlookConnected,
   })
   const doneCount = steps.filter(s => s.done).length
   if (doneCount === steps.length) return null
   const currentId = steps.find(s => !s.done)?.id
 
-  const firstDealId = myDealIds[0]
   const run = (id) => ({
-    outlook:   () => go('integrations'),
-    contact:   () => startNew('contact'),
-    property:  () => startNew('property'),
-    deal:      () => startNew('deal'),
-    signature: () => (firstDealId ? go(`deal/${firstDealId}/signatures`) : startNew('deal')),
+    outlook:  () => go('integrations'),
+    contact:  () => startNew('contact'),
+    property: () => startNew('property'),
+    deal:     () => startNew('deal'),
   }[id]())
 
   const hide = () => { writeHidden(agentId); setHidden(true) }

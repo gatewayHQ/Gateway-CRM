@@ -7,7 +7,7 @@ import { Icon, Badge, Avatar, Loading, pushToast } from '../components/UI.jsx'
 import SignatureQueue from '../components/SignatureQueue.jsx'
 import GettingStarted from '../components/GettingStarted.jsx'
 
-export default function Dashboard({ db, setDb, activeAgent, go, openCompose, startNew }) {
+export default function Dashboard({ db, setDb, activeAgent, isAdmin, go, openCompose, startNew }) {
   // Funnel headings follow the agent's own pipeline column names.
   const stageLabels = useStageLabels()
   const today = new Date().toDateString()
@@ -78,7 +78,7 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose, sta
         </div>
       </div>
 
-      <GettingStarted db={db} activeAgent={activeAgent} go={go} startNew={startNew} />
+      <GettingStarted db={db} activeAgent={activeAgent} isAdmin={isAdmin} go={go} startNew={startNew} />
 
       <div className="stats-grid">
         {[

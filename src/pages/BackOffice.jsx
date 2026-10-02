@@ -2,7 +2,8 @@ import React, { useState, useMemo } from 'react'
 import { saveAgentProfile } from '../lib/services/agentProfile.js'
 import { Icon, Avatar, Badge, pushToast } from '../components/UI.jsx'
 import { formatMoney, formatDate } from '../lib/helpers.js'
-import { agentSliceForDeal, capWindowStart } from '../lib/commission.js'
+import { agentSliceForDeal, capWindowStart, addByParty, partyAmounts } from '../lib/commission.js'
+import SideSplit from '../components/SideSplit.jsx'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Back Office (admin-only) — quarterly brokerage reporting and cap management.
@@ -48,6 +49,7 @@ export function BrokerageReport({ db }) {
     })
     const rows = agents.map(a => {
       let dealsCount = 0, volume = 0, gci = 0, take = 0, capPaid = 0, fees = 0
+      let gciBy = {}, takeBy = {}   // the same two figures, seller side / buyer side
       for (const d of closedInPeriod) {
         const slice = agentSliceForDeal(d, commByDeal.get(d.id), agents, a.id)
         if (!slice.onDeal) continue
@@ -57,6 +59,8 @@ export function BrokerageReport({ db }) {
         take += slice.take
         capPaid += slice.cap
         fees += slice.fees
+        gciBy  = addByParty(gciBy,  slice.byParty, 'gross')
+        takeBy = addByParty(takeBy, slice.byParty, 'take')
       }
       // Cap progress over the agent's CURRENT cap window (independent of the
       // selected report period — it answers "where do they stand right now?")
@@ -67,27 +71,29 @@ export function BrokerageReport({ db }) {
         if (new Date(d.updated_at || d.created_at) < winStart) continue
         capYearPaid += agentSliceForDeal(d, commByDeal.get(d.id), agents, a.id).cap
       }
-      return { agent: a, dealsCount, volume, gci, take, capPaid, fees, capYearPaid }
+      return { agent: a, dealsCount, volume, gci, take, capPaid, fees, capYearPaid, gciBy, takeBy }
     }).filter(r => r.dealsCount > 0 || r.agent.cap_amount != null || r.agent.no_brokerage_split)
       .sort((x, y) => y.take - x.take)
 
     const totals = rows.reduce((t, r) => ({
       dealsCount: t.dealsCount + r.dealsCount, volume: t.volume + r.volume,
       gci: t.gci + r.gci, take: t.take + r.take, capPaid: t.capPaid + r.capPaid, fees: t.fees + r.fees,
-    }), { dealsCount: 0, volume: 0, gci: 0, take: 0, capPaid: 0, fees: 0 })
+      takeBy: addByParty(t.takeBy, partyAmounts(r.takeBy), 'amount'),
+    }), { dealsCount: 0, volume: 0, gci: 0, take: 0, capPaid: 0, fees: 0, takeBy: {} })
     return { rows, totals }
   }, [deals, agents, commByDeal, period])
 
   const exportCSV = () => {
-    const head = ['Agent', 'Closed Deals', 'Volume', 'GCI', 'Agent Take', 'House Split (cap)', 'Transaction Fees', 'Cap Status']
+    const head = ['Agent', 'Closed Deals', 'Volume', 'GCI', 'Agent Take', 'Take — Seller Side', 'Take — Buyer Side', 'Take — Not Split', 'House Split (cap)', 'Transaction Fees', 'Cap Status']
+    const by = (m, k) => (m?.[k] || 0).toFixed(2)
     const lines = [head.join(',')]
     for (const r of report.rows) {
       const capStatus = r.agent.no_brokerage_split ? 'Pre-paid'
         : r.agent.cap_amount > 0 ? `${Math.round(r.capYearPaid)} / ${r.agent.cap_amount}` : 'No cap set'
-      lines.push([`"${r.agent.name}"`, r.dealsCount, r.volume, r.gci.toFixed(2), r.take.toFixed(2), r.capPaid.toFixed(2), r.fees.toFixed(2), `"${capStatus}"`].join(','))
+      lines.push([`"${r.agent.name}"`, r.dealsCount, r.volume, r.gci.toFixed(2), r.take.toFixed(2), by(r.takeBy, 'seller'), by(r.takeBy, 'buyer'), by(r.takeBy, 'unsplit'), r.capPaid.toFixed(2), r.fees.toFixed(2), `"${capStatus}"`].join(','))
     }
     const t = report.totals
-    lines.push(['"TOTAL"', t.dealsCount, t.volume, t.gci.toFixed(2), t.take.toFixed(2), t.capPaid.toFixed(2), t.fees.toFixed(2), ''].join(','))
+    lines.push(['"TOTAL"', t.dealsCount, t.volume, t.gci.toFixed(2), t.take.toFixed(2), by(t.takeBy, 'seller'), by(t.takeBy, 'buyer'), by(t.takeBy, 'unsplit'), t.capPaid.toFixed(2), t.fees.toFixed(2), ''].join(','))
     const blob = new Blob([lines.join('\n')], { type: 'text/csv' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
@@ -115,6 +121,7 @@ export function BrokerageReport({ db }) {
         <div className="stat-card" style={{ borderLeft: '3px solid var(--gw-green)' }}>
           <div className="stat-card__value" style={{ color: 'var(--gw-green)' }}>{fmt(report.totals.take)}</div>
           <div className="stat-card__label">Agent Earnings Paid</div>
+          <SideSplit parts={partyAmounts(report.totals.takeBy)} />
         </div>
       </div>
 
@@ -140,8 +147,8 @@ export function BrokerageReport({ db }) {
                   </td>
                   <td style={{ padding: '9px 12px' }}>{r.dealsCount}</td>
                   <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{fmt(r.volume)}</td>
-                  <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{fmt(r.gci)}</td>
-                  <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', fontWeight: 700, color: 'var(--gw-green)' }}>{fmt(r.take)}</td>
+                  <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{fmt(r.gci)}<SideSplit parts={partyAmounts(r.gciBy)} /></td>
+                  <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', fontWeight: 700, color: 'var(--gw-green)' }}>{fmt(r.take)}<SideSplit parts={partyAmounts(r.takeBy)} /></td>
                   <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{fmt(r.capPaid)}</td>
                   <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{fmt(r.fees)}</td>
                   <td style={{ padding: '9px 12px', minWidth: 180 }}>

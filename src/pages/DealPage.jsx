@@ -8,6 +8,7 @@ import { formatCurrency, formatDate, formatPhone } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage, isContractStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
+import SideSplit from '../components/SideSplit.jsx'
 import { agentIdsOnDeal } from '../lib/coAgents.js'
 import { dealSideBreakdown, representingFor } from '../lib/dealPeople.js'
 import { DealDrawer } from './Pipeline.jsx'
@@ -240,6 +241,9 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
     }
     return mySlice?.take || 0
   }, [breakdown, activeAgent, isAdmin, mySlice])
+  // The agent's take by side — from the server's slice, so a co-agent's split
+  // still never reaches this browser.
+  const myTakeParts = (mySlice?.by_party || []).map(p => ({ party: p.party, amount: p.take }))
 
   const dealActivities = useMemo(
     () => (db.activities || []).filter(a => a.deal_id === dealId),
@@ -615,14 +619,16 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
               </div>
             </div>
             {isAdmin && breakdown && (deal.value > 0) && (
-              <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8, display: 'flex', gap: 16, fontSize: 12 }}>
+              <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8, fontSize: 12 }}>
                 <span>Gross comm: <strong>{formatCurrency(breakdown.gross_total)}</strong></span>
+                <SideSplit parts={breakdown.parties.map(p => ({ party: p.party, amount: p.gross }))} />
               </div>
             )}
             {!isAdmin && myTake > 0 && (
               <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8, fontSize: 12, color: 'var(--gw-green)' }}>
                 Your take: <strong>{formatCurrency(myTake)}</strong>
                 <span style={{ color: 'var(--gw-mist)' }}> · your slice only — splits are managed by the office</span>
+                <SideSplit parts={myTakeParts} />
               </div>
             )}
           </div>

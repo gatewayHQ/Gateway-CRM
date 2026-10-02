@@ -4,6 +4,8 @@ import { Icon, Badge, EmptyState, Loading } from '../components/UI.jsx'
 import { formatCurrency, formatMoney, formatDate } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
 import EarningsChart from '../components/EarningsChart.jsx'
+import SideSplit from '../components/SideSplit.jsx'
+import { addByParty, partyAmounts } from '../lib/commission.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // My Earnings — what a non-admin agent sees on the Commission page since the
@@ -48,13 +50,21 @@ export default function MyEarnings({ activeAgent }) {
   const closed = deals.filter(d => d.closed)
   const capPct = cap.prepaid ? 100 : (cap.amount > 0 ? Math.min(100, Math.round(cap.ytd_cap_paid / cap.amount * 100)) : 0)
   const pipelineTake = open.reduce((s, d) => s + (d.take || 0), 0)
+  // Every figure says which side of the table it comes from. `by_party` is
+  // computed on the server with the take itself; an older server sends none
+  // and the split lines simply don't show.
+  const pipelineByParty = open.reduce((acc, d) => addByParty(acc, d.by_party, 'take'), {})
+  const dealParts = (d) => (d.by_party || []).map(p => ({ party: p.party, amount: p.take }))
 
   const dealRow = (d) => (
     <tr key={d.deal_id} style={{ borderTop: '1px solid var(--gw-border)' }}>
       <td style={{ padding: '9px 12px', fontWeight: 600 }}>{d.title}</td>
       <td style={{ padding: '9px 12px' }}><Badge variant={d.stage === 'closed' ? 'closed' : d.stage === 'lost' ? 'lost' : 'lead'}>{stageLabels[d.stage] || d.stage}</Badge></td>
       <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{d.value > 0 ? formatCurrency(d.value) : '—'}</td>
-      <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', fontWeight: 700, color: 'var(--gw-green)' }}>{formatMoney(d.take)}</td>
+      <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', fontWeight: 700, color: 'var(--gw-green)' }}>
+        {formatMoney(d.take)}
+        <SideSplit parts={dealParts(d)} />
+      </td>
       <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', color: 'var(--gw-mist)' }}>{d.split_pct != null ? `${d.split_pct}%` : '—'}</td>
       <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', color: 'var(--gw-mist)' }}>{d.fees > 0 ? formatMoney(d.fees) : '—'}</td>
       <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', color: 'var(--gw-mist)' }}>{d.closed_at ? formatDate(d.closed_at) : '—'}</td>
@@ -76,6 +86,7 @@ export default function MyEarnings({ activeAgent }) {
         <div className="stat-card" style={{ borderLeft: '3px solid var(--gw-green)' }}>
           <div className="stat-card__value" style={{ color: 'var(--gw-green)' }}>{formatMoney(ytd.take)}</div>
           <div className="stat-card__label">Earned this cap year</div>
+          <SideSplit parts={partyAmounts(ytd.by_party)} />
         </div>
         <div className="stat-card">
           <div className="stat-card__value">{ytd.deals}</div>
@@ -84,6 +95,7 @@ export default function MyEarnings({ activeAgent }) {
         <div className="stat-card">
           <div className="stat-card__value">{formatMoney(pipelineTake)}</div>
           <div className="stat-card__label">Projected from open deals</div>
+          <SideSplit parts={partyAmounts(pipelineByParty)} />
         </div>
         <div className="stat-card">
           <div className="stat-card__value">{formatMoney(cap.ytd_fees)}</div>

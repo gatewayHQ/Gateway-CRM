@@ -102,6 +102,90 @@ export function makeSide(key = 'sale', rate_pct = DEFAULTS.GROSS_PCT, flat = 0) 
   return { id: uid(), key, label, rate_pct, flat, referral_pct: 0, referral_flat: 0 }
 }
 
+// ── Buyer side / seller side ────────────────────────────────────────────────
+// Every dollar on a deal comes from one side of the table, and an agent who
+// represents both needs to see how much came from each. A side's PARTY is read
+// from its key — 'listing' is the seller side, 'buyer' the buyer side — and a
+// single 'sale' side belongs to whichever side the deal represents. A 'sale'
+// side on a deal representing BOTH can't be placed and reads as 'unsplit', so
+// the screens can say the split was never entered rather than guess at it.
+export const PARTIES = ['seller', 'buyer']
+export const PARTY_LABELS = { seller: 'Seller side', buyer: 'Buyer side', unsplit: 'Both sides (not split)' }
+
+/** Which side(s) a deal represents: 'buyer' | 'seller' | 'both' (blank reads as buyer). */
+export function dealRepresents(deal) {
+  const t = String(deal?.comp_data?.transaction_type || '').trim().toLowerCase()
+  return t === 'both' || t === 'seller' ? t : 'buyer'
+}
+
+/** The party a commission side's money comes from. */
+export function partyForSide(sideKey, deal) {
+  if (sideKey === 'listing') return 'seller'
+  if (sideKey === 'buyer') return 'buyer'
+  const rep = dealRepresents(deal)
+  return rep === 'both' ? 'unsplit' : rep
+}
+
+// One side's entry as the Details tab stores it: { type, pct, flat }. Null
+// when nothing usable was entered, so a blank side never prices at $0.
+function entryFrom(raw) {
+  if (!raw) return null
+  if (raw.type === 'flat') {
+    const flat = num(raw.flat, 0)
+    return flat > 0 ? { type: 'flat', pct: 0, flat } : null
+  }
+  const pct = num(raw.pct, 0)
+  return pct > 0 ? { type: 'percent', pct, flat: 0 } : null
+}
+
+/**
+ * The per-side entries on a deal that represents BOTH sides, read from
+ * comp_data.commission_sides — { seller, buyer }, either of which may be null —
+ * or null when the deal doesn't represent both or nothing was entered per side.
+ */
+export function dealSideEntries(deal) {
+  if (dealRepresents(deal) !== 'both') return null
+  const raw = deal?.comp_data?.commission_sides
+  if (!raw || typeof raw !== 'object') return null
+  const seller = entryFrom(raw.seller)
+  const buyer  = entryFrom(raw.buyer)
+  return seller || buyer ? { seller, buyer } : null
+}
+
+/**
+ * The single total a both-sides entry adds up to, in the deal's own
+ * commission_type / commission_pct / commission_flat shape — what the Details
+ * tab writes back to those columns so anything reading only them (agreement
+ * fields, older reports) sees the real total. Two percentages stay a
+ * percentage; anything involving a flat fee becomes the dollar total.
+ */
+export function totalEntryForSides(sides, value) {
+  const list = PARTIES.map(k => entryFrom(sides?.[k])).filter(Boolean)
+  if (!list.length) return { commission_type: 'percent', commission_pct: null, commission_flat: null }
+  if (list.every(e => e.type === 'percent')) {
+    return { commission_type: 'percent', commission_pct: round2(list.reduce((t, e) => t + e.pct, 0)), commission_flat: null }
+  }
+  const gross = list.reduce((t, e) => t + (e.type === 'flat' ? e.flat : num(value, 0) * e.pct / 100), 0)
+  return { commission_type: 'flat', commission_pct: null, commission_flat: round2(gross) }
+}
+
+/**
+ * Split `total` across weights so the parts are rounded to cents and still add
+ * up to exactly `total` — the last part takes the rounding remainder.
+ */
+export function apportion(total, weights) {
+  const sum = weights.reduce((t, w) => t + Math.max(0, num(w, 0)), 0)
+  if (!weights.length) return []
+  if (sum <= 0) return weights.map((_, i) => (i === weights.length - 1 ? round2(total) : 0))
+  let given = 0
+  return weights.map((w, i) => {
+    if (i === weights.length - 1) return round2(total - given)
+    const part = round2(total * Math.max(0, num(w, 0)) / sum)
+    given += part
+    return part
+  })
+}
+
 /**
  * The assigned agent's own commission entry from the deal's Details tab, or
  * null when they haven't entered one. `commission_type` picks which field is
@@ -125,10 +209,26 @@ export function dealCommissionEntry(deal) {
  * itself goes through `normalizeCommission`.
  */
 export function describeDealCommission(deal) {
+  const value = num(deal?.value, 0)
+  const grossOf = (e) => round2(e.type === 'flat' ? e.flat : value * e.pct / 100)
+  // A both-sides deal entered per side: the total is the sum of the sides, and
+  // `sides` says how much each one brings in.
+  const perSide = dealSideEntries(deal)
+  if (perSide) {
+    const sides = PARTIES
+      .filter(k => perSide[k])
+      .map(k => ({ party: k, label: PARTY_LABELS[k], ...perSide[k], gross: grossOf(perSide[k]) }))
+    const total = totalEntryForSides(perSide, value)
+    const gross = round2(sides.reduce((t, x) => t + x.gross, 0))
+    return total.commission_type === 'percent'
+      ? { type: 'percent', pct: total.commission_pct, flat: 0, gross, sides }
+      : { type: 'flat', pct: 0, flat: total.commission_flat, gross, sides }
+  }
   const entry = dealCommissionEntry(deal)
   if (!entry) return null
-  const gross = entry.type === 'flat' ? entry.flat : num(deal?.value, 0) * entry.pct / 100
-  return { ...entry, gross: round2(gross) }
+  const party = partyForSide('sale', deal)
+  const gross = grossOf(entry)
+  return { ...entry, gross, sides: [{ party, label: PARTY_LABELS[party], ...entry, gross }] }
 }
 
 /**
@@ -144,7 +244,7 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
       Array.isArray(commission.participants) && commission.participants.length) {
     return {
       sale_price,
-      sides: commission.sides.map(s => ({ ...makeSide(s.key, s.rate_pct), ...s })),
+      sides: commission.sides.map(s => ({ ...makeSide(s.key, s.rate_pct), ...s, party: partyForSide(s.key, deal) })),
       participants: commission.participants.map(p => ({ ...makeParticipant(), ...p })),
       transaction_fee: num(commission.transaction_fee, 0),
     }
@@ -163,7 +263,17 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
   const co_agent_pct = num(commission?.co_agent_pct, 0)
   const fee          = num(commission?.transaction_fee, 0)
 
-  const sides = [{ ...makeSide('sale', gross_pct, gross_flat), referral_pct }]
+  // A both-sides deal entered per side on the Details tab prices each side on
+  // its own; everything else is one side, placed by what the deal represents.
+  const perSide = !commission?.sides?.length ? dealSideEntries(deal) : null
+  const sides = perSide
+    ? [['listing', 'seller'], ['buyer', 'buyer']]
+        .filter(([, party]) => perSide[party])
+        .map(([key, party]) => {
+          const e = perSide[party]
+          return { ...makeSide(key, e.type === 'flat' ? 0 : e.pct, e.type === 'flat' ? e.flat : 0), referral_pct, party }
+        })
+    : [{ ...makeSide('sale', gross_pct, gross_flat), referral_pct, party: partyForSide('sale', deal) }]
 
   const primaryAgent = agents.find(a => a.id === deal?.agent_id) || null
   const primary = makeParticipant({ agent: primaryAgent, role: 'primary', allocation_pct: 100 })
@@ -317,6 +427,32 @@ export function computeCommission(input) {
 
   const primary = participants.find(p => p.role === 'primary') || participants[0] || null
 
+  // ── By side ───────────────────────────────────────────────────────────────
+  // Where the money comes from. Sides are grouped by party (seller / buyer /
+  // unsplit), and every agent's take and the house's share are divided between
+  // the parties in proportion to the net each one contributes — the same rule
+  // the allocation itself uses, so the parts always add back up to the totals.
+  const partyOrder = [...PARTIES, 'unsplit']
+  const partyKeys = partyOrder.filter(k => sides.some(sd => (sd.party || 'unsplit') === k))
+  const partyNet = partyKeys.map(k => sides.filter(sd => (sd.party || 'unsplit') === k).reduce((t, sd) => t + sd.net, 0))
+  for (const p of participants) {
+    const shares = apportion(p.agent_take, partyNet)
+    p.by_party = Object.fromEntries(partyKeys.map((k, i) => [k, shares[i]]))
+  }
+  const houseShares = apportion(house_total, partyNet)
+  const parties = partyKeys.map((k, i) => {
+    const own = sides.filter(sd => (sd.party || 'unsplit') === k)
+    return {
+      party: k,
+      label: PARTY_LABELS[k],
+      gross:    round2(own.reduce((t, sd) => t + sd.gross, 0)),
+      referral: round2(own.reduce((t, sd) => t + sd.referral, 0)),
+      net:      round2(partyNet[i]),
+      agent_take: round2(participants.reduce((t, p) => t + (p.by_party[k] || 0), 0)),
+      house: houseShares[i],
+    }
+  })
+
   const allocPctSum = rawParts
     .filter(p => p._fixed_take == null && p._legacy_co_pct == null)
     .reduce((s, p) => s + num(p.allocation_pct, 0), 0)
@@ -334,6 +470,7 @@ export function computeCommission(input) {
     transaction_fee_total,   // total flat fees charged on this deal (on top of cap)
     house_split_total,       // brokerage split only — the cap-counting portion
     primary,
+    parties,                 // [{ party, label, gross, referral, net, agent_take, house }] — seller, buyer, unsplit
     // Effective blended rate (for the dashboard's "GC %" column).
     effective_rate_pct: sale_price > 0 ? round2(gross_total / sale_price * 100) : 0,
     // Legacy-compatible fields consumed by existing report rollups:
@@ -350,6 +487,24 @@ function validateAllocations(allocPctSum, participants) {
     w.push(`Agent allocations add up to ${round2(allocPctSum)}% (should be 100%). The remainder goes to the brokerage.`)
   }
   return w
+}
+
+/**
+ * Add a deal's by-side figures into a running total, for any report that sums
+ * many deals: `acc` is { seller, buyer, unsplit } and `parts` is a list of
+ * { party, [field] } — a breakdown's `parties`, or an agent slice's `byParty`.
+ */
+export function addByParty(acc, parts, field) {
+  const next = { ...acc }
+  for (const p of parts || []) next[p.party] = round2((next[p.party] || 0) + num(p[field], 0))
+  return next
+}
+
+/** { seller, buyer, unsplit } totals → the [{ party, amount }] list the screens render. */
+export function partyAmounts(totals) {
+  return ['seller', 'buyer', 'unsplit']
+    .filter(k => totals && num(totals[k], 0) !== 0)
+    .map(k => ({ party: k, amount: round2(totals[k]) }))
 }
 
 /**
@@ -371,8 +526,15 @@ export function breakdownForDeal(deal, commission, agents) {
 export function agentSliceForDeal(deal, commission, agents, agentId) {
   const r = breakdownForDeal(deal, commission, agents)
   const mine = r.participants.filter(p => p.agent_id === agentId)
+  // The agent's take by side, alongside each side's gross — what My Earnings
+  // and the deal page show an agent who represents both sides.
+  const byParty = (rows) => r.parties.map(pt => ({
+    party: pt.party, label: pt.label, gross: pt.gross,
+    take: round2(rows.reduce((t, p) => t + num(p.by_party?.[pt.party], 0), 0)),
+  }))
   if (mine.length) {
     return {
+      byParty: byParty(mine),
       onDeal: true,
       take:  round2(mine.reduce((s, p) => s + num(p.agent_take), 0)),
       house: round2(mine.reduce((s, p) => s + num(p.house_from), 0)),
@@ -384,12 +546,13 @@ export function agentSliceForDeal(deal, commission, agents, agentId) {
   }
   if (deal.agent_id === agentId) {
     return {
+      byParty: r.parties.map(pt => ({ party: pt.party, label: pt.label, gross: pt.gross, take: pt.agent_take })),
       onDeal: true, take: r.agent_total, house: r.house_total,
       cap: r.house_split_total, fees: r.transaction_fee_total ?? 0,
       splitPct: r.primary ? num(r.primary.split_pct, null) : null, gross: r.gross_total,
     }
   }
-  return { onDeal: false, take: 0, house: 0, cap: 0, fees: 0, splitPct: null, gross: 0 }
+  return { onDeal: false, take: 0, house: 0, cap: 0, fees: 0, splitPct: null, gross: 0, byParty: [] }
 }
 
 /**

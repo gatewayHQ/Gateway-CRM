@@ -407,6 +407,17 @@ select.form-control { cursor: pointer; }
 .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .section-title { font-family: var(--font-display); font-size: 17px; font-weight: 600; letter-spacing: 0.02em; }
 
+/* SIDE SPLIT — the seller/buyer line under a commission figure (components/SideSplit.jsx). */
+.side-split { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 3px; font-size: 11px; font-weight: 500; color: var(--gw-mist); line-height: 1.4; }
+.side-split--right { justify-content: flex-end; }
+.side-split__part { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.side-split__part strong { color: var(--gw-ink); font-weight: 600; }
+.side-split__dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: var(--gw-mist); }
+.side-split__part--seller .side-split__dot { background: var(--gw-gold); }
+.side-split__part--buyer .side-split__dot { background: var(--gw-azure); }
+.side-split__part--unsplit { color: var(--gw-amber); }
+.side-split__part--unsplit .side-split__dot { background: var(--gw-amber); }
+
 /* GETTING STARTED — the dashboard's first-run card (components/GettingStarted.jsx).
    A slate banner with the brand's gold for progress, over five step cards. The
    step the agent should do next is the only one with a primary button. */
@@ -440,7 +451,8 @@ select.form-control { cursor: pointer; }
 .onboard__hide:hover { background: rgba(255,255,255,0.18); color: #fff; }
 .onboard__hide:focus-visible { outline: 2px solid var(--gw-gold); outline-offset: 2px; }
 
-.onboard__steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+/* One equal column per step, however many steps there are. */
+.onboard__steps { list-style: none; margin: 0; padding: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
 .onboard-step {
   position: relative; display: flex; flex-direction: column; gap: 6px; padding: 18px 18px 16px;
   border-right: 1px solid var(--gw-border); transition: background 160ms ease;
@@ -465,7 +477,7 @@ select.form-control { cursor: pointer; }
 .onboard-step__done { display: inline-flex; align-items: center; gap: 5px; margin-top: 6px; font-size: 12px; font-weight: 600; color: var(--gw-green); }
 
 @media (max-width: 1100px) {
-  .onboard__steps { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+  .onboard__steps { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .onboard-step { border-right: none; border-bottom: 1px solid var(--gw-border); }
 }
 @media (max-width: 640px) {
