@@ -254,3 +254,37 @@ describe('matchSignatures — a link is authoritative', () => {
     expect(r.unsatisfied).toBe(1)
   })
 })
+
+// Every Fix button on the deal page opens the drawer at `issue.tab`. A tab the
+// drawer doesn't have opened it onto an empty panel, so every tab the gate can
+// name is checked against the real list.
+describe('getClosingGate — where each Fix goes', () => {
+  const everyIssue = (review_status) => getClosingGate(
+    { id: 'd1', value: 100_000, review_status, comp_data: { state: 'IA', key_dates: [] } },
+    {
+      steps: steps(3, { completed: false, signCount: 1 }),
+      envelopes: [], commission: null, hasCommissionVisibility: true,
+      requiredForms: [{ id: 'f1', name: 'Agency Disclosure', boldsign_template_id: 't1' }],
+    },
+  ).issues
+
+  it('only ever names tabs the deal drawer has', async () => {
+    const { DEAL_TAB_IDS } = await import('../dealTabs.js')
+    for (const status of ['none', 'pending', 'changes_requested']) {
+      for (const issue of everyIssue(status)) {
+        if (issue.tab) expect(DEAL_TAB_IDS).toContain(issue.tab)
+      }
+    }
+  })
+
+  it('sends missing commission to Details, where it is entered', () => {
+    const issue = everyIssue('approved').find(i => i.code === ISSUE_CODES.COMMISSION_MISSING)
+    expect(issue.tab).toBe('details')
+  })
+
+  it('makes review a submit action, except while it is already pending', () => {
+    expect(everyIssue('none').find(i => i.code === ISSUE_CODES.REVIEW_REQUIRED).action).toBe('submit-review')
+    expect(everyIssue('changes_requested').find(i => i.code === ISSUE_CODES.REVIEW_CHANGES).action).toBe('submit-review')
+    expect(everyIssue('pending').find(i => i.code === ISSUE_CODES.REVIEW_REQUIRED).action).toBeUndefined()
+  })
+})

@@ -85,6 +85,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
   // A global-search hit routes here with the record to open. Resolve it against
   // the loaded rows and open its drawer, then clear so it fires only once.
   useEffect(() => {
+    if (focusRecord?.type === 'new-contact') { setEditing(null); setDrawerOpen(true); onFocusHandled?.(); return }
     if (focusRecord?.type !== 'contact') return
     const hit = (db.contacts || []).find(c => c.id === focusRecord.id)
     if (hit) { setEditing(hit); setDrawerOpen(true) }

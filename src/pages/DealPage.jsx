@@ -6,8 +6,9 @@ import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx
 import { readDealTerms, termsFilled } from '../lib/services/dealTerms.js'
 import { formatCurrency, formatDate, formatPhone } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
-import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
+import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage, isContractStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
+import SideSplit from '../components/SideSplit.jsx'
 import { agentIdsOnDeal } from '../lib/coAgents.js'
 import { dealSideBreakdown, representingFor } from '../lib/dealPeople.js'
 import { DealDrawer } from './Pipeline.jsx'
@@ -240,6 +241,9 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
     }
     return mySlice?.take || 0
   }, [breakdown, activeAgent, isAdmin, mySlice])
+  // The agent's take by side — from the server's slice, so a co-agent's split
+  // still never reaches this browser.
+  const myTakeParts = (mySlice?.by_party || []).map(p => ({ party: p.party, amount: p.take }))
 
   const dealActivities = useMemo(
     () => (db.activities || []).filter(a => a.deal_id === dealId),
@@ -512,8 +516,10 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
           })}
         </div>
 
-        {/* ── Compliance gate banner — only shows when there's something to do ── */}
-        {isOpenStage(deal.stage) && !gate.canClose && (
+        {/* ── Compliance gate banner — once the deal is under contract and
+            there's something left to do. Earlier than that it's a list of
+            things nobody is expected to have done yet. ── */}
+        {isContractStage(deal.stage) && !gate.canClose && (
           <div className="card" style={{
             padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 12,
             background: '#fff7ed', border: '1px solid #fed7aa', borderLeft: '4px solid #d97706',
@@ -613,14 +619,16 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
               </div>
             </div>
             {isAdmin && breakdown && (deal.value > 0) && (
-              <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8, display: 'flex', gap: 16, fontSize: 12 }}>
+              <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8, fontSize: 12 }}>
                 <span>Gross comm: <strong>{formatCurrency(breakdown.gross_total)}</strong></span>
+                <SideSplit parts={breakdown.parties.map(p => ({ party: p.party, amount: p.gross }))} />
               </div>
             )}
             {!isAdmin && myTake > 0 && (
               <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 8, fontSize: 12, color: 'var(--gw-green)' }}>
                 Your take: <strong>{formatCurrency(myTake)}</strong>
                 <span style={{ color: 'var(--gw-mist)' }}> · your slice only — splits are managed by the office</span>
+                <SideSplit parts={myTakeParts} />
               </div>
             )}
           </div>
@@ -782,7 +790,11 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
               {gate.issues.slice(0, 6).map(i => (
                 <li key={i.code}>
                   {i.label}
-                  {i.tab && (
+                  {i.action === 'submit-review' ? (
+                    <button className="btn btn--ghost btn--sm" style={{ marginLeft: 6, padding: '0 6px', fontSize: 11 }} onClick={submitForReview} disabled={submittingReview}>
+                      {submittingReview ? 'Submitting…' : deal.review_status === 'changes_requested' ? 'Resubmit' : 'Submit for review'}
+                    </button>
+                  ) : i.tab && (
                     <button className="btn btn--ghost btn--sm" style={{ marginLeft: 6, padding: '0 6px', fontSize: 11 }} onClick={() => openDrawer(i.tab)}>
                       Fix
                     </button>

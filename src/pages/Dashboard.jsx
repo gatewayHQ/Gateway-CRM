@@ -5,8 +5,9 @@ import { formatCurrency, formatDate, STAGE_ORDER, upcomingReminders } from '../l
 import { useStageLabels } from '../lib/stageLabelContext.js'
 import { Icon, Badge, Avatar, Loading, pushToast } from '../components/UI.jsx'
 import SignatureQueue from '../components/SignatureQueue.jsx'
+import GettingStarted from '../components/GettingStarted.jsx'
 
-export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
+export default function Dashboard({ db, setDb, activeAgent, isAdmin, go, openCompose, startNew }) {
   // Funnel headings follow the agent's own pipeline column names.
   const stageLabels = useStageLabels()
   const today = new Date().toDateString()
@@ -72,10 +73,12 @@ export default function Dashboard({ db, setDb, activeAgent, go, openCompose }) {
           <div className="page-sub">{new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn btn--secondary" onClick={() => go('contacts')}><Icon name="plus" size={14} /> Contact</button>
-          <button className="btn btn--primary" onClick={() => go('pipeline')}><Icon name="plus" size={14} /> Deal</button>
+          <button className="btn btn--secondary" onClick={() => startNew('contact')}><Icon name="plus" size={14} /> Contact</button>
+          <button className="btn btn--primary" onClick={() => startNew('deal')}><Icon name="plus" size={14} /> Deal</button>
         </div>
       </div>
+
+      <GettingStarted db={db} activeAgent={activeAgent} isAdmin={isAdmin} go={go} startNew={startNew} />
 
       <div className="stats-grid">
         {[
