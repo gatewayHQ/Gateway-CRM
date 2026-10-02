@@ -59,3 +59,14 @@ export async function deleteTask(id) {
   await syncTaskCalendar(id, { purge: true })
   return supabase.from('tasks').delete().eq('id', id)
 }
+
+/**
+ * Tick a task done (or reopen it), then bring its calendar event in line —
+ * completing takes the event down, reopening puts it back. Returns the
+ * Supabase result so the caller can report a refused save.
+ */
+export async function setTaskCompleted(id, completed) {
+  const res = await supabase.from('tasks').update({ completed }).eq('id', id)
+  if (!res.error) syncTaskCalendar(id)
+  return res
+}

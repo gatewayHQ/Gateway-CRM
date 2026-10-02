@@ -3,16 +3,12 @@ import { supabase } from './supabase.js'
 // ─── Event registry ───────────────────────────────────────────────────────────
 // Single source of truth for all outbound webhook event IDs + labels.
 
+// Only events the app actually fires. (Contact, task and lead events were
+// listed here for a long time but nothing ever sent them.)
 export const WEBHOOK_EVENTS = [
-  { id: 'contact.created',    label: 'Contact Created' },
-  { id: 'contact.updated',    label: 'Contact Updated' },
-  { id: 'deal.created',       label: 'Deal Created' },
   { id: 'deal.stage_changed', label: 'Deal Stage Changed' },
   { id: 'deal.closed',        label: 'Deal Closed' },
-  { id: 'task.completed',     label: 'Task Completed' },
   { id: 'property.added',     label: 'Property Added' },
-  { id: 'lead.captured',      label: 'Website Lead Captured' },
-  { id: 'radius_sync',        label: 'Radius Mailing Synced to Mailchimp' },
 ]
 
 // ─── Fire webhooks ────────────────────────────────────────────────────────────

@@ -1,9 +1,10 @@
 import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
-import { syncTaskCalendar } from '../lib/services/tasks.js'
 import { fetchVisibleDeals, findOpenDealsOnProperty } from '../lib/services/deals.js'
 import { formatCurrency, formatDate, STAGE_LABELS, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
-import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
+import { TRACKS, UNIFIED, boardStageFor, isOpenStage } from '../lib/stages.js'
+import { changeDealStage } from '../lib/services/dealStage.js'
+import { mutationErrorMessage } from '../lib/services/db.js'
 import { DEAL_TABS, dealTabOrDefault } from '../lib/dealTabs.js'
 import { CHECKLIST_KINDS, checklistKindFor, checklistStateFor, checklistTemplate, checklistRows } from '../lib/checklistTemplates.js'
 import { normalizeStageLabel, hasStageLabelOverrides, STAGE_LABEL_MAX } from '../lib/stageLabels.js'
@@ -28,7 +29,7 @@ import { deliverPacket, packetFiles } from '../lib/packetDownload.js'
 import { DealPriceLine } from '../components/PricingHistoryPanel.jsx'
 import { friendlyDbError } from '../lib/dbErrors.js'
 import { streetLine, propertyLabel } from '../lib/address.js'
-import { packetEditUrl, packetAddInitials, packetCloneUrl, packetSync, packetChangeSigner, revokeDocument as apiRevokeDocument, packetState, canFixPacket, fixPacketBlockedReason, canSendCorrection, canRevoke, canChangeSigner, isInFlight, isEditPending, editPendingMs, documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, fileDocumentToDeal, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, prefillFieldEntry, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, sharedDataOnSignerFields, conditionalFieldsToRemove, emptyLabelsToRemove, partyNameGaps, describeFieldMapping, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
+import { packetEditUrl, packetAddInitials, packetCloneUrl, packetSync, packetChangeSigner, revokeDocument as apiRevokeDocument, packetState, canFixPacket, fixPacketBlockedReason, canSendCorrection, canRevoke, canChangeSigner, isInFlight, isEditPending, editPendingMs, documentEmbedUrl, documentEditUrl, captureLayout, documentPdfUrl, fileDocumentToDeal, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, saveTemplateDraft, templateDetails, crmTokenValues, isFillableField, isTickableField, isPrefillableField, isSharedField, isSignerBoundField, isUnconfiguredField, isDateField, usDateToIso, isoDateToUs, signerBoundPrefillFields, buildPrefillFields, conditionalFieldsToRemove, emptyLabelsToRemove, partyNameGaps, describeFieldMapping, fieldTokenValue, fieldTokenKey, resolvePanel, seedPanelState, panelTickValues, panelMissing, panelFieldIds, revealedTokens, describePanelProblem, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, selectionRows, seedSelectionValues, applySelection, normalizeTokenKey, appointedAgent, orderAgentSigners, normalizeState, seedSignersFromDeal, dealAgentList, buildTemplateRoles, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../lib/services/boldsign.js'
 import {
   readTemplateWork, saveTemplateWork, clearTemplateWork, isUnsentDraft,
   applySavedTemplateWork, templateWorkEdits, describeTemplateWorkEdits, countFilledWork,
@@ -62,7 +63,6 @@ import AgentMultiSelect from '../components/AgentMultiSelect.jsx'
 const boldSignReturnUrl = () => `${window.location.origin}/boldsign-return.html`
 
 
-const CHECKLIST_STAGES = ['under-contract','closed']
 
 
 const DEFAULT_KEY_DATE_TYPES = ['Closing','Expiration','Financing Contingency','Inspection','HUD Approval','Appraisal','Lease Start Date','Possession Date']
@@ -403,7 +403,6 @@ export function plausibleKeyDate(value) {
 function KeyDatesTab({ deal }) {
   const [dates, setDates]         = useState([])
   const [saving, setSaving]       = useState(false)
-  const [newType, setNewType]     = useState('')
   const [customType, setCustomType] = useState('')
   const [showCustom, setShowCustom] = useState(false)
   const [sentReminders, setSentReminders] = useState([])   // [{date_type, threshold}]
@@ -529,7 +528,7 @@ function KeyDatesTab({ deal }) {
     const updated = [...dates, { type: t, date: '' }]
     setDates(updated)
     schedulePersist(updated, { immediate: true })
-    setNewType(''); setCustomType(''); setShowCustom(false)
+    setCustomType(''); setShowCustom(false)
   }
 
   const removeRow = (i) => {
@@ -1230,185 +1229,8 @@ const DS_STATUS = {
   voided:    { bg: 'var(--gw-bone)',         color: 'var(--gw-mist)' },
 }
 
-const FIELD_TYPES = {
-  signature: { label: 'Sign Here', color: '#2563eb', bg: '#dbeafe' },
-  initials:  { label: 'Initials',  color: '#7c3aed', bg: '#ede9fe' },
-  date:      { label: 'Date',      color: '#059669', bg: '#d1fae5' },
-}
-
-// Document-level annotation tools (not tied to a signer)
-const ANNOTATION_TYPES = {
-  highlight:     { label: 'Highlight',     color: '#d97706', bg: 'rgba(253,224,71,0.45)', w: 160, h: 14 },
-  strikethrough: { label: 'Strike-through', color: '#dc2626', bg: 'rgba(220,38,38,0.7)',  w: 160, h: 3  },
-  checkbox:      { label: 'Checkbox',       color: '#1a2236', bg: 'rgba(26,34,54,0.06)',  w: 18,  h: 18 },
-}
-
 // Per-signer accent colors for multi-signer field placement
 const SIGNER_COLORS = ['#2563eb','#d97706','#dc2626','#0891b2']
-const SIGNER_BGS    = ['#dbeafe','#fef3c7','#fee2e2','#cffafe']
-
-const PDF_SCALE = 1.3
-
-// allFields = flat array of all signers' tabs, each with signerIndex for color-coding
-// docAnnotations = document-level highlight/strikethrough marks (not per-signer)
-function PDFPlacer({ file, fileUrl, allFields, onPlace, onRemove, activeTool, setActiveTool, activeSignerIndex, docAnnotations, onPlaceAnnotation, onRemoveAnnotation }) {
-  const [pages,   setPages]   = React.useState([])
-  const [loading, setLoading] = React.useState(true)
-  const canvasRefs = React.useRef({})
-
-  React.useEffect(() => { loadPDF() }, [])
-  React.useEffect(() => { if (pages.length > 0) renderPages() }, [pages])
-
-  const loadPDF = async () => {
-    setLoading(true)
-    if (!window.pdfjsLib) {
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script')
-        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
-        s.onload = resolve; s.onerror = reject
-        document.head.appendChild(s)
-      })
-      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
-    }
-    let buf
-    if (file) { buf = await file.arrayBuffer() }
-    else { buf = await fetch(fileUrl).then(r => r.arrayBuffer()) }
-    const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise
-    const list = []
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const pageObj  = await pdf.getPage(i)
-      const viewport = pageObj.getViewport({ scale: PDF_SCALE })
-      list.push({ pageObj, viewport })
-    }
-    setPages(list)
-    setLoading(false)
-  }
-
-  const renderPages = async () => {
-    for (let i = 0; i < pages.length; i++) {
-      const canvas = canvasRefs.current[i]
-      if (!canvas) continue
-      const { pageObj, viewport } = pages[i]
-      canvas.width  = viewport.width
-      canvas.height = viewport.height
-      await pageObj.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
-    }
-  }
-
-  const handleClick = (e, pageIndex) => {
-    if (!activeTool) return
-    const rect    = e.currentTarget.getBoundingClientRect()
-    const xCanvas = e.clientX - rect.left
-    const yCanvas = e.clientY - rect.top
-    // Annotation tools are document-level, not per-signer
-    if (ANNOTATION_TYPES[activeTool]) {
-      const ann = ANNOTATION_TYPES[activeTool]
-      onPlaceAnnotation({
-        id: Date.now(), type: activeTool,
-        page: pageIndex + 1, pageIndex,
-        xCanvas: xCanvas - ann.w / 2,
-        yCanvas: yCanvas - ann.h / 2,
-        xPosition: String(Math.round((xCanvas - ann.w / 2) / PDF_SCALE)),
-        yPosition: String(Math.round((yCanvas - ann.h / 2) / PDF_SCALE)),
-        width: ann.w, height: ann.h,
-      })
-    } else {
-      onPlace({
-        id: Date.now(), type: activeTool,
-        page: pageIndex + 1,
-        xPosition: String(Math.round(xCanvas / PDF_SCALE)),
-        yPosition: String(Math.round(yCanvas / PDF_SCALE)),
-        xCanvas, yCanvas, pageIndex,
-        signerIndex: activeSignerIndex,
-      })
-    }
-  }
-
-  if (loading) return <div style={{ padding:'40px 0', textAlign:'center', color:'var(--gw-mist)', fontSize:13 }}>Loading PDF…</div>
-
-  return (
-    <div>
-      <div style={{ display:'flex', gap:6, marginBottom:6, alignItems:'center', flexWrap:'wrap' }}>
-        <span style={{ fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.07em', color:'var(--gw-mist)', flexBasis:'100%' }}>Signature Fields</span>
-        {Object.entries(FIELD_TYPES).map(([key, { label }]) => {
-          const color = SIGNER_COLORS[activeSignerIndex] || SIGNER_COLORS[0]
-          const bg    = SIGNER_BGS[activeSignerIndex]    || SIGNER_BGS[0]
-          const active = activeTool === key
-          return (
-            <button key={key} onClick={() => setActiveTool(active ? null : key)}
-              style={{ padding:'5px 12px', borderRadius:'var(--radius)', fontSize:12, fontWeight:700, cursor:'pointer', border:`2px solid ${active?color:'var(--gw-border)'}`, background:active?bg:'#fff', color:active?color:'var(--gw-mist)' }}>
-              + {label}
-            </button>
-          )
-        })}
-      </div>
-      <div style={{ display:'flex', gap:6, marginBottom:10, alignItems:'center', flexWrap:'wrap' }}>
-        <span style={{ fontSize:10, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.07em', color:'var(--gw-mist)', flexBasis:'100%' }}>Document Markup</span>
-        {Object.entries(ANNOTATION_TYPES).map(([key, { label, color, bg }]) => {
-          const active = activeTool === key
-          return (
-            <button key={key} onClick={() => setActiveTool(active ? null : key)}
-              style={{ padding:'5px 12px', borderRadius:'var(--radius)', fontSize:12, fontWeight:700, cursor:'pointer', border:`2px solid ${active?color:'var(--gw-border)'}`, background:active?bg:'#fff', color:active?color:'var(--gw-mist)' }}>
-              {key === 'highlight' ? '🖊 ' : key === 'strikethrough' ? '—— ' : '☐ '}{label}
-            </button>
-          )
-        })}
-        <span style={{ fontSize:11, color:'var(--gw-mist)', marginLeft:4 }}>
-          {activeTool ? (ANNOTATION_TYPES[activeTool] ? 'Click to mark area' : 'Click PDF to place') : 'Select a tool above'}
-        </span>
-        {(allFields.length + (docAnnotations?.length||0)) > 0 && (
-          <span style={{ marginLeft:'auto', fontSize:11, fontWeight:700 }}>
-            {allFields.length} field{allFields.length !== 1 ? 's' : ''}
-            {(docAnnotations?.length||0) > 0 && ` · ${docAnnotations.length} mark${docAnnotations.length !== 1 ? 's' : ''}`}
-          </span>
-        )}
-      </div>
-      <div style={{ maxHeight:420, overflowY:'auto', overflowX:'auto', background:'#e5e7eb', borderRadius:'var(--radius)', padding:12, display:'flex', flexDirection:'column', alignItems:'flex-start', gap:12 }}>
-        {pages.map((_, i) => (
-          <div key={i} style={{ position:'relative' }}>
-            <div style={{ fontSize:10, color:'#6b7280', marginBottom:4, textAlign:'center' }}>Page {i + 1}</div>
-            <canvas ref={el => { if (el) canvasRefs.current[i] = el }} style={{ display:'block', boxShadow:'0 2px 8px rgba(0,0,0,0.2)' }}/>
-            <div style={{ position:'absolute', inset:0, cursor:activeTool?'crosshair':'default', marginTop:18 }} onClick={e => handleClick(e, i)}/>
-            {allFields.filter(f => f.pageIndex === i).map(f => {
-              const color = SIGNER_COLORS[f.signerIndex] || SIGNER_COLORS[0]
-              const bg    = SIGNER_BGS[f.signerIndex]    || SIGNER_BGS[0]
-              const ft    = FIELD_TYPES[f.type]
-              const dim   = f.signerIndex !== activeSignerIndex
-              return (
-                <div key={f.id} style={{ position:'absolute', left:f.xCanvas - 42, top:f.yCanvas - 10 + 18, display:'flex', alignItems:'center', gap:3, background:bg, border:`1.5px solid ${color}`, borderRadius:3, padding:'2px 6px', fontSize:10, fontWeight:700, color, whiteSpace:'nowrap', zIndex:10, pointerEvents:'auto', opacity: dim ? 0.4 : 1 }}>
-                  {ft?.label}
-                  <span onClick={e => { e.stopPropagation(); onRemove(f.id) }} style={{ cursor:'pointer', fontSize:12, lineHeight:1, opacity:0.6, marginLeft:1 }}>×</span>
-                </div>
-              )
-            })}
-            {/* Document annotations (highlight / strikethrough) */}
-            {(docAnnotations||[]).filter(a => a.pageIndex === i).map(a => {
-              const ann = ANNOTATION_TYPES[a.type]
-              return (
-                <div key={a.id} style={{
-                  position:'absolute',
-                  left: a.xCanvas, top: a.yCanvas + 18,
-                  width: a.width, height: a.height,
-                  background: ann?.bg,
-                  border: `${a.type === 'checkbox' ? 2 : 1}px solid ${ann?.color}`,
-                  borderRadius: a.type === 'highlight' ? 2 : 0,
-                  zIndex: 9, pointerEvents:'auto', cursor:'default',
-                  display:'flex', alignItems:'center', justifyContent: a.type === 'checkbox' ? 'center' : 'flex-end',
-                }}>
-                  {a.type === 'checkbox'
-                    ? <span onClick={e => { e.stopPropagation(); onRemoveAnnotation(a.id) }} style={{ fontSize:9, cursor:'pointer', color: ann?.color, lineHeight:1, opacity:0.7 }}>×</span>
-                    : <span onClick={e => { e.stopPropagation(); onRemoveAnnotation(a.id) }} style={{ fontSize:10, cursor:'pointer', color: ann?.color, lineHeight:1, padding:'0 2px', opacity:0.8 }}>×</span>
-                  }
-                </div>
-              )
-            })}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
 
 // ── Embedded BoldSign step (prepare a new send, or edit an existing draft) ───
 // One shell for every in-app BoldSign screen, because they all share the same
@@ -1864,7 +1686,6 @@ function SendSignatureModal({ deal, contacts, properties, dealFiles, activeAgent
 
   const addSigner    = () => setSigners(p => [...p, { id: Date.now(), name:'', email:'' }])
   const removeSigner = (id) => setSigners(p => p.filter(s => s.id !== id))
-  const updateSigner = (id, k, v) => setSigners(p => p.map(s => s.id===id ? {...s,[k]:v} : s))
 
   // Validate at PICK time, not at send time. Drag-and-drop bypasses the input's
   // own accept=".pdf", so a dropped .docx used to be shipped to BoldSign
@@ -4542,7 +4363,6 @@ export function SendFromTemplateModal({ deal, contacts, properties, extraContact
 
   const [showAllFields, setShowAllFields] = React.useState(false)
   const [showShared, setShowShared] = React.useState(false)
-  const setSigner = (idx, k, v) => setSigners(p => ({ ...p, [idx]: { ...(p[idx] || {}), [k]: v } }))
   const setValue  = (id, v)     => setValues(p => ({ ...p, [id]: v }))
 
   // The payload both actions below send. Returns null (having said why) when the
@@ -4999,7 +4819,6 @@ export function SendFromTemplateModal({ deal, contacts, properties, extraContact
   }
 
   const fields     = details?.fields || []
-  const tickFields = fields.filter(f => isTickableField(f.type))
   const textFields = fields.filter(f => isFillableField(f.type))
 
   // Shared (Label) fields vs signer-specific ones. The difference is not
@@ -5034,14 +4853,6 @@ export function SendFromTemplateModal({ deal, contacts, properties, extraContact
   // Deal data sitting on a role-scoped field — the template needs fixing, and no
   // send-time payload can work around it. Named here because the agent about to
   // send is the person who will hear about the blank from the client.
-  // Who signs first decides what everyone else can see: BoldSign reveals a
-  // signer's fields to the rest once that signer completes, so prefilled details
-  // carried by the first signer reach every later one. Filled rows in template
-  // order — the same order buildTemplateRoles emits.
-  const firstSignerIndex = (details?.roles || [])
-    .filter(r => (signers[r.index]?.name || '').trim() && (signers[r.index]?.email || '').trim())[0]?.index ?? null
-  const sharedGaps = sharedDataOnSignerFields({ fields, values, firstSignerIndex, inOrder })
-
   // Name fields the template is using for somebody other than their own signer.
   // Worse than the gap above and not fixable from here at all: BoldSign prints
   // the assigned signer's name and silently drops whatever we send, so the
@@ -6172,8 +5983,11 @@ export function dealContactKeyFor(dealContacts, dealId) {
     .join(',')
 }
 
-export function DealDrawer({ open, onClose, deal, agents, contacts, properties, deals = [], dealContacts = [], propertyContacts = [], activeAgent, onSave, setDb, initialTab = 'details' }) {
-  const blank = { title:'', contact_id:'', buyer_contact_id:'', seller_contact_id:'', property_id:'', agent_id:'', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, commission_type:'percent', commission_pct:'', commission_flat:'' }
+export function DealDrawer({ open, onClose, deal, agents, contacts, properties, deals = [], dealContacts = [], propertyContacts = [], activeAgent, onSave, onCreated, setDb, initialTab = 'details' }) {
+  // A new deal belongs to the agent creating it. It used to start Unassigned,
+  // and new agents didn't know to pick themselves — the database then refused
+  // the save, or the deal landed in nobody's pipeline.
+  const blank = { title:'', contact_id:'', buyer_contact_id:'', seller_contact_id:'', property_id:'', agent_id: activeAgent?.id || '', stage:'lead', value:'', probability:0, expected_close_date:'', notes:'', prop_category:'residential', prop_subtype:'', comp_data:{}, commission_type:'percent', commission_pct:'', commission_flat:'' }
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
@@ -6619,6 +6433,9 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       pushToast(warning || (deal?.id ? 'Deal updated' : 'Deal added'), warning ? 'error' : undefined)
       await onSave()
       onClose()
+      // A NEW deal opens on its own page — its checklist, signatures and key
+      // dates are the next thing the agent needs, and the board was a dead end.
+      if (!deal?.id && savedId) onCreated?.(savedId)
     } catch(err) {
       console.error('[DealDrawer] save error:', err)
       pushToast('Something went wrong.', 'error')
@@ -6796,7 +6613,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
               )
             })}
             <div className="form-group"><label className="form-label">Property</label><SearchDropdown items={properties} value={form.property_id} onSelect={linkProperty} placeholder="Search properties…" labelKey={propertyLabel} /></div>
-            <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}><option value="">Unassigned</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+            <div className="form-group"><label className="form-label">Assigned Agent</label><select className="form-control" value={form.agent_id||''} onChange={e=>set('agent_id',e.target.value)}>{!form.agent_id && <option value="">Choose an agent…</option>}{agents.map(a=><option key={a.id} value={a.id}>{a.id === activeAgent?.id ? `${a.name} (you)` : a.name}</option>)}</select></div>
             <div className="form-group">
               <label className="form-label">Additional Agents</label>
               <AgentMultiSelect agents={agents} selectedIds={additionalAgentIds} onChange={v=>set('co_agent_ids',v)} excludeId={form.agent_id} placeholder="Search agents to add…" />
@@ -6952,7 +6769,6 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   )
 }
 
-const AUTO_TASKS = STAGE_AUTO_TASKS
 
 const LISTING_STATUS_ORDER  = ['active','pending','off-market','sold','leased','cancelled']
 const LISTING_STATUS_LABELS = { active:'Active', pending:'Pending', 'off-market':'Off Market', sold:'Sold', leased:'Leased', cancelled:'Cancelled' }
@@ -7272,17 +7088,15 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   // Single-pass O(n) grouping into the active track's columns. Foreign stage
   // tokens (legacy data) land in the nearest column via boardStageFor — the
   // stored stage is rewritten only when the card is dragged.
-  const { stageGroups, stageTotals, totalValue } = useMemo(() => {
+  const { stageGroups, stageTotals } = useMemo(() => {
     const groups = Object.fromEntries(track.stages.map(s => [s, []]))
     const totals = Object.fromEntries(track.stages.map(s => [s, 0]))
-    let total = 0
     trackDeals.forEach(d => {
       const col = boardStageFor(d, resolvedTrack)
       groups[col].push(d)
       totals[col] += d.value || 0
-      total += d.value || 0
     })
-    return { stageGroups: groups, stageTotals: totals, totalValue: total }
+    return { stageGroups: groups, stageTotals: totals }
   }, [trackDeals, track, resolvedTrack])
 
   // ── Intelligence bar: open-deal rollups for the active track ───────────────
@@ -7426,37 +7240,32 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     setDrawer(true)
   }, [deals, activeAgent])
 
-  // updated_at omitted — handled by DB trigger. We stamp comp_data.stage_since
-  // so "days in stage" / rotting is precise going forward (no schema change).
+  // A drag saves through the same path as the deal page's stage rail. Closing
+  // is the exception: its checks need the deal's checklist and signatures, so
+  // a drop on Closed opens the deal, where the close happens.
   const moveStage = useCallback(async (dealId, newStage) => {
     const deal = deals.find(d => d.id === dealId)
-    const comp_data = { ...(deal?.comp_data || {}), stage_since: new Date().toISOString() }
-    await supabase.from('deals').update({ stage: newStage, comp_data }).eq('id', dealId)
-    setDb(p => ({ ...p, deals: p.deals.map(d => d.id === dealId ? { ...d, stage: newStage, comp_data } : d) }))
-    pushToast(`Moved to ${stageLabels[newStage]}`)
-
-    const auto = AUTO_TASKS[newStage]
-    if (!auto) return
-    if (!deal) return
-    const due = new Date()
-    due.setDate(due.getDate() + auto.daysOut)
-    due.setHours(9, 0, 0, 0)
-    const { data: newTask } = await supabase.from('tasks').insert([{
-      title: auto.title(deal),
-      type: auto.type,
-      priority: auto.priority,
-      due_date: due.toISOString(),
-      agent_id: deal.agent_id || null,
-      contact_id: deal.contact_id || null,
-      deal_id: dealId,
-      completed: false,
-    }]).select().single()
-    if (newTask) {
-      syncTaskCalendar(newTask.id)
-      setDb(p => ({ ...p, tasks: [newTask, ...(p.tasks || [])] }))
-      pushToast(`Task auto-created: ${newTask.title}`, 'info')
+    if (!deal || deal.stage === newStage) return
+    if (newStage === 'closed') {
+      pushToast('Close it from the deal — the closing checks run there.', 'info')
+      go?.(`deal/${dealId}`)
+      return
     }
-  }, [setDb, deals])
+    const before = deal
+    setDb(p => ({ ...p, deals: p.deals.map(d => d.id === dealId ? { ...d, stage: newStage } : d) }))
+    const r = await changeDealStage(deal, newStage, { actorId: activeAgent?.id })
+    if (r.error) {
+      setDb(p => ({ ...p, deals: p.deals.map(d => d.id === dealId ? before : d) }))
+      pushToast(mutationErrorMessage(r.error, r.status), 'error')
+      return
+    }
+    setDb(p => ({ ...p,
+      deals: p.deals.map(d => d.id === dealId ? { ...d, stage: newStage, comp_data: r.comp_data } : d),
+      tasks: r.task ? [r.task, ...(p.tasks || [])] : p.tasks,
+    }))
+    pushToast(`Moved to ${stageLabels[newStage]}`)
+    if (r.task) pushToast(`Task auto-created: ${r.task.title}`, 'info')
+  }, [setDb, deals, activeAgent?.id, go, stageLabels])
 
   return (
     <div className="page-content" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
@@ -7647,7 +7456,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
       {/* ── LIST VIEW ── */}
       {pipelineTab === 'deals' && dealView === 'list' && (
         trackDeals.length === 0 ? (
-          <EmptyState icon="pipeline" title={`No ${track.label.toLowerCase()} deals`} message="Switch tracks above, or add a deal to this one." />
+          <EmptyState icon="pipeline" title={`No ${track.label.toLowerCase()} deals`} message="Add a deal to this track, or pick another track above." />
         ) : (
           <div style={{ flex:1, minHeight:0, overflow:'auto', border:'1px solid var(--gw-border)', borderRadius:'var(--radius-lg)', background:'#fff' }}>
             <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
@@ -7790,7 +7599,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
       <DealDrawer open={drawer} onClose={() => setDrawer(false)}
         deal={editing ? editing : { stage: defaultStage }}
-        agents={agents} contacts={contacts} properties={properties} deals={deals} dealContacts={dealContacts} propertyContacts={db.propertyContacts || []} activeAgent={activeAgent} onSave={reload} setDb={setDb} />
+        agents={agents} contacts={contacts} properties={properties} deals={deals} dealContacts={dealContacts} propertyContacts={db.propertyContacts || []} activeAgent={activeAgent} onSave={reload} onCreated={id => go?.(`deal/${id}`)} setDb={setDb} />
       {confirm && <ConfirmDialog message="This will permanently delete this deal." onConfirm={() => del(confirm)} onCancel={() => setConfirm(null)} />}
       {confirmProp && <ConfirmDialog message="Remove this listing from the pipeline? Any linked deals are kept but will be unlinked from the property." onConfirm={() => delProperty(confirmProp)} onCancel={() => setConfirmProp(null)} />}
     </div>

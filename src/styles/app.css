@@ -12,7 +12,9 @@
   --gw-sky:      #e8f0fb;
   --gw-bone:     #f5f3ef;
   --gw-chalk:    #ffffff;
-  --gw-mist:     #9aa3b2;
+  /* Secondary text. Was #9aa3b2 — 2.5:1 on white, under the 4.5:1 WCAG asks
+     for body text and hard to read in daylight on a phone. 4.8:1 now. */
+  --gw-mist:     #6b7385;
   --gw-border:   #e2e0db;
   --gw-gold:     #c9a84c;
   /* Outer field of the Wolf CRM seal — the boot screen and the light-header
@@ -1918,3 +1920,162 @@ select.form-control { cursor: pointer; }
     overflow-y: visible;
   }
 }
+
+/* ═══════════════════════════════════════════
+   READABILITY & TOUCH (Oct 2026)
+   ═══════════════════════════════════════════ */
+
+/* A visible ring for keyboard users everywhere, not just the five controls
+   that had one. Mouse and touch clicks don't trigger :focus-visible. */
+:where(a, button, input, select, textarea, [role="button"], [tabindex]):focus-visible {
+  outline: 2px solid var(--gw-azure);
+  outline-offset: 2px;
+}
+
+/* Fingers, not cursors: on a touch screen every button and field is at least
+   40px tall, and inputs use 16px text so iOS doesn't zoom the page on focus. */
+@media (pointer: coarse) {
+  .btn { min-height: 40px; }
+  .btn--sm { min-height: 36px; padding: 7px 12px; font-size: 13px; }
+  .btn--icon { min-width: 40px; min-height: 40px; display: inline-flex; align-items: center; justify-content: center; }
+  .form-control { font-size: 16px; min-height: 42px; }
+  .drawer__close { min-width: 40px; min-height: 40px; }
+}
+
+/* ── Contact: one-tap call / text / email ── */
+.contact-actions {
+  display: flex; gap: 8px; padding: 10px 16px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--gw-border); background: var(--gw-chalk);
+}
+.contact-action {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 14px; min-height: 36px; border-radius: 18px;
+  border: 1px solid var(--gw-border); background: var(--gw-chalk);
+  color: var(--gw-slate); font: 600 13px var(--font-body);
+  text-decoration: none; cursor: pointer; transition: background 120ms, border-color 120ms;
+}
+.contact-action:hover { background: var(--gw-sky); border-color: var(--gw-azure); }
+.contact-action:first-child { background: var(--gw-slate); border-color: var(--gw-slate); color: #fff; }
+.contact-action:first-child:hover { background: var(--gw-slate-2); }
+.contact-action__sub { font-weight: 500; opacity: 0.75; font-family: var(--font-mono); font-size: 12px; }
+@media (pointer: coarse) { .contact-action { min-height: 42px; } }
+
+/* ── Activity: call outcomes + follow-up ── */
+.activity-outcomes { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.activity-outcome {
+  padding: 5px 11px; border-radius: 14px; border: 1px dashed var(--gw-azure);
+  background: var(--gw-sky); color: var(--gw-azure);
+  font: 600 12px var(--font-body); cursor: pointer; transition: background 120ms, color 120ms;
+}
+.activity-outcome:hover:not(:disabled) { background: var(--gw-azure); color: #fff; border-style: solid; }
+.activity-outcome:disabled { opacity: 0.5; cursor: default; }
+@media (pointer: coarse) { .activity-outcome { padding: 9px 13px; font-size: 13px; } }
+.activity-followup {
+  display: flex; align-items: center; gap: 8px; margin-top: 8px;
+  font-size: 12px; font-weight: 600; color: var(--gw-mist);
+}
+.activity-followup .form-control { width: auto; flex: 0 1 180px; padding: 5px 8px; font-size: 12px; }
+@media (pointer: coarse) { .activity-followup .form-control { font-size: 16px; } }
+
+/* ── Contacts table → a contact list on phones ── */
+.ct-grid { display: grid; grid-template-columns: 36px 1.8fr 80px 90px 100px 1.2fr 1.6fr 1.2fr 120px 100px; }
+.ct-narrow { display: none; }
+@media (max-width: 768px) {
+  .ct-head { display: none !important; }
+  .ct-grid { grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; }
+  .ct-wide { display: none !important; }
+  .ct-narrow { display: block; }
+  .ct-sub { font-size: 12px; color: var(--gw-mist); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+  .ct-call {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 42px; height: 42px; border-radius: 50%;
+    background: var(--gw-green-light); color: var(--gw-green); text-decoration: none;
+  }
+  .ct-call:active { background: var(--gw-green); color: #fff; }
+}
+
+/* ── Dashboard: Today ── */
+.today__summary { font-size: 12px; font-weight: 600; color: var(--gw-mist); }
+.today__clear {
+  display: flex; align-items: center; gap: 8px; padding: 14px 16px;
+  border-radius: var(--radius); background: var(--gw-green-light); color: var(--gw-green);
+  font-size: 13px; font-weight: 600;
+}
+.today__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px 24px; }
+.today__section-head {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--gw-mist);
+}
+.today__count {
+  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px;
+  background: var(--gw-bone); color: var(--gw-ink); font-size: 11px; letter-spacing: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.today__more {
+  margin-left: auto; background: none; border: none; cursor: pointer;
+  color: var(--gw-azure); font: 600 12px var(--font-body); letter-spacing: 0; text-transform: none;
+}
+.today__list { list-style: none; }
+.today__row {
+  display: flex; align-items: center; gap: 10px; padding: 6px 0;
+  border-bottom: 1px solid var(--gw-border);
+}
+.today__row:last-child { border-bottom: none; }
+.today__tick {
+  width: 22px; height: 22px; flex-shrink: 0; border-radius: 50%;
+  border: 2px solid var(--gw-border); background: var(--gw-chalk); color: transparent;
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+  transition: border-color 120ms, background 120ms, color 120ms;
+}
+.today__tick:hover { border-color: var(--gw-green); color: var(--gw-green); }
+.today__tick:disabled { opacity: 0.5; cursor: default; }
+.today__main {
+  flex: 1; min-width: 0; text-align: left; background: none; border: none; cursor: pointer;
+  padding: 4px 0; font-family: var(--font-body); color: var(--gw-ink);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.today__main:hover .today__title { color: var(--gw-azure); }
+.today__title { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.today__meta {
+  font-size: 12px; color: var(--gw-mist); display: flex; align-items: center; gap: 5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.today__when { font-size: 12px; color: var(--gw-mist); white-space: nowrap; flex-shrink: 0; }
+.today__when--late { color: var(--gw-red); font-weight: 600; }
+.today__dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin: 0 7px; }
+.today__dot--lead { background: var(--gw-gold); }
+.today__dot--critical { background: var(--gw-red); }
+.today__dot--warning { background: var(--gw-amber); }
+.today__call {
+  width: 32px; height: 32px; flex-shrink: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--gw-green-light); color: var(--gw-green); text-decoration: none;
+}
+.today__call:hover { background: var(--gw-green); color: #fff; }
+@media (pointer: coarse) {
+  .today__tick { width: 30px; height: 30px; }
+  .today__call { width: 40px; height: 40px; }
+  .today__main { padding: 8px 0; }
+}
+
+/* The More sheet holds ~15 items — it scrolls rather than running off the top
+   of a short phone screen. */
+@media (max-width: 768px) {
+  .mobile-menu { max-height: calc(85dvh - 58px); overflow-y: auto; overscroll-behavior: contain; }
+  .mobile-menu__item { padding: 12px 22px; }
+  .mobile-menu__label { padding-top: 12px; }
+}
+/* Room under the last contact so the Quick Add button never covers its call button. */
+@media (max-width: 768px) { .ct-scroll { padding-bottom: 72px; } }
+
+/* ── Boot failed ── */
+.boot--error { gap: 16px; padding: 24px; text-align: center; }
+.boot--error .boot__seal { width: 120px; height: 120px; }
+.boot__error-title { color: #fff; font: 600 22px var(--font-display); }
+.boot__error-msg { color: rgba(255,255,255,0.75); font-size: 14px; line-height: 1.5; max-width: 420px; }
+.boot__error-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 4px; }
+.boot__error-signout { color: rgba(255,255,255,0.7); }
+.boot__error-signout:hover { color: #fff; background: rgba(255,255,255,0.08); }
+@media (pointer: coarse) { .activity-type { padding: 8px 13px !important; font-size: 13px !important; } }
+.boot--error .btn--primary { background: var(--gw-gold); color: var(--gw-ink); }
+.boot--error .btn--primary:hover { background: var(--gw-gold-light); }

@@ -2,23 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, pushToast } from '../components/UI.jsx'
 import { WEBHOOK_EVENTS } from '../lib/webhooks.js'
-import { geocodeQuery } from '../lib/address.js'
-
-// ─── Geocode helpers (shared with Properties radius tool) ────────────────────
-
-async function geocodeAddress(address) {
-  const q = encodeURIComponent(address)
-  try {
-    const r = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${q}`,
-      { headers: { 'User-Agent': 'GatewayCRM/1.0 (internal brokerage tool)' } }
-    )
-    const data = await r.json()
-    return data[0] ? { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) } : null
-  } catch {
-    return null
-  }
-}
+import { mutationErrorMessage } from '../lib/services/db.js'
 
 // ─── Outlook tab ──────────────────────────────────────────────────────────────
 
@@ -126,207 +110,6 @@ function OutlookSection() {
         ) : (
           <button className="btn btn--primary" onClick={connect} disabled={connecting || status === null}>
             <Icon name="mail" size={13} /> {connecting ? 'Redirecting…' : 'Connect Outlook'}
-          </button>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// ─── Mailchimp tab ────────────────────────────────────────────────────────────
-
-function MailchimpSection() {
-  const [apiKey, setApiKey]     = useState('')
-  const [listId, setListId]     = useState('')
-  const [lists, setLists]       = useState([])
-  const [showKey, setShowKey]   = useState(false)
-  const [status, setStatus]     = useState('idle')   // idle | testing | connected | error
-  const [errMsg, setErrMsg]     = useState('')
-  const [saved, setSaved]       = useState(false)
-  const [geocoding, setGeocoding] = useState(false)
-  const [geoProgress, setGeoProgress] = useState(null) // { done, total }
-
-  // Load saved config on mount
-  useEffect(() => {
-    supabase.from('integrations').select('config').eq('type', 'mailchimp').single()
-      .then(({ data }) => {
-        if (data?.config?.api_key) {
-          setApiKey(data.config.api_key)
-          setListId(data.config.list_id || '')
-          setStatus('connected')
-        }
-      })
-  }, [])
-
-  const testConnect = async () => {
-    if (!apiKey.trim()) { pushToast('Enter your Mailchimp API key', 'error'); return }
-    setStatus('testing'); setErrMsg('')
-    try {
-      const res = await fetch('/api/mailchimp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'getLists', apiKey: apiKey.trim() }),
-      })
-      const data = await res.json()
-      if (!res.ok) { setStatus('error'); setErrMsg(data.error || 'Invalid API key'); return }
-      setLists(data.lists || [])
-      if (!listId && data.lists?.length) setListId(data.lists[0].id)
-      setStatus('connected')
-      pushToast(`Connected — ${data.lists?.length} audience${data.lists?.length !== 1 ? 's' : ''} found`)
-    } catch (err) {
-      setStatus('error'); setErrMsg(err.message)
-    }
-  }
-
-  const save = async () => {
-    const { error } = await supabase.from('integrations').upsert(
-      { type: 'mailchimp', config: { api_key: apiKey.trim(), list_id: listId }, active: true, updated_at: new Date().toISOString() },
-      { onConflict: 'type' }
-    )
-    if (error) { pushToast(error.message, 'error'); return }
-    setSaved(true); pushToast('Mailchimp settings saved')
-    setTimeout(() => setSaved(false), 3000)
-  }
-
-  // Batch geocode all properties that are missing lat/lng
-  const geocodeAll = async () => {
-    const { data: props } = await supabase.from('properties')
-      .select('id, address, city, state, zip')
-      .or('lat.is.null,lng.is.null')
-    if (!props?.length) { pushToast('All properties are already geocoded ✓'); return }
-
-    setGeocoding(true)
-    setGeoProgress({ done: 0, total: props.length })
-    let done = 0
-
-    for (const p of props) {
-      // Building only — the suite is not a place a geocoder can find.
-      const addr = geocodeQuery(p)
-      const coords = await geocodeAddress(addr)
-      if (coords) {
-        await supabase.from('properties').update({ lat: coords.lat, lng: coords.lng }).eq('id', p.id)
-      }
-      done++
-      setGeoProgress({ done, total: props.length })
-      // Nominatim rate limit: 1 request/sec
-      if (done < props.length) await new Promise(r => setTimeout(r, 1100))
-    }
-
-    setGeocoding(false)
-    setGeoProgress(null)
-    pushToast(`Geocoded ${done} properties ✓`)
-  }
-
-  const dotColor = { idle: 'var(--gw-mist)', testing: 'var(--gw-azure)', connected: 'var(--gw-green)', error: 'var(--gw-red)' }
-  const dotLabel = { idle: 'Not connected', testing: 'Testing…', connected: 'Connected', error: 'Connection error' }
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {/* API key card */}
-      <div className="card" style={{ padding: 24, maxWidth: 560 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
-          <div>
-            <div style={{ fontWeight: 700, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
-              <img src="https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/mailchimp.svg" alt="" style={{ width: 18, opacity: 0.8 }} />
-              Mailchimp
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginTop: 2 }}>
-              Sync contacts to email audiences for radius mailings
-            </div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600, color: dotColor[status] }}>
-            <div style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor[status] }} />
-            {dotLabel[status]}
-          </div>
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">API Key</label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <div style={{ flex: 1, position: 'relative' }}>
-              <input
-                className="form-control"
-                type={showKey ? 'text' : 'password'}
-                value={apiKey}
-                onChange={e => { setApiKey(e.target.value); if (status !== 'idle') setStatus('idle') }}
-                placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-us6"
-                style={{ paddingRight: 36, fontFamily: showKey ? 'var(--font-mono)' : undefined, fontSize: showKey ? 11 : undefined }}
-              />
-              <button
-                onClick={() => setShowKey(s => !s)}
-                style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--gw-mist)', padding: 2 }}
-                title={showKey ? 'Hide key' : 'Show key'}
-              >
-                <Icon name={showKey ? 'eye' : 'eye'} size={14} />
-              </button>
-            </div>
-            <button
-              className={`btn btn--${status === 'connected' ? 'secondary' : 'primary'}`}
-              onClick={testConnect}
-              disabled={status === 'testing'}
-            >
-              {status === 'testing' ? 'Testing…' : status === 'connected' ? 'Re-test' : 'Connect'}
-            </button>
-          </div>
-          {errMsg && <div style={{ fontSize: 12, color: 'var(--gw-red)', marginTop: 4 }}>{errMsg}</div>}
-          <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>
-            Mailchimp → Account → Extras → API Keys → Create A Key
-          </div>
-        </div>
-
-        {status === 'connected' && lists.length > 0 && (
-          <div className="form-group">
-            <label className="form-label">Default Audience</label>
-            <select className="form-control" value={listId} onChange={e => setListId(e.target.value)}>
-              {lists.map(l => (
-                <option key={l.id} value={l.id}>
-                  {l.name}{l.stats?.member_count ? ` (${l.stats.member_count.toLocaleString()} contacts)` : ''}
-                </option>
-              ))}
-            </select>
-            <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 4 }}>
-              Default audience used when syncing radius mailings from the Properties page
-            </div>
-          </div>
-        )}
-
-        {status === 'connected' && (
-          <button className="btn btn--primary" onClick={save} style={{ minWidth: 120 }}>
-            {saved ? '✓ Saved' : 'Save Settings'}
-          </button>
-        )}
-      </div>
-
-      {/* Geocoding card */}
-      <div className="card" style={{ padding: 24, maxWidth: 560 }}>
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>Property Geocoding</div>
-          <div style={{ fontSize: 12, color: 'var(--gw-mist)', lineHeight: 1.5 }}>
-            Radius mailing uses GPS coordinates to find nearby properties. Run this once to geocode
-            all existing properties. New properties geocode automatically when saved.
-          </div>
-        </div>
-
-        {geoProgress ? (
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
-              <span>Geocoding properties…</span>
-              <span>{geoProgress.done} / {geoProgress.total}</span>
-            </div>
-            <div style={{ height: 6, background: 'var(--gw-border)', borderRadius: 3, overflow: 'hidden' }}>
-              <div style={{
-                height: '100%', borderRadius: 3, background: 'var(--gw-azure)',
-                width: `${Math.round(geoProgress.done / geoProgress.total * 100)}%`,
-                transition: 'width 400ms ease',
-              }} />
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 6 }}>
-              ~1 second per property (OpenStreetMap rate limit)
-            </div>
-          </div>
-        ) : (
-          <button className="btn btn--secondary" onClick={geocodeAll} disabled={geocoding}>
-            <Icon name="building" size={13} /> Geocode All Properties
           </button>
         )}
       </div>
@@ -452,12 +235,14 @@ function WebhooksSection() {
   }, [])
 
   const toggle = useCallback(async (wh) => {
-    await supabase.from('webhook_configs').update({ active: !wh.active }).eq('id', wh.id)
+    const { error } = await supabase.from('webhook_configs').update({ active: !wh.active }).eq('id', wh.id)
+    if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
     setWebhooks(p => p.map(w => w.id === wh.id ? { ...w, active: !wh.active } : w))
   }, [])
 
   const del = useCallback(async (id) => {
-    await supabase.from('webhook_configs').delete().eq('id', id)
+    const { error } = await supabase.from('webhook_configs').delete().eq('id', id)
+    if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
     setWebhooks(p => p.filter(w => w.id !== id))
     pushToast('Webhook deleted', 'info')
   }, [])
@@ -538,7 +323,7 @@ function WebhooksSection() {
             <li>Copy the webhook URL from Zapier and paste it above</li>
             <li>Select the events you want to trigger the Zap</li>
             <li>Click <strong>Test</strong> to send a sample payload to Zapier</li>
-            <li>Build your Zap action (Mailchimp, Slack, Google Sheets, etc.)</li>
+            <li>Build your Zap action (Slack, Google Sheets, etc.)</li>
           </ol>
         </div>
       </div>
@@ -548,33 +333,34 @@ function WebhooksSection() {
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
-export default function IntegrationsPage() {
+// Outlook is each agent's own connection. Webhooks are firm-wide — they fire
+// on every agent's deals — so only an admin sees or changes them (and the
+// database enforces it, migration 0062).
+export default function IntegrationsPage({ isAdmin }) {
   const [tab, setTab] = useState('outlook')
+  const tabs = [['outlook', 'Outlook'], ...(isAdmin ? [['webhooks', 'Zapier / Webhooks']] : [])]
 
   return (
     <div className="page-content">
       <div className="page-header">
         <div>
           <div className="page-title">Integrations</div>
-          <div className="page-sub">Connect Mailchimp, Zapier, and external tools</div>
+          <div className="page-sub">{isAdmin ? 'Your Outlook connection, and the firm’s Zapier webhooks' : 'Connect your Outlook email and calendar'}</div>
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 8, marginBottom: 24, flexWrap: 'wrap' }}>
-        {[
-          ['outlook',   'Outlook'],
-          ['mailchimp', 'Mailchimp'],
-          ['webhooks',  'Zapier / Webhooks'],
-        ].map(([id, label]) => (
-          <button key={id} className={`btn btn--${tab === id ? 'primary' : 'secondary'}`} onClick={() => setTab(id)}>
-            {label}
-          </button>
-        ))}
-      </div>
+      {tabs.length > 1 && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 24, flexWrap: 'wrap' }}>
+          {tabs.map(([id, label]) => (
+            <button key={id} className={`btn btn--${tab === id ? 'primary' : 'secondary'}`} onClick={() => setTab(id)}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
 
-      {tab === 'outlook'   && <OutlookSection />}
-      {tab === 'mailchimp' && <MailchimpSection />}
-      {tab === 'webhooks'  && <WebhooksSection />}
+      {tab === 'outlook' && <OutlookSection />}
+      {tab === 'webhooks' && isAdmin && <WebhooksSection />}
     </div>
   )
 }

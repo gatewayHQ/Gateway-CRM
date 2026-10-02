@@ -25,6 +25,7 @@
 // stay visible while the listing behind it vanished.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { fetchAllRows } from './fetchAll.js'
 const byNewest = (a, b) => new Date(b.created_at) - new Date(a.created_at)
 
 // Properties where this agent is named as a co-agent. Stored in the `details`
@@ -66,15 +67,15 @@ export async function fetchGrantedPropertyIds(client) {
  */
 export async function fetchVisibleProperties(client, { isAdmin, agentId, propertyAgentIds }) {
   if (isAdmin) {
-    return client.from('properties').select('*').order('created_at', { ascending: false })
+    return fetchAllRows(() => client.from('properties').select('*').order('created_at', { ascending: false }))
   }
   const owners = propertyAgentIds?.length ? propertyAgentIds : (agentId ? [agentId] : [])
   if (!owners.length && !agentId) return { data: [], error: null }
 
   const [ownRes, coRes, grantedIds] = await Promise.all([
     owners.length
-      ? client.from('properties').select('*').in('assigned_agent_id', owners)
-          .order('created_at', { ascending: false })
+      ? fetchAllRows(() => client.from('properties').select('*').in('assigned_agent_id', owners)
+          .order('created_at', { ascending: false }))
       : Promise.resolve({ data: [], error: null }),
     fetchCoAgentProperties(client, agentId),
     fetchGrantedPropertyIds(client),

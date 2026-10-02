@@ -22,6 +22,16 @@ export function matches(term, ...fields) {
   return fields.some(f => String(f ?? '').toLowerCase().includes(t))
 }
 
+/**
+ * Phone numbers match by digits: "515-555", "(515) 555" and "515555" all find
+ * +15155550123. Needs 3+ digits so a house number doesn't match every phone.
+ */
+export function phoneMatches(term, phone) {
+  const t = String(term || '').replace(/\D/g, '')
+  if (t.length < 3 || !phone) return false
+  return String(phone).replace(/\D/g, '').includes(t)
+}
+
 /** True when a term is long enough to be worth a query. */
 export const isSearchable = (term) => String(term || '').trim().length >= MIN_SEARCH_CHARS
 
@@ -36,7 +46,17 @@ export function searchAgentIds({ isAdmin, agents = [], visibleAgentIds = [] }) {
 
 /** Client-side fallbacks, used only when the server RPC is unavailable. */
 export const filterContacts = (rows = [], term) =>
-  rows.filter(c => matches(term, contactName(c), c.email, c.phone, c.owner_city)).slice(0, PER_SECTION)
+  rows.filter(c => matches(term, contactName(c), c.email, c.phone, c.owner_city) || phoneMatches(term, c.phone)).slice(0, PER_SECTION)
+
+/**
+ * The server's hits first, then any loaded contact it didn't return — the RPC
+ * searches by owner, so a contact visible through a shared deal (a co-agent's
+ * client) only turns up from memory.
+ */
+export function mergeContactHits(remote = [], local = []) {
+  const seen = new Set(remote.map(c => c.id))
+  return [...remote, ...local.filter(c => !seen.has(c.id))].slice(0, PER_SECTION)
+}
 
 export const filterProperties = (rows = [], term) =>
   rows.filter(p => matches(term, p.address, p.unit, streetLine(p), p.city, p.mls_number)).slice(0, PER_SECTION)

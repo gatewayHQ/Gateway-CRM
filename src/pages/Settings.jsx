@@ -21,41 +21,7 @@ const TRACKING_SCRIPT = `<!-- Gateway CRM — Lead Tracker -->
 })('https://twgwemkihpwlgliftagg.supabase.co','eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR3Z3dlbWtpaHB3bGdsaWZ0YWdnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNjkzMjAsImV4cCI6MjA5MjY0NTMyMH0.YRaCsDpExXjuPyrssFyzXP9RQktFAW7GTuEMgQq8sZU');
 </script>`
 
-const SCHEMA_SQL = `-- Run this in Supabase → SQL Editor
-
-create table if not exists visitor_events (
-  id uuid primary key default gen_random_uuid(),
-  session_key text not null,
-  agent_id uuid references agents(id) on delete set null,
-  property_address text,
-  property_url text,
-  created_at timestamptz default now()
-);
-
-create table if not exists lead_captures (
-  id uuid primary key default gen_random_uuid(),
-  session_key text,
-  agent_id uuid references agents(id) on delete set null,
-  first_name text not null,
-  last_name text not null,
-  email text not null,
-  phone text,
-  property_address text,
-  message text,
-  converted_contact_id uuid references contacts(id) on delete set null,
-  created_at timestamptz default now()
-);
-
-alter table visitor_events enable row level security;
-create policy "Public insert" on visitor_events for insert with check (true);
-create policy "Auth read" on visitor_events for select using (auth.role() = 'authenticated');
-
-alter table lead_captures enable row level security;
-create policy "Public insert" on lead_captures for insert with check (true);
-create policy "Auth read" on lead_captures for select using (auth.role() = 'authenticated');`
-
-export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnabled, activeAgentId, hideableNav, go }) {
-  const [companyName, setCompanyName] = useState('Gateway Real Estate Advisors')
+export default function SettingsPage({ db, setDb, activeAgentId, hideableNav, go }) {
   const [copied, setCopied] = useState(null)
 
   // ── Sidebar customization ──────────────────────────────────────────────────
@@ -114,13 +80,6 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
     pushToast('Copied to clipboard')
   }
 
-  const toggleWebsite = () => {
-    const next = !websiteEnabled
-    setWebsiteEnabled(next)
-    localStorage.setItem('gw_website_enabled', String(next))
-    pushToast(next ? 'Website Leads enabled' : 'Website Leads hidden')
-  }
-
   // Export is scoped to the signed-in agent, never the whole workspace. `db` is
   // loaded firm-wide for office admins, so every collection is filtered by
   // ownership here before it reaches the file.
@@ -158,15 +117,6 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
     pushToast('Your data exported successfully')
   }
 
-  const stats = [
-    { label: 'Contacts', count: (db.contacts||[]).length },
-    { label: 'Properties', count: (db.properties||[]).length },
-    { label: 'Deals', count: (db.deals||[]).length },
-    { label: 'Tasks', count: (db.tasks||[]).length },
-    { label: 'Templates', count: (db.templates||[]).length },
-    { label: 'Agents', count: (db.agents||[]).length },
-  ]
-
   const codeStyle = {
     background: '#1a1a2e', color: '#c9a84c', fontFamily: 'JetBrains Mono, monospace',
     fontSize: 11, padding: 14, borderRadius: 'var(--radius)', overflowX: 'auto',
@@ -176,17 +126,7 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
   return (
     <div className="page-content" style={{ maxWidth: 720 }}>
       <div className="page-header">
-        <div><div className="page-title">Settings</div><div className="page-sub">Workspace configuration</div></div>
-      </div>
-
-      <div className="settings-section">
-        <div className="settings-section__title">Workspace</div>
-        <div className="settings-section__sub">Basic information about your organization</div>
-        <div className="form-group" style={{ maxWidth: 400 }}>
-          <label className="form-label">Company Name</label>
-          <input className="form-control" value={companyName} onChange={e=>setCompanyName(e.target.value)} />
-        </div>
-        <button className="btn btn--primary btn--sm" onClick={() => pushToast('Settings saved')}>Save Changes</button>
+        <div><div className="page-title">Settings</div><div className="page-sub">Your sidebar, email and data</div></div>
       </div>
 
       {/* ── Sidebar Customization ── */}
@@ -236,64 +176,17 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
         )}
       </div>
 
+      {/* ── Website Integration ── (admin: it's the firm's website) */}
+      {activeAgent?.is_admin && (
       <div className="settings-section">
-        <div className="settings-section__title">Database Overview</div>
-        <div className="settings-section__sub">Current records in your CRM</div>
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:12 }}>
-          {stats.map(s => (
-            <div key={s.label} style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'14px 16px' }}>
-              <div style={{ fontSize:24, fontWeight:700, fontFamily:'var(--font-display)' }}>{s.count}</div>
-              <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:2 }}>{s.label}</div>
-            </div>
-          ))}
-        </div>
-      </div>
+        <div className="settings-section__title">Website Lead Tracking</div>
+        <div className="settings-section__sub">Send visitor activity and inquiries from the firm's website into Leads</div>
 
-      {/* ── Website Integration ── */}
-      <div className="settings-section">
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 4 }}>
-          <div>
-            <div className="settings-section__title">Website Lead Tracking</div>
-            <div className="settings-section__sub" style={{ marginBottom: 0 }}>Capture visitor activity and leads from your real estate website</div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, marginTop: 4 }}>
-            <span style={{ fontSize: 12, color: 'var(--gw-mist)' }}>{websiteEnabled ? 'Enabled' : 'Hidden'}</span>
-            <div onClick={toggleWebsite} style={{
-              width: 44, height: 24, borderRadius: 12, cursor: 'pointer', position: 'relative', flexShrink: 0,
-              background: websiteEnabled ? 'var(--gw-green)' : 'var(--gw-border)',
-              transition: 'background 200ms ease',
-            }}>
-              <div style={{
-                position: 'absolute', top: 3, left: websiteEnabled ? 23 : 3,
-                width: 18, height: 18, borderRadius: '50%', background: '#fff',
-                transition: 'left 200ms ease', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-              }} />
-            </div>
-          </div>
-        </div>
-
-        {!websiteEnabled && (
-          <div style={{ marginTop: 16, padding: '12px 14px', background: 'var(--gw-bone)', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', fontSize: 13, color: 'var(--gw-mist)' }}>
-            Toggle on when you're ready to connect your website. The "Website Leads" section will appear in the navigation.
-          </div>
-        )}
-
-        {websiteEnabled && (
+        {(
           <div style={{ marginTop: 20, display: 'flex', flexDirection: 'column', gap: 20 }}>
             <div>
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'var(--gw-slate)', color: '#fff', fontSize: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>1</span>
-                Set up your Supabase database
-              </div>
-              <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 8 }}>Go to Supabase → SQL Editor and run this once:</div>
-              <code style={codeStyle}>{SCHEMA_SQL}</code>
-              <button className="btn btn--secondary btn--sm" style={{ marginTop: 8 }} onClick={() => copy(SCHEMA_SQL, 'sql')}>
-                <Icon name="copy" size={12} /> {copied === 'sql' ? 'Copied!' : 'Copy SQL'}
-              </button>
-            </div>
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'var(--gw-slate)', color: '#fff', fontSize: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>2</span>
                 Add the tracking script to your website
               </div>
               <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 8 }}>Paste this into the <code style={{ background: 'var(--gw-bone)', padding: '1px 5px', borderRadius: 3, fontSize: 11 }}>&lt;head&gt;</code> of every page:</div>
@@ -304,14 +197,14 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
             </div>
             <div>
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'var(--gw-slate)', color: '#fff', fontSize: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>3</span>
+                <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'var(--gw-slate)', color: '#fff', fontSize: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>2</span>
                 Tag each property listing page
               </div>
               <code style={{ ...codeStyle, maxHeight: 'none' }}>{`<div data-gw-agent="AGENT-UUID-HERE"\n     data-gw-property="123 Main St, Sioux Falls, SD"></div>`}</code>
             </div>
             <div>
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'var(--gw-slate)', color: '#fff', fontSize: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>4</span>
+                <span style={{ width: 20, height: 20, borderRadius: '50%', background: 'var(--gw-slate)', color: '#fff', fontSize: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>3</span>
                 Add "Contact Agent" buttons on your listings
               </div>
               <code style={{ ...codeStyle, maxHeight: 'none' }}>{`${window.location.origin}/lead?agent=AGENT-UUID&property=123+Main+St`}</code>
@@ -332,11 +225,12 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
           </div>
         )}
       </div>
+      )}
 
       {/* ── Email Sending (Resend) ── */}
       <div className="settings-section">
         <div className="settings-section__title">Email Sending</div>
-        <div className="settings-section__sub">Send emails directly from the CRM.</div>
+        <div className="settings-section__sub">Only needed if you don't connect Outlook (Integrations) — Outlook is used first when it's connected.</div>
 
         <div style={{ maxWidth: 480 }}>
           <div className="form-group">
@@ -394,7 +288,6 @@ export default function SettingsPage({ db, setDb, websiteEnabled, setWebsiteEnab
         <div className="settings-section__sub">Gateway CRM version information</div>
         <div style={{ fontSize:13, color:'var(--gw-mist)', lineHeight:1.8 }}>
           <div>Gateway CRM <span style={{ fontFamily:'var(--font-mono)', fontSize:11 }}>v1.0.0</span></div>
-          <div>Built with React + Vite + Supabase</div>
           <div>Gateway Real Estate Advisors</div>
         </div>
       </div>

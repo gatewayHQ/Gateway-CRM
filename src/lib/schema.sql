@@ -314,6 +314,23 @@ create table if not exists activities (
 -- ─────────────────────────────────────────────────────────────────────────────
 -- DOCUMENTS  (files attached to deals)
 -- ─────────────────────────────────────────────────────────────────────────────
+-- contacts.last_contacted_at follows every call, email, meeting or showing
+-- logged against the contact (migration 0062; a note is not contact).
+create or replace function activities_stamp_last_contacted()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if new.contact_id is not null and new.type in ('call', 'email', 'meeting', 'showing') then
+    update contacts
+       set last_contacted_at = greatest(coalesce(last_contacted_at, new.created_at), new.created_at)
+     where id = new.contact_id;
+  end if;
+  return new;
+end $$;
+drop trigger if exists activities_stamp_last_contacted_trg on activities;
+create trigger activities_stamp_last_contacted_trg
+  after insert on activities
+  for each row execute function activities_stamp_last_contacted();
+
 create table if not exists documents (
   id          uuid primary key default uuid_generate_v4(),
   deal_id     uuid references deals(id) on delete cascade,
@@ -635,6 +652,7 @@ create table if not exists agent_notifications (
   id          uuid primary key default uuid_generate_v4(),
   agent_id    uuid references agents(id) on delete cascade,
   deal_id     uuid references deals(id) on delete set null,
+  contact_id  uuid references contacts(id) on delete set null,  -- migration 0062
   envelope_id text,
   title       text,
   message     text,
@@ -1605,6 +1623,9 @@ as $$
       to_tsvector('english', first_name || ' ' || last_name) @@ plainto_tsquery('english', search_term)
       or lower(email)   like '%' || lower(search_term) || '%'
       or lower(phone)   like '%' || lower(search_term) || '%'
+      -- "515-555" or "(515) 555": digits only (migration 0062).
+      or (length(regexp_replace(search_term, '\D', '', 'g')) >= 3
+          and regexp_replace(coalesce(phone, ''), '\D', '', 'g') like '%' || regexp_replace(search_term, '\D', '', 'g') || '%')
       or lower(owner_city) like '%' || lower(search_term) || '%'
     )
   order by created_at desc
@@ -2289,7 +2310,7 @@ begin
     -- here: they are owner-scoped (migration 0060, further down this file).
     'cold_call_lists','cold_call_leads',
     'conversations','messages','property_showings',
-    'listing_checklist_steps','integrations','webhook_configs',
+    'listing_checklist_steps',
     'option_values'
   ] loop
     execute format('alter table %I enable row level security', t);
@@ -2297,6 +2318,21 @@ begin
     execute format('create policy allow_all on %I for all to authenticated using (true) with check (true)', t);
   end loop;
 end $$;
+
+-- Firm-wide integrations are admin-only (migration 0062). Webhooks stay
+-- readable by every agent: the browser fires them on deal and contact events.
+alter table integrations    enable row level security;
+alter table webhook_configs enable row level security;
+drop policy if exists allow_all on integrations;
+drop policy if exists integrations_admin_only on integrations;
+create policy integrations_admin_only on integrations for all to authenticated
+  using (app_is_admin()) with check (app_is_admin());
+drop policy if exists allow_all on webhook_configs;
+drop policy if exists webhook_configs_read on webhook_configs;
+drop policy if exists webhook_configs_admin_write on webhook_configs;
+create policy webhook_configs_read on webhook_configs for select to authenticated using (true);
+create policy webhook_configs_admin_write on webhook_configs for all to authenticated
+  using (app_is_admin()) with check (app_is_admin());
 
 -- visitor_events & lead_captures accept anonymous inserts (landing pages),
 -- authenticated read only.
@@ -2804,6 +2840,9 @@ create policy contacts_agent_scope on contacts for all to authenticated
     app_is_admin()
     or assigned_agent_id in (select app_visible_agent_ids('contacts'))
     or id in (select app_visible_contact_ids())
+    -- Handoff (migration 0062): a contact the caller can see may be assigned
+    -- to any real agent in the firm.
+    or assigned_agent_id in (select id from agents)
   );
 
 -- ACTIVITIES — visible through the parent contact OR the parent deal; the

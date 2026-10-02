@@ -25,6 +25,7 @@
 
 // Supabase .in() lists travel in the request URL — chunk them so a large book
 // of business can't overflow it.
+import { fetchAllRows } from './fetchAll.js'
 const IN_CHUNK = 150
 
 async function selectInChunks(client, table, column, ids, order) {
@@ -105,11 +106,11 @@ export async function fetchCoListedDealIds(client, agentId) {
 // else gets own + team-shared + co-listed, merged and de-duplicated.
 export async function fetchVisibleDeals(client, { isAdmin, agentId, dealAgentIds }) {
   if (isAdmin) {
-    return client.from('deals').select('*').order('created_at', { ascending: false })
+    return fetchAllRows(() => client.from('deals').select('*').order('created_at', { ascending: false }))
   }
   const owners = dealAgentIds?.length ? dealAgentIds : (agentId ? [agentId] : [])
   const [ownRes, coRes] = await Promise.all([
-    client.from('deals').select('*').in('agent_id', owners).order('created_at', { ascending: false }),
+    fetchAllRows(() => client.from('deals').select('*').in('agent_id', owners).order('created_at', { ascending: false })),
     fetchCoListedDealIds(client, agentId),
   ])
   if (ownRes.error) return ownRes
@@ -127,7 +128,7 @@ export async function fetchVisibleDeals(client, { isAdmin, agentId, dealAgentIds
 
 // Commissions for exactly the deals the caller can see. Admins fetch all.
 export async function fetchVisibleCommissions(client, { isAdmin, dealIds }) {
-  if (isAdmin) return client.from('commissions').select('*')
+  if (isAdmin) return fetchAllRows(() => client.from('commissions').select('*'))
   if (!dealIds?.length) return { data: [], error: null }
   return selectInChunks(client, 'commissions', 'deal_id', dealIds)
 }

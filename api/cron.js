@@ -91,7 +91,19 @@ function thresholdLabel(t) {
   return t === 'today' ? 'TODAY' : t === '24h' ? 'tomorrow' : 'in 3 days'
 }
 
-function emailHtml(deal, dateName, dateStr, threshold, agentName, contactName, propertyAddress) {
+// The emails' "Review this deal" line, as a real button when the app's
+// address is known. ?deal=<id>: the app routes in memory, so a query param is
+// the deep link (App.jsx).
+export function dealLink(baseUrl, dealId) {
+  return baseUrl && dealId ? `${String(baseUrl).replace(/\/+$/, '')}/?deal=${encodeURIComponent(dealId)}` : null
+}
+function reviewDealCta(link) {
+  return link
+    ? `<a href="${link}" style="display:inline-block;background:#2d3561;color:#fff;font-size:14px;font-weight:600;text-decoration:none;padding:11px 22px;border-radius:6px">Review this deal →</a>`
+    : '<div style="font-size:13px;color:#4a6fa5;font-weight:600">Review this deal in Gateway CRM →</div>'
+}
+
+function emailHtml(deal, dateName, dateStr, threshold, agentName, contactName, propertyAddress, link = null) {
   const label    = thresholdLabel(threshold)
   const emphasis = threshold === 'today' ? '#c0392b' : threshold === '24h' ? '#d97706' : '#2d3561'
   const dateFormatted = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
@@ -114,7 +126,7 @@ function emailHtml(deal, dateName, dateStr, threshold, agentName, contactName, p
       ${contactName     ? `<div style="font-size:12px;color:#9aa3b2;margin-top:2px">Client: ${contactName}</div>` : ''}
     </div>
 
-    <div style="font-size:13px;color:#4a6fa5;font-weight:600">Review this deal in Gateway CRM →</div>
+    ${reviewDealCta(link)}
   </div>
   <div style="background:#f7f8fa;padding:14px 28px;font-size:11px;color:#9aa3b2">
     Hi ${agentName || 'Agent'} — this is an automated reminder from Gateway CRM. You can manage key dates in the Pipeline → Key Dates tab.
@@ -131,7 +143,7 @@ function reminderText(deal, dateName, threshold, propertyAddress) {
   return `${dateName} for "${deal}"${addr} is ${label}.`
 }
 
-async function runReminders(supabase) {
+async function runReminders(supabase, { baseUrl = null } = {}) {
   const resendKey  = process.env.RESEND_API_KEY  || ''
   const resendFrom = process.env.RESEND_FROM     || ''
 
@@ -205,7 +217,7 @@ async function runReminders(supabase) {
         if (agent?.email && resendKey && resendFrom) {
           const subjectEmoji = threshold === 'today' ? '🚨' : threshold === '24h' ? '⚠️' : '📅'
           const subject = `${subjectEmoji} ${entry.type} ${threshold === 'today' ? 'is TODAY' : threshold === '24h' ? 'is TOMORROW' : 'in 3 days'} — ${deal.title}`
-          const html  = emailHtml(deal.title, entry.type, entry.date, threshold, agent.name, contactName, propertyAddress)
+          const html  = emailHtml(deal.title, entry.type, entry.date, threshold, agent.name, contactName, propertyAddress, dealLink(baseUrl, deal.id))
           const result = await sendResend(resendKey, resendFrom, agent.email, subject, html, text)
           sends.push({ channel: 'email:agent', ...result })
         }
@@ -293,11 +305,11 @@ export default async function handler(req, res) {
   const task = (req.query?.task || 'reminders').toLowerCase()
   let result
   if (task === 'reminders') {
-    result = await runReminders(supabase)
+    result = await runReminders(supabase, { baseUrl: publicBaseUrl(req) })
   } else if (task === 'sequence' || task === 'sequence-run' || task === 'sequences') {
     result = await runSequences(supabase, req)
   } else if (task === 'nudges') {
-    result = await runNudges(supabase)
+    result = await runNudges(supabase, { baseUrl: publicBaseUrl(req) })
   } else if (task === 'boldsign-sync' || task === 'boldsign-template-sync') {
     result = await runBoldsignTemplateSync(supabase)
   } else if (task === 'scan-reconcile') {
@@ -442,7 +454,7 @@ function nudgeEmailHtml({ title, deal, agent, reason, detail, link }) {
       <div style="font-size:14px;font-weight:600">${deal}</div>
       ${detail ? `<div style="font-size:12px;color:#9aa3b2;margin-top:6px">${detail}</div>` : ''}
     </div>
-    <div style="font-size:13px;color:#4a6fa5;font-weight:600">Review this deal in Gateway CRM →</div>
+    ${reviewDealCta(link)}
   </div>
   <div style="background:#f7f8fa;padding:14px 28px;font-size:11px;color:#9aa3b2">
     Hi ${agent || 'there'} — daily nudge from Gateway CRM. You can mute these by closing the deal or completing the open items.
@@ -451,7 +463,7 @@ function nudgeEmailHtml({ title, deal, agent, reason, detail, link }) {
 </body></html>`
 }
 
-async function dispatchNudge(supabase, { agent, deal, kind, title, detail }) {
+async function dispatchNudge(supabase, { agent, deal, kind, title, detail, baseUrl = null }) {
   // Dedupe — one nudge per (agent, deal, kind, day)
   const { data: dupe } = await supabase
     .from('agent_nudges')
@@ -468,7 +480,7 @@ async function dispatchNudge(supabase, { agent, deal, kind, title, detail }) {
     const r = await sendResend(
       resendKey, resendFrom, agent.email,
       `${kind === 'review_overdue' ? '🛂 ' : kind === 'closing_soon' ? '⏳ ' : '⏰ '}${title}`,
-      nudgeEmailHtml({ title, deal: deal.title, agent: agent.name, reason: kind, detail }),
+      nudgeEmailHtml({ title, deal: deal.title, agent: agent.name, reason: kind, detail, link: dealLink(baseUrl, deal.id) }),
       detail || title,
     )
     emailOk = !!r.ok
@@ -486,7 +498,7 @@ async function dispatchNudge(supabase, { agent, deal, kind, title, detail }) {
   return { ok: true, email: emailOk }
 }
 
-async function runNudges(supabase) {
+async function runNudges(supabase, { baseUrl = null } = {}) {
   const today = new Date()
   const out   = { sent: 0, skipped: 0, kinds: { review_overdue: 0, closing_soon: 0, rotting_steps: 0 } }
 
@@ -530,7 +542,7 @@ async function runNudges(supabase) {
       const hours = (today - new Date(deal.review_requested_at)) / 3_600_000
       if (hours >= 24) {
         for (const admin of admins) {
-          const r = await dispatchNudge(supabase, {
+          const r = await dispatchNudge(supabase, { baseUrl,
             agent: admin, deal, kind: 'review_overdue',
             title: 'A deal has been waiting more than a day for your review',
             detail: `${deal.title} — submitted ${Math.round(hours)}h ago`,
@@ -550,7 +562,7 @@ async function runNudges(supabase) {
       const daysToClose = Math.round((close - today) / 86_400_000)
       const openSteps = openByDeal.get(deal.id) || 0
       if (daysToClose >= 0 && daysToClose <= 7 && openSteps > 0) {
-        const r = await dispatchNudge(supabase, {
+        const r = await dispatchNudge(supabase, { baseUrl,
           agent: primary, deal, kind: 'closing_soon',
           title: 'Closing soon — checklist not done',
           detail: `${openSteps} open item${openSteps === 1 ? '' : 's'} · closes in ${daysToClose}d`,
@@ -566,7 +578,7 @@ async function runNudges(supabase) {
       const rot  = ROT_DAYS[deal.stage] ?? DEFAULT_ROT
       const openSteps = openByDeal.get(deal.id) || 0
       if (idle >= rot && openSteps > 0) {
-        const r = await dispatchNudge(supabase, {
+        const r = await dispatchNudge(supabase, { baseUrl,
           agent: primary, deal, kind: 'rotting_steps',
           title: 'Deal has gone quiet',
           detail: `Idle ${idle}d in ${deal.stage} · ${openSteps} open checklist item${openSteps === 1 ? '' : 's'}`,

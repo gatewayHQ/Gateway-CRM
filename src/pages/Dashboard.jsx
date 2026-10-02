@@ -1,13 +1,15 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useMemo } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { syncTaskCalendar } from '../lib/services/tasks.js'
-import { formatCurrency, formatDate, STAGE_ORDER, upcomingReminders } from '../lib/helpers.js'
+import { mutationErrorMessage } from '../lib/services/db.js'
+import { formatCurrency, STAGE_ORDER, upcomingReminders } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
-import { Icon, Badge, Avatar, Loading, pushToast } from '../components/UI.jsx'
+import { Icon, pushToast } from '../components/UI.jsx'
 import SignatureQueue from '../components/SignatureQueue.jsx'
 import GettingStarted from '../components/GettingStarted.jsx'
+import TodayCard from '../components/TodayCard.jsx'
 
-export default function Dashboard({ db, setDb, activeAgent, isAdmin, go, openCompose, startNew }) {
+export default function Dashboard({ db, setDb, activeAgent, isAdmin, go, startNew, openContact }) {
   // Funnel headings follow the agent's own pipeline column names.
   const stageLabels = useStageLabels()
   const today = new Date().toDateString()
@@ -15,16 +17,10 @@ export default function Dashboard({ db, setDb, activeAgent, isAdmin, go, openCom
   const deals = db.deals || []
   const properties = db.properties || []
   const tasks = db.tasks || []
-  const agents = db.agents || []
 
   const todayTasks = tasks.filter(t => !t.completed && t.due_date && new Date(t.due_date).toDateString() === today)
   const activeDeals = deals.filter(d => d.stage !== 'closed' && d.stage !== 'lost')
   const totalDealValue = activeDeals.reduce((s, d) => s + (d.value || 0), 0)
-
-  const upcomingTasks = tasks
-    .filter(t => !t.completed && t.due_date)
-    .sort((a, b) => new Date(a.due_date) - new Date(b.due_date))
-    .slice(0, 5)
 
   const stageData = STAGE_ORDER.slice(0, 5).map(s => ({
     stage: s,
@@ -51,7 +47,7 @@ export default function Dashboard({ db, setDb, activeAgent, isAdmin, go, openCom
       completed: false,
     }
     const { data, error } = await supabase.from('tasks').insert([payload]).select().single()
-    if (error) { pushToast(error.message, 'error'); return }
+    if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
     syncTaskCalendar(data?.id)
     setDb(p => ({ ...p, tasks: [data, ...p.tasks] }))
     pushToast(`Task created for ${contact.first_name}'s ${type}`)
@@ -99,6 +95,8 @@ export default function Dashboard({ db, setDb, activeAgent, isAdmin, go, openCom
       </div>
 
       <div className="dash-grid">
+        <TodayCard db={db} setDb={setDb} activeAgent={activeAgent} go={go} openContact={openContact} />
+
         {/* FIRST, above the funnel. A bar chart of stages is a status report;
             this is a work queue with a client on the other end of every row,
             and it is the thing most likely to change what the agent does in the
@@ -125,33 +123,6 @@ export default function Dashboard({ db, setDb, activeAgent, isAdmin, go, openCom
                   <div style={{ width: 80, fontSize: 12, color: 'var(--gw-mist)', textAlign: 'right' }}>{formatCurrency(s.value)}</div>
                 </div>
               ))}
-            </div>
-          )}
-        </div>
-
-        <div className="card">
-          <div className="section-head">
-            <div className="section-title">Upcoming Tasks</div>
-            <button className="btn btn--ghost btn--sm" onClick={() => go('tasks')}>View all</button>
-          </div>
-          {upcomingTasks.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--gw-mist)', fontSize: 13 }}>No upcoming tasks</div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {upcomingTasks.map(task => {
-                const contact = (db.contacts||[]).find(c => c.id === task.contact_id)
-                const overdue = task.due_date && new Date(task.due_date) < new Date()
-                return (
-                  <div key={task.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--gw-border)' }}>
-                    <Icon name={task.type === 'call' ? 'phone' : task.type === 'email' ? 'mail' : 'tasks'} size={14} style={{ color: 'var(--gw-mist)' }} />
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13, fontWeight: 500 }}>{task.title}</div>
-                      {contact && <div style={{ fontSize: 11, color: 'var(--gw-mist)' }}>{contact.first_name} {contact.last_name}</div>}
-                    </div>
-                    <div style={{ fontSize: 11, color: overdue ? 'var(--gw-red)' : 'var(--gw-mist)', fontWeight: overdue ? 600 : 400 }}>{formatDate(task.due_date)}</div>
-                  </div>
-                )
-              })}
             </div>
           )}
         </div>

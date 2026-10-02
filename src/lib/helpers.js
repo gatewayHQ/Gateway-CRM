@@ -119,6 +119,28 @@ export const calcHeatScore = (contact, activities, deals) => {
   return 'cold'
 }
 
+/**
+ * Heat for every contact at once: activities and deals are grouped by contact
+ * in one pass, so the cost is contacts + activities + deals rather than
+ * contacts × (activities + deals) — the difference between instant and a
+ * noticeable stall once a book has thousands of each.
+ */
+export const heatScoresFor = (contacts = [], activities = [], deals = []) => {
+  const group = (rows) => {
+    const m = new Map()
+    for (const r of rows || []) {
+      if (!r?.contact_id) continue
+      const list = m.get(r.contact_id)
+      if (list) list.push(r); else m.set(r.contact_id, [r])
+    }
+    return m
+  }
+  const actsBy = group(activities), dealsBy = group(deals)
+  const out = {}
+  for (const c of contacts) out[c.id] = calcHeatScore(c, actsBy.get(c.id) || [], dealsBy.get(c.id) || [])
+  return out
+}
+
 // Days until the next annual occurrence of a date (0 = today, -1 = no date set)
 export const daysUntilAnnual = (dateStr) => {
   if (!dateStr) return -1

@@ -36,7 +36,6 @@ This document outlines:
 | E-Signature | Live | Via BoldSign |
 | Mail Campaigns + QR Tracking | Live | Custom-built |
 | Social Media Posting | Live | Via Buffer |
-| Mailchimp Sync | Live | Per-agent API keys |
 | Commission Tracking | Live | Splits & team support |
 | Document Storage | Live | Via Supabase |
 | Activity Timeline | Live | Notes, calls, meetings |
