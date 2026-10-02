@@ -285,6 +285,11 @@ body { font-family: var(--font-body); font-size: 14px; color: var(--gw-ink); bac
 .btn--ghost { background: transparent; color: var(--gw-mist); }
 .btn--ghost:hover { background: var(--gw-bone); color: var(--gw-ink); }
 .btn--sm { padding: 5px 10px; font-size: 12px; }
+/* A button that reads as an inline link. Used across the app but never styled,
+   so it fell back to the browser's grey button face. */
+.btn--link { background: transparent; color: var(--gw-azure); text-decoration: underline; text-underline-offset: 2px; }
+.btn--link:hover { color: var(--gw-ink); }
+.btn--link:disabled { color: var(--gw-mist); cursor: default; text-decoration: none; }
 .btn--icon { padding: 6px; border-radius: var(--radius); }
 
 /* FORMS */

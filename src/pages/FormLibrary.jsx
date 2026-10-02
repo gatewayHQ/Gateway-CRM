@@ -665,20 +665,17 @@ create unique index if not exists uq_form_packets_boldsign_tid
         )}
       </div>
 
-      {/* WHERE SENDING HAPPENS. This page is where agents come looking for a
-          form, but e-signature starts on the deal, not here — and nothing on
-          this page said so, so "Get Forms" (a download) was taken for the way
-          to send one. */}
-      {packets.some(p => p.boldsign_template_id && p.active) && (
-        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', background: 'var(--gw-bone)', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', padding: '10px 14px', marginBottom: 16, fontSize: 12.5, lineHeight: 1.55 }}>
-          <Icon name="send" size={14} style={{ color: 'var(--gw-azure)', flexShrink: 0, marginTop: 2 }} />
-          <span>
-            <strong>Sending a form for e-signature?</strong> Open the deal in Pipeline → <strong>Signatures</strong> tab
-            → <strong>Send from Template</strong>. Forms marked <em>Sendable</em> below are listed there and fill in
-            from the deal automatically. <strong>Get Forms</strong> here only downloads the blank PDF.
-          </span>
-        </div>
-      )}
+      {/* WHAT THIS PAGE IS FOR. Blank forms to download and print. Agents
+          came here to send a form for e-signature, which starts on the deal
+          instead — and nothing on this page said so. */}
+      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', background: 'var(--gw-bone)', border: '1px solid var(--gw-border)', borderRadius: 'var(--radius)', padding: '10px 14px', marginBottom: 16, fontSize: 12.5, lineHeight: 1.55 }}>
+        <Icon name="send" size={14} style={{ color: 'var(--gw-azure)', flexShrink: 0, marginTop: 2 }} />
+        <span>
+          <strong>Blank forms to download and print.</strong> To send a form for e-signature, open the deal in
+          Pipeline → <strong>Signatures</strong> tab → <strong>Send from Template</strong> — it fills in from the
+          deal automatically.
+        </span>
+      </div>
 
       {/* Filters */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 18, flexWrap: 'wrap' }}>

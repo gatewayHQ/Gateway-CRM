@@ -2419,13 +2419,13 @@ function ChangeSignerDialog({ env, signer, candidates, busy, onCancel, onConfirm
 }
 
 // ── First-visit guide for the Signatures tab ────────────────────────────────
-// What an empty tab shows. A new agent arrives here not knowing that the state
-// forms live in the Form Library, that they fill in from the deal, or that
-// nothing goes out until they say so — so the whole route is laid out as three
-// steps with the button for step one under it. When the deal has no sendable
-// template, it says why and who fixes it rather than leaving a button missing.
+// What an empty tab shows. A new agent arrives here not knowing that e-sign
+// forms start on the deal, that they fill in from it, or that nothing goes out
+// until they say so — so the whole route is laid out as three steps with the
+// button for step one under it. When the deal has no sendable template, it
+// says why and who fixes it rather than leaving a button missing.
 const SIGNATURE_STEPS = [
-  ['Pick a template', 'Your state’s forms from the Form Library. Deal, client and property details fill in automatically.'],
+  ['Pick a template', 'Choose the e-sign form for your state. Deal, client and property details fill in automatically.'],
   ['Review the draft', 'See exactly what your signers will get. Move or add signature boxes if this deal needs it. Nothing is sent yet.'],
   ['Send for signature', 'Confirm who gets it. Each signer is emailed a link, and this tab updates as they sign.'],
 ]
@@ -2434,7 +2434,7 @@ const SIGNATURE_STEPS = [
 // knows how far they are from sending.
 const templateStep = (n) => `Send from Template · Step ${n} of ${SIGNATURE_STEPS.length}`
 
-function SignaturesGettingStarted({ hasTemplates, templatesBroken, onTemplate, onUpload }) {
+export function SignaturesGettingStarted({ hasTemplates, templatesBroken, onTemplate, onUpload }) {
   return (
     <div style={{ maxWidth:520, margin:'12px auto 0', padding:'18px 20px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'#fff' }}>
       <div style={{ fontSize:15, fontWeight:700, color:'var(--gw-ink)', marginBottom:4 }}>Get a document signed</div>
@@ -2456,9 +2456,8 @@ function SignaturesGettingStarted({ hasTemplates, templatesBroken, onTemplate, o
         </button>
       ) : !templatesBroken && (
         <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, lineHeight:1.6 }}>
-          <strong>No e-sign templates are set up yet.</strong> Templates are the forms marked
-          {' '}<em>Sendable</em> in the Form Library (sidebar → Tools → Form Library). Ask your admin to make the
-          form you need sendable — or upload a PDF below in the meantime.
+          <strong>No e-sign templates are set up yet.</strong> Ask your admin to set up the form you need for
+          e-signature — or upload a PDF below in the meantime.
         </div>
       )}
       <div style={{ textAlign:'center', fontSize:12, color:'var(--gw-mist)', marginTop:12 }}>
@@ -3062,8 +3061,8 @@ create policy "agent_notifications_policy" on agent_notifications
           </span>
           {summary && <span style={{ fontSize:12, color:'var(--gw-mist)' }}>{envelopes.length} in all</span>}
         </div>
-        {/* TEMPLATE FIRST. Nearly every send starts from a state form in the
-            Form Library, so that is the primary button whenever one exists.
+        {/* TEMPLATE FIRST. Nearly every send starts from a state e-sign
+            template, so that is the primary button whenever one exists.
             It used to sit behind "More" as "Prepare from template…" — a name
             that read as drafting, not sending — while the primary "Send for
             Signature" was the upload-your-own-PDF path, so a new agent's first
@@ -3099,7 +3098,7 @@ create policy "agent_notifications_policy" on agent_notifications
             <button
               className="btn btn--primary btn--sm"
               onClick={() => setTplOpen(true)}
-              title="Pick a form from the Form Library — it fills in from this deal, you review it, then send"
+              title="Pick your state's e-sign form — it fills in from this deal, you review it, then send"
             >
               <Icon name="send" size={13}/> Send from Template
             </button>
@@ -4336,7 +4335,7 @@ const groupFields = (list) => {
     .filter(g => g.fields.length)
 }
 
-function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], sideClients = null, dealAgents = [], templates, activeAgent, onClose, onSent, onSaved }) {
+export function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], sideClients = null, dealAgents = [], templates, activeAgent, onClose, onSent, onSaved }) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)
   const property = properties?.find(p => p.id === deal?.property_id)
 
@@ -4350,6 +4349,10 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
   const visible   = dealState
     ? templates.filter(t => isGeneral(t) || normalizeState(t.state) === dealState)
     : templates
+  // How many of those are this state's own forms, for the line under the picker.
+  // It once read a `matched` list that no longer existed, which threw on every
+  // deal with a state and crashed the screen the moment it opened.
+  const stateFormCount = dealState ? visible.filter(t => !isGeneral(t)).length : 0
 
   // The defaults live in constants because they are also the BASELINE the
   // "has this agent changed anything?" comparison runs against (see `seeded`
@@ -5394,9 +5397,17 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           <select className="form-control" value={templateId} onChange={e => setTemplateId(e.target.value)}>
             {visible.map(t => <option key={t.template_id} value={t.template_id}>{t.name}{t.state ? ` (${t.state})` : ''}</option>)}
           </select>
-          {dealState && (
+          {dealState && visible.length > 0 && (
             <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6 }}>
-              Showing templates for {dealState}{matched.length ? '' : ' — none registered for this state yet, showing all'}.
+              {stateFormCount
+                ? `Showing ${dealState} forms and general forms.`
+                : `No ${dealState} forms are set up yet — showing general forms only.`}
+            </div>
+          )}
+          {visible.length === 0 && (
+            <div style={{ fontSize:12, color:'var(--gw-ink)', marginTop:6, lineHeight:1.5 }} role="alert">
+              <strong>No templates are set up for {dealState || 'this deal'} yet.</strong> Ask your admin to add one,
+              or close this and use <strong>Upload Your Own PDF</strong>.
             </div>
           )}
           {/* Where this form's terms come from, and whether they still match the
