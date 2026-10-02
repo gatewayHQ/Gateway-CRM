@@ -2418,6 +2418,59 @@ function ChangeSignerDialog({ env, signer, candidates, busy, onCancel, onConfirm
   )
 }
 
+// ── First-visit guide for the Signatures tab ────────────────────────────────
+// What an empty tab shows. A new agent arrives here not knowing that the state
+// forms live in the Form Library, that they fill in from the deal, or that
+// nothing goes out until they say so — so the whole route is laid out as three
+// steps with the button for step one under it. When the deal has no sendable
+// template, it says why and who fixes it rather than leaving a button missing.
+const SIGNATURE_STEPS = [
+  ['Pick a template', 'Your state’s forms from the Form Library. Deal, client and property details fill in automatically.'],
+  ['Review the draft', 'See exactly what your signers will get. Move or add signature boxes if this deal needs it. Nothing is sent yet.'],
+  ['Send for signature', 'Confirm who gets it. Each signer is emailed a link, and this tab updates as they sign.'],
+]
+
+// The eyebrow each screen of the template route wears, so an agent always
+// knows how far they are from sending.
+const templateStep = (n) => `Send from Template · Step ${n} of ${SIGNATURE_STEPS.length}`
+
+function SignaturesGettingStarted({ hasTemplates, templatesBroken, onTemplate, onUpload }) {
+  return (
+    <div style={{ maxWidth:520, margin:'12px auto 0', padding:'18px 20px', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', background:'#fff' }}>
+      <div style={{ fontSize:15, fontWeight:700, color:'var(--gw-ink)', marginBottom:4 }}>Get a document signed</div>
+      <div style={{ fontSize:12, color:'var(--gw-mist)', marginBottom:14 }}>Nothing has been sent on this deal yet. Here is how it works:</div>
+      <ol style={{ listStyle:'none', margin:'0 0 16px', padding:0 }}>
+        {SIGNATURE_STEPS.map(([title, body], i) => (
+          <li key={title} style={{ display:'flex', gap:10, marginBottom:10 }}>
+            <span style={{ width:22, height:22, borderRadius:'50%', background:'var(--gw-slate)', color:'#fff', fontSize:11, fontWeight:700, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>{i + 1}</span>
+            <span style={{ fontSize:12.5, lineHeight:1.5 }}>
+              <strong style={{ color:'var(--gw-ink)' }}>{title}</strong>
+              <span style={{ color:'var(--gw-mist)' }}> — {body}</span>
+            </span>
+          </li>
+        ))}
+      </ol>
+      {hasTemplates ? (
+        <button className="btn btn--primary" style={{ width:'100%', justifyContent:'center' }} onClick={onTemplate}>
+          <Icon name="send" size={13}/> Start: Send from Template
+        </button>
+      ) : !templatesBroken && (
+        <div style={{ background:'var(--gw-bone)', border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, lineHeight:1.6 }}>
+          <strong>No e-sign templates are set up yet.</strong> Templates are the forms marked
+          {' '}<em>Sendable</em> in the Form Library (sidebar → Tools → Form Library). Ask your admin to make the
+          form you need sendable — or upload a PDF below in the meantime.
+        </div>
+      )}
+      <div style={{ textAlign:'center', fontSize:12, color:'var(--gw-mist)', marginTop:12 }}>
+        Already have the PDF?{' '}
+        <button type="button" className="btn btn--link btn--sm" style={{ padding:0, fontSize:12 }} onClick={onUpload}>
+          Upload your own PDF instead
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function SignaturesTab({ deal, contacts, properties, extraContacts = [], sideClients = null, agents = [], activeAgent }) {
   const [envelopes,   setEnvelopes]   = React.useState([])
   const [loading,     setLoading]     = React.useState(true)
@@ -2993,6 +3046,9 @@ create policy "agent_notifications_policy" on agent_notifications
     </div>
   )
 
+  const hasTemplates = templates.length > 0
+  const canCompose   = templates.length > 1   // a packet needs at least two forms
+
   return (
     <div style={{ padding:16, overflowY:'auto', flex:1 }}>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16, flexWrap:'wrap', gap:8 }}>
@@ -3006,28 +3062,25 @@ create policy "agent_notifications_policy" on agent_notifications
           </span>
           {summary && <span style={{ fontSize:12, color:'var(--gw-mist)' }}>{envelopes.length} in all</span>}
         </div>
-        {/* ONE BUTTON, NOT FOUR. Sending a document for signature is what an
-            agent opens this tab to do; composing a packet, preparing a draft
-            from a template and building an MLS upload are the other three
-            doors into the same job and sat at nearly equal weight beside it.
-            They keep every word of their old tooltips, one click down. */}
+        {/* TEMPLATE FIRST. Nearly every send starts from a state form in the
+            Form Library, so that is the primary button whenever one exists.
+            It used to sit behind "More" as "Prepare from template…" — a name
+            that read as drafting, not sending — while the primary "Send for
+            Signature" was the upload-your-own-PDF path, so a new agent's first
+            click put them in front of a blank PDF picker. Both doors now say
+            what they start from; the rarer jobs stay one click down. */}
         <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center' }}>
           <MenuButton
             className="btn btn--secondary btn--sm"
             label={<><Icon name="more" size={13}/> More</>}
-            title="Compose a packet, prepare a draft, or build an MLS upload"
+            title="Send several forms at once, or build an MLS upload"
             items={[
-              templates.length > 1 && {
-                label: 'Compose packet…',
+              canCompose && {
+                label: 'Send several forms together…',
                 title: 'Send several forms to the same signers — together as one document, or separately',
                 onClick: () => setComposeOpen(true),
               },
-              templates.length > 0 && {
-                label: 'Prepare from template…',
-                title: "Fill a template from this deal's data and save it as a draft — print it for the client, then send when they're ready",
-                onClick: () => setTplOpen(true),
-              },
-              { divider: true },
+              canCompose && { divider: true },
               {
                 label: 'Pack for MLS…',
                 title: "Build an MLS upload from this deal's signed forms — separate files or one merged PDF. Assembled here; nothing is re-sent through BoldSign.",
@@ -3035,9 +3088,22 @@ create policy "agent_notifications_policy" on agent_notifications
               },
             ]}
           />
-          <button className="btn btn--primary btn--sm" onClick={() => setSendOpen(true)}>
-            <Icon name="send" size={13}/> Send for Signature
+          <button
+            className={`btn ${hasTemplates ? 'btn--secondary' : 'btn--primary'} btn--sm`}
+            onClick={() => setSendOpen(true)}
+            title="Upload a PDF you already have (or pick one from this deal's Documents) and place the signature fields yourself"
+          >
+            <Icon name="upload" size={13}/> Upload Your Own PDF
           </button>
+          {hasTemplates && (
+            <button
+              className="btn btn--primary btn--sm"
+              onClick={() => setTplOpen(true)}
+              title="Pick a form from the Form Library — it fills in from this deal, you review it, then send"
+            >
+              <Icon name="send" size={13}/> Send from Template
+            </button>
+          )}
         </div>
       </div>
 
@@ -3051,9 +3117,12 @@ create policy "agent_notifications_policy" on agent_notifications
       {loading
         ? <div style={{ fontSize:13, color:'var(--gw-mist)' }}>Loading…</div>
         : groups.length === 0
-          ? <div style={{ textAlign:'center', color:'var(--gw-mist)', fontSize:13, padding:'32px 0' }}>
-              No documents sent yet.<br/>Click "Send for Signature" to get started.
-            </div>
+          ? <SignaturesGettingStarted
+              hasTemplates={hasTemplates}
+              templatesBroken={Boolean(templateErr)}
+              onTemplate={() => setTplOpen(true)}
+              onUpload={() => setSendOpen(true)}
+            />
           : groups.map(group => {
               const open  = groupOpen[group.id] ?? group.open
               const tone  = GROUP_TONE[group.tone] || 'var(--gw-border)'
@@ -4088,7 +4157,7 @@ function DraftReviewStep({ documentId, documentName, previewUrl, downloadUrl, fi
     <Modal open={true} onClose={onClose} width={null} className="modal--workspace">
       <div className="modal__head">
         <div>
-          <div className="eyebrow-label">Review before sending</div>
+          <div className="eyebrow-label">{templateStep(2)} — Review</div>
           <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>{documentName || 'Draft agreement'}</h3>
         </div>
         <button className="drawer__close" onClick={onClose}><Icon name="x" size={18}/></button>
@@ -4155,7 +4224,7 @@ function DraftReviewStep({ documentId, documentName, previewUrl, downloadUrl, fi
           the WRONG people. */}
       {confirm && (
         <ConfirmDialog
-          eyebrow="Send for Signature"
+          eyebrow={templateStep(3)}
           title="Send this document to its signers?"
           confirmLabel="Send for Signature"
           busyLabel="Sending…"
@@ -5292,8 +5361,8 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
     <Modal open={true} onClose={requestClose} width={520}>
       <div className="modal__head">
         <div>
-          <div className="eyebrow-label">BoldSign · Prepare from Template</div>
-          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Prepare Draft Agreement</h3>
+          <div className="eyebrow-label">{templateStep(1)}</div>
+          <h3 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:20 }}>Pick &amp; Fill the Form</h3>
         </div>
         <button className="drawer__close" onClick={requestClose}><Icon name="x" size={18}/></button>
       </div>
@@ -5818,18 +5887,21 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           )}
         </div>
 
-        <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px' }}>
-          <strong>Nothing here sends anything.</strong> All three buttons fill the form in from this deal and save it as
-          a draft — <strong>Review Draft</strong> shows you the packet, <strong>Place Fields</strong> opens it in
-          BoldSign to move boxes first, and <strong>Save for Later</strong> just keeps it. You can get to either of the
-          first two from the other.
-          <br/>
-          <strong>Save for Later</strong> is for a packet you are not ready to send: it remembers this screen — the
-          boxes you ticked, the names you corrected, your send options — and leaves the filled draft on the Signatures
-          tab. Reopen this template on this deal and you are back where you were.
-          <br/>
-          Fill values in <em>here</em>, not on the placement screen: anything typed there is a preview and never
-          reaches the signers.
+        {/* WHAT THE BUTTONS DO, as a list an agent can scan. It was one dense
+            paragraph, and the line that matters most — nothing is sent from
+            this screen — was the one new agents kept asking about. */}
+        <div style={{ fontSize:12, color:'var(--gw-mist)', padding:'2px 2px', lineHeight:1.6 }}>
+          <strong style={{ color:'var(--gw-ink)' }}>Nothing is sent from this screen.</strong> Next you will see the
+          filled form and choose to send it.
+          <ul style={{ margin:'6px 0 0', paddingLeft:18 }}>
+            <li><strong>Next: Review Draft</strong> — see the filled form exactly as signers will (the usual next step).</li>
+            <li><strong>Place Fields in BoldSign</strong> — only if you need to move or add signature boxes first.</li>
+            <li><strong>Save for Later</strong> — keep everything on this screen and finish another time.</li>
+          </ul>
+          <div style={{ marginTop:6 }}>
+            Fill values in <em>here</em>, not on the placement screen: anything typed there is a preview and never
+            reaches the signers.
+          </div>
         </div>
       </div>
       <div className="modal__foot">
@@ -5867,7 +5939,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           disabled={sending || savingDraft || loadingDet || Boolean(detailsErr) || !details || panelBlocked}
           title="Fill this form in from the deal and show it to you — nothing is sent"
         >
-          {savingDraft ? 'Preparing…' : 'Review Draft'}
+          {savingDraft ? 'Preparing…' : 'Next: Review Draft'}
         </button>
       </div>
 
@@ -5878,7 +5950,7 @@ function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [],
           button somebody can press deliberately. */}
       {closeAsk && (
         <ConfirmDialog
-          eyebrow="BoldSign · Prepare from Template"
+          eyebrow="Send from Template"
           title="Save what you have done on this form?"
           confirmLabel="Save for Later"
           busyLabel="Saving…"
