@@ -32,6 +32,7 @@ create table if not exists agents (
     constraint agents_stage_labels_object check (jsonb_typeof(stage_labels) = 'object'),
   cap_amount      numeric,                 -- brokerage cap in dollars; null = no cap configured
   cap_anniversary date,                    -- cap year resets on this month/day; null = calendar year
+  cap_confirmed_at date,                   -- office confirmed the cap is met: 100% from here to the next anniversary (migration 0061)
   created_at timestamptz default now()
 );
 
@@ -556,6 +557,7 @@ begin
   new.no_brokerage_split := old.no_brokerage_split;
   new.cap_amount         := old.cap_amount;
   new.cap_anniversary    := old.cap_anniversary;
+  new.cap_confirmed_at   := old.cap_confirmed_at;
   return new;
 end $$;
 

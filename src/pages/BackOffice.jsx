@@ -1,8 +1,8 @@
 import React, { useState, useMemo } from 'react'
 import { saveAgentProfile } from '../lib/services/agentProfile.js'
-import { Icon, Avatar, Badge, pushToast } from '../components/UI.jsx'
+import { Icon, Avatar, Badge, ConfirmDialog, pushToast } from '../components/UI.jsx'
 import { formatMoney, formatDate } from '../lib/helpers.js'
-import { agentSliceForDeal, capWindowStart, addByParty, partyAmounts } from '../lib/commission.js'
+import { agentSliceForDeal, addByParty, partyAmounts, capStatusFor, todayIso, DEFAULTS } from '../lib/commission.js'
 import SideSplit from '../components/SideSplit.jsx'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -64,14 +64,8 @@ export function BrokerageReport({ db }) {
       }
       // Cap progress over the agent's CURRENT cap window (independent of the
       // selected report period — it answers "where do they stand right now?")
-      const winStart = capWindowStart(a.cap_anniversary)
-      let capYearPaid = 0
-      for (const d of deals) {
-        if (d.stage !== 'closed') continue
-        if (new Date(d.updated_at || d.created_at) < winStart) continue
-        capYearPaid += agentSliceForDeal(d, commByDeal.get(d.id), agents, a.id).cap
-      }
-      return { agent: a, dealsCount, volume, gci, take, capPaid, fees, capYearPaid, gciBy, takeBy }
+      const capStatus = capStatusFor(a, { deals, commissionsByDeal: commByDeal, agents })
+      return { agent: a, dealsCount, volume, gci, take, capPaid, fees, capYearPaid: capStatus.paid, capStatus, gciBy, takeBy }
     }).filter(r => r.dealsCount > 0 || r.agent.cap_amount != null || r.agent.no_brokerage_split)
       .sort((x, y) => y.take - x.take)
 
@@ -89,7 +83,8 @@ export function BrokerageReport({ db }) {
     const lines = [head.join(',')]
     for (const r of report.rows) {
       const capStatus = r.agent.no_brokerage_split ? 'Pre-paid'
-        : r.agent.cap_amount > 0 ? `${Math.round(r.capYearPaid)} / ${r.agent.cap_amount}` : 'No cap set'
+        : r.capStatus.confirmed ? `Cap met (confirmed ${r.capStatus.confirmedAt})`
+        : r.agent.cap_amount > 0 ? `${Math.round(r.capYearPaid)} / ${r.agent.cap_amount}${r.capStatus.awaiting ? ' — reached, awaiting confirmation' : ''}` : 'No cap set'
       lines.push([`"${r.agent.name}"`, r.dealsCount, r.volume, r.gci.toFixed(2), r.take.toFixed(2), by(r.takeBy, 'seller'), by(r.takeBy, 'buyer'), by(r.takeBy, 'unsplit'), r.capPaid.toFixed(2), r.fees.toFixed(2), `"${capStatus}"`].join(','))
     }
     const t = report.totals
@@ -136,8 +131,7 @@ export function BrokerageReport({ db }) {
           </thead>
           <tbody>
             {report.rows.map(r => {
-              const capPct = r.agent.no_brokerage_split ? 100
-                : r.agent.cap_amount > 0 ? Math.min(100, Math.round(r.capYearPaid / r.agent.cap_amount * 100)) : null
+              const capPct = r.capStatus.pct
               return (
                 <tr key={r.agent.id} style={{ borderTop: '1px solid var(--gw-border)' }}>
                   <td style={{ padding: '9px 12px' }}>
@@ -154,6 +148,8 @@ export function BrokerageReport({ db }) {
                   <td style={{ padding: '9px 12px', minWidth: 180 }}>
                     {r.agent.no_brokerage_split ? (
                       <Badge variant="active">Cap pre-paid</Badge>
+                    ) : r.capStatus.confirmed ? (
+                      <Badge variant="closed">Cap met · 100%</Badge>
                     ) : capPct == null ? (
                       <span style={{ fontSize: 12, color: 'var(--gw-mist)' }}>No cap set</span>
                     ) : (
@@ -184,10 +180,66 @@ export function BrokerageReport({ db }) {
   )
 }
 
+// One agent's standing this cap year, and the action it calls for.
+function CapStanding({ status, busy, onConfirm, onUndo }) {
+  if (!status) return null
+  if (status.prepaid) return <span style={{ fontSize: 12, color: 'var(--gw-mist)' }}>Pre-paid — keeps 100%</span>
+  if (status.confirmed) return (
+    <div style={{ fontSize: 12, lineHeight: 1.5 }}>
+      <Badge variant="closed">Cap met · 100%</Badge>
+      <div style={{ color: 'var(--gw-mist)', marginTop: 3 }}>
+        Confirmed {longDate(status.confirmedAt)} · until {longDate(status.until)}
+        {' '}<button type="button" className="btn btn--link btn--sm" style={{ padding: 0, fontSize: 12 }} onClick={onUndo} disabled={busy}>Undo</button>
+      </div>
+    </div>
+  )
+  if (status.amount == null || status.amount <= 0) return <span style={{ fontSize: 12, color: 'var(--gw-mist)' }}>No cap set</span>
+  return (
+    <div style={{ fontSize: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--gw-mist)', marginBottom: 3 }}>
+        <span>{fmt(status.paid)} / {fmt(status.amount)}</span><span>{status.pct}%</span>
+      </div>
+      <div style={{ height: 6, background: 'var(--gw-border)', borderRadius: 3, overflow: 'hidden', marginBottom: 6 }}>
+        <div style={{ width: `${status.pct}%`, height: '100%', background: status.reached ? 'var(--gw-amber)' : 'var(--gw-azure)' }} />
+      </div>
+      <button type="button" className={`btn btn--sm ${status.awaiting ? 'btn--primary' : 'btn--secondary'}`} onClick={onConfirm} disabled={busy}
+        title="Confirm the cap is met — the agent keeps 100% from today until their cap anniversary">
+        {status.awaiting ? 'Reached — confirm cap met' : 'Confirm cap met'}
+      </button>
+    </div>
+  )
+}
+
+// "Mar 10, 2026" — how a cap date reads on this screen.
+const longDate = (d) => (d ? new Date(d instanceof Date ? d : `${d}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '')
+
 export function CapsEditor({ db, setDb }) {
   const agents = db.agents || []
   const [drafts, setDrafts] = useState({})
   const [saving, setSaving] = useState(null)
+  const [capAsk, setCapAsk] = useState(null)   // { agent, status, undo } awaiting the admin's yes
+
+  // Each agent's standing this cap year, from the same engine as every report.
+  const commByDeal = useMemo(() => new Map((db.commissions || []).map(c => [c.deal_id, c])), [db.commissions])
+  const statuses = useMemo(() => new Map(agents.map(a => [a.id, capStatusFor(a, { deals: db.deals || [], commissionsByDeal: commByDeal, agents })])),
+    [agents, db.deals, commByDeal])
+
+  // CONFIRMING A CAP is the one step that switches an agent to 100%, so it is
+  // its own button and its own question — never a side effect of editing the
+  // cap amount. Undo clears it, for a confirmation made in error.
+  const setCapConfirmed = async (a, undo) => {
+    setSaving(a.id)
+    try {
+      const saved = await saveAgentProfile({ id: a.id, cap_confirmed_at: undo ? null : todayIso() })
+      setDb(p => ({ ...p, agents: (p.agents || []).map(x => x.id === a.id ? { ...x, ...saved } : x) }))
+      pushToast(undo ? `${a.name}'s cap confirmation removed` : `${a.name}'s cap is confirmed — they keep 100% from today`)
+      setCapAsk(null)
+    } catch (e) {
+      pushToast(e.message || `Could not update ${a.name}.`, 'error')
+    } finally {
+      setSaving(null)
+    }
+  }
 
   const draftFor = (a) => drafts[a.id] || {
     cap_amount: a.cap_amount ?? '',
@@ -235,7 +287,7 @@ export function CapsEditor({ db, setDb }) {
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
         <thead>
           <tr style={{ background: 'var(--gw-bone)', textAlign: 'left' }}>
-            {['Agent', 'Default Split %', 'Cap Amount ($)', 'Cap Anniversary', 'Cap Pre-paid / No Split', ''].map(h => (
+            {['Agent', 'Default Split %', 'Cap Amount ($)', 'Cap Anniversary', 'Cap Pre-paid / No Split', 'This cap year', ''].map(h => (
               <th key={h} style={{ padding: '9px 12px', fontSize: 11, fontWeight: 700, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}>{h}</th>
             ))}
           </tr>
@@ -266,6 +318,11 @@ export function CapsEditor({ db, setDb }) {
                 <td style={{ padding: '9px 12px' }}>
                   <input type="checkbox" checked={d.no_brokerage_split} onChange={e => setDraft(a.id, { no_brokerage_split: e.target.checked })} />
                 </td>
+                <td style={{ padding: '9px 12px', minWidth: 210 }}>
+                  <CapStanding status={statuses.get(a.id)} busy={saving === a.id}
+                    onConfirm={() => setCapAsk({ agent: a, status: statuses.get(a.id), undo: false })}
+                    onUndo={() => setCapAsk({ agent: a, status: statuses.get(a.id), undo: true })} />
+                </td>
                 <td style={{ padding: '9px 12px' }}>
                   <button className="btn btn--primary btn--sm" onClick={() => save(a)} disabled={saving === a.id}>
                     {saving === a.id ? 'Saving…' : 'Save'}
@@ -276,6 +333,22 @@ export function CapsEditor({ db, setDb }) {
           })}
         </tbody>
       </table>
+
+      {capAsk && (
+        <ConfirmDialog
+          eyebrow="Agents & Caps"
+          title={capAsk.undo ? `Remove ${capAsk.agent.name}'s cap confirmation?` : `Confirm ${capAsk.agent.name}'s cap is met?`}
+          confirmLabel={capAsk.undo ? 'Remove confirmation' : 'Confirm cap met'}
+          confirmVariant={capAsk.undo ? 'btn--danger' : 'btn--primary'}
+          busy={saving === capAsk.agent.id}
+          busyLabel="Saving…"
+          onCancel={() => setCapAsk(null)}
+          onConfirm={() => setCapConfirmed(capAsk.agent, capAsk.undo)}
+          message={capAsk.undo
+            ? `Their split (${capAsk.agent.default_split_pct ?? DEFAULTS.SPLIT_PCT}%) applies again to every deal from ${longDate(capAsk.agent.cap_confirmed_at)} on.`
+            : `They've paid ${fmt(capAsk.status?.paid || 0)} of a ${fmt(capAsk.status?.amount || 0)} cap this cap year. From today until their cap anniversary they keep 100% of their commission on every deal — less the transaction fee, which is charged on top of the cap. Deals already closed keep their split.`}
+        />
+      )}
       <div style={{ fontSize: 11.5, color: 'var(--gw-mist)', padding: '10px 12px' }}>
         Anniversary = the date the agent's cap year restarts (year is ignored; only month/day matter). Leave blank for calendar-year resets.
         "Cap pre-paid" marks agents who paid up front and keep 100% of splits — flat transaction fees still apply.

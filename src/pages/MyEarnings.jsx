@@ -14,6 +14,9 @@ import { addByParty, partyAmounts } from '../lib/commission.js'
 // caller's slice server-side — co-agents' splits never reach this browser.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Why a deal pays 100% — shown under the split so an agent can see it is not a typo.
+const SPLIT_BASIS = { cap: 'Cap met', prepaid: 'Pre-paid' }
+
 export default function MyEarnings({ activeAgent }) {
   const stageLabels       = useStageLabels()
   const [data, setData]   = useState(null)
@@ -48,7 +51,7 @@ export default function MyEarnings({ activeAgent }) {
   const { cap, ytd, deals } = data
   const open   = deals.filter(d => !d.closed && d.stage !== 'lost')
   const closed = deals.filter(d => d.closed)
-  const capPct = cap.prepaid ? 100 : (cap.amount > 0 ? Math.min(100, Math.round(cap.ytd_cap_paid / cap.amount * 100)) : 0)
+  const capPct = cap.prepaid || cap.confirmed ? 100 : (cap.amount > 0 ? Math.min(100, Math.round(cap.ytd_cap_paid / cap.amount * 100)) : 0)
   const pipelineTake = open.reduce((s, d) => s + (d.take || 0), 0)
   // Every figure says which side of the table it comes from. `by_party` is
   // computed on the server with the take itself; an older server sends none
@@ -61,12 +64,16 @@ export default function MyEarnings({ activeAgent }) {
       <td style={{ padding: '9px 12px', fontWeight: 600 }}>{d.title}</td>
       <td style={{ padding: '9px 12px' }}><Badge variant={d.stage === 'closed' ? 'closed' : d.stage === 'lost' ? 'lost' : 'lead'}>{stageLabels[d.stage] || d.stage}</Badge></td>
       <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{d.value > 0 ? formatCurrency(d.value) : '—'}</td>
+      <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{d.allocation > 0 ? formatMoney(d.allocation) : '—'}</td>
+      <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', color: 'var(--gw-mist)' }}>
+        {d.split_pct != null ? `${d.split_pct}%` : '—'}
+        {SPLIT_BASIS[d.basis] && <div style={{ fontSize: 11, color: 'var(--gw-green)', fontWeight: 600 }}>{SPLIT_BASIS[d.basis]}</div>}
+      </td>
+      <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', color: 'var(--gw-mist)' }}>{d.fees > 0 ? `− ${formatMoney(d.fees)}` : '—'}</td>
       <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', fontWeight: 700, color: 'var(--gw-green)' }}>
         {formatMoney(d.take)}
         <SideSplit parts={dealParts(d)} />
       </td>
-      <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', color: 'var(--gw-mist)' }}>{d.split_pct != null ? `${d.split_pct}%` : '—'}</td>
-      <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', color: 'var(--gw-mist)' }}>{d.fees > 0 ? formatMoney(d.fees) : '—'}</td>
       <td style={{ padding: '9px 12px', whiteSpace: 'nowrap', color: 'var(--gw-mist)' }}>{d.closed_at ? formatDate(d.closed_at) : '—'}</td>
     </tr>
   )
@@ -76,7 +83,7 @@ export default function MyEarnings({ activeAgent }) {
       <div className="page-header">
         <div>
           <div className="page-title">My Earnings</div>
-          <div className="page-sub">Your commissions only — splits are entered and managed by the office.</div>
+          <div className="page-sub">What you really take home: your share of each commission, after your split with the office and the transaction fee.</div>
         </div>
         <button className="btn btn--secondary btn--sm" onClick={() => { setData(null); load() }}><Icon name="refresh" size={13} /> Refresh</button>
       </div>
@@ -122,15 +129,22 @@ export default function MyEarnings({ activeAgent }) {
               : cap.amount > 0
                 ? `${formatMoney(cap.ytd_cap_paid)} of ${formatMoney(cap.amount)} · resets ${cap.anniversary ? formatDate(cap.anniversary).replace(/, \d{4}$/, '') : 'Jan 1'}`
                 : 'No cap configured — ask the office to set yours'}
+            {!cap.prepaid && !cap.confirmed && cap.split_pct != null && cap.amount > 0 && <> · your split is {cap.split_pct}% until it&rsquo;s met</>}
           </div>
         </div>
         <div style={{ height: 10, background: 'var(--gw-border)', borderRadius: 5, overflow: 'hidden' }}>
           <div style={{ width: `${capPct}%`, height: '100%', borderRadius: 5, transition: 'width 400ms ease',
             background: cap.capped ? 'var(--gw-green)' : 'var(--gw-azure)' }} />
         </div>
-        {cap.capped && !cap.prepaid && (
+        {cap.confirmed && (
           <div style={{ fontSize: 12, color: 'var(--gw-green)', fontWeight: 700, marginTop: 8 }}>
-            🎉 Cap hit — every split from here is 100% yours (flat fees still apply).
+            🎉 Cap met — confirmed by the office{cap.confirmed_at ? ` on ${formatDate(cap.confirmed_at)}` : ''}. You keep 100% of every
+            commission until {cap.confirmed_until ? formatDate(cap.confirmed_until) : 'your cap anniversary'} (the transaction fee still applies).
+          </div>
+        )}
+        {cap.awaiting_confirmation && (
+          <div style={{ fontSize: 12, color: 'var(--gw-amber)', fontWeight: 700, marginTop: 8 }}>
+            You&rsquo;ve reached your cap. Once the office confirms it, you keep 100% of every commission from that day on.
           </div>
         )}
       </div>
@@ -138,13 +152,13 @@ export default function MyEarnings({ activeAgent }) {
       {/* ── Deals ── */}
       {deals.length === 0 ? (
         <EmptyState icon="commission" title="No commission entries yet"
-          message="When the office enters a commission on one of your deals, your numbers appear here." />
+          message={'Enter the commission on a deal\u2019s Details tab and your take-home appears here — after your split and the transaction fee.'} />
       ) : (
         <div style={{ border: '1px solid var(--gw-border)', borderRadius: 'var(--radius-lg)', background: '#fff', overflow: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr style={{ background: 'var(--gw-bone)', textAlign: 'left' }}>
-                {['Deal', 'Stage', 'Sale Price', 'Your Take', 'Your Split', 'Fee', 'Closed'].map(h => (
+                {['Deal', 'Stage', 'Sale Price', 'Your Share', 'Your Split', 'Fee', 'You Take Home', 'Closed'].map(h => (
                   <th key={h} style={{ padding: '9px 12px', fontSize: 11, fontWeight: 700, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</th>
                 ))}
               </tr>

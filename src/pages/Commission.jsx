@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { Icon, Avatar, Badge, Drawer, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatCurrency, formatMoney } from '../lib/helpers.js'
@@ -6,7 +6,7 @@ import { fetchVisibleDeals, fetchVisibleCommissions } from '../lib/services/deal
 import MyEarnings from './MyEarnings.jsx'
 import { BrokerageReport, CapsEditor } from './BackOffice.jsx'
 import {
-  computeCommission, normalizeCommission, breakdownForDeal, agentSliceForDeal,
+  computeCommission, normalizeCommission, breakdownForDeal, agentSliceForDeal, capStatusFor, agentArrangement,
   makeSide, makeParticipant, describeDealCommission, partyForSide, addByParty, partyAmounts,
   PARTY_LABELS, DEFAULTS,
 } from '../lib/commission.js'
@@ -31,29 +31,6 @@ const COMMISSION_SQL = `create table if not exists commissions (
 );
 alter table commissions enable row level security;
 create policy "Auth all" on commissions for all using (auth.role() = 'authenticated');`
-
-// ── Cap Celebration Modal ──────────────────────────────────────────────────────
-function CapCelebration({ agentName, onClose }) {
-  return (
-    <div style={{ position:'fixed', inset:0, background:'rgba(10,14,28,0.7)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1200, padding:24 }}
-      onClick={onClose}>
-      <div style={{ background:'#fff', borderRadius:20, padding:'40px 48px', textAlign:'center', maxWidth:440, boxShadow:'0 24px 60px rgba(0,0,0,0.25)', animation:'fabIn 300ms ease' }}
-        onClick={e=>e.stopPropagation()}>
-        <div style={{ fontSize:64, marginBottom:8 }}>🎉</div>
-        <div style={{ fontFamily:'var(--font-display)', fontSize:28, fontWeight:700, color:'var(--gw-slate)', marginBottom:8 }}>
-          Cap Hit!
-        </div>
-        <div style={{ fontSize:15, color:'var(--gw-mist)', lineHeight:1.6, marginBottom:24 }}>
-          Congratulations{agentName ? `, ${agentName}` : ''}! 🥳<br />
-          You've reached your brokerage cap. Every commission from here on is <strong>100% yours</strong>.
-        </div>
-        <button className="btn btn--primary" style={{ width:'100%', justifyContent:'center', fontSize:15, padding:'12px 0' }} onClick={onClose}>
-          Let's keep closing! 🚀
-        </button>
-      </div>
-    </div>
-  )
-}
 
 // ── Commission Drawer (structured editor) ───────────────────────────────────
 // Handles the simple case (one side, one agent at their default split) and the
@@ -149,13 +126,10 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
 
   const pickAgent = (id, agentId) => {
     const a = agents.find(x => x.id === agentId)
-    setPart(id, {
-      agent_id: agentId,
-      name: a?.name || '',
-      // Pull this agent's stored default arrangement so the common case is zero-typing.
-      no_split: a?.no_brokerage_split === true,
-      split_pct: a?.no_brokerage_split ? 100 : Number(a?.default_split_pct ?? D_AGENT),
-    })
+    // The agent's own arrangement — their split, pre-paid, or a cap the office
+    // has confirmed for this deal's date — so the common case is zero-typing.
+    const { split_pct, no_split, basis } = agentArrangement(a, deal)
+    setPart(id, { agent_id: agentId, name: a?.name || '', no_split, split_pct, basis })
   }
 
   const addParticipant = () => {
@@ -185,10 +159,18 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
     // Write BOTH the structured shape (authoritative) and best-effort legacy
     // scalar columns, so any older report path still renders something sane.
     const primary = result.primary
+    // A confirmed cap is applied when the deal is READ, never saved into it:
+    // store the agent's underlying split, so undoing the confirmation (or the
+    // cap year resetting) puts this deal back on that split by itself.
+    const participants = form.participants.map(p => {
+      if (p.basis !== 'cap') return p
+      const a = agents.find(x => x.id === p.agent_id)
+      return { ...p, no_split: false, split_pct: Number(a?.default_split_pct ?? D_AGENT), basis: 'split' }
+    })
     const payload = {
       deal_id: deal.id,
       sides: effectiveSides,
-      participants: form.participants,
+      participants,
       // Legacy mirror (single-side blended view):
       gross_pct:       result.effective_rate_pct,
       referral_pct:    result.gross_total > 0 ? Math.round(result.referral_total / result.gross_total * 1000) / 10 : 0,
@@ -361,10 +343,16 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
                   </div>
                 </div>
 
-                <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, margin:'10px 0 6px', cursor:'pointer' }}>
-                  <input type="checkbox" checked={!!p.no_split} onChange={e=>setPart(p.id,{ no_split:e.target.checked })} />
-                  <span>Keeps 100% — no brokerage split (capped / referred co-agent)</span>
-                </label>
+                {p.basis === 'cap' ? (
+                  <div style={{ fontSize:12, margin:'10px 0 6px', padding:'6px 9px', borderRadius:'var(--radius)', background:'var(--gw-green-light)', color:'var(--gw-green)', fontWeight:600 }}>
+                    Cap met — keeps 100% (confirmed by the office in Agents &amp; Caps)
+                  </div>
+                ) : (
+                  <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, margin:'10px 0 6px', cursor:'pointer' }}>
+                    <input type="checkbox" checked={!!p.no_split} onChange={e=>setPart(p.id,{ no_split:e.target.checked })} />
+                    <span>Keeps 100% — no brokerage split (pre-paid / referred co-agent)</span>
+                  </label>
+                )}
 
                 {!p.no_split && (
                   <div>
@@ -768,14 +756,6 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
   const [filterAgent, setFilterAgent] = useState('')
   const [filterCategory, setFilterCategory] = useState('all')
   const [copied, setCopied]           = useState(false)
-  const [celebration, setCelebration] = useState(false)
-  const [prevCapHit, setPrevCapHit]   = useState(false)
-
-  // Cap amount: database first (Agents & Caps tab), legacy localStorage fallback
-  const capKey   = `gw_cap_${activeAgent?.id || 'default'}`
-  const [capAmt, setCapAmt] = useState(() => Number(activeAgent?.cap_amount ?? localStorage.getItem(capKey) ?? 25000))
-
-  const saveCapAmt = (val) => { setCapAmt(val); localStorage.setItem(capKey, String(val)) }
 
   const deals       = db.deals       || []
   const agents      = db.agents      || []
@@ -862,25 +842,15 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
   // Team total
   const teamTotal = agentBreakdown.reduce((s, a) => s + a.agent, 0)
 
-  // Cap tracking — for the active agent's closed deals this year
-  const thisYear = new Date().getFullYear()
-  const activeAgentClosedDeals = closedDeals.filter(d => {
-    if (new Date(d.updated_at || d.created_at).getFullYear() !== thisYear) return false
-    const r = breakdownForDeal(d, getComm(d.id), agents)
-    return d.agent_id === activeAgent?.id || r.participants.some(p => p.agent_id === activeAgent?.id)
-  })
-  const ytdBrokerFees  = activeAgentClosedDeals.reduce((s, d) => s + agentSlice(d, activeAgent?.id).cap, 0)
-  const ytdAgentEarned = activeAgentClosedDeals.reduce((s, d) => s + agentSlice(d, activeAgent?.id).agent, 0)
-  const capPct = capAmt > 0 ? Math.min(100, Math.round(ytdBrokerFees / capAmt * 100)) : 0
-  const capHit = capAmt > 0 && ytdBrokerFees >= capAmt
-
-  // Trigger celebration once when cap is first hit
-  useEffect(() => {
-    if (capHit && !prevCapHit && ytdBrokerFees > 0) {
-      setCelebration(true)
-    }
-    setPrevCapHit(capHit)
-  }, [capHit])
+  // Caps the office still has to confirm: agents whose split paid this cap
+  // year has reached their cap. Confirming (Agents & Caps) is what switches
+  // them to 100% on every deal from then on — no per-deal edits.
+  const capsToConfirm = React.useMemo(() => {
+    const commByDeal = new Map(commissions.map(c => [c.deal_id, c]))
+    return agents
+      .map(a => ({ agent: a, status: capStatusFor(a, { deals, commissionsByDeal: commByDeal, agents }) }))
+      .filter(x => x.status.awaiting)
+  }, [agents, deals, commissions])
 
   // ── Filtered table ───────────────────────────────────────────────────────────
   let filtered = deals
@@ -936,12 +906,17 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
           <div style={{ display:'flex', background:'var(--gw-bone)', borderRadius:'var(--radius)', padding:3, gap:2 }}>
             {[['tracker','Tracker'],['report','Brokerage Report'],['caps','Agents & Caps']].map(([id, label]) => (
-              <button key={id} onClick={() => setBoTab(id)} style={{
+              <button key={id} onClick={() => setBoTab(id)} title={id === 'caps' && capsToConfirm.length ? `${capsToConfirm.length} cap${capsToConfirm.length === 1 ? '' : 's'} to confirm` : undefined} style={{
                 padding:'5px 14px', border:'none', borderRadius:'var(--radius)', cursor:'pointer',
                 fontFamily:'var(--font-body)', fontSize:12, fontWeight:600,
                 background: boTab === id ? 'var(--gw-slate)' : 'transparent',
                 color: boTab === id ? '#fff' : 'var(--gw-mist)', transition:'all 150ms ease',
-              }}>{label}</button>
+              }}>
+                {label}
+                {id === 'caps' && capsToConfirm.length > 0 && (
+                  <span style={{ marginLeft:6, background:'var(--gw-gold)', color:'#fff', borderRadius:9, padding:'0 6px', fontSize:10.5, fontWeight:700 }}>{capsToConfirm.length}</span>
+                )}
+              </button>
             ))}
           </div>
           {boTab === 'tracker' && <button className="btn btn--secondary btn--sm" onClick={reload}><Icon name="refresh" size={13} /> Refresh</button>}
@@ -1003,44 +978,19 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
         </div>
       </div>
 
-      {/* ── Cap Tracker (active agent) ── */}
-      {activeAgent && (
-        <div className="card" style={{ marginBottom:20, padding:'18px 20px' }}>
-          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
-            <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-              <Avatar agent={activeAgent} size={32} />
-              <div>
-                <div style={{ fontWeight:700, fontSize:14 }}>{activeAgent.name}'s Cap Tracker</div>
-                <div style={{ fontSize:12, color:'var(--gw-mist)' }}>
-                  {thisYear} YTD · Broker fees paid: <strong>{formatMoney(ytdBrokerFees)}</strong> of <strong>{formatMoney(capAmt)}</strong> cap
-                </div>
-              </div>
+      {/* ── Caps to confirm ── */}
+      {capsToConfirm.length > 0 && (
+        <div className="card" style={{ marginBottom:20, padding:'14px 18px', borderLeft:'4px solid var(--gw-gold)', display:'flex', alignItems:'center', gap:14, flexWrap:'wrap' }}>
+          <div style={{ flex:1, minWidth:220 }}>
+            <div style={{ fontWeight:700, fontSize:14 }}>
+              {capsToConfirm.length} agent{capsToConfirm.length === 1 ? ' has' : 's have'} reached their cap
             </div>
-            {capHit && (
-              <span style={{ background:'#fef9ec', border:'1px solid var(--gw-amber)', borderRadius:20, padding:'4px 12px', fontSize:12, fontWeight:700, color:'#856404' }}>
-                🎉 CAP HIT!
-              </span>
-            )}
+            <div style={{ fontSize:12, color:'var(--gw-mist)', marginTop:2 }}>
+              {capsToConfirm.map(x => `${x.agent.name} (${formatMoney(x.status.paid)} of ${formatMoney(x.status.amount)})`).join(' · ')}
+              {' '}— confirm to pay them 100% from today.
+            </div>
           </div>
-
-          {/* Progress bar */}
-          <div style={{ height:10, background:'var(--gw-border)', borderRadius:5, overflow:'hidden', marginBottom:10 }}>
-            <div style={{ width:`${capPct}%`, height:'100%', background: capHit ? 'var(--gw-green)' : capPct > 75 ? 'var(--gw-amber)' : 'var(--gw-azure)', borderRadius:5, transition:'width 400ms ease' }} />
-          </div>
-          <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, color:'var(--gw-mist)', marginBottom:14 }}>
-            <span>{capPct}% to cap</span>
-            <span>Agent kept YTD: <strong style={{ color:'var(--gw-green)' }}>{formatMoney(ytdAgentEarned)}</strong></span>
-          </div>
-
-          {/* Cap slider */}
-          <div style={{ display:'flex', alignItems:'center', gap:12 }}>
-            <span style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap' }}>Set Cap:</span>
-            <input type="range" min="5000" max="100000" step="1000" value={capAmt}
-              onChange={e => saveCapAmt(Number(e.target.value))}
-              style={{ flex:1, accentColor:'var(--gw-azure)' }} />
-            <span style={{ fontSize:13, fontWeight:700, minWidth:72, textAlign:'right' }}>{formatMoney(capAmt)}</span>
-            {capHit && <button className="btn btn--secondary btn--sm" onClick={() => setCelebration(true)}>🎉</button>}
-          </div>
+          <button className="btn btn--primary btn--sm" onClick={() => setBoTab('caps')}>Review &amp; confirm</button>
         </div>
       )}
 
@@ -1099,7 +1049,7 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
           {agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
         <span style={{ fontSize:12, color:'var(--gw-mist)', marginLeft:'auto' }}>
-          Defaults: {D_GROSS}% gross · {D_AGENT}/{D_BROKER} agent/broker. Click edit to customize.
+          Each agent's split, cap and pre-paid status come from Agents &amp; Caps · {D_GROSS}% gross when none is entered. Click edit to customize a deal.
         </span>
       </div>
 
@@ -1196,9 +1146,6 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
         <CommissionDrawer open={drawer} onClose={()=>setDrawer(false)} deal={selectedDeal} commission={getComm(selectedDeal.id)} agents={agents} onSave={reload} />
       )}
 
-      {celebration && (
-        <CapCelebration agentName={activeAgent?.name} onClose={()=>setCelebration(false)} />
-      )}
     </div>
   )
 }

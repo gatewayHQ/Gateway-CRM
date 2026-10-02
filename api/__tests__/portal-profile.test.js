@@ -205,3 +205,21 @@ describe('sanitizeProfilePayload — stage labels', () => {
       .toEqual({ stage_labels: {} })
   })
 })
+
+describe('cap confirmation (migration 0061)', () => {
+  it('only an admin can confirm a cap', () => {
+    expect(sanitizeProfilePayload({ cap_confirmed_at: '2026-03-10' }, { isAdmin: false }).payload).not.toHaveProperty('cap_confirmed_at')
+    expect(sanitizeProfilePayload({ cap_confirmed_at: '2026-03-10' }, { isAdmin: true }).payload.cap_confirmed_at).toBe('2026-03-10')
+  })
+  it('a blank date undoes the confirmation; a malformed one is refused', () => {
+    expect(sanitizeProfilePayload({ cap_confirmed_at: '' }, { isAdmin: true }).payload.cap_confirmed_at).toBeNull()
+    expect(sanitizeProfilePayload({ cap_confirmed_at: 'March 10' }, { isAdmin: true }).error).toMatch(/date/)
+  })
+  it('a confirmation the guard froze is reported, not swallowed', () => {
+    expect(verifyPrivilegedWrite({ cap_confirmed_at: '2026-03-10' }, { cap_confirmed_at: null })).toEqual(['cap_confirmed_at'])
+    expect(verifyPrivilegedWrite({ cap_confirmed_at: '2026-03-10' }, { cap_confirmed_at: '2026-03-10' })).toEqual([])
+  })
+  it('names the migration when the column is missing', () => {
+    expect(profileDbError({ message: 'column "cap_confirmed_at" of relation "agents" does not exist' })).toMatch(/0061/)
+  })
+})

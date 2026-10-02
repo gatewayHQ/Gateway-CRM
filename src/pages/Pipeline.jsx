@@ -15,7 +15,7 @@ import {
 } from '../lib/pipeline.js'
 import { isResidentialPropertyType } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
-import { describeDealCommission, dealRepresents, totalEntryForSides, PARTY_LABELS } from '../lib/commission.js'
+import { describeDealCommission, dealRepresents, totalEntryForSides, agentSliceForDeal, PARTY_LABELS } from '../lib/commission.js'
 import { agentIdsOnDeal, coAgentIdsForNewDeal, dealCoAgentIds, propertyCoAgentIds, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import {
   propertyContactIds, propertyExtrasNotOnDeal, seedPickerFromProperty,
@@ -6049,12 +6049,39 @@ function CommissionEntry({ title, type, pct, flat, dealValue, onChange }) {
   )
 }
 
+// What the deal's agent takes home from what was just typed: their share,
+// their split with the office (or 100% once their cap is confirmed), and the
+// transaction fee — the same engine My Earnings uses. An estimate, because the
+// back office can still set a custom split on the deal.
+function TakeHomeEstimate({ form, deal, agents, viewerId }) {
+  if (!form.agent_id) return null
+  // The saved deal's dates decide which split applies (a closed deal keeps the
+  // split it closed on) — the form doesn't carry them.
+  const draft = { ...form, id: deal?.id || 'draft', updated_at: deal?.updated_at, created_at: deal?.created_at }
+  const slice = agentSliceForDeal(draft, null, agents || [], form.agent_id)
+  if (!slice.onDeal || slice.gross <= 0) return null
+  const who = form.agent_id === viewerId ? 'You take home' : `${(agents || []).find(a => a.id === form.agent_id)?.name?.split(' ')[0] || 'The agent'} takes home`
+  const basis = slice.basis === 'cap' ? '100% — cap met' : slice.basis === 'prepaid' ? '100% — pre-paid' : `${slice.splitPct}% split`
+  return (
+    <div style={{ background:'var(--gw-green-light)', border:'1px solid #b8dccd', borderRadius:'var(--radius)', padding:'10px 12px', fontSize:12, marginTop:10 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline' }}>
+        <span style={{ color:'var(--gw-green)', fontWeight:600 }}>{who}</span>
+        <strong style={{ fontSize:15, color:'var(--gw-green)' }}>{formatCurrency(slice.take)}</strong>
+      </div>
+      <div style={{ color:'var(--gw-mist)', marginTop:3, lineHeight:1.5 }}>
+        {formatCurrency(slice.allocation)} share · {basis}{slice.fees > 0 ? ` · − ${formatCurrency(slice.fees)} transaction fee` : ''}.
+        {' '}Estimate — the office confirms the final split.
+      </div>
+    </div>
+  )
+}
+
 // The deal's commission, by side. A deal representing ONE side has one entry,
 // labeled with the side it comes from. A deal representing BOTH asks for each
 // side separately (comp_data.commission_sides) and writes their total back to
 // commission_type / commission_pct / commission_flat, so anything that reads
 // only the total — agreement fields, older reports — still gets the real number.
-export function CommissionFields({ form, set, apply }) {
+export function CommissionFields({ form, deal, set, apply, agents, viewerId }) {
   const value = Number(form.value) || 0
   const represents = dealRepresents(form)
 
@@ -6074,8 +6101,9 @@ export function CommissionFields({ form, set, apply }) {
           }}
         />
         <div style={{ fontSize:11, color:'var(--gw-mist)' }}>
-          The total commission on your {represents} side — the back office splits it from here.
+          The total commission on your {represents} side.
         </div>
+        <TakeHomeEstimate form={form} deal={deal} agents={agents} viewerId={viewerId} />
       </div>
     )
   }
@@ -6114,6 +6142,7 @@ export function CommissionFields({ form, set, apply }) {
           <strong style={{ fontSize:14 }}>{formatCurrency(summary.gross)}</strong>
         </div>
       )}
+      <TakeHomeEstimate form={form} deal={deal} agents={agents} viewerId={viewerId} />
     </div>
   )
 }
@@ -6774,7 +6803,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
             </div>
 
             {/* ── Commission ────────────────────────────────────── */}
-            <CommissionFields form={form} set={set} apply={applyTrackChange} />
+            <CommissionFields form={form} deal={deal} set={set} apply={applyTrackChange} agents={agents} viewerId={activeAgent?.id} />
 
             {/* ── Comp Data ─────────────────────────────────────── */}
             <div style={{ borderTop:'1px solid var(--gw-border)', paddingTop:14, marginTop:4 }}>

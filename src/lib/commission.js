@@ -75,22 +75,90 @@ const round1 = (n) => Math.round((n + Number.EPSILON) * 10) / 10
 /** Stable id for new participants/sides created in the UI. */
 export const uid = () => Math.random().toString(36).slice(2, 10)
 
+// ── The agent's own arrangement with the office ─────────────────────────────
+// What an agent keeps of their allocation comes from THEIR row on `agents`,
+// set once by the office in Back Office → Agents & Caps:
+//   • no_brokerage_split — pre-paid / no split: keeps 100%, always
+//   • cap_confirmed_at   — the office confirmed the cap is met: keeps 100% on
+//                          every deal from that date to the cap anniversary,
+//                          when the cap year resets
+//   • default_split_pct  — otherwise, the agent's split (house keeps the rest)
+// It used to apply only once the back office had saved a split on each deal;
+// until then every agent read as 70/30 with no fee, so the take-home an agent
+// saw was wrong on exactly the deals nobody had touched yet.
+
+// Parse a date column as local noon, so a date-only value never slips a day.
+const parseDay = (v) => {
+  if (!v) return null
+  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(v) ? `${v}T12:00:00` : v)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+/**
+ * The date a deal's commission counts on: the day it closed (its last update,
+ * the same date every report attributes a closing to), or for an open deal its
+ * expected close — never earlier than today, since it can't close in the past.
+ */
+export function dealCommissionDate(deal, now = new Date()) {
+  if (deal?.stage === 'closed') return parseDay(deal.updated_at || deal.created_at) || now
+  const expected = parseDay(deal?.expected_close_date)
+  return expected && expected > now ? expected : now
+}
+
+/** The end of the cap year an office-confirmed cap applies to — the next anniversary. */
+export function capConfirmedUntil(agent) {
+  const confirmed = parseDay(agent?.cap_confirmed_at)
+  if (!confirmed) return null
+  const end = capWindowStart(agent.cap_anniversary, confirmed)
+  end.setFullYear(end.getFullYear() + 1)
+  return end
+}
+
+/** Whether the office's cap confirmation covers a deal counting on `date`. */
+export function capCovers(agent, date) {
+  const confirmed = parseDay(agent?.cap_confirmed_at)
+  if (!confirmed || !date) return false
+  return date >= confirmed && date < capConfirmedUntil(agent)
+}
+
+/**
+ * The split an agent works on for a deal, and why: 'prepaid' and 'cap' keep
+ * 100% (the flat transaction fee still applies — it is charged on top of the
+ * cap), 'split' is their default share.
+ */
+export function agentArrangement(agent, deal) {
+  if (agent?.no_brokerage_split === true) return { split_pct: 100, no_split: true, basis: 'prepaid' }
+  if (capCovers(agent, dealCommissionDate(deal))) return { split_pct: 100, no_split: true, basis: 'cap' }
+  return { split_pct: num(agent?.default_split_pct, DEFAULTS.SPLIT_PCT), no_split: false, basis: 'split' }
+}
+
 /**
  * Build a fresh participant row. `agent` (optional) seeds the split from the
- * agent's stored default so the common case needs zero extra typing.
+ * agent's own arrangement — including a confirmed cap on this `deal` — so the
+ * common case needs zero extra typing.
  */
-export function makeParticipant({ agent = null, role = 'primary', allocation_pct = 100 } = {}) {
-  const noSplit = agent?.no_brokerage_split === true
+export function makeParticipant({ agent = null, deal = null, role = 'primary', allocation_pct = 100 } = {}) {
+  const arrangement = agentArrangement(agent, deal)
   return {
     id: uid(),
     agent_id: agent?.id || '',
     name: agent?.name || '',
     role,                              // 'primary' | 'co'
     allocation_pct,                    // share of NET commission this agent is allocated
-    split_pct: noSplit ? 100 : num(agent?.default_split_pct, DEFAULTS.SPLIT_PCT),
-    no_split: noSplit,                 // true = keeps 100%, no brokerage cut
+    split_pct: arrangement.split_pct,
+    no_split: arrangement.no_split,    // true = keeps 100%, no brokerage cut
+    basis: arrangement.basis,          // 'split' | 'prepaid' | 'cap' — why this split
     fee: 0,                            // per-agent override of the flat fee share (0 = use the deal-level split)
   }
+}
+
+// A confirmed cap outranks a split saved on the deal: once the office confirms
+// it, every deal in that cap year pays the agent 100% without anyone re-opening
+// each one. Everything else the back office saved stands.
+function withConfirmedCap(participant, agents, deal) {
+  const agent = agents.find(a => a.id === participant.agent_id)
+  if (participant.no_split || !capCovers(agent, dealCommissionDate(deal))) return participant
+  return { ...participant, no_split: true, split_pct: 100, basis: 'cap' }
 }
 
 /**
@@ -245,7 +313,7 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
     return {
       sale_price,
       sides: commission.sides.map(s => ({ ...makeSide(s.key, s.rate_pct), ...s, party: partyForSide(s.key, deal) })),
-      participants: commission.participants.map(p => ({ ...makeParticipant(), ...p })),
+      participants: commission.participants.map(p => withConfirmedCap({ ...makeParticipant(), basis: 'saved', ...p }, agents, deal)),
       transaction_fee: num(commission.transaction_fee, 0),
     }
   }
@@ -261,7 +329,9 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
   const referral_pct = num(commission?.referral_pct, 0)
   const agent_pct    = num(commission?.agent_pct, DEFAULTS.SPLIT_PCT)
   const co_agent_pct = num(commission?.co_agent_pct, 0)
-  const fee          = num(commission?.transaction_fee, 0)
+  // Nothing saved by the back office yet: the standard per-deal fee applies,
+  // exactly what the editor seeds a new deal with.
+  const fee          = commission ? num(commission.transaction_fee, 0) : DEFAULTS.TRANSACTION_FEE
 
   // A both-sides deal entered per side on the Details tab prices each side on
   // its own; everything else is one side, placed by what the deal represents.
@@ -276,9 +346,15 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
     : [{ ...makeSide('sale', gross_pct, gross_flat), referral_pct, party: partyForSide('sale', deal) }]
 
   const primaryAgent = agents.find(a => a.id === deal?.agent_id) || null
-  const primary = makeParticipant({ agent: primaryAgent, role: 'primary', allocation_pct: 100 })
-  primary.split_pct = agent_pct
-  primary.no_split = false
+  const primary = makeParticipant({ agent: primaryAgent, deal, role: 'primary', allocation_pct: 100 })
+  // A legacy row the back office saved keeps its own agent_pct — its dollars
+  // were reported on. With no row at all, the agent's own arrangement stands.
+  if (commission) {
+    primary.split_pct = agent_pct
+    primary.no_split = false
+    primary.basis = 'saved'
+    Object.assign(primary, withConfirmedCap(primary, agents, deal))
+  }
 
   const participants = [primary]
 
@@ -304,6 +380,7 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
       for (const id of coAgentIds) {
         participants.push(makeParticipant({
           agent: agents.find(a => a.id === id) || { id },
+          deal,
           role: 'co',
           allocation_pct: evenly,
         }))
@@ -535,6 +612,10 @@ export function agentSliceForDeal(deal, commission, agents, agentId) {
   if (mine.length) {
     return {
       byParty: byParty(mine),
+      // The agent's share of the commission before their split, and why their
+      // split is what it is — what My Earnings shows as "gross → split → take".
+      allocation: round2(mine.reduce((s, p) => s + num(p.allocation), 0)),
+      basis: mine[0]?.basis || 'split',
       onDeal: true,
       take:  round2(mine.reduce((s, p) => s + num(p.agent_take), 0)),
       house: round2(mine.reduce((s, p) => s + num(p.house_from), 0)),
@@ -547,12 +628,50 @@ export function agentSliceForDeal(deal, commission, agents, agentId) {
   if (deal.agent_id === agentId) {
     return {
       byParty: r.parties.map(pt => ({ party: pt.party, label: pt.label, gross: pt.gross, take: pt.agent_take })),
+      allocation: r.net_total, basis: r.primary?.basis || 'split',
       onDeal: true, take: r.agent_total, house: r.house_total,
       cap: r.house_split_total, fees: r.transaction_fee_total ?? 0,
       splitPct: r.primary ? num(r.primary.split_pct, null) : null, gross: r.gross_total,
     }
   }
-  return { onDeal: false, take: 0, house: 0, cap: 0, fees: 0, splitPct: null, gross: 0, byParty: [] }
+  return { onDeal: false, take: 0, house: 0, cap: 0, fees: 0, splitPct: null, gross: 0, allocation: 0, basis: null, byParty: [] }
+}
+
+/**
+ * Where an agent stands against their cap RIGHT NOW — the one answer the Caps
+ * editor, the Brokerage Report and My Earnings all show. `paid` is the
+ * brokerage split they've paid on deals closed this cap year (a confirmed cap
+ * pays none, so it stops climbing once confirmed). `reached` means paid has hit
+ * the cap; `confirmed` means the office has confirmed it for this cap year —
+ * the only thing that switches the agent to 100%. `awaiting` is reached but not
+ * yet confirmed: the office's to-do.
+ */
+export function capStatusFor(agent, { deals = [], commissionsByDeal = new Map(), agents = [], now = new Date() } = {}) {
+  const windowStart = capWindowStart(agent?.cap_anniversary, now)
+  let paid = 0
+  for (const d of deals) {
+    if (d.stage !== 'closed') continue
+    if (dealCommissionDate(d, now) < windowStart) continue
+    paid += agentSliceForDeal(d, commissionsByDeal.get(d.id), agents, agent.id).cap
+  }
+  paid = round2(paid)
+  const amount    = agent?.cap_amount != null && agent.cap_amount !== '' ? num(agent.cap_amount, 0) : null
+  const prepaid   = agent?.no_brokerage_split === true
+  const confirmed = !prepaid && capCovers(agent, now)
+  const reached   = amount != null && amount > 0 && paid >= amount
+  return {
+    windowStart, paid, amount, prepaid, confirmed, reached,
+    awaiting: reached && !confirmed && !prepaid,
+    confirmedAt: confirmed ? agent.cap_confirmed_at : null,
+    until: confirmed ? capConfirmedUntil(agent) : null,
+    pct: prepaid || confirmed ? 100 : (amount > 0 ? Math.min(100, Math.round(paid / amount * 100)) : null),
+  }
+}
+
+/** Today as YYYY-MM-DD in local time — the value a date column expects. */
+export function todayIso(now = new Date()) {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`
 }
 
 /**
