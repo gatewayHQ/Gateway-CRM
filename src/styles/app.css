@@ -407,6 +407,85 @@ select.form-control { cursor: pointer; }
 .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .section-title { font-family: var(--font-display); font-size: 17px; font-weight: 600; letter-spacing: 0.02em; }
 
+/* GETTING STARTED — the dashboard's first-run card (components/GettingStarted.jsx).
+   A slate banner with the brand's gold for progress, over five step cards. The
+   step the agent should do next is the only one with a primary button. */
+.onboard {
+  border: 1px solid var(--gw-border); border-radius: var(--radius-lg); overflow: hidden;
+  background: var(--gw-chalk); box-shadow: var(--shadow-card); margin-bottom: 24px;
+  animation: onboardIn 320ms ease both;
+}
+@keyframes onboardIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.onboard__head {
+  position: relative; display: flex; align-items: center; gap: 24px; padding: 22px 56px 22px 26px; color: #fff;
+  background:
+    radial-gradient(120% 140% at 100% 0%, rgba(201,168,76,0.20) 0%, rgba(201,168,76,0) 55%),
+    linear-gradient(135deg, var(--gw-slate) 0%, var(--gw-slate-2) 100%);
+}
+.onboard__intro { flex: 1; min-width: 0; }
+.onboard__eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; color: var(--gw-gold); margin-bottom: 6px; }
+.onboard__title { margin: 0; font-family: var(--font-display); font-size: 26px; font-weight: 600; letter-spacing: 0.01em; line-height: 1.15; }
+.onboard__sub { margin: 6px 0 0; font-size: 13px; line-height: 1.55; color: rgba(255,255,255,0.72); max-width: 520px; }
+.onboard__ring { position: relative; width: 64px; height: 64px; flex-shrink: 0; }
+.onboard__ring-count {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-display); font-size: 22px; font-weight: 600;
+}
+.onboard__ring-count small { font-size: 13px; color: rgba(255,255,255,0.6); margin-left: 1px; }
+.onboard__hide {
+  position: absolute; top: 12px; right: 12px; width: 28px; height: 28px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; border: none; cursor: pointer;
+  background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.7); transition: all 160ms ease;
+}
+.onboard__hide:hover { background: rgba(255,255,255,0.18); color: #fff; }
+.onboard__hide:focus-visible { outline: 2px solid var(--gw-gold); outline-offset: 2px; }
+
+.onboard__steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.onboard-step {
+  position: relative; display: flex; flex-direction: column; gap: 6px; padding: 18px 18px 16px;
+  border-right: 1px solid var(--gw-border); transition: background 160ms ease;
+}
+.onboard-step:last-child { border-right: none; }
+.onboard-step--current { background: #fbfaf6; }
+.onboard-step--current::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--gw-gold);
+}
+.onboard-step__top { display: flex; align-items: center; gap: 9px; }
+.onboard-step__badge {
+  width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center; font-size: 11.5px; font-weight: 700;
+  background: var(--gw-bone); color: var(--gw-mist); border: 1px solid var(--gw-border);
+}
+.onboard-step--current .onboard-step__badge { background: var(--gw-slate); color: #fff; border-color: var(--gw-slate); box-shadow: 0 0 0 3px var(--gw-gold-light); }
+.onboard-step--done .onboard-step__badge { background: var(--gw-green); color: #fff; border-color: var(--gw-green); }
+.onboard-step__title { font-size: 13.5px; font-weight: 600; color: var(--gw-ink); }
+.onboard-step--done .onboard-step__title { color: var(--gw-mist); }
+.onboard-step__body { margin: 0; font-size: 12px; line-height: 1.5; color: var(--gw-mist); flex: 1; }
+.onboard-step__cta { align-self: flex-start; margin-top: 6px; }
+.onboard-step__done { display: inline-flex; align-items: center; gap: 5px; margin-top: 6px; font-size: 12px; font-weight: 600; color: var(--gw-green); }
+
+@media (max-width: 1100px) {
+  .onboard__steps { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+  .onboard-step { border-right: none; border-bottom: 1px solid var(--gw-border); }
+}
+@media (max-width: 640px) {
+  .onboard__head { padding: 20px 52px 20px 18px; gap: 14px; }
+  .onboard__title { font-size: 22px; }
+  .onboard__ring { width: 52px; height: 52px; }
+  .onboard__ring svg { width: 52px; height: 52px; }
+  .onboard__steps { grid-template-columns: 1fr; }
+  .onboard-step { flex-direction: row; flex-wrap: wrap; align-items: center; padding: 14px 16px; }
+  .onboard-step__top { flex: 1 1 100%; }
+  .onboard-step__body { flex: 1 1 100%; padding-left: 33px; }
+  .onboard-step__cta, .onboard-step__done { margin-left: 33px; }
+  /* Finished steps fold to one line so the next step is near the top. */
+  .onboard-step--done { padding: 10px 16px; }
+  .onboard-step--done .onboard-step__top { flex: 1; }
+  .onboard-step--done .onboard-step__body { display: none; }
+  .onboard-step--done .onboard-step__done { margin: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .onboard { animation: none; } }
+
 /* PIPELINE KANBAN */
 .kanban-board { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 16px; min-height: calc(100vh - 200px); }
 .kanban-board::-webkit-scrollbar { height: 6px; }

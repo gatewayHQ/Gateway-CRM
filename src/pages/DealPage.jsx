@@ -6,7 +6,7 @@ import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx
 import { readDealTerms, termsFilled } from '../lib/services/dealTerms.js'
 import { formatCurrency, formatDate, formatPhone } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
-import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
+import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage, isContractStage } from '../lib/stages.js'
 import { breakdownForDeal } from '../lib/commission.js'
 import { agentIdsOnDeal } from '../lib/coAgents.js'
 import { dealSideBreakdown, representingFor } from '../lib/dealPeople.js'
@@ -512,8 +512,10 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
           })}
         </div>
 
-        {/* ── Compliance gate banner — only shows when there's something to do ── */}
-        {isOpenStage(deal.stage) && !gate.canClose && (
+        {/* ── Compliance gate banner — once the deal is under contract and
+            there's something left to do. Earlier than that it's a list of
+            things nobody is expected to have done yet. ── */}
+        {isContractStage(deal.stage) && !gate.canClose && (
           <div className="card" style={{
             padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 12,
             background: '#fff7ed', border: '1px solid #fed7aa', borderLeft: '4px solid #d97706',
@@ -782,7 +784,11 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
               {gate.issues.slice(0, 6).map(i => (
                 <li key={i.code}>
                   {i.label}
-                  {i.tab && (
+                  {i.action === 'submit-review' ? (
+                    <button className="btn btn--ghost btn--sm" style={{ marginLeft: 6, padding: '0 6px', fontSize: 11 }} onClick={submitForReview} disabled={submittingReview}>
+                      {submittingReview ? 'Submitting…' : deal.review_status === 'changes_requested' ? 'Resubmit' : 'Submit for review'}
+                    </button>
+                  ) : i.tab && (
                     <button className="btn btn--ghost btn--sm" style={{ marginLeft: 6, padding: '0 6px', fontSize: 11 }} onClick={() => openDrawer(i.tab)}>
                       Fix
                     </button>

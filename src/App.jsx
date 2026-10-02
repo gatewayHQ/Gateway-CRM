@@ -96,7 +96,7 @@ const HIDEABLE_NAV = [
 // Always visible at the bottom — never buried
 const NAV_ADMIN = [
   { id: 'integrations',   label: 'Integrations',    icon: 'pipeline'  },
-  { id: 'data-management', label: 'Data Management', icon: 'tag'      },
+  { id: 'data-management', label: 'Data Management', icon: 'tag', adminOnly: true },
   { id: 'settings',       label: 'Settings',        icon: 'settings' },
 ]
 
@@ -329,11 +329,19 @@ export default function App() {
   // computed lower for prop-passing, but the nav builds before that)
   const navAdmin = isOfficeAdmin(db.agents?.find(x => x.id === activeAgentId))
   const officeBase = NAV_OFFICE.filter(n => navAdmin || !n.adminOnly)
+  const adminBase  = NAV_ADMIN.filter(n => navAdmin || !n.adminOnly)
+  // An admin-only page reached by anyone else (a stale route after switching
+  // agents) goes to the dashboard rather than rendering nothing. Waits for the
+  // roster, so an admin is never bounced while their own row is still loading.
+  useEffect(() => {
+    if (!db.agents?.length || navAdmin) return
+    if ([...NAV_OFFICE, ...NAV_ADMIN].some(n => n.adminOnly && n.id === route)) setRoute('dashboard')
+  }, [navAdmin, route, db.agents?.length])
   const NAV = [
     ...NAV_CORE.filter(n => !hiddenNav.includes(n.id)),
     ...officeBase.filter(n => !hiddenNav.includes(n.id)),
     ...toolsBase.filter(n => !hiddenNav.includes(n.id)),
-    ...NAV_ADMIN,
+    ...adminBase,
   ]
   // Tools items visible in sidebar
   const visibleTools = toolsBase.filter(n => !hiddenNav.includes(n.id))
@@ -566,6 +574,12 @@ export default function App() {
     visibleAgentIds, propertyAgentIds, dealAgentIds,
     // Properties → "Announce" → the mass-email wizard, with the property preselected.
     announce: (propertyId) => { setAnnounceProperty(propertyId); setRoute('mass-email') },
+    // "+ Contact" / "+ Deal" from anywhere: go to the page AND open its blank
+    // form, through the same one-shot handoff a search hit uses.
+    startNew: (kind) => {
+      setFocusRecord({ type: `new-${kind}` })
+      setRoute({ contact: 'contacts', property: 'properties', deal: 'pipeline' }[kind])
+    },
   }
 
   if (loading) return <BootScreen />
@@ -663,7 +677,7 @@ export default function App() {
 
         {/* ── Admin — pinned above agent profile ── */}
         <div className="sidebar__bottom">
-          {NAV_ADMIN.map(n => (
+          {adminBase.map(n => (
             <div key={n.id} className={`nav-item nav-item--admin${route === n.id ? ' active' : ''}`}
               onClick={() => setRoute(n.id)} title={n.label}
               role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
@@ -803,7 +817,7 @@ export default function App() {
           {route === 'dashboard'  && <Dashboard {...props} />}
           {route === 'contacts'   && <ContactsPage {...props} focusRecord={focusRecord} onFocusHandled={() => setFocusRecord(null)} />}
           {route === 'properties' && <PropertiesPage {...props} focusRecord={focusRecord} onFocusHandled={() => setFocusRecord(null)} />}
-          {route === 'pipeline'   && <PipelinePage {...props} isAdmin={isAdmin} />}
+          {route === 'pipeline'   && <PipelinePage {...props} isAdmin={isAdmin} focusRecord={focusRecord} onFocusHandled={() => setFocusRecord(null)} />}
           {/* `deal/<id>` and `deal/<id>/<drawer tab>`. The suffix is how another
               screen hands an agent straight to the thing they clicked — the
               dashboard's signature queue lands on that deal's Signatures tab
@@ -829,7 +843,7 @@ export default function App() {
           {route === 'form-library' && <FormLibraryPage isAdmin={isAdmin} />}
           {route === 'leads'      && <LeadsPage {...props} />}
           {route === 'integrations'      && <IntegrationsPage />}
-          {route === 'data-management'   && <DataManagementPage />}
+          {route === 'data-management'   && isAdmin && <DataManagementPage />}
           {route === 'settings'          && <SettingsPage {...props} websiteEnabled={websiteEnabled} setWebsiteEnabled={setWebsiteEnabled} activeAgentId={activeAgentId} hideableNav={HIDEABLE_NAV} />}
           {route === 'markup-preview'    && <MarkupPreviewPage />}
         </ErrorBoundary>

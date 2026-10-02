@@ -1658,6 +1658,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAge
 
   // Same contract as ContactsPage — see the comment there.
   React.useEffect(() => {
+    if (focusRecord?.type === 'new-property') { setEditing(null); setDrawer(true); onFocusHandled?.(); return }
     if (focusRecord?.type !== 'property') return
     const hit = (db.properties || []).find(x => x.id === focusRecord.id)
     if (hit) { setEditing(hit); setDrawer(true) }

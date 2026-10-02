@@ -180,7 +180,7 @@ export function getClosingGate(deal, {
         code: ISSUE_CODES.COMMISSION_MISSING,
         label: 'Commission not entered',
         severity: 'block',
-        tab: 'commission',
+        tab: 'details',   // commission is entered on the deal's Details tab
       })
     }
   }
@@ -192,7 +192,9 @@ export function getClosingGate(deal, {
       code: ISSUE_CODES.REVIEW_CHANGES,
       label: 'Admin requested changes — address feedback and resubmit',
       severity: 'block',
-      tab: 'review',
+      // Not a tab: the fix is resubmitting, which the deal page offers as a
+      // button. Every `tab` here must be a real drawer tab (lib/dealTabs.js).
+      action: 'submit-review',
       detail: deal.review_notes ? [deal.review_notes] : [],
     })
   } else if (deal.review_status !== 'approved') {
@@ -200,7 +202,7 @@ export function getClosingGate(deal, {
       code: ISSUE_CODES.REVIEW_REQUIRED,
       label: deal.review_status === 'pending' ? 'Awaiting admin review' : 'Admin review required before closing',
       severity: 'block',
-      tab: 'review',
+      ...(deal.review_status === 'pending' ? {} : { action: 'submit-review' }),
     })
   }
 

@@ -83,6 +83,12 @@ export function boardStageFor(deal, trackId) {
 // dashboards, and the "open deals" pickers.
 export const isOpenStage = (stage) => stage !== 'closed' && stage !== 'lost'
 
+// Under contract and on the way to closing, on any track. The closing checklist
+// only means something from here — shown on a fresh lead, it read as a list of
+// failures and pushed new agents to submit a lead for closing review.
+export const CONTRACT_STAGES = ['under-contract', 'psa', 'due-diligence']
+export const isContractStage = (stage) => CONTRACT_STAGES.includes(stage)
+
 // Auto-task fired when a deal ENTERS a stage (board drag or deal-page rail).
 // One rule per stage; daysOut sets the due date.
 export const STAGE_AUTO_TASKS = {

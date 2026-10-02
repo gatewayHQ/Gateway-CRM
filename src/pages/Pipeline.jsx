@@ -4,6 +4,8 @@ import { syncTaskCalendar } from '../lib/services/tasks.js'
 import { fetchVisibleDeals, findOpenDealsOnProperty } from '../lib/services/deals.js'
 import { formatCurrency, formatDate, STAGE_LABELS, getKeyDateUrgency, getNearestKeyDate } from '../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor, STAGE_AUTO_TASKS, isOpenStage } from '../lib/stages.js'
+import { DEAL_TABS, dealTabOrDefault } from '../lib/dealTabs.js'
+import { CHECKLIST_KINDS, checklistKindFor, checklistStateFor, checklistTemplate, checklistRows } from '../lib/checklistTemplates.js'
 import { normalizeStageLabel, hasStageLabelOverrides, STAGE_LABEL_MAX } from '../lib/stageLabels.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
 import { saveStageLabels } from '../lib/services/agentProfile.js'
@@ -48,20 +50,6 @@ import ComposePacketModal from '../components/ComposePacketModal.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 import AgentMultiSelect from '../components/AgentMultiSelect.jsx'
 
-const DEFAULT_STEPS_RESIDENTIAL = [
-  'Title Search Ordered',
-  'Earnest Money Deposited',
-  'Home Inspection Scheduled',
-  'Inspection Report Reviewed',
-  'Appraisal Ordered',
-  'Appraisal Report Received',
-  'Financing Conditionally Approved',
-  'Financing Fully Approved',
-  'Final Walkthrough Scheduled',
-  'Closing Disclosure Reviewed',
-  'Closing Documents Signed',
-  'Keys & Possession Transferred',
-]
 
 // Where BoldSign should redirect an embedded iframe on exit — a same-origin
 // STATIC page (public/boldsign-return.html), never the CRM's own live URL.
@@ -73,176 +61,9 @@ const DEFAULT_STEPS_RESIDENTIAL = [
 // FormLibrary.jsx's template editor for the same pattern already in place.
 const boldSignReturnUrl = () => `${window.location.origin}/boldsign-return.html`
 
-const DEFAULT_STEPS_COMMERCIAL = [
-  'Title Search Ordered',
-  'Earnest Money Deposited',
-  'Environmental Due Diligence (Phase I)',
-  'Property Inspection Ordered',
-  'Inspection Report Reviewed',
-  'Survey Ordered',
-  'Survey Received & Approved',
-  'Zoning & Entitlements Verified',
-  'Financing Commitment Received',
-  'Lease Review (if applicable)',
-  'Closing Disclosure Reviewed',
-  'Closing Documents Signed',
-  'Keys & Possession Transferred',
-]
 
 const CHECKLIST_STAGES = ['under-contract','closed']
 
-// Per-state, per-transaction-type document checklists (BoldTrail-style)
-const STATE_DOC_TEMPLATES = {
-  'SD-seller': [
-    { title: 'Submit Listing into MLS',                                                             doc_action: 'manual' },
-    { title: 'All SD Agency & Listing Paperwork',                                                   doc_action: 'manual' },
-    { title: 'Install Yard Sign',                                                                   doc_action: 'manual' },
-    { title: 'Lockbox Authorization/Put on Property',                                               doc_action: 'manual' },
-    { title: 'MLS Change Form',                                                                     doc_action: 'manual' },
-    { title: 'Addendum to SPD',                                                                     doc_action: 'manual' },
-    { title: "Seller's Property Disclosure",                                                        doc_action: 'manual' },
-    { title: 'Lead-Based Paint/Radon Pamphlets Given',                                              doc_action: 'manual' },
-    { title: 'Completed Purchase Agreement',                                                        doc_action: 'forms'  },
-    { title: 'Earnest Money Deposit Receipt',                                                       doc_action: 'upload' },
-    { title: "HOA Info/Disclosures sent to Buyer's Agent",                                          doc_action: 'manual' },
-    { title: 'Termite Inspection Scheduled',                                                        doc_action: 'manual' },
-    { title: 'Appraisal Scheduled',                                                                 doc_action: 'manual' },
-    { title: 'Abstract dropped off at closing/abstract company',                                    doc_action: 'manual' },
-    { title: 'Escrow Sheet',                                                                        doc_action: 'forms'  },
-    { title: 'Closing Disclosure/Settlement Statement — Admin Only',                                doc_action: 'upload', admin_only: true },
-    { title: 'Commission — Proof of Payment — Admin Only',                                          doc_action: 'upload', admin_only: true },
-    { title: 'Retrieve Yard Sign',                                                                  doc_action: 'manual' },
-    { title: 'Retrieve and Unassign Lockbox',                                                       doc_action: 'manual' },
-    { title: 'Update Listing Site',                                                                 doc_action: 'manual' },
-    { title: 'Inspection Addendums Submitted if any',                                               doc_action: 'upload', if_applicable: true },
-    { title: 'Order Home Warranty if applicable',                                                   doc_action: 'forms',  if_applicable: true },
-    { title: 'Addendums to Contract if applicable',                                                 doc_action: 'forms',  if_applicable: true },
-    { title: 'MLS Listing Change Form if applicable',                                               doc_action: 'forms',  if_applicable: true },
-  ],
-  'SD-commercial': [
-    { title: 'All SD Agency/Listing Paperwork',                                                     doc_action: 'manual' },
-    { title: "Seller's Property & Lead Based Paint Disclosure",                                     doc_action: 'forms'  },
-    { title: 'Lead-Based Paint/Radon Pamphlets Given',                                              doc_action: 'manual' },
-    { title: 'Put onto listing site if applicable',                                                 doc_action: 'manual', if_applicable: true },
-    { title: 'Install Sign if applicable',                                                          doc_action: 'manual', if_applicable: true },
-    { title: 'Lockbox Authorization/Put on Property',                                               doc_action: 'manual' },
-    { title: 'Completed Purchase Agreement',                                                        doc_action: 'forms'  },
-    { title: 'Earnest Money Deposit Receipt',                                                       doc_action: 'upload' },
-    { title: 'Escrow Sheet',                                                                        doc_action: 'forms'  },
-    { title: 'Inspection Addendums Submitted if any',                                               doc_action: 'upload', if_applicable: true },
-    { title: 'Closing Disclosure/Settlement Statement — Admin Only',                                doc_action: 'upload', admin_only: true },
-    { title: 'Commission — Proof of Payment — Admin Only',                                          doc_action: 'upload', admin_only: true },
-    { title: 'Retrieve and Unassign Lockbox',                                                       doc_action: 'manual' },
-    { title: 'Remove Sign if applicable',                                                           doc_action: 'manual', if_applicable: true },
-    { title: 'Update listing site if applicable',                                                   doc_action: 'manual', if_applicable: true },
-    { title: 'Leases/expenses/rent/deposit prorations submitted to closing company if applicable',  doc_action: 'manual', if_applicable: true },
-    { title: 'Any Addendums to Contract if applicable',                                             doc_action: 'manual', if_applicable: true },
-  ],
-  'SD-buyer': [
-    { title: 'Buyer Representation Agreement',             doc_action: 'manual' },
-    { title: 'Agency Disclosure',                          doc_action: 'manual' },
-    { title: 'Purchase Agreement',                         doc_action: 'forms'  },
-    { title: 'Lead-Based Paint Disclosure',                doc_action: 'manual', if_applicable: true },
-    { title: 'Earnest Money Deposit Receipt',              doc_action: 'upload' },
-    { title: 'Pre-Approval Letter',                        doc_action: 'upload' },
-    { title: 'Home Inspection Report',                     doc_action: 'upload' },
-    { title: 'Inspection Addendum / Response',             doc_action: 'forms',  if_applicable: true },
-    { title: 'Financing Commitment Letter',                doc_action: 'upload' },
-    { title: 'Appraisal Report',                           doc_action: 'upload', if_applicable: true },
-    { title: 'Final Walkthrough Completed',                doc_action: 'manual' },
-    { title: 'Closing Disclosure Reviewed',                doc_action: 'manual' },
-    { title: 'Commission — Proof of Payment — Admin Only', doc_action: 'upload', admin_only: true },
-    { title: 'Addendums to Contract if applicable',        doc_action: 'forms',  if_applicable: true },
-  ],
-  'IA-seller': [
-    { title: 'All Iowa Agency & Listing Paperwork',                                                 doc_action: 'manual' },
-    { title: 'Seller & Lead Based Paint Disclosure',                                                doc_action: 'forms'  },
-    { title: 'Iowa Radon & Lead-Based Paint Pamphlets Given',                                       doc_action: 'manual' },
-    { title: 'Submit Listing into MLS',                                                             doc_action: 'manual' },
-    { title: 'Install yard sign if applicable',                                                     doc_action: 'manual', if_applicable: true },
-    { title: 'Lockbox Authorization/Put on Property',                                               doc_action: 'manual' },
-    { title: 'Termite Inspection Scheduled',                                                        doc_action: 'manual' },
-    { title: 'Appraisal Scheduled',                                                                 doc_action: 'manual' },
-    { title: 'Earnest Money Deposit Receipt',                                                       doc_action: 'upload' },
-    { title: 'Abstract Dropped off at Closing Company/Abstract Company',                            doc_action: 'manual' },
-    { title: 'Escrow Sheet',                                                                        doc_action: 'forms'  },
-    { title: 'Closing Disclosure/Settlement Statement — Admin Only',                                doc_action: 'upload', admin_only: true },
-    { title: 'Commission — Proof of Payment — Admin Only',                                          doc_action: 'upload', admin_only: true },
-    { title: 'Update MLS',                                                                          doc_action: 'manual' },
-    { title: 'Retrieve yard sign if applicable',                                                    doc_action: 'manual', if_applicable: true },
-    { title: 'Retrieve lockbox & unassign property',                                                doc_action: 'manual' },
-    { title: 'MLS Listing Change Form if applicable',                                               doc_action: 'forms',  if_applicable: true },
-    { title: 'Any Addendums to Contract if applicable',                                             doc_action: 'upload', if_applicable: true },
-    { title: 'Order Home Warranty if applicable',                                                   doc_action: 'forms',  if_applicable: true },
-    { title: 'Inspection Addendums Submitted if any',                                               doc_action: 'upload', if_applicable: true },
-  ],
-  'IA-commercial': [
-    { title: 'All IA Agency/Listing Paperwork',                                                     doc_action: 'manual' },
-    { title: 'Put onto Listing site if applicable',                                                 doc_action: 'manual', if_applicable: true },
-    { title: 'Install sign if applicable',                                                          doc_action: 'manual', if_applicable: true },
-    { title: 'Lockbox Authorization/Put on property',                                               doc_action: 'manual' },
-    { title: 'Purchase Agreement',                                                                  doc_action: 'forms'  },
-    { title: 'Inspection Scheduled',                                                                doc_action: 'manual' },
-    { title: 'Leases/expenses/rent/deposit prorations submitted to closing company if applicable',  doc_action: 'manual', if_applicable: true },
-    { title: 'Escrow Sheet',                                                                        doc_action: 'forms'  },
-    { title: 'Earnest Money Deposit Receipt',                                                       doc_action: 'upload' },
-    { title: 'Closing Disclosure/Settlement Statement — Admin Only',                                doc_action: 'upload', admin_only: true },
-    { title: 'Commission — Proof of Payment — Admin Only',                                          doc_action: 'upload', admin_only: true },
-    { title: 'Update Listing site if applicable',                                                   doc_action: 'manual', if_applicable: true },
-    { title: 'Retrieve lockbox/unassign from property',                                             doc_action: 'manual' },
-    { title: 'Retrieve Sign if applicable',                                                         doc_action: 'manual', if_applicable: true },
-    { title: 'Any Addendums to Contract if applicable',                                             doc_action: 'upload', if_applicable: true },
-    { title: 'MLS Listing Change Form if applicable',                                               doc_action: 'forms',  if_applicable: true },
-  ],
-  'IA-buyer': [
-    { title: 'Buyer Agency Agreement',                     doc_action: 'manual' },
-    { title: 'Agency Disclosure',                          doc_action: 'manual' },
-    { title: 'Purchase Agreement',                         doc_action: 'forms'  },
-    { title: 'Earnest Money Deposit Receipt',              doc_action: 'upload' },
-    { title: 'Pre-Approval Letter',                        doc_action: 'upload' },
-    { title: 'Home Inspection Report',                     doc_action: 'upload' },
-    { title: 'Inspection Addendum / Response',             doc_action: 'forms',  if_applicable: true },
-    { title: 'Financing Commitment Letter',                doc_action: 'upload' },
-    { title: 'Appraisal Report',                           doc_action: 'upload', if_applicable: true },
-    { title: 'Final Walkthrough Completed',                doc_action: 'manual' },
-    { title: 'Closing Disclosure Reviewed',                doc_action: 'manual' },
-    { title: 'Commission — Proof of Payment — Admin Only', doc_action: 'upload', admin_only: true },
-    { title: 'Addendums to Contract if applicable',        doc_action: 'forms',  if_applicable: true },
-  ],
-  'NE-seller': [
-    { title: 'All NE Agency & Listing Paperwork',          doc_action: 'manual' },
-    { title: 'NE Seller Property Condition Disclosure',    doc_action: 'manual' },
-    { title: 'MLS Change Form',                            doc_action: 'manual' },
-    { title: 'Lead-Based Paint Disclosure',                doc_action: 'manual', if_applicable: true },
-    { title: 'Completed Purchase Agreement',               doc_action: 'forms'  },
-    { title: 'Earnest Money Deposit Receipt',              doc_action: 'upload' },
-    { title: 'Title Insurance Ordered',                    doc_action: 'manual' },
-    { title: 'Escrow / Settlement Sheet',                  doc_action: 'forms'  },
-    { title: 'Closing Disclosure/Settlement Statement — Admin Only', doc_action: 'upload', admin_only: true },
-    { title: 'Commission — Proof of Payment — Admin Only', doc_action: 'upload', admin_only: true },
-    { title: 'Inspection Addendums Submitted if any',      doc_action: 'upload', if_applicable: true },
-    { title: 'Home Warranty Order if applicable',          doc_action: 'forms',  if_applicable: true },
-    { title: 'Addendums to Contract if applicable',        doc_action: 'forms',  if_applicable: true },
-    { title: 'MLS Listing Change Form if applicable',      doc_action: 'forms',  if_applicable: true },
-  ],
-  'NE-buyer': [
-    { title: 'Buyer Representation Agreement',             doc_action: 'manual' },
-    { title: 'Agency Disclosure',                          doc_action: 'manual' },
-    { title: 'Purchase Agreement',                         doc_action: 'forms'  },
-    { title: 'Lead-Based Paint Disclosure',                doc_action: 'manual', if_applicable: true },
-    { title: 'Earnest Money Deposit Receipt',              doc_action: 'upload' },
-    { title: 'Pre-Approval Letter',                        doc_action: 'upload' },
-    { title: 'Home Inspection Report',                     doc_action: 'upload' },
-    { title: 'Inspection Addendum / Response',             doc_action: 'forms',  if_applicable: true },
-    { title: 'Financing Commitment Letter',                doc_action: 'upload' },
-    { title: 'Title Commitment Received',                  doc_action: 'manual' },
-    { title: 'Appraisal Report',                           doc_action: 'upload', if_applicable: true },
-    { title: 'Final Walkthrough Completed',                doc_action: 'manual' },
-    { title: 'Closing Disclosure Reviewed',                doc_action: 'manual' },
-    { title: 'Commission — Proof of Payment — Admin Only', doc_action: 'upload', admin_only: true },
-    { title: 'Addendums to Contract if applicable',        doc_action: 'forms',  if_applicable: true },
-  ],
-}
 
 const DEFAULT_KEY_DATE_TYPES = ['Closing','Expiration','Financing Contingency','Inspection','HUD Approval','Appraisal','Lease Start Date','Possession Date']
 
@@ -257,61 +78,114 @@ const ACTION_BADGE_MAP = {
   sign:   { label: 'Sign',      bg: '#fff7ed', color: '#c2410c', border: '#fed7aa' },
 }
 
-function ChecklistTab({ deal }) {
+// Fill an empty checklist for a deal. Best-effort and only ever into an EMPTY
+// checklist — it is called on deal creation and when the tab first opens, and
+// neither may overwrite steps an agent has already worked.
+async function seedChecklist(dealId, state, kind, propCategory) {
+  const { count, error } = await supabase.from('transaction_steps')
+    .select('id', { count: 'exact', head: true }).eq('deal_id', dealId)
+  if (error || count > 0) return null
+  const { data } = await supabase.from('transaction_steps')
+    .insert(checklistRows(dealId, checklistTemplate(state, kind, propCategory))).select()
+  return data || null
+}
+
+const kindLabel = (kind) => (CHECKLIST_KINDS.find(([id]) => id === kind)?.[1] || kind)
+
+function ChecklistTab({ deal, property }) {
   const [steps,      setSteps]      = useState([])
   const [loading,    setLoading]    = useState(true)
   const [newTitle,   setNewTitle]   = useState('')
   const [adding,     setAdding]     = useState(false)
   const [ready,      setReady]      = useState(true)
   const [dealState,  setDealState]  = useState('')
-  const [txType,     setTxType]     = useState('')
+  const [kind,       setKind]       = useState('buyer')
+  const [replaceAsk, setReplaceAsk] = useState(null)   // { state, kind, lost } awaiting confirmation
+  const [replacing,  setReplacing]  = useState(false)
 
+  // State and kind are READ from the deal (and its property), not asked for.
+  // An empty checklist fills itself the first time the tab opens; the agent
+  // only has to answer something the deal genuinely doesn't say — its state.
   React.useEffect(() => {
     if (!deal?.id) return
-    supabase.from('deals').select('comp_data').eq('id', deal.id).single()
-      .then(({ data }) => {
-        const cd = data?.comp_data || {}
-        setDealState(cd.state || '')
-        setTxType(cd.transaction_type || '')
-      })
-    loadSteps()
+    let cancelled = false
+    ;(async () => {
+      setLoading(true)
+      const [{ data: fresh }, { data: rows, error }] = await Promise.all([
+        supabase.from('deals').select('comp_data, prop_category').eq('id', deal.id).single(),
+        supabase.from('transaction_steps').select('*').eq('deal_id', deal.id).order('sort_order', { ascending: true }),
+      ])
+      if (cancelled) return
+      if (error) { setReady(false); setLoading(false); return }
+      const current = { ...deal, ...(fresh || {}) }
+      const st = checklistStateFor(current, property)
+      const k  = checklistKindFor(current)
+      setDealState(st)
+      setKind(k)
+      let list = rows || []
+      if (!list.length && st) {
+        const seeded = await seedChecklist(deal.id, st, k, current.prop_category)
+        if (cancelled) return
+        if (seeded?.length) list = seeded
+      }
+      setSteps(list)
+      setLoading(false)
+    })()
+    return () => { cancelled = true }
   }, [deal?.id])
 
-  const loadSteps = async () => {
-    setLoading(true)
-    const { data, error } = await supabase
-      .from('transaction_steps').select('*').eq('deal_id', deal.id).order('sort_order', { ascending: true })
-    if (error) { setReady(false); setLoading(false); return }
-    setSteps(data || [])
-    setLoading(false)
-  }
-
-  const saveMeta = async (stateVal, typeVal) => {
+  // comp_data is re-read before writing so this never overwrites a field
+  // another tab changed while this one was open.
+  const saveMeta = async (patch) => {
     const { data: cur } = await supabase.from('deals').select('comp_data').eq('id', deal.id).single()
-    const cd = cur?.comp_data || {}
-    await supabase.from('deals').update({ comp_data: { ...cd, state: stateVal, transaction_type: typeVal } }).eq('id', deal.id)
+    const { error } = await supabase.from('deals').update({ comp_data: { ...(cur?.comp_data || {}), ...patch } }).eq('id', deal.id)
+    if (error) pushToast(`Could not save the checklist settings: ${error.message}`, 'error')
   }
 
-  const getTemplate = (stateVal, typeVal) => {
-    const key = `${stateVal}-${typeVal}`
-    if (STATE_DOC_TEMPLATES[key]) return STATE_DOC_TEMPLATES[key]
-    if (typeVal === 'commercial' && STATE_DOC_TEMPLATES['any-commercial']) return STATE_DOC_TEMPLATES['any-commercial']
-    return (deal?.prop_category === 'commercial' ? DEFAULT_STEPS_COMMERCIAL : DEFAULT_STEPS_RESIDENTIAL)
-      .map(title => ({ title, doc_action: 'manual' }))
-  }
+  const isDoneStep = (s) => s.doc_status === 'complete' || s.doc_status === 'approved' || (!s.doc_status && s.completed)
 
-  const loadTemplate = async (stateVal, typeVal) => {
-    if (!stateVal || !typeVal) return
-    const template = getTemplate(stateVal, typeVal)
-    await supabase.from('transaction_steps').delete().eq('deal_id', deal.id)
-    const rows = template.map((doc, i) => ({
-      deal_id: deal.id, title: doc.title, completed: false, sort_order: i,
-      doc_action: doc.doc_action || 'manual', doc_status: 'pending',
-      if_applicable: doc.if_applicable || false,
-    }))
-    const { data } = await supabase.from('transaction_steps').insert(rows).select()
+  // Swap in the checklist for a state + kind. Steps that appear in both lists
+  // keep their progress, so switching (or reloading) never un-ticks work that
+  // still applies; anything completed that the new list drops is counted, and
+  // the agent is asked first.
+  const replaceChecklist = async (st, k) => {
+    setReplacing(true)
+    const done = new Map(steps.filter(isDoneStep).map(s => [s.title, s]))
+    const rows = checklistRows(deal.id, checklistTemplate(st, k, deal?.prop_category)).map(r => {
+      const prev = done.get(r.title)
+      return prev ? { ...r, completed: true, doc_status: prev.doc_status || 'complete', completed_at: prev.completed_at || null } : r
+    })
+    const { error: delErr } = await supabase.from('transaction_steps').delete().eq('deal_id', deal.id)
+    if (delErr) { setReplacing(false); pushToast(delErr.message, 'error'); return }
+    const { data, error } = await supabase.from('transaction_steps').insert(rows).select()
+    setReplacing(false)
+    setReplaceAsk(null)
+    if (error) { pushToast(error.message, 'error'); return }
     setSteps(data || [])
-    pushToast(`${stateVal !== 'other' ? stateVal + ' ' : ''}${typeVal} checklist loaded`, 'success')
+    pushToast(`${st} ${kindLabel(k).toLowerCase()} checklist loaded`, 'success')
+  }
+
+  // Ask before replacing only when completed work would be thrown away.
+  const requestReplace = (st, k) => {
+    if (!st) return
+    const keep = new Set(checklistTemplate(st, k, deal?.prop_category).map(t => t.title))
+    const lost = steps.filter(s => isDoneStep(s) && !keep.has(s.title)).length
+    if (lost) setReplaceAsk({ state: st, kind: k, lost })
+    else replaceChecklist(st, k)
+  }
+
+  const changeState = (v) => {
+    setDealState(v)
+    saveMeta({ state: v })
+    if (v) steps.length ? requestReplace(v, kind) : replaceChecklist(v, kind)
+  }
+
+  // Its own field — comp_data.transaction_type is the deal's Representing
+  // (buyer / seller / both) and is never written from here.
+  const changeKind = (v) => {
+    setKind(v)
+    saveMeta({ checklist_type: v })
+    if (dealState) steps.length ? requestReplace(dealState, v) : replaceChecklist(dealState, v)
   }
 
   const cycleStatus = async (step) => {
@@ -360,57 +234,30 @@ function ChecklistTab({ deal }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* ── State + type selector ── */}
+      {/* ── Which checklist this is ── */}
       <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--gw-border)', background: 'var(--gw-bone)', flexShrink: 0 }}>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <select className="form-control" style={{ flex: 1, fontSize: 12 }}
-            value={dealState}
-            onChange={e => {
-              const v = e.target.value
-              setDealState(v); saveMeta(v, txType)
-              if (v && txType && steps.length === 0) loadTemplate(v, txType)
-            }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <select className="form-control" style={{ flex: 1, fontSize: 12 }} value={dealState} onChange={e => changeState(e.target.value)} aria-label="State">
             <option value="">State…</option>
             {OPERATING_STATES.map(s => <option key={s.code} value={s.code}>{s.name} ({s.code})</option>)}
-            <option value="other">Other</option>
+            {dealState && !OPERATING_STATES.some(s => s.code === dealState) && <option value={dealState}>{dealState}</option>}
           </select>
-          <select className="form-control" style={{ flex: 1, fontSize: 12 }}
-            value={txType}
-            onChange={e => {
-              const v = e.target.value
-              setTxType(v); saveMeta(dealState, v)
-              if (dealState && v && steps.length === 0) loadTemplate(dealState, v)
-            }}>
-            <option value="">Type…</option>
-            <option value="seller">Seller (Listing)</option>
-            <option value="buyer">Buyer (Purchase)</option>
-            <option value="commercial">Commercial</option>
-            <option value="lease">Lease / Rental</option>
+          <select className="form-control" style={{ flex: 1, fontSize: 12 }} value={kind} onChange={e => changeKind(e.target.value)} aria-label="Checklist type">
+            {CHECKLIST_KINDS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
           </select>
-          {dealState && txType && (
-            <button className="btn btn--primary btn--sm" style={{ whiteSpace: 'nowrap', fontSize: 11 }}
-              onClick={() => loadTemplate(dealState, txType)}>
-              {steps.length > 0 ? 'Reload' : 'Load'}
+          {dealState && (
+            <button className="btn btn--ghost btn--sm" style={{ whiteSpace: 'nowrap', fontSize: 11 }}
+              onClick={() => requestReplace(dealState, kind)} disabled={replacing}
+              title="Load the standard checklist. Steps you have completed that are still on it stay completed.">
+              <Icon name="refresh" size={11}/> {steps.length ? 'Reset' : 'Load'}
             </button>
           )}
         </div>
-        {/* Active transaction-type banner — makes buyer vs seller unmistakable */}
-        {dealState && txType && (
-          <div style={{ fontSize: 11, marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={{ fontWeight: 600, padding: '2px 8px', borderRadius: 10, fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.04em',
-              background: txType === 'seller' ? '#fff7ed' : txType === 'buyer' ? '#eff6ff' : 'var(--gw-bone)',
-              color:      txType === 'seller' ? '#c2410c' : txType === 'buyer' ? '#1d4ed8' : 'var(--gw-mist)',
-              border: `1px solid ${txType === 'seller' ? '#fed7aa' : txType === 'buyer' ? '#bfdbfe' : 'var(--gw-border)'}` }}>
-              {txType === 'seller' ? 'Seller / Listing side' : txType === 'buyer' ? 'Buyer / Purchase side' : txType}
-            </span>
-            <span style={{ color: 'var(--gw-mist)' }}>{dealState !== 'other' ? dealState : 'Custom'} checklist</span>
-          </div>
-        )}
-        {(!dealState || !txType) && (
-          <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 5, lineHeight: 1.4 }}>
-            Select state &amp; transaction type — the correct <strong>buyer</strong> or <strong>seller</strong> document checklist loads automatically.
-          </div>
-        )}
+        <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 6, lineHeight: 1.4 }}>
+          {dealState
+            ? <>Set from this deal. Change either one to switch checklists — completed steps carry over.</>
+            : <>Pick the deal&rsquo;s state and its checklist fills in automatically.</>}
+        </div>
       </div>
 
       <div style={{ padding: '12px 14px', overflowY: 'auto', flex: 1 }}>
@@ -429,9 +276,9 @@ function ChecklistTab({ deal }) {
 
         {steps.length === 0 && (
           <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--gw-mist)', fontSize: 13, lineHeight: 1.6 }}>
-            {dealState && txType
-              ? <>Click <strong>Load</strong> above to populate the {dealState !== 'other' ? dealState + ' ' : ''}{txType} checklist.</>
-              : <>Select state &amp; type above to load a checklist,<br />or add steps manually below.</>}
+            {dealState
+              ? <>No steps yet — add them below, or press <strong>Load</strong> for the standard list.</>
+              : <>Pick the state above to load this deal&rsquo;s checklist,<br />or add steps manually below.</>}
           </div>
         )}
 
@@ -499,6 +346,19 @@ function ChecklistTab({ deal }) {
           <button className="btn btn--secondary btn--sm" onClick={addStep} disabled={adding || !newTitle.trim()}>Add</button>
         </div>
       </div>
+
+      {replaceAsk && (
+        <ConfirmDialog
+          eyebrow="Checklist"
+          title={`Switch to the ${replaceAsk.state} ${kindLabel(replaceAsk.kind).toLowerCase()} checklist?`}
+          confirmLabel="Switch checklist"
+          busyLabel="Switching…"
+          busy={replacing}
+          onCancel={() => setReplaceAsk(null)}
+          onConfirm={() => replaceChecklist(replaceAsk.state, replaceAsk.kind)}
+          message={`${replaceAsk.lost} completed step${replaceAsk.lost === 1 ? ' is' : 's are'} not on the new list and will be removed. Steps that appear on both lists keep their progress.`}
+        />
+      )}
     </div>
   )
 }
@@ -6251,7 +6111,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
   const [form, setForm]     = useState(deal || blank)
   const [errors, setErrors] = useState({})
   const [saving, setSaving] = useState(false)
-  const [tab, setTab]       = useState(initialTab)
+  const [tab, setTab]       = useState(dealTabOrDefault(initialTab))
   // HOW WIDE THE DRAWER OPENS.
   //
   // It used to be 500px, which could not fit its own tab strip — the tabs
@@ -6321,7 +6181,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       co_agent_ids: dealCoAgentIds(deal, (properties || []).find(p => p.id === deal.property_id) || null),
     } : blank)
     setErrors({})
-    setTab(deal?.id ? initialTab : 'details')
+    setTab(deal?.id ? dealTabOrDefault(initialTab) : 'details')
     setAdditionalBySide(deal?.id ? {
       buyer:  dealContactIdsForSide(dealContacts, deal, 'buyer'),
       seller: dealContactIdsForSide(dealContacts, deal, 'seller'),
@@ -6621,6 +6481,18 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
         await reloadDealContacts(setDb, savedId)
       }
 
+      // A NEW deal gets its checklist straight away when its state is known —
+      // from the deal or its property — so the Checklist tab is already filled
+      // the first time the agent opens it. Best-effort: the deal is saved.
+      if (!deal?.id && savedId) {
+        const seedFrom = { prop_category: payload.prop_category, comp_data: payload.comp_data }
+        const st = checklistStateFor(seedFrom, linkedProperty)
+        if (st) {
+          try { await seedChecklist(savedId, st, checklistKindFor(seedFrom), payload.prop_category) }
+          catch (err) { console.warn('[DealDrawer] checklist seed failed:', err) }
+        }
+      }
+
       // ── Take the removed agents off the listing ────────────────────────────
       // Best-effort and AFTER the deal is saved: the edit is never lost to this.
       // RLS lets it through because anyone editing this deal is on the listing
@@ -6714,7 +6586,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
           describes on the Details tab, instead of costing a whole tab. */}
       {isExisting && (
         <div className="drawer-tabs">
-          {[['details','Details'],['terms','Deal Terms'],['dates','Key Dates'],['checklist','Checklist'],['documents','Documents'],['signatures','Signatures'],['portal','Client Portal']].map(([id, label]) => (
+          {DEAL_TABS.map(([id, label]) => (
             <button key={id} className={`drawer-tab${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}>
               {label}
             </button>
@@ -6993,7 +6865,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
           building, so a reduction made on either surface appears on both. */}
       {/* Checklist tab */}
       {tab === 'checklist' && isExisting && (
-        <ChecklistTab deal={deal} />
+        <ChecklistTab deal={deal} property={linkedProperty} />
       )}
 
       {/* Documents tab */}
@@ -7221,7 +7093,7 @@ export function listingsOnBoard({
     || behindTheirDeals.has(p.id))
 }
 
-export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgentIds, go }) {
+export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgentIds, go, focusRecord, onFocusHandled }) {
   const [drawer, setDrawer] = useState(false)
   const [editing, setEditing] = useState(null)
   const [defaultStage, setDefaultStage] = useState('lead')
@@ -7321,6 +7193,14 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   // One unified pipeline — every deal on the same board (no res/comm split).
   const resolvedTrack = UNIFIED
   const track = TRACKS[UNIFIED]
+
+  // "+ Deal" from elsewhere (the dashboard) lands here with the blank deal
+  // form already open — same one-shot handoff ContactsPage uses.
+  React.useEffect(() => {
+    if (focusRecord?.type !== 'new-deal') return
+    setEditing(null); setDefaultStage(track.stages[0]); setDrawer(true)
+    onFocusHandled?.()
+  }, [focusRecord])
   const trackDeals = visibleDeals
 
   // Single-pass O(n) grouping into the active track's columns. Foreign stage
