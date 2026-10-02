@@ -332,13 +332,13 @@ const PROFILE_SELF_FIELDS = ['name', 'initials', 'email', 'phone', 'photo_url', 
 // Fields only an admin may set (role doubles as a legacy admin flag).
 // `is_admin` is deliberately absent: being an admin does not let you hand out
 // firm-wide visibility. That column has its own gate — see canSetOfficeAdmin.
-const PROFILE_ADMIN_FIELDS = ['role', 'default_split_pct', 'no_brokerage_split', 'cap_amount', 'cap_anniversary', 'cap_confirmed_at']
+const PROFILE_ADMIN_FIELDS = ['role', 'default_split_pct', 'no_brokerage_split', 'cap_amount', 'cap_anniversary', 'cap_confirmed_at', 'transaction_fee']
 
 // Money/permission columns the `agents_guard_privileged` trigger freezes for an
 // untrusted caller. If one of these comes back from the write different to what
 // we asked for, the write did NOT take effect and we must say so — see
 // verifyPrivilegedWrite below.
-const PROFILE_VERIFY_FIELDS = ['is_admin', 'default_split_pct', 'no_brokerage_split', 'cap_amount', 'cap_anniversary', 'cap_confirmed_at']
+const PROFILE_VERIFY_FIELDS = ['is_admin', 'default_split_pct', 'no_brokerage_split', 'cap_amount', 'cap_anniversary', 'cap_confirmed_at', 'transaction_fee']
 
 // Numeric coercion that keeps null meaningful: '' / null / undefined clear the
 // column, anything non-numeric is an error rather than a silent 0.
@@ -376,6 +376,13 @@ export function sanitizeProfilePayload(fields, { isAdmin, canSetOfficeAdmin = fa
     payload.cap_amount = r.value
   }
   if ('cap_anniversary' in payload && !payload.cap_anniversary) payload.cap_anniversary = null
+  // The agent's per-deal fee from their contract (migration 0061); blank = the
+  // office standard.
+  if ('transaction_fee' in payload) {
+    const r = coerceNumeric(payload.transaction_fee, 'Transaction fee', { min: 0 })
+    if (r.error) return { error: r.error }
+    payload.transaction_fee = r.value
+  }
   // The day the office confirmed the cap (migration 0061). Blank clears it —
   // that is how an admin undoes a confirmation made in error.
   if ('cap_confirmed_at' in payload) {
@@ -402,8 +409,8 @@ export function profileDbError(error) {
   if (missing === 'stage_labels') {
     return 'Custom pipeline headers need migration 0027 — ask an admin to apply it in Supabase, then try again.'
   }
-  if (missing === 'cap_confirmed_at') {
-    return 'Confirming a cap needs migration 0061 — apply migrations/0061_agent_cap_confirmed.sql in Supabase, then try again.'
+  if (missing === 'cap_confirmed_at' || missing === 'transaction_fee') {
+    return 'Caps and per-agent fees need migration 0061 — apply migrations/0061_agent_cap_and_fee.sql in Supabase, then try again.'
   }
   if (missing) {
     return `The database is missing the "${missing}" column. Ask an admin to apply the latest migration, then try again.`
@@ -532,12 +539,13 @@ async function handleMyEarnings(req, res) {
   try {
     // Resolve the agent for this auth user (with the cap-window fields the
     // earnings computation needs).
-    // cap_confirmed_at is migration 0061: asked for optimistically and dropped
-    // on a database without it, where no cap reads as confirmed.
+    // cap_confirmed_at and transaction_fee are migration 0061: asked for
+    // optimistically and dropped on a database without them, where no cap
+    // reads as confirmed and every agent pays the standard fee.
     const AGENT_COLUMNS = 'id, name, default_split_pct, cap_amount, cap_anniversary, no_brokerage_split'
     const withOptional = async (build) => {
-      const r = await build(`${AGENT_COLUMNS}, cap_confirmed_at`)
-      if (r.error && (r.error.code === '42703' || /cap_confirmed_at/.test(r.error.message || ''))) return build(AGENT_COLUMNS)
+      const r = await build(`${AGENT_COLUMNS}, cap_confirmed_at, transaction_fee`)
+      if (r.error && (r.error.code === '42703' || /cap_confirmed_at|transaction_fee/.test(r.error.message || ''))) return build(AGENT_COLUMNS)
       return r
     }
     const { data: me } = await withOptional(cols => svc.from('agents').select(cols).eq('auth_id', user.id).maybeSingle())

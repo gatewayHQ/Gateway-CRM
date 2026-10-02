@@ -33,6 +33,7 @@ create table if not exists agents (
   cap_amount      numeric,                 -- brokerage cap in dollars; null = no cap configured
   cap_anniversary date,                    -- cap year resets on this month/day; null = calendar year
   cap_confirmed_at date,                   -- office confirmed the cap is met: 100% from here to the next anniversary (migration 0061)
+  transaction_fee numeric check (transaction_fee is null or transaction_fee >= 0), -- per-deal fee from the agent's contract; null = office standard $100 (migration 0061)
   created_at timestamptz default now()
 );
 
@@ -558,6 +559,7 @@ begin
   new.cap_amount         := old.cap_amount;
   new.cap_anniversary    := old.cap_anniversary;
   new.cap_confirmed_at   := old.cap_confirmed_at;
+  new.transaction_fee    := old.transaction_fee;
   return new;
 end $$;
 

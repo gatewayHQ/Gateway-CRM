@@ -6,7 +6,7 @@ import { fetchVisibleDeals, fetchVisibleCommissions } from '../lib/services/deal
 import MyEarnings from './MyEarnings.jsx'
 import { BrokerageReport, CapsEditor } from './BackOffice.jsx'
 import {
-  computeCommission, normalizeCommission, breakdownForDeal, agentSliceForDeal, capStatusFor, agentArrangement,
+  computeCommission, normalizeCommission, breakdownForDeal, agentSliceForDeal, capStatusFor, agentArrangement, agentFee, hasContractFee,
   makeSide, makeParticipant, describeDealCommission, partyForSide, addByParty, partyAmounts,
   PARTY_LABELS, DEFAULTS,
 } from '../lib/commission.js'
@@ -57,9 +57,10 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
         .filter(p => p._legacy_co_pct == null) // legacy co marker not editable directly
         .map(p => ({ ...p })),
       twoSided,
-      // Flat brokerage transaction fee for the whole deal. New deals default to
-      // $100; existing rows keep whatever was saved.
-      transaction_fee: commission?.id != null ? Number(norm.transaction_fee || 0) : DEFAULTS.TRANSACTION_FEE,
+      // The deal-level fee only applies to agents without a contract fee (rows
+      // saved before per-agent fees). A new deal's agents all bring their own,
+      // so it starts at 0; existing rows keep whatever was saved.
+      transaction_fee: commission?.id != null ? Number(norm.transaction_fee || 0) : 0,
       notes: commission?.notes ?? '',
     }
   }
@@ -120,6 +121,9 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
     })
   }
 
+  // Agents on this deal paying the deal-level fee instead of their own.
+  const legacyFeePayers = form.participants.filter(p => !hasContractFee(p)).length
+
   // ── Participant editing ─────────────────────────────────────────────────
   const setPart = (id, patch) =>
     setForm(p => ({ ...p, participants: p.participants.map(x => x.id === id ? { ...x, ...patch } : x) }))
@@ -129,7 +133,7 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
     // The agent's own arrangement — their split, pre-paid, or a cap the office
     // has confirmed for this deal's date — so the common case is zero-typing.
     const { split_pct, no_split, basis } = agentArrangement(a, deal)
-    setPart(id, { agent_id: agentId, name: a?.name || '', no_split, split_pct, basis })
+    setPart(id, { agent_id: agentId, name: a?.name || '', no_split, split_pct, basis, contract_fee: a ? agentFee(a) : null })
   }
 
   const addParticipant = () => {
@@ -299,7 +303,9 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
             </button>
           </div>
 
-          {/* Deal-level transaction fee — flat brokerage fee, split across agents. */}
+          {/* Deal-level transaction fee — only for agents on this deal who don't
+              carry a contract fee (rows saved before per-agent fees existed). */}
+          {legacyFeePayers > 0 && (
           <div style={{ border:'1px solid var(--gw-border)', borderRadius:'var(--radius)', padding:'10px 12px', marginBottom:8, display:'flex', alignItems:'center', gap:10 }}>
             <div style={{ flex:1 }}>
               <label style={fieldLabel}>Transaction fee ($)</label>
@@ -308,10 +314,11 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
             </div>
             <div style={{ flex:1, fontSize:11, color:'var(--gw-mist)', alignSelf:'flex-end', paddingBottom:8 }}>
               Flat brokerage fee, charged on top of the split. Split evenly:
-              <strong> {formatMoney((Number(form.transaction_fee)||0) / Math.max(1, form.participants.length))} </strong>
-              per agent.
+              <strong> {formatMoney((Number(form.transaction_fee)||0) / Math.max(1, legacyFeePayers))} </strong>
+              per agent without a contract fee.
             </div>
           </div>
+          )}
 
           {form.participants.map((p, i) => {
             const rp = result.participants.find(x => x.id === p.id) || {}
@@ -336,10 +343,13 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
                       onChange={e=>setPart(p.id,{ allocation_pct:e.target.value })} />
                   </div>
                   <div style={{ flex:1 }}>
-                    <label style={fieldLabel}>Fee override ($)</label>
+                    <label style={fieldLabel}>Transaction fee ($)</label>
                     <input className="form-control" type="number" min="0" step="0.01" value={p.fee || ''}
                       onChange={e=>setPart(p.id,{ fee:e.target.value })}
-                      placeholder={((Number(form.transaction_fee)||0) / Math.max(1, form.participants.length)).toFixed(2)} />
+                      placeholder={Number(rp.fee || 0).toFixed(2)}
+                      title={hasContractFee(p)
+                        ? `Their $${Number(p.contract_fee)} contract fee on a ${Number(p.allocation_pct) || 0}% share. Type a figure to override it on this deal.`
+                        : 'An even share of the deal-level fee. Type a figure to override it.'} />
                   </div>
                 </div>
 

@@ -223,3 +223,15 @@ describe('cap confirmation (migration 0061)', () => {
     expect(profileDbError({ message: 'column "cap_confirmed_at" of relation "agents" does not exist' })).toMatch(/0061/)
   })
 })
+
+describe('per-agent transaction fee (migration 0061)', () => {
+  it('only an admin can set it, as a non-negative number; blank means the office standard', () => {
+    expect(sanitizeProfilePayload({ transaction_fee: '50' }, { isAdmin: false }).payload).not.toHaveProperty('transaction_fee')
+    expect(sanitizeProfilePayload({ transaction_fee: '50' }, { isAdmin: true }).payload.transaction_fee).toBe(50)
+    expect(sanitizeProfilePayload({ transaction_fee: '' }, { isAdmin: true }).payload.transaction_fee).toBeNull()
+    expect(sanitizeProfilePayload({ transaction_fee: '-5' }, { isAdmin: true }).error).toMatch(/below 0/)
+  })
+  it('names the migration when the column is missing', () => {
+    expect(profileDbError({ message: "Could not find the 'transaction_fee' column of 'agents' in the schema cache" })).toMatch(/0061/)
+  })
+})

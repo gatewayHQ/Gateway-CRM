@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react'
 import { saveAgentProfile } from '../lib/services/agentProfile.js'
 import { Icon, Avatar, Badge, ConfirmDialog, pushToast } from '../components/UI.jsx'
 import { formatMoney, formatDate } from '../lib/helpers.js'
-import { agentSliceForDeal, addByParty, partyAmounts, capStatusFor, todayIso, DEFAULTS } from '../lib/commission.js'
+import { agentSliceForDeal, addByParty, partyAmounts, capStatusFor, todayIso, agentFee, DEFAULTS } from '../lib/commission.js'
 import SideSplit from '../components/SideSplit.jsx'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -246,6 +246,7 @@ export function CapsEditor({ db, setDb }) {
     cap_anniversary: a.cap_anniversary || '',
     no_brokerage_split: !!a.no_brokerage_split,
     default_split_pct: a.default_split_pct ?? 70,
+    transaction_fee: a.transaction_fee ?? '',
   }
   const setDraft = (id, patch) => setDrafts(p => ({ ...p, [id]: { ...draftFor(agents.find(a => a.id === id)), ...p[id], ...patch } }))
 
@@ -269,6 +270,11 @@ export function CapsEditor({ db, setDb }) {
         // "Cap pre-paid" means the agent keeps everything — record 100, not a
         // stale figure the disabled input is still showing.
         default_split_pct:  d.no_brokerage_split ? 100 : Number(d.default_split_pct),
+        // Sent only when it changed, so saving a split still works on a
+        // database that hasn't had migration 0061 yet. Blank = the standard.
+        ...(String(d.transaction_fee ?? '') !== String(a.transaction_fee ?? '')
+          ? { transaction_fee: d.transaction_fee === '' ? null : Number(d.transaction_fee) }
+          : {}),
       })
       setDb(p => ({ ...p, agents: (p.agents || []).map(x => x.id === a.id ? { ...x, ...saved } : x) }))
       // Drop the draft so the row re-derives from the saved values — a stale
@@ -287,7 +293,7 @@ export function CapsEditor({ db, setDb }) {
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
         <thead>
           <tr style={{ background: 'var(--gw-bone)', textAlign: 'left' }}>
-            {['Agent', 'Default Split %', 'Cap Amount ($)', 'Cap Anniversary', 'Cap Pre-paid / No Split', 'This cap year', ''].map(h => (
+            {['Agent', 'Default Split %', 'Fee per Deal ($)', 'Cap Amount ($)', 'Cap Anniversary', 'Cap Pre-paid / No Split', 'This cap year', ''].map(h => (
               <th key={h} style={{ padding: '9px 12px', fontSize: 11, fontWeight: 700, color: 'var(--gw-mist)', textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}>{h}</th>
             ))}
           </tr>
@@ -306,6 +312,11 @@ export function CapsEditor({ db, setDb }) {
                 <td style={{ padding: '9px 12px' }}>
                   <input type="number" min="0" max="100" className="form-control" style={{ width: 80, fontSize: 12.5 }}
                     value={d.default_split_pct} onChange={e => setDraft(a.id, { default_split_pct: e.target.value })} disabled={d.no_brokerage_split} />
+                </td>
+                <td style={{ padding: '9px 12px' }}>
+                  <input type="number" min="0" step="1" className="form-control" style={{ width: 90, fontSize: 12.5 }}
+                    placeholder={String(DEFAULTS.TRANSACTION_FEE)} title={`From their contract — blank = the $${DEFAULTS.TRANSACTION_FEE} standard. Charged on their share of each deal.`}
+                    value={d.transaction_fee} onChange={e => setDraft(a.id, { transaction_fee: e.target.value })} />
                 </td>
                 <td style={{ padding: '9px 12px' }}>
                   <input type="number" min="0" className="form-control" style={{ width: 120, fontSize: 12.5 }} placeholder="e.g. 25000"
@@ -346,12 +357,12 @@ export function CapsEditor({ db, setDb }) {
           onConfirm={() => setCapConfirmed(capAsk.agent, capAsk.undo)}
           message={capAsk.undo
             ? `Their split (${capAsk.agent.default_split_pct ?? DEFAULTS.SPLIT_PCT}%) applies again to every deal from ${longDate(capAsk.agent.cap_confirmed_at)} on.`
-            : `They've paid ${fmt(capAsk.status?.paid || 0)} of a ${fmt(capAsk.status?.amount || 0)} cap this cap year. From today until their cap anniversary they keep 100% of their commission on every deal — less the transaction fee, which is charged on top of the cap. Deals already closed keep their split.`}
+            : `They've paid ${fmt(capAsk.status?.paid || 0)} of a ${fmt(capAsk.status?.amount || 0)} cap this cap year. From today until their cap anniversary (${capAsk.agent.cap_anniversary ? longDate(capAsk.agent.cap_anniversary).replace(/, \d{4}$/, '') : 'Jan 1'}) they keep 100% of their commission on every deal — less their ${fmt(agentFee(capAsk.agent))} transaction fee, which is charged on top of the cap. Deals already closed keep their split.`}
         />
       )}
       <div style={{ fontSize: 11.5, color: 'var(--gw-mist)', padding: '10px 12px' }}>
         Anniversary = the date the agent's cap year restarts (year is ignored; only month/day matter). Leave blank for calendar-year resets.
-        "Cap pre-paid" marks agents who paid up front and keep 100% of splits — flat transaction fees still apply.
+        "Cap pre-paid" marks agents who paid up front and keep 100% of splits — flat transaction fees still apply. Fee per deal = the agent's contract fee (blank = the standard ${DEFAULTS.TRANSACTION_FEE}), charged on their share of each deal.
       </div>
     </div>
   )

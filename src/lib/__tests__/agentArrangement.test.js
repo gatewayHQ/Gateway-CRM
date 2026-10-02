@@ -4,7 +4,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   agentArrangement, capCovers, capConfirmedUntil, dealCommissionDate,
-  breakdownForDeal, agentSliceForDeal, makeSide, capStatusFor, todayIso,
+  breakdownForDeal, agentSliceForDeal, makeSide, capStatusFor, todayIso, agentFee,
 } from '../commission.js'
 
 const at = (iso) => new Date(`${iso}T12:00:00`)
@@ -119,5 +119,48 @@ describe('capStatusFor', () => {
 
   it('formats today for a date column', () => {
     expect(todayIso(at('2026-03-05'))).toBe('2026-03-05')
+  })
+})
+
+describe('each agent’s own transaction fee', () => {
+  const team = [
+    { id: 'new', name: 'New Nia', default_split_pct: 70, transaction_fee: 50 },
+    { id: 'std', name: 'Standard Sam', default_split_pct: 70 },
+  ]
+  const solo = (agentId, extra = {}) => ({ id: 'd', value: 500_000, stage: 'psa', agent_id: agentId,
+    commission_type: 'percent', commission_pct: 3, comp_data: { transaction_type: 'seller' }, ...extra })
+
+  it('is the contract fee, or the $100 standard when none is set', () => {
+    expect(agentFee(team[0])).toBe(50)
+    expect(agentFee(team[1])).toBe(100)
+    expect(agentFee({ transaction_fee: 0 })).toBe(0)
+  })
+
+  it('charges a new agent their $50 on a solo deal', () => {
+    const r = breakdownForDeal(solo('new'), null, team)
+    expect(r.participants[0].fee).toBe(50)
+    expect(r.agent_total).toBeCloseTo(15_000 * 0.7 - 50, 2)
+  })
+
+  it('charges each co-agent their own fee on their share of the deal', () => {
+    const r = breakdownForDeal(solo('new', { co_agent_ids: ['std'] }), null, team)
+    expect(r.participants.map(p => p.fee)).toEqual([25, 50])   // 50% of $50, 50% of $100
+    expect(r.transaction_fee_total).toBe(75)
+  })
+
+  it('keeps the deal-level fee on a row the office saved before per-agent fees', () => {
+    const saved = {
+      id: 'c1', sides: [makeSide('sale', 3)], transaction_fee: 100,
+      participants: [{ id: 'p1', agent_id: 'new', role: 'primary', allocation_pct: 100, split_pct: 70 }],
+    }
+    expect(breakdownForDeal(solo('new'), saved, team).participants[0].fee).toBe(100)
+  })
+
+  it('lets a fee the office typed on the deal win over the contract', () => {
+    const saved = {
+      id: 'c1', sides: [makeSide('sale', 3)], transaction_fee: 0,
+      participants: [{ id: 'p1', agent_id: 'new', role: 'primary', allocation_pct: 100, split_pct: 70, contract_fee: 50, fee: 75 }],
+    }
+    expect(breakdownForDeal(solo('new'), saved, team).participants[0].fee).toBe(75)
   })
 })

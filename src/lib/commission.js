@@ -133,6 +133,20 @@ export function agentArrangement(agent, deal) {
 }
 
 /**
+ * The agent's per-deal transaction fee from their contract (agents.
+ * transaction_fee, migration 0061) — typically $50 for a new agent — or the
+ * office standard when none is set. They pay it on their SHARE of a deal: all
+ * of it on a solo deal, half on a 50/50 co-listing.
+ */
+export function agentFee(agent) {
+  const v = agent?.transaction_fee
+  return v === null || v === undefined || v === '' ? DEFAULTS.TRANSACTION_FEE : Math.max(0, num(v, DEFAULTS.TRANSACTION_FEE))
+}
+
+/** Whether a participant pays their own contract fee (vs. the deal-level split). */
+export const hasContractFee = (p) => p?.contract_fee !== null && p?.contract_fee !== undefined && p?.contract_fee !== ''
+
+/**
  * Build a fresh participant row. `agent` (optional) seeds the split from the
  * agent's own arrangement — including a confirmed cap on this `deal` — so the
  * common case needs zero extra typing.
@@ -148,7 +162,11 @@ export function makeParticipant({ agent = null, deal = null, role = 'primary', a
     split_pct: arrangement.split_pct,
     no_split: arrangement.no_split,    // true = keeps 100%, no brokerage cut
     basis: arrangement.basis,          // 'split' | 'prepaid' | 'cap' — why this split
-    fee: 0,                            // per-agent override of the flat fee share (0 = use the deal-level split)
+    // The agent's contract fee, charged on their allocation. Null on a row
+    // built without an agent, and on rows the back office saved before
+    // per-agent fees existed — those keep the deal-level fee split evenly.
+    contract_fee: agent ? agentFee(agent) : null,
+    fee: 0,                            // per-agent override of the fee (0 = their contract fee, or the deal-level split)
   }
 }
 
@@ -329,9 +347,9 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
   const referral_pct = num(commission?.referral_pct, 0)
   const agent_pct    = num(commission?.agent_pct, DEFAULTS.SPLIT_PCT)
   const co_agent_pct = num(commission?.co_agent_pct, 0)
-  // Nothing saved by the back office yet: the standard per-deal fee applies,
-  // exactly what the editor seeds a new deal with.
-  const fee          = commission ? num(commission.transaction_fee, 0) : DEFAULTS.TRANSACTION_FEE
+  // A saved legacy row keeps its deal-level fee. With nothing saved, there is
+  // no deal-level fee: each agent pays their own contract fee (contract_fee).
+  const fee          = commission ? num(commission.transaction_fee, 0) : 0
 
   // A both-sides deal entered per side on the Details tab prices each side on
   // its own; everything else is one side, placed by what the deal represents.
@@ -391,6 +409,10 @@ export function normalizeCommission(commission, { deal, agents = [] } = {}) {
     }
   }
 
+  // A saved legacy row's fee is the deal-level fee it was reported with, so its
+  // participants don't bring contract fees of their own.
+  if (commission) for (const p of participants) p.contract_fee = null
+
   // The legacy flat `transaction_fee` was a single deal-level fee — carry it
   // straight through as the deal-level fee (no longer pinned to the primary).
   return { sale_price, sides, participants, transaction_fee: fee, _legacy: true }
@@ -442,17 +464,24 @@ export function computeCommission(input) {
     legacyCo._fixed_take = round2(coTake)
   }
 
-  // Flat per-deal transaction fee, split evenly across the agents who pay it
-  // (legacy fixed-take co-agents don't). A per-agent `fee` > 0 overrides the
-  // even share. This fee is charged ON TOP and is excluded from cap tracking.
+  // Transaction fee, charged ON TOP and excluded from cap tracking. In order:
+  //   1. a per-agent `fee` > 0 the back office typed — wins outright;
+  //   2. the agent's own contract fee (`contract_fee`), on their allocation —
+  //      full fee on a solo deal, half on a 50/50 co-listing;
+  //   3. otherwise the deal-level `transaction_fee`, split evenly across the
+  //      agents without a contract fee (rows saved before per-agent fees).
+  // Legacy fixed-take co-agents pay nothing.
   const transaction_fee = num(input?.transaction_fee, 0)
-  const feePayers = rawParts.filter(p => p._fixed_take == null && p._legacy_co_pct == null)
+  const feePayers = rawParts.filter(p => p._fixed_take == null && p._legacy_co_pct == null && !hasContractFee(p))
   const feeShare = feePayers.length ? transaction_fee / feePayers.length : 0
 
   const participants = rawParts.map(p => {
     const allocation = net_total * num(p.allocation_pct, 0) / 100
     const ownFee = num(p.fee, 0)
-    const txnFee = p._fixed_take != null ? 0 : (ownFee > 0 ? ownFee : feeShare)
+    const txnFee = p._fixed_take != null ? 0
+      : ownFee > 0 ? ownFee
+      : hasContractFee(p) ? num(p.contract_fee, 0) * num(p.allocation_pct, 0) / 100
+      : feeShare
 
     if (p._fixed_take != null) {
       // Legacy co-agent: fixed dollar take, comes out of the agent pool.

@@ -4,12 +4,16 @@ import { compressForUpload, IMMUTABLE_CACHE } from '../../lib/imageCompress.js'
 import { saveAgentProfile } from '../../lib/services/agentProfile.js'
 import { canHoldOfficeAdmin } from '../../lib/officeAdmins.js'
 import { Icon, Drawer, pushToast } from '../../components/UI.jsx'
+import { DEFAULTS } from '../../lib/commission.js'
 
 const COLORS = ['#2d3561','#4a6fa5','#2e7d5e','#c9a84c','#6b4fa5','#c0392b','#d4820a','#1a1a2e']
 const DEFAULT_SPLIT = 70
 const BLANK  = { name: '', initials: '', role: '', email: '', phone: '', color: '#2d3561', photo_url: '', bio: '',
                  tagline: '', stats: [],
-                 default_split_pct: DEFAULT_SPLIT, no_brokerage_split: false, is_admin: false }
+                 default_split_pct: DEFAULT_SPLIT, no_brokerage_split: false, is_admin: false,
+                 transaction_fee: '', cap_amount: '', cap_anniversary: '' }
+// The office standard per-deal fee — what a blank fee means.
+const STANDARD_FEE = DEFAULTS.TRANSACTION_FEE
 const BIO_MAX = 600
 
 const autoInitials = (name) =>
@@ -54,6 +58,10 @@ export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = fa
           // A null split in the database would make this a controlled→
           // uncontrolled input; show the house default instead of blank.
           default_split_pct: agent.default_split_pct ?? DEFAULT_SPLIT,
+          // Contract terms — blank inputs for nulls, for the same reason.
+          transaction_fee: agent.transaction_fee ?? '',
+          cap_amount:      agent.cap_amount ?? '',
+          cap_anniversary: agent.cap_anniversary || '',
         }
       : BLANK)
     setErrors({})
@@ -149,6 +157,12 @@ export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = fa
       // "Keeps 100%" is the split, not an excuse to blank the field: store 100
       // so reports and the commission editor read the same number the UI shows.
       payload.default_split_pct  = form.no_brokerage_split ? 100 : Number(form.default_split_pct)
+      // Contract terms travel only when changed: saving a bio or a split must
+      // not depend on migration 0061 (transaction_fee) having been applied.
+      const changed = (k) => String(form[k] ?? '') !== String(agent?.[k] ?? '')
+      if (changed('transaction_fee')) payload.transaction_fee = form.transaction_fee === '' ? null : Number(form.transaction_fee)
+      if (changed('cap_amount'))      payload.cap_amount      = form.cap_amount === '' ? null : Number(form.cap_amount)
+      if (changed('cap_anniversary')) payload.cap_anniversary = form.cap_anniversary || null
     }
 
     // Sent on its own track: an allow-listed account may flip this even while
@@ -344,13 +358,44 @@ export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = fa
                     : <div className="form-hint">This agent's share; the brokerage keeps the rest. Pre-fills the commission editor.</div>}
                 </div>
               )}
+
+              {/* CONTRACT TERMS — the rest of what decides their take-home. */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">Fee per deal ($)</label>
+                  <input className="form-control" type="number" min="0" step="1" placeholder={String(STANDARD_FEE)}
+                    value={form.transaction_fee ?? ''} onChange={e => set('transaction_fee', e.target.value)} />
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">Cap amount ($)</label>
+                  <input className="form-control" type="number" min="0" step="500" placeholder="No cap" disabled={!!form.no_brokerage_split}
+                    value={form.cap_amount ?? ''} onChange={e => set('cap_amount', e.target.value)} />
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">Cap anniversary</label>
+                  <input className="form-control" type="date" disabled={!!form.no_brokerage_split}
+                    value={form.cap_anniversary || ''} onChange={e => set('cap_anniversary', e.target.value)} />
+                </div>
+              </div>
+              <div className="form-hint" style={{ marginBottom: 12 }}>
+                The fee is from their contract (blank = the ${STANDARD_FEE} standard; new agents are often $50) and is charged on
+                their share of each deal. Their cap year resets on the anniversary — Jan 1 if none is set.
+              </div>
             </>
           ) : isSelf ? (
             <div style={{ fontSize: 13, color: 'var(--gw-slate)' }}>
               {form.no_brokerage_split
                 ? <>You keep <strong>100%</strong> — no brokerage split.</>
                 : <>Your split: <strong>{form.default_split_pct ?? DEFAULT_SPLIT}%</strong> to you, {100 - Number(form.default_split_pct ?? DEFAULT_SPLIT)}% to the brokerage.</>}
-              <div className="form-hint">Only an office admin can change this.</div>
+              <div style={{ marginTop: 4 }}>
+                Transaction fee: <strong>${form.transaction_fee === '' || form.transaction_fee == null ? STANDARD_FEE : Number(form.transaction_fee)}</strong> per deal
+                {!form.no_brokerage_split && form.cap_amount !== '' && form.cap_amount != null && (
+                  <> · cap <strong>${Number(form.cap_amount).toLocaleString()}</strong>, resets {form.cap_anniversary
+                    ? new Date(`${form.cap_anniversary}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                    : 'Jan 1'}</>
+                )}
+              </div>
+              <div className="form-hint">Only an office admin can change these.</div>
             </div>
           ) : null}
 
