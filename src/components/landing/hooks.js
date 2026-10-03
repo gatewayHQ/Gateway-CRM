@@ -2,7 +2,7 @@
  * Landing kit hooks — small, dependency-free, SSR/edge-safe, and all of the
  * motion hooks short-circuit when the user prefers reduced motion.
  */
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 /** True if the user has asked the OS to reduce motion. Reactive to changes. */
 export function usePrefersReducedMotion() {

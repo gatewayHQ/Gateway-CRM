@@ -21,8 +21,9 @@
  */
 
 import React, { useEffect, useMemo, useState } from 'react'
-import { supabase } from '../lib/supabase.js'
-import { compressForUpload, IMMUTABLE_CACHE, isWebpUrl } from '../lib/imageCompress.js'
+import { uploadCampaignImage, getCampaignImagePublicUrl } from '../lib/services/campaigns.js'
+import { createTemplate } from '../lib/services/templates.js'
+import { compressForUpload, isWebpUrl } from '../lib/imageCompress.js'
 import { Icon, Badge, EmptyState, SearchDropdown, pushToast, ConfirmDialog } from '../components/UI.jsx'
 import AudienceFilter from '../components/AudienceFilter.jsx'
 import BlastReport from '../components/BlastReport.jsx'
@@ -37,6 +38,8 @@ import {
   requiresProperty, announcementHeader, normalizeCustomHeader, CUSTOM_HEADER_MAX,
 } from '../lib/dealAnnouncement.js'
 import { PREVIEW_UNSUBSCRIBE_URL } from '../lib/emailFooter.js'
+import { getAuthSession } from '../lib/services/auth.js'
+import { fetchOutlookConnection } from '../lib/services/outlook.js'
 
 const STEPS = [
   { id: 1, label: 'Topic'    },
@@ -56,10 +59,9 @@ const card = {
 async function uploadEmailImage(file) {
   const { blob, ext, type, original } = await compressForUpload(file, 'email')
   const path = `announcements/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
-  const { error } = await supabase.storage.from('campaign-images')
-    .upload(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
+  const { error } = await uploadCampaignImage(path, blob, type)
   if (error) throw error
-  const { data: { publicUrl } } = supabase.storage.from('campaign-images').getPublicUrl(path)
+  const { data: { publicUrl } } = getCampaignImagePublicUrl(path)
   return { publicUrl, original, type }
 }
 
@@ -84,7 +86,7 @@ async function emailSafePhotoUrl(url) {
 }
 
 async function authedPost(action, payload) {
-  const { data: { session } } = await supabase.auth.getSession()
+  const { data: { session } } = await getAuthSession()
   const res = await fetch(`/api/email-send?action=${action}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
@@ -187,7 +189,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
   }, [focusProperty])   // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    supabase.from('ms_graph_connection_status').select('*').maybeSingle()
+    fetchOutlookConnection()
       .then(({ data }) => setOutlook(data && data.status === 'connected' ? data : false))
   }, [])
 
@@ -280,12 +282,12 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
 
   const saveAsTemplate = async () => {
     setSavingTemplate(true)
-    const { error } = await supabase.from('templates').insert([{
+    const { error } = await createTemplate({
       name:     property?.address ? `${header} — ${property.address}` : header,
       subject, body,
       category: 'deal-announcement',
       agent_id: activeAgent?.id || null,
-    }])
+    })
     setSavingTemplate(false)
     if (error) { pushToast(`Could not save template: ${error.message}`, 'error'); return }
     pushToast('Saved to Email Templates')

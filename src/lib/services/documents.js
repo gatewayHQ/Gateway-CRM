@@ -185,3 +185,28 @@ export async function listDealFiles(dealId) {
     files: (data || []).filter(f => f.id && f.name !== '.emptyFolderPlaceholder'),
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RAW BUCKET OPERATIONS
+//
+// The Documents tab and the signature screens work the deal's folder directly
+// — upload, sign a download link, delete, list — and do their own error
+// handling. These return exactly what supabase.storage returns
+// (`{ data, error }`); the friendlier wrappers above are for callers that want
+// the result interpreted.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Put a file at `path` (already `deal-<id>/…`) in the deal-documents bucket. */
+export const uploadDealFile = (path, body, options) =>
+  supabase.storage.from(BUCKETS.DEAL_DOCS).upload(path, body, options)
+
+/** A short-lived signed link to one of the deal's files. */
+export const createDealFileSignedUrl = (dealId, fileName, expiresInSeconds) =>
+  supabase.storage.from(BUCKETS.DEAL_DOCS).createSignedUrl(`${dealFolder(dealId)}/${fileName}`, expiresInSeconds)
+
+export const removeDealFile = (dealId, fileName) =>
+  supabase.storage.from(BUCKETS.DEAL_DOCS).remove([`${dealFolder(dealId)}/${fileName}`])
+
+/** The deal's folder listing, newest first, unfiltered. */
+export const listDealFolder = (dealId) =>
+  supabase.storage.from(BUCKETS.DEAL_DOCS).list(dealFolder(dealId), { sortBy: { column: 'created_at', order: 'desc' } })

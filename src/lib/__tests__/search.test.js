@@ -154,17 +154,23 @@ describe('routeForResult', () => {
 })
 
 describe('the box is actually wired up', () => {
-  const app = read('../../App.jsx')
+  // The top bar moved out of App.jsx into the shell's layout components.
+  const app = read('../../app/layout/Topbar.jsx')
   const cmp = read('../../components/GlobalSearch.jsx')
+  // The RPC calls themselves live in the search service the component uses.
+  const svc = read('../services/contactSearch.js')
 
-  it('App.jsx no longer renders the dead handler-less input', () => {
+  it('the top bar no longer renders the dead handler-less input', () => {
     expect(app).not.toMatch(/<input placeholder="Search contacts, properties, deals…" defaultValue="" \/>/)
     expect(app).toMatch(/<GlobalSearch/)
   })
 
   it('the component calls both database search functions', () => {
-    expect(cmp).toMatch(/supabase\.rpc\('search_contacts'/)
-    expect(cmp).toMatch(/supabase\.rpc\('search_properties'/)
+    expect(svc).toMatch(/supabase\.rpc\('search_contacts'/)
+    expect(svc).toMatch(/supabase\.rpc\('search_properties'/)
+    expect(cmp).toMatch(/searchContactsRemote\(/)
+    expect(cmp).toMatch(/searchPropertiesRemote\(/)
+    expect(cmp).toMatch(/from '\.\.\/lib\/services\/contactSearch\.js'/)
   })
 
   it('the input is controlled and has a change handler', () => {

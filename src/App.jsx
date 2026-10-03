@@ -1,919 +1,162 @@
-import React, { useState, useEffect } from 'react'
-import { supabase } from './lib/supabase.js'
-import { primeCache } from './lib/queryCache.js'
-import { fetchVisibleDeals, fetchVisibleCommissions } from './lib/services/deals.js'
-import { fetchVisibleProperties } from './lib/services/properties.js'
-import { fetchVisibleContacts } from './lib/services/contacts.js'
+// ─────────────────────────────────────────────────────────────────────────────
+// The signed-in CRM shell — composition root.
+//
+// This file wires the app together and holds no business rules of its own:
+//
+//   app/workspace/      session, boot (identity → visibility → scoped data)
+//   app/notifications/  the bell: unread list, realtime feed, read receipts
+//   app/navigation.js   nav model, titles, per-agent visibility of entries
+//   app/launchIntent.js deep links from outside the app (?deal=, ?contact=, …)
+//   app/routes.jsx      route → lazy page, with each page's exact props
+//   app/layout/         Sidebar, Topbar, MobileNav — presentational only
+//   lib/services/       every Supabase read/write the above depend on
+// ─────────────────────────────────────────────────────────────────────────────
+import React, { useState } from 'react'
+import { Analytics } from '@vercel/analytics/react'
 import { resolveStageLabels } from './lib/stageLabels.js'
-import { isOfficeAdmin } from './lib/officeAdmins.js'
-import { teamVisibleAgentIds } from './lib/teamVisibility.js'
 import { StageLabelContext } from './lib/stageLabelContext.js'
-import { Icon, Avatar, ToastHost, Loading, BootScreen, BootError, BrandLogo, ErrorBoundary, pushToast } from './components/UI.jsx'
-import { fetchAllRows } from './lib/services/fetchAll.js'
 import { mutationErrorMessage } from './lib/services/db.js'
-// All pages are lazy-loaded — only the current route's bundle downloads
-const Dashboard        = React.lazy(() => import('./pages/Dashboard.jsx'))
-const ContactsPage     = React.lazy(() => import('./pages/Contacts.jsx'))
-const PropertiesPage   = React.lazy(() => import('./pages/Properties.jsx'))
-const PipelinePage     = React.lazy(() => import('./pages/Pipeline.jsx'))
-const DealPage         = React.lazy(() => import('./pages/DealPage.jsx'))
-const TasksPage        = React.lazy(() => import('./pages/Tasks.jsx'))
-const MessagesPage     = React.lazy(() => import('./pages/Messages.jsx'))
-const CommissionPage   = React.lazy(() => import('./pages/Commission.jsx'))
-const TemplatesPage    = React.lazy(() => import('./pages/Templates.jsx'))
-const TeamPage         = React.lazy(() => import('./pages/Team/index.jsx'))
-const SettingsPage     = React.lazy(() => import('./pages/Settings.jsx'))
-const LeadsPage        = React.lazy(() => import('./pages/Leads.jsx'))
-const DataManagementPage = React.lazy(() => import('./pages/DataManagement.jsx'))
-const ReportsPage      = React.lazy(() => import('./pages/Reports.jsx'))
-const SequencesPage    = React.lazy(() => import('./pages/Sequences.jsx'))
-const MassEmailPage    = React.lazy(() => import('./pages/MassEmail.jsx'))
-const ColdCallsPage    = React.lazy(() => import('./pages/ColdCalls.jsx'))
-const IntegrationsPage = React.lazy(() => import('./pages/Integrations.jsx'))
-const CampaignsPage    = React.lazy(() => import('./pages/Campaigns.jsx'))
-const FormLibraryPage  = React.lazy(() => import('./pages/FormLibrary.jsx'))
-const AdminReviewPage  = React.lazy(() => import('./pages/AdminReview.jsx'))
-// Unreleased. Reached only by ?preview=markup — deliberately not in the nav,
-// so testing it cannot become an agent stumbling onto it mid-transaction.
-const MarkupPreviewPage = React.lazy(() => import('./pages/MarkupPreview.jsx'))
+import { ToastHost, Loading, BootScreen, BootError, ErrorBoundary, pushToast } from './components/UI.jsx'
 import LoginPage from './pages/Login.jsx'
 import QuickAdd from './pages/QuickAdd.jsx'
-import GlobalSearch from './components/GlobalSearch.jsx'
 import InstallPrompt from './components/InstallPrompt.jsx'
-import { Analytics } from '@vercel/analytics/react'
-// ComposeModal is a named export — wrap in a lazy default-export shim
-const ComposeModalLazy = React.lazy(() =>
-  import('./pages/Templates.jsx').then(m => ({ default: m.ComposeModal }))
-)
-
-// Primary: what every agent uses every day
-const NAV_CORE = [
-  { id: 'dashboard',  label: 'Dashboard',  icon: 'dashboard' },
-  { id: 'contacts',   label: 'Contacts',   icon: 'contacts' },
-  { id: 'properties', label: 'Properties', icon: 'building' },
-  { id: 'pipeline',   label: 'Pipeline',   icon: 'pipeline' },
-  { id: 'tasks',      label: 'Tasks',      icon: 'tasks' },
-  { id: 'messages',   label: 'Messages',   icon: 'mail' },
-]
-
-// Office: business operations, reviewed regularly
-const NAV_OFFICE = [
-  { id: 'commission', label: 'Commission', icon: 'commission' },
-  { id: 'review',     label: 'Review Queue', icon: 'check', adminOnly: true },
-  { id: 'coldcalls',  label: 'Cold Calls', icon: 'phone' },
-  { id: 'campaigns',  label: 'Mail Campaigns', icon: 'mail' },
-  { id: 'reports',    label: 'Reports',    icon: 'reports' },
-  { id: 'team',       label: 'Team',       icon: 'team' },
-]
-
-// Marketing & Tools: power features, collapsed for new users
-const NAV_TOOLS = [
-  { id: 'templates',    label: 'Email Templates', icon: 'file-text' },
-  { id: 'sequences',    label: 'Drip Sequences',  icon: 'sequences' },
-  { id: 'mass-email',   label: 'Mass Email',      icon: 'send'      },
-  { id: 'form-library', label: 'Form Library',    icon: 'document'  },
-  { id: 'toolkit',      label: 'Toolkit',         icon: 'sparkles'  },
-  { id: 'leads',        label: 'Website Leads',   icon: 'leads'     },
-]
-
-// Nav items agents are allowed to hide (dashboard + settings always stay)
-const HIDEABLE_NAV = [
-  { id: 'contacts',     label: 'Contacts',        group: 'Core'   },
-  { id: 'properties',   label: 'Properties',      group: 'Core'   },
-  { id: 'tasks',        label: 'Tasks',            group: 'Core'   },
-  { id: 'messages',     label: 'Messages',         group: 'Core'   },
-  { id: 'commission',   label: 'Commission',       group: 'Office' },
-  { id: 'coldcalls',    label: 'Cold Calls',       group: 'Office' },
-  { id: 'campaigns',    label: 'Mail Campaigns',   group: 'Office' },
-  { id: 'reports',      label: 'Reports',          group: 'Office' },
-  { id: 'team',         label: 'Team',             group: 'Office' },
-  { id: 'templates',    label: 'Email Templates',  group: 'Tools'  },
-  { id: 'sequences',    label: 'Drip Sequences',   group: 'Tools'  },
-  { id: 'mass-email',   label: 'Mass Email',       group: 'Tools'  },
-  { id: 'form-library', label: 'Form Library',     group: 'Tools'  },
-  { id: 'toolkit',      label: 'Toolkit',          group: 'Tools'  },
-  { id: 'leads',        label: 'Website Leads',    group: 'Tools'  },
-]
-
-// Always visible at the bottom — never buried
-const NAV_ADMIN = [
-  { id: 'integrations',   label: 'Integrations',    icon: 'link'      },
-  { id: 'data-management', label: 'Data Management', icon: 'tag', adminOnly: true },
-  { id: 'settings',       label: 'Settings',        icon: 'settings' },
-]
-
-const TOOLS_IDS = NAV_TOOLS.map(n => n.id)
-// The phone's bottom bar; everything else is under More.
-const MOBILE_TABS = ['dashboard', 'contacts', 'pipeline', 'tasks']
-const TOOLKIT_URL = 'https://gatewayhq.github.io/'
-
-const TITLES = {
-  dashboard:  { title: 'Dashboard',        crumb: 'Overview' },
-  contacts:   { title: 'Contacts',         crumb: 'CRM · People' },
-  properties: { title: 'Properties',       crumb: 'Database · Listings' },
-  pipeline:   { title: 'Pipeline',         crumb: 'Deals · Kanban' },
-  coldcalls:  { title: 'Cold Call Lists',  crumb: 'Prospecting · Dialer' },
-  campaigns:  { title: 'Mail Campaigns',   crumb: 'Marketing · Print · Tracking' },
-  commission: { title: 'Commission',       crumb: 'Deals · Earnings' },
-  tasks:      { title: 'Tasks',            crumb: 'Follow-ups · Reminders' },
-  messages:   { title: 'Messages',         crumb: 'SMS · Twilio Inbox' },
-  team:       { title: 'Team',             crumb: 'Agents · Roster' },
-  templates:  { title: 'Email Templates',  crumb: 'Communications · Library' },
-  sequences:  { title: 'Drip Sequences',   crumb: 'Marketing · Automation' },
-  'mass-email': { title: 'Mass Email',     crumb: 'Marketing · Deal Announcements' },
-  reports:    { title: 'Reports',          crumb: 'Analytics · ROI' },
-  review:     { title: 'Review Queue',     crumb: 'Admin · Closing Approvals' },
-  'form-library': { title: 'Form Library',  crumb: 'Documents · State Forms' },
-  toolkit:    { title: 'Toolkit',          crumb: 'Tools · Gateway Suite' },
-  leads:      { title: 'Website Leads',    crumb: 'Marketing · Captures' },
-  integrations: { title: 'Integrations',    crumb: 'Tools · Connections' },
-  'data-management': { title: 'Data Management', crumb: 'Admin · Controlled Vocabulary' },
-  settings:     { title: 'Settings',        crumb: 'Workspace' },
-}
-
-const COLORS = ['#2d3561','#4a6fa5','#2e7d5e','#c9a84c','#6b4fa5','#c0392b','#d4820a','#1a1a2e']
-
-const EMPTY_DB = {
-  contacts: [], properties: [], deals: [], tasks: [],
-  agents: [], templates: [], commissions: [], commissionsReady: true,
-  activities: [], activitiesReady: true,
-  dealContacts: [], propertyContacts: [],
-}
-
-const nameFromEmail = (email = '') => {
-  const local = (email || '').split('@')[0]
-  return local.split(/[._-]+/).filter(Boolean)
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join(' ')
-}
-
-function AgentOnboardingModal({ session, onComplete }) {
-  const guessedName = nameFromEmail(session?.user?.email || '')
-  const [name, setName] = useState(guessedName)
-  const [role, setRole] = useState('')
-  const [color, setColor] = useState(COLORS[0])
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
-
-  const autoInitials = (n) => n.trim().split(/\s+/).map(w => w[0] || '').join('').toUpperCase().slice(0, 2)
-
-  const save = async () => {
-    if (!name.trim()) { setError('Please enter your full name.'); return }
-    setSaving(true)
-    const { data, error: err } = await supabase.from('agents').insert([{
-      auth_id: session?.user?.id,
-      name: name.trim(),
-      initials: autoInitials(name),
-      role: role.trim() || 'Agent',
-      email: session?.user?.email || '',
-      color,
-    }]).select().single()
-    setSaving(false)
-    if (err) { setError(err.message); return }
-    onComplete(data)
-  }
-
-  return (
-    <div style={{
-      position: 'fixed', inset: 0, background: 'rgba(10,14,28,0.7)', backdropFilter: 'blur(4px)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 24,
-    }}>
-      <div style={{ background: '#fff', borderRadius: 14, width: '100%', maxWidth: 440, boxShadow: 'var(--shadow-modal)' }}>
-        <div style={{ padding: '28px 32px 0' }}>
-          <div style={{ fontFamily: 'var(--font-display)', fontSize: 26, fontWeight: 600, color: 'var(--gw-slate)', marginBottom: 6 }}>
-            Welcome to Gateway CRM
-          </div>
-          <div style={{ fontSize: 14, color: 'var(--gw-mist)', lineHeight: 1.6, marginBottom: 24 }}>
-            Let's set up your agent profile. This creates your shared identity across the team.
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 20 }}>
-            <div style={{ width: 64, height: 64, borderRadius: 12, background: color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24, fontWeight: 700, color: '#fff', transition: 'background 200ms' }}>
-              {autoInitials(name) || '?'}
-            </div>
-          </div>
-
-          <div className="form-group">
-            <label className="form-label required">Full Name</label>
-            <input className="form-control" value={name} onChange={e => setName(e.target.value)} placeholder="Jane Smith" autoFocus />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Role / Title</label>
-            <input className="form-control" value={role} onChange={e => setRole(e.target.value)} placeholder="Lead Agent, Buyer's Agent, Admin…" />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Avatar Color</label>
-            <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-              {COLORS.map(c => (
-                <div key={c} onClick={() => setColor(c)} style={{ width: 28, height: 28, borderRadius: 6, background: c, cursor: 'pointer', border: color === c ? '3px solid var(--gw-ink)' : '3px solid transparent', transition: 'border 150ms' }} />
-              ))}
-            </div>
-          </div>
-
-          {error && <div style={{ color: 'var(--gw-red)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
-        </div>
-
-        <div style={{ padding: '16px 32px 28px', borderTop: '1px solid var(--gw-border)', marginTop: 8 }}>
-          <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginBottom: 12 }}>
-            Logged in as <strong>{session?.user?.email}</strong>. Your profile is shared with the whole team.
-          </div>
-          <button className="btn btn--primary" style={{ width: '100%', justifyContent: 'center' }} onClick={save} disabled={saving}>
-            {saving ? 'Creating Profile…' : 'Get Started →'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
+import { useAuthSession } from './app/workspace/useAuthSession.js'
+import { signOutUser } from './lib/services/auth.js'
+import { useWorkspace } from './app/workspace/useWorkspace.js'
+import { useNotifications } from './app/notifications/useNotifications.js'
+import NotificationBell from './app/notifications/NotificationBell.jsx'
+import AgentOnboardingModal from './app/onboarding/AgentOnboardingModal.jsx'
+import { useAppNavigation } from './app/useAppNavigation.js'
+import { pageTitleFor } from './app/navigation.js'
+import { RouteOutlet, ComposeModalLazy } from './app/routes.jsx'
+import Sidebar from './app/layout/Sidebar.jsx'
+import Topbar from './app/layout/Topbar.jsx'
+import MobileNav from './app/layout/MobileNav.jsx'
 
 export default function App() {
-  const [session, setSession] = useState(null)
-  const [db, setDb] = useState(EMPTY_DB)
-  const [loading, setLoading] = useState(true)
-  const [route, setRoute] = useState('dashboard')
+  const session = useAuthSession()
+  const workspace = useWorkspace(session)
+  const { db, setDb, activeAgentId, visibility } = workspace
+  const navigation = useAppNavigation({ agents: db.agents, activeAgentId })
+  const { route, setRoute, navTo, nav, activeAgent, isAdmin } = navigation
+  const bell = useNotifications(activeAgentId)
+
   const [collapsed, setCollapsed] = useState(false)
-  const [activeAgentId, setActiveAgentId] = useState(null)
-  // One list per shared dimension, because each has its own opt-in flag on the
-  // team member row. `visibleAgentIds` is CONTACTS — it is not a general-purpose
-  // "people I can see" list, and using it for properties is what made the
-  // Properties sharing toggle do nothing (see the scoping block below).
-  const [visibleAgentIds, setVisibleAgentIds]   = useState([])
-  const [propertyAgentIds, setPropertyAgentIds] = useState([])
-  const [dealAgentIds, setDealAgentIds]         = useState([])
   const [compose, setCompose] = useState(null)
-  const [mobileMore, setMobileMore] = useState(false)
-  const [needsOnboarding, setNeedsOnboarding] = useState(false)
-  // A boot that couldn't reach the database. Shown as a retry screen — never
-  // as onboarding (which is what a failed agents read used to look like) or as
-  // an empty book (which is what a failed contacts read looked like).
-  const [bootError, setBootError] = useState(null)
-  const [bootAttempt, setBootAttempt] = useState(0)
-  const [notifications,   setNotifications]   = useState([])
-  const [notifOpen,       setNotifOpen]       = useState(false)
-  // Set by a global-search hit so the destination page opens that record.
-  const [focusRecord,     setFocusRecord]     = useState(null)
+  const [notifOpen, setNotifOpen] = useState(false)
   // The property an agent chose to announce from the Properties page. Carried
-  // as state rather than a URL param because this app has no real router (see
-  // the `route` state above); cleared once Mass Email has consumed it so a
-  // later visit to the page starts blank instead of re-seeding a stale listing.
+  // as state rather than a URL param because this app has no real router;
+  // cleared once Mass Email has consumed it so a later visit to the page
+  // starts blank instead of re-seeding a stale listing.
   const [announceProperty, setAnnounceProperty] = useState(null)
-  const [toolsOpen, setToolsOpen] = useState(
-    () => localStorage.getItem('gw_tools_open') === 'true'
-  )
-
-  // Auto-expand tools section when navigating to a tools page
-  useEffect(() => {
-    if (TOOLS_IDS.includes(route) && !toolsOpen) {
-      setToolsOpen(true)
-      localStorage.setItem('gw_tools_open', 'true')
-    }
-  }, [route])
-
-  // Land back here after the Microsoft OAuth redirect (api/email-send.js's
-  // outlook-callback 302s to `/?outlook=connected|error`, since this app has
-  // no real URL routing — see the `route` state above). Route to Integrations,
-  // toast the result, then strip the query string so a refresh doesn't repeat it.
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const outlook = params.get('outlook')
-    if (!outlook) return
-    setRoute('integrations')
-    if (outlook === 'connected') pushToast('Outlook connected')
-    else pushToast(params.get('message') || 'Could not connect Outlook', 'error')
-    window.history.replaceState(null, '', window.location.pathname)
-  }, [])
-
-  // ?deal=<id> — a deep link INTO a deal from outside the app. The signed-copy
-  // email the BoldSign webhook sends (api/_lib/signedCopyMail.js) is the first
-  // thing to need one: "open the deal" in an email has to land on the deal, and
-  // this app has no real URL routing to land on. Same shape as the Outlook
-  // callback above — route, then strip the query so a refresh doesn't re-route
-  // an agent who has since navigated somewhere else.
-  //
-  // ?contact=<id> is the same for a contact: the new-lead email's "Open in the
-  // CRM". Lead emails sent before Oct 2026 link to /contacts?id=<id>, which
-  // still works.
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const dealId = params.get('deal')
-    const contactId = params.get('contact')
-      || (window.location.pathname.replace(/\/+$/, '') === '/contacts' ? params.get('id') : null)
-    if (!dealId && !contactId) return
-    if (dealId) setRoute(`deal/${dealId}`)
-    else { setFocusRecord({ type: 'contact', id: contactId }); setRoute('contacts') }
-    window.history.replaceState(null, '', contactId ? '/' : window.location.pathname)
-  }, [])
-
-  // ?preview=markup — the strike-through markup bench (src/pages/MarkupPreview.jsx).
-  // Unreleased, so it has no nav entry and nothing links to it. The query string
-  // is deliberately NOT stripped the way the Outlook one above is: testing this
-  // means reloading it repeatedly, and a refresh that dumped you on the dashboard
-  // would make that tedious.
-  useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('preview') === 'markup') {
-      setRoute('markup-preview')
-    }
-  }, [])
-
-  // Per-agent hidden nav — loaded from agents table (nav_hidden column)
-  // Messages (two-way SMS) only means something to an agent with a Twilio
-  // number; for everyone else it was an empty inbox in their main nav.
-  const hiddenNav = React.useMemo(() => {
-    const agent = db.agents?.find(a => a.id === activeAgentId)
-    const hidden = agent?.nav_hidden || []
-    return agent && !agent.twilio_number ? [...hidden, 'messages'] : hidden
-  }, [db.agents, activeAgentId])
-
-  // If the current route is now hidden, redirect to dashboard
-  useEffect(() => {
-    if (hiddenNav.includes(route)) setRoute('dashboard')
-  }, [hiddenNav])
-
-  // Nav click handler — Toolkit opens in a new tab (uses its own login); everything else routes
-  const navTo = (id) => {
-    if (id === 'toolkit') {
-      window.open(TOOLKIT_URL, '_blank', 'noopener,noreferrer')
-      return
-    }
-    setRoute(id)
-  }
-
-  // Website Leads is always listed: new leads arrive there by round-robin, and
-  // a per-browser switch used to hide it from the agents receiving them.
-  const toolsBase = NAV_TOOLS
-  // Admin-only items disappear from the nav for everyone else (isAdmin is also
-  // computed lower for prop-passing, but the nav builds before that)
-  const navAdmin = isOfficeAdmin(db.agents?.find(x => x.id === activeAgentId))
-  const officeBase = NAV_OFFICE.filter(n => navAdmin || !n.adminOnly)
-  const adminBase  = NAV_ADMIN.filter(n => navAdmin || !n.adminOnly)
-  // An admin-only page reached by anyone else (a stale route after switching
-  // agents) goes to the dashboard rather than rendering nothing. Waits for the
-  // roster, so an admin is never bounced while their own row is still loading.
-  useEffect(() => {
-    if (!db.agents?.length || navAdmin) return
-    if ([...NAV_OFFICE, ...NAV_ADMIN].some(n => n.adminOnly && n.id === route)) setRoute('dashboard')
-  }, [navAdmin, route, db.agents?.length])
-  const NAV = [
-    ...NAV_CORE.filter(n => !hiddenNav.includes(n.id)),
-    ...officeBase.filter(n => !hiddenNav.includes(n.id)),
-    ...toolsBase.filter(n => !hiddenNav.includes(n.id)),
-    ...adminBase,
-  ]
-  // Tools items visible in sidebar
-  const visibleTools = toolsBase.filter(n => !hiddenNav.includes(n.id))
-
-  useEffect(() => {
-    supabase.auth.getSession()
-      .then(({ data }) => setSession(data.session ?? null))
-      .catch(() => setSession(null))
-    let subscription
-    try {
-      const { data } = supabase.auth.onAuthStateChange((_e, s) => setSession(s ?? null))
-      subscription = data.subscription
-    } catch {
-      setSession(null)
-    }
-    return () => subscription?.unsubscribe()
-  }, [])
-
-  // The whole database is refetched when the SIGNED-IN USER changes — not whenever a
-  // new session OBJECT arrives.
-  //
-  // Supabase refreshes the access token on its own schedule, and notably when a
-  // backgrounded tab is brought back to the front. Each refresh fires
-  // onAuthStateChange with a fresh session object, and while the dependency here was
-  // `session` that object identity alone re-ran this loader and called setDb with
-  // newly-built arrays. Nothing had changed, but every component keyed on those
-  // arrays behaved as though it had — which is how switching browser tabs used to
-  // slam the deal drawer back to its Details tab and take an open BoldSign editor
-  // down with it (see the comment on DealDrawer's seeding effect).
-  //
-  // Keyed on the user id, a token refresh is now what it should be: invisible.
-  const sessionUserId = session?.user?.id || null
-
-  useEffect(() => {
-    if (!session) return
-    const load = async () => {
-      // ── Phase 1: identity + team membership ──────────────────────────────
-      // Fetch agents and team_splits (with sharing flags) first so we know who
-      // is logged in and what data each team peer has opted to share.
-      const [agentsRes, teamSplitsRes] = await Promise.all([
-        supabase.from('agents').select('*').order('created_at', { ascending: true }),
-        supabase.from('team_splits').select('agent_id,team_id,share_contacts,share_properties,share_deals')
-          .then(r => r, () => ({ data: [] })),
-      ])
-
-      if (agentsRes.error) { setBootError(agentsRes.error); setLoading(false); return }
-      let agentsData      = agentsRes.data      || []
-      const allTeamSplits = teamSplitsRes.data  || []
-
-      const userId        = session?.user?.id
-      const loggedInEmail = session?.user?.email?.toLowerCase()
-
-      // Priority 1: match by auth_id
-      let matched = userId ? agentsData.find(a => a.auth_id === userId) : null
-
-      // Priority 2: claim an unclaimed agent record with matching email
-      if (!matched && userId) {
-        const orphan = agentsData.find(a =>
-          !a.auth_id && a.email?.toLowerCase() === loggedInEmail
-        )
-        if (orphan) {
-          const { error } = await supabase
-            .from('agents').update({ auth_id: userId }).eq('id', orphan.id)
-          if (!error) {
-            matched = { ...orphan, auth_id: userId }
-          } else {
-            // Unique constraint conflict — someone else already claimed this auth_id.
-            const { data: fresh } = await supabase.from('agents').select('*')
-            matched = (fresh || []).find(a => a.auth_id === userId) || null
-            if (fresh) agentsData = fresh
-          }
-        }
-      }
-
-      if (!matched) {
-        setNeedsOnboarding(true)
-        setLoading(false)
-        return
-      }
-
-      setActiveAgentId(matched.id)
-      // Office admin: the explicit is_admin flag (migration 0005), with a
-      // free-text role fallback for profiles created before the column — except
-      // for the accounts that own the toggle, where OFF means OFF.
-      const isAdminAgent = isOfficeAdmin(matched)
-
-      // ── Compute scoped agent ID lists ──────────────────────────────────────
-      // Each team member row carries explicit share_* flags (default true).
-      // Visibility is driven purely by those flags — no team-type rules needed,
-      // and each dimension reads only its own flag (see teamVisibility.js).
-      const {
-        contacts:   myVisible,
-        properties: myPropertyVisible,
-        deals:      myDealVisible,
-      } = teamVisibleAgentIds(allTeamSplits, matched.id)
-
-      setVisibleAgentIds(myVisible)
-      setPropertyAgentIds(myPropertyVisible)
-      setDealAgentIds(myDealVisible)
-
-      // ── Phase 2: scoped data fetches ─────────────────────────────────────
-      // Office admin sees EVERYTHING firm-wide (deals, contacts, properties,
-      // commissions, activities, documents-by-deal) so they can oversee the whole
-      // office. Tasks stay personal even for admins — a to-do list isn't oversight
-      // data and the admin's own tasks are all that's useful to them.
-      // Regular agents receive only rows scoped to their computed lists above.
-      // Everything pages past PostgREST's 1,000-row cap (fetchAllRows), and
-      // commissions load alongside the rest rather than after it.
-      const [contacts, properties, deals, tasks, templates, activitiesRes, dealContactsRes, propertyContactsRes, commissionsRes] = await Promise.all([
-        // Own book + team peers sharing contacts + the buyer and seller on any
-        // deal this agent is on. That last arm (migration 0055) is what stops a
-        // co-agent opening a deal they can see and finding no client on it.
-        fetchVisibleContacts(supabase, {
-          isAdmin: isAdminAgent, agentId: matched.id, contactAgentIds: myVisible,
-        }),
-        // Assigned to me + team peers sharing properties + anything I co-agent
-        fetchVisibleProperties(supabase, {
-          isAdmin: isAdminAgent, agentId: matched.id, propertyAgentIds: myPropertyVisible,
-        }),
-        // Own + team-shared + co-listed (commission participant) deals
-        fetchVisibleDeals(supabase, { isAdmin: isAdminAgent, agentId: matched.id, dealAgentIds: myDealVisible }),
-        // Tasks are personal — never shared, even for an admin
-        fetchAllRows(() => supabase.from('tasks').select('*').eq('agent_id', matched.id).order('due_date', { ascending: true })),
-        fetchAllRows(() => supabase.from('templates').select('*').order('created_at', { ascending: false })),
-        fetchAllRows(() => supabase.from('activities').select('*').order('created_at', { ascending: false })),
-        // Additional-contact links (husband & wife etc. — migration 0021).
-        // deal_contacts is RLS-scoped to visible deals; property_contacts is
-        // open like properties. If the migration hasn't run yet these error and
-        // the app degrades gracefully to single-contact behavior.
-        fetchAllRows(() => supabase.from('deal_contacts').select('*')),
-        fetchAllRows(() => supabase.from('property_contacts').select('*')),
-        // Commissions are back-office data: only admins load raw rows. Agents
-        // get their own slice via /api/portal?action=my-earnings (the database
-        // enforces this too — non-admin queries return zero rows).
-        isAdminAgent
-          ? fetchVisibleCommissions(supabase, { isAdmin: true })
-          : Promise.resolve({ data: [], error: null }),
-      ])
-      // The book itself must load. A failed read here would otherwise show as
-      // an agent with no contacts or deals — indistinguishable from data loss.
-      const coreError = [contacts, properties, deals, tasks].find(r => r?.error)?.error
-      if (coreError) { setBootError(coreError); setLoading(false); return }
-      setBootError(null)
-
-      const dbPayload = {
-        contacts:         contacts.data     || [],
-        properties:       properties.data   || [],
-        deals:            deals.data         || [],
-        tasks:            tasks.data         || [],
-        agents:           agentsData,
-        templates:        templates.data     || [],
-        commissions:      commissionsRes.data || [],
-        commissionsReady: !commissionsRes.error,
-        activities:       activitiesRes.data || [],
-        activitiesReady:  !activitiesRes.error,
-        dealContacts:     dealContactsRes.data     || [],
-        propertyContacts: propertyContactsRes.data || [],
-      }
-      setDb(dbPayload)
-
-      // Seed query cache so page components skip redundant fetches
-      const agentKey = matched.id
-      primeCache(`contacts:${agentKey}`,    dbPayload.contacts)
-      primeCache(`properties:${agentKey}`,  dbPayload.properties)
-      primeCache(`deals:${agentKey}`,       dbPayload.deals)
-      primeCache(`tasks:${agentKey}`,       dbPayload.tasks)
-      primeCache(`templates:${agentKey}`,   dbPayload.templates)
-      primeCache(`activities:${agentKey}`,  dbPayload.activities)
-      primeCache(`agents:all`,              dbPayload.agents)
-
-      setLoading(false)
-    }
-    load().catch(err => { setBootError(err); setLoading(false) })
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on WHO is signed
-    // in, deliberately not on the session object; see the comment above.
-  }, [sessionUserId, bootAttempt])
-
-  // Realtime: listen for new agent_notifications for the active agent
-  useEffect(() => {
-    if (!activeAgentId) return
-    // Load existing unread notifications
-    supabase
-      .from('agent_notifications')
-      .select('*')
-      .eq('agent_id', activeAgentId)
-      .eq('read', false)
-      .order('created_at', { ascending: false })
-      .then(({ data }) => { if (data) setNotifications(data) })
-      .catch(() => {}) // table may not exist yet — fail silently
-
-    const channel = supabase.channel(`notif-agent-${activeAgentId}`)
-      .on('postgres_changes', {
-        event: 'INSERT', schema: 'public', table: 'agent_notifications',
-        filter: `agent_id=eq.${activeAgentId}`,
-      }, payload => {
-        setNotifications(prev => [payload.new, ...prev])
-        pushToast(payload.new.title
-          ? `${payload.new.title}: ${payload.new.message}`
-          : payload.new.message || 'New notification', 'success')
-      })
-      .subscribe()
-
-    return () => { supabase.removeChannel(channel) }
-  }, [activeAgentId])
-
-  const markNotifRead = async (id) => {
-    await supabase.from('agent_notifications').update({ read: true }).eq('id', id)
-    setNotifications(prev => prev.filter(n => n.id !== id))
-  }
-
-  // Where a bell item goes: its contact (a new lead) or its deal (reminders,
-  // nudges, signatures). Opening it also marks it read.
-  const openContact = (id) => { setFocusRecord({ type: 'contact', id }); setRoute('contacts') }
-  const openNotification = (n) => {
-    if (!n.contact_id && !n.deal_id) return null
-    return () => {
-      setNotifOpen(false)
-      markNotifRead(n.id)
-      if (n.contact_id) openContact(n.contact_id)
-      else setRoute(`deal/${n.deal_id}`)
-    }
-  }
-
-  const markAllRead = async () => {
-    const ids = notifications.map(n => n.id)
-    if (ids.length === 0) return
-    await supabase.from('agent_notifications').update({ read: true }).in('id', ids)
-    setNotifications([])
-  }
 
   const signOut = async () => {
-    await supabase.auth.signOut()
-    setDb(EMPTY_DB)
-    setNotifications([])
-    setNeedsOnboarding(false)
-    setBootError(null)
-    setLoading(true)
+    await signOutUser()
+    workspace.reset()
+    bell.clear()
   }
 
   if (!session) return <LoginPage />
 
-  const activeAgent = db.agents.find(a => a.id === activeAgentId) || null
-  const isAdmin     = isOfficeAdmin(activeAgent)
   // Pipeline column headers this agent renamed, layered over the built-in
   // labels. Resolved once here and provided to every screen so the board, the
   // deal page, and the dashboard all speak the agent's own vocabulary. Cheap
   // enough to recompute (one spread over ~16 keys) that memoizing it after the
   // early returns above would only buy a rules-of-hooks violation.
   const stageLabels = resolveStageLabels(activeAgent?.stage_labels)
-  const props = {
+
+  // The shared context most pages take.
+  const page = {
     db, setDb, activeAgent, go: setRoute, openCompose: setCompose, isAdmin,
-    visibleAgentIds, propertyAgentIds, dealAgentIds,
+    // One list per shared dimension — each has its own opt-in flag.
+    visibleAgentIds: visibility.contacts,
+    propertyAgentIds: visibility.properties,
+    dealAgentIds: visibility.deals,
     // Properties → "Announce" → the mass-email wizard, with the property preselected.
     announce: (propertyId) => { setAnnounceProperty(propertyId); setRoute('mass-email') },
-    // "+ Contact" / "+ Deal" from anywhere: go to the page AND open its blank
-    // form, through the same one-shot handoff a search hit uses.
-    startNew: (kind) => {
-      setFocusRecord({ type: `new-${kind}` })
-      setRoute({ contact: 'contacts', property: 'properties', deal: 'pipeline' }[kind])
-    },
-    // Open one contact's drawer from anywhere (dashboard, bell, search).
-    openContact,
+    startNew: navigation.startNew,
+    openContact: navigation.openContact,
   }
 
-  if (loading) return <BootScreen />
-  if (bootError) {
+  if (workspace.loading) return <BootScreen />
+  if (workspace.bootError) {
     return (
       <BootError
-        message={mutationErrorMessage(bootError, undefined, "We couldn't load your CRM.")}
-        onRetry={() => { setBootError(null); setLoading(true); setBootAttempt(n => n + 1) }}
+        message={mutationErrorMessage(workspace.bootError, undefined, "We couldn't load your CRM.")}
+        onRetry={workspace.retry}
         onSignOut={signOut}
       />
     )
   }
 
-  // A deal page has no TITLES entry (its route carries the id), so the bar was
-  // blank there; it reads as the deal, under Pipeline.
-  const routeDeal = route.startsWith('deal/') ? (db.deals || []).find(d => d.id === route.split('/')[1]) : null
-  const pageTitle = route.startsWith('deal/')
-    ? { title: routeDeal?.title || 'Deal', crumb: 'Pipeline · Deal' }
-    : (TITLES[route] || {})
-  // The bottom-nav tab a page belongs to — a deal is part of Pipeline.
-  const navRoute = route.startsWith('deal/') ? 'pipeline' : route
+  // Where a bell item goes: its contact (a new lead) or its deal (reminders,
+  // nudges, signatures). Opening it also marks it read.
+  const openNotification = (n) => {
+    if (!n.contact_id && !n.deal_id) return null
+    return () => {
+      setNotifOpen(false)
+      bell.markRead(n.id)
+      if (n.contact_id) navigation.openContact(n.contact_id)
+      else setRoute(`deal/${n.deal_id}`)
+    }
+  }
 
   return (
     <StageLabelContext.Provider value={stageLabels}>
     <div className="app" onClick={() => notifOpen && setNotifOpen(false)}>
-      {needsOnboarding && (
+      {workspace.needsOnboarding && (
         <AgentOnboardingModal
           session={session}
           onComplete={(agent) => {
-            setDb(p => ({ ...p, agents: [...p.agents, agent] }))
-            setActiveAgentId(agent.id)
-            setNeedsOnboarding(false)
+            workspace.completeOnboarding(agent)
             pushToast(`Welcome, ${agent.name}!`)
           }}
         />
       )}
 
-      <aside className={`sidebar${collapsed ? ' collapsed' : ''}`}>
-        <div className="sidebar__brand">
-          <button
-            type="button"
-            className="sidebar__brand-mark"
-            onClick={() => setRoute('dashboard')}
-            title="Dashboard"
-            aria-label="The Wolf CRM — go to dashboard"
-          >
-            <BrandLogo size={72} />
-          </button>
-          {!collapsed && (
-            <div className="sidebar__brand-text">
-              <div className="sidebar__wordmark">Gateway</div>
-              <div className="sidebar__sub">Real Estate Advisors</div>
-            </div>
-          )}
-          <button className="sidebar__collapse" onClick={() => setCollapsed(!collapsed)} title={collapsed ? 'Expand' : 'Collapse'}>
-            <Icon name={collapsed ? 'chevronRight' : 'chevronLeft'} size={16} />
-          </button>
-        </div>
-
-        <nav className="sidebar__nav" aria-label="Main navigation">
-          {/* ── Core ── */}
-          {NAV_CORE.filter(n => !(isAdmin && n.id === 'contacts') && !hiddenNav.includes(n.id)).map(n => (
-            <div key={n.id} className={`nav-item${route === n.id || (n.id === 'pipeline' && route.startsWith('deal/')) ? ' active' : ''}`}
-              onClick={() => setRoute(n.id)} title={n.label}
-              role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
-              <Icon name={n.icon} size={16} />
-              {!collapsed && <span>{n.label}</span>}
-              {isAdmin && n.id === 'pipeline' && !collapsed && (
-                <span style={{ marginLeft: 'auto', fontSize: 9, fontWeight: 700, background: 'rgba(255,255,255,0.15)', color: '#fff', padding: '1px 5px', borderRadius: 6, letterSpacing: '0.05em' }}>ALL</span>
-              )}
-            </div>
-          ))}
-
-          {/* ── Office ── */}
-          {!collapsed && <div className="nav-section-label" style={{ marginTop: 8 }}>Office</div>}
-          {collapsed && <div className="nav-section-divider" />}
-          {officeBase.filter(n => !hiddenNav.includes(n.id)).map(n => (
-            <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}`}
-              onClick={() => setRoute(n.id)} title={n.label}
-              role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
-              <Icon name={n.icon} size={16} />
-              {!collapsed && <span>{n.label}</span>}
-            </div>
-          ))}
-
-          {/* ── Marketing & Tools (collapsible) ── */}
-          {collapsed ? (
-            <div className="nav-section-divider" />
-          ) : (
-            <button
-              className={`nav-group-toggle${TOOLS_IDS.includes(route) ? ' has-active' : ''}${toolsOpen ? ' open' : ''}`}
-              onClick={() => { const next = !toolsOpen; setToolsOpen(next); localStorage.setItem('gw_tools_open', String(next)) }}
-              aria-expanded={toolsOpen}
-              title={toolsOpen ? 'Collapse Marketing & Tools' : 'Expand Marketing & Tools'}
-            >
-              <span>Marketing &amp; Tools</span>
-              <span className="nav-group-toggle__badge">{visibleTools.length}</span>
-              <Icon name={toolsOpen ? 'chevronDown' : 'chevronRight'} size={11} style={{ marginLeft: 'auto', flexShrink: 0 }} />
-            </button>
-          )}
-          {(toolsOpen || collapsed) && visibleTools.map(n => (
-            <div key={n.id} className={`nav-item${route === n.id ? ' active' : ''}${!collapsed ? ' nav-item--indented' : ''}`}
-              onClick={() => navTo(n.id)} title={n.label}
-              role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && navTo(n.id)}>
-              <Icon name={n.icon} size={16} />
-              {!collapsed && <span>{n.label}</span>}
-              {n.id === 'toolkit' && !collapsed && (
-                <Icon name="eye" size={11} style={{ marginLeft: 'auto', flexShrink: 0, opacity: 0.5 }} />
-              )}
-            </div>
-          ))}
-        </nav>
-
-        {/* ── Admin — pinned above agent profile ── */}
-        <div className="sidebar__bottom">
-          {adminBase.map(n => (
-            <div key={n.id} className={`nav-item nav-item--admin${route === n.id ? ' active' : ''}`}
-              onClick={() => setRoute(n.id)} title={n.label}
-              role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && setRoute(n.id)}>
-              <Icon name={n.icon} size={16} />
-              {!collapsed && <span>{n.label}</span>}
-            </div>
-          ))}
-        </div>
-
-        <div className="sidebar__agent">
-          {activeAgent && <Avatar agent={activeAgent} size={32} />}
-          {!activeAgent && <div style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon name="contacts" size={14} style={{ color: 'rgba(255,255,255,0.4)' }} /></div>}
-          {!collapsed && (
-            <div style={{ flex: 1, overflow: 'hidden' }}>
-              <div className="agent-name">{activeAgent?.name || 'No agent selected'}</div>
-              <div className="agent-role">{activeAgent?.role || 'Set up your profile'}</div>
-            </div>
-          )}
-        </div>
-      </aside>
+      <Sidebar
+        nav={nav} route={route} navTo={navTo} isAdmin={isAdmin} activeAgent={activeAgent}
+        collapsed={collapsed} onToggleCollapsed={() => setCollapsed(!collapsed)}
+        toolsOpen={navigation.toolsOpen} onToggleTools={navigation.toggleTools}
+      />
 
       <div className="main">
-        <header className="topbar">
-          {/* The sidebar — and with it the brand slot — is hidden under 768px,
-              so the seal moves into the top-left of the bar on phones. */}
-          <button
-            type="button"
-            className="topbar__brand"
-            onClick={() => setRoute('dashboard')}
-            title="Dashboard"
-            aria-label="The Wolf CRM — go to dashboard"
-          >
-            <BrandLogo size={40} />
-          </button>
-          <div>
-            <div className="topbar__title">{pageTitle.title}</div>
-            <div className="topbar__breadcrumb">{pageTitle.crumb}</div>
-          </div>
-          <GlobalSearch
-            db={db}
-            visibleAgentIds={visibleAgentIds}
-            propertyAgentIds={propertyAgentIds}
-            isAdmin={isAdmin}
-            onNavigate={(item) => {
-              if (item.kind === 'deal')     { setRoute(`deal/${item.id}`); return }
-              if (item.kind === 'contact')  { openContact(item.id); return }
-              if (item.kind === 'property') { setFocusRecord({ type: 'property', id: item.id }); setRoute('properties') }
-            }}
-          />
-          {activeAgent && (
-            <div className="topbar__agent-badge">
-              <Avatar agent={activeAgent} size={30} />
-              <div>
-                <div className="label">Active Agent</div>
-                <div className="name">{activeAgent.name}</div>
-              </div>
-            </div>
-          )}
-          {/* Notification bell */}
-          <div style={{ position: 'relative' }}>
-            <button
-              className="btn btn--ghost btn--icon"
-              title="Notifications"
-              onClick={() => setNotifOpen(o => !o)}
-              style={{ position: 'relative' }}
-            >
-              <Icon name="alert" size={16} />
-              {notifications.length > 0 && (
-                <span style={{
-                  position: 'absolute', top: 2, right: 2,
-                  width: 16, height: 16, borderRadius: '50%',
-                  background: 'var(--gw-red, #dc2626)', color: '#fff',
-                  fontSize: 9, fontWeight: 700,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  pointerEvents: 'none',
-                }}>
-                  {notifications.length > 9 ? '9+' : notifications.length}
-                </span>
-              )}
-            </button>
-            {notifOpen && (
-              <div style={{
-                position: 'absolute', right: 0, top: 'calc(100% + 8px)', zIndex: 200,
-                width: 340, background: '#fff', border: '1px solid var(--gw-border)',
-                borderRadius: 'var(--radius)', boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
-              }} onClick={e => e.stopPropagation()}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderBottom: '1px solid var(--gw-border)' }}>
-                  <span style={{ fontWeight: 700, fontSize: 13 }}>Notifications</span>
-                  {notifications.length > 0 && (
-                    <button className="btn btn--ghost btn--sm" style={{ fontSize: 11 }} onClick={markAllRead}>
-                      Mark all read
-                    </button>
-                  )}
-                </div>
-                {notifications.length === 0 ? (
-                  <div style={{ padding: '24px 14px', textAlign: 'center', fontSize: 13, color: 'var(--gw-mist)' }}>
-                    No new notifications
-                  </div>
-                ) : (
-                  <div style={{ maxHeight: 360, overflowY: 'auto' }}>
-                    {notifications.map(n => {
-                      const open = openNotification(n)
-                      return (
-                      <div key={n.id} style={{
-                        display: 'flex', gap: 10, padding: '10px 14px',
-                        borderBottom: '1px solid var(--gw-border)',
-                        background: '#f0fdf4',
-                      }}>
-                        <Icon name={n.type === 'lead' ? 'leads' : 'check'} size={14} style={{ color: 'var(--gw-green)', flexShrink: 0, marginTop: 2 }} />
-                        <div
-                          style={{ flex: 1, minWidth: 0, cursor: open ? 'pointer' : 'default' }}
-                          role={open ? 'button' : undefined} tabIndex={open ? 0 : undefined}
-                          onClick={open || undefined}
-                          onKeyDown={open ? (e => { if (e.key === 'Enter') open() }) : undefined}
-                        >
-                          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--gw-ink)' }}>{n.title}</div>
-                          <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 2, lineHeight: 1.5 }}>{n.message}</div>
-                          <div style={{ fontSize: 10, color: 'var(--gw-mist)', marginTop: 4 }}>
-                            {new Date(n.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                          </div>
-                        </div>
-                        <button
-                          className="btn btn--ghost btn--icon btn--sm"
-                          title="Dismiss"
-                          onClick={() => markNotifRead(n.id)}
-                          style={{ flexShrink: 0, alignSelf: 'flex-start' }}
-                        >
-                          <Icon name="x" size={11} />
-                        </button>
-                      </div>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-          <button className="btn btn--ghost btn--icon" onClick={signOut} title="Sign out" style={{ marginLeft: 4 }}>
-            <Icon name="logout" size={16} />
-          </button>
-        </header>
+        <Topbar
+          pageTitle={pageTitleFor(route, db.deals || [])}
+          onHome={() => setRoute('dashboard')}
+          search={{
+            db,
+            visibleAgentIds: visibility.contacts,
+            propertyAgentIds: visibility.properties,
+            isAdmin,
+            onNavigate: navigation.openSearchResult,
+          }}
+          activeAgent={activeAgent}
+          onSignOut={signOut}
+          bell={
+            <NotificationBell
+              notifications={bell.notifications}
+              open={notifOpen}
+              onToggle={() => setNotifOpen(o => !o)}
+              onDismiss={bell.markRead}
+              onDismissAll={bell.markAllRead}
+              onOpenItem={openNotification}
+            />
+          }
+        />
 
         <React.Suspense fallback={<div style={{ display:'flex', alignItems:'center', justifyContent:'center', flex:1 }}><Loading /></div>}>
         <ErrorBoundary>
-          {route === 'dashboard'  && <Dashboard {...props} />}
-          {route === 'contacts'   && <ContactsPage {...props} focusRecord={focusRecord} onFocusHandled={() => setFocusRecord(null)} />}
-          {route === 'properties' && <PropertiesPage {...props} focusRecord={focusRecord} onFocusHandled={() => setFocusRecord(null)} />}
-          {route === 'pipeline'   && <PipelinePage {...props} isAdmin={isAdmin} focusRecord={focusRecord} onFocusHandled={() => setFocusRecord(null)} />}
-          {/* `deal/<id>` and `deal/<id>/<drawer tab>`. The suffix is how another
-              screen hands an agent straight to the thing they clicked — the
-              dashboard's signature queue lands on that deal's Signatures tab
-              rather than on the deal page for them to find it again. */}
-          {route.startsWith('deal/') && (() => {
-            const [dealId, openTab] = route.slice(5).split('/')
-            return <DealPage {...props} dealId={dealId} openTab={openTab || null} />
-          })()}
-          {route === 'coldcalls'  && <ColdCallsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
-          {route === 'campaigns'  && <CampaignsPage  db={db} setDb={setDb} activeAgent={activeAgent} />}
-          {route === 'commission' && <CommissionPage {...props} />}
-          {route === 'tasks'      && <TasksPage {...props} />}
-          {route === 'messages'   && <MessagesPage db={db} activeAgent={activeAgent} />}
-          {route === 'team'       && <TeamPage {...props} onSwitchAgent={id => setActiveAgentId(id)} />}
-          {route === 'templates'  && <TemplatesPage {...props} />}
-          {route === 'sequences'  && <SequencesPage {...props} />}
-          {route === 'mass-email' && (
-            <MassEmailPage {...props} focusProperty={announceProperty}
-              onFocusHandled={() => setAnnounceProperty(null)} />
-          )}
-          {route === 'reports'    && <ReportsPage {...props} />}
-          {route === 'review'     && <AdminReviewPage {...props} />}
-          {route === 'form-library' && <FormLibraryPage isAdmin={isAdmin} />}
-          {route === 'leads'      && <LeadsPage {...props} />}
-          {route === 'integrations'      && <IntegrationsPage isAdmin={isAdmin} />}
-          {route === 'data-management'   && isAdmin && <DataManagementPage />}
-          {route === 'settings'          && <SettingsPage {...props} activeAgentId={activeAgentId} hideableNav={HIDEABLE_NAV} />}
-          {route === 'markup-preview'    && <MarkupPreviewPage />}
+          <RouteOutlet
+            route={route}
+            page={page}
+            focusRecord={navigation.focusRecord}
+            clearFocus={navigation.clearFocus}
+            announceProperty={announceProperty}
+            clearAnnounce={() => setAnnounceProperty(null)}
+            activeAgentId={activeAgentId}
+            onSwitchAgent={workspace.setActiveAgentId}
+          />
         </ErrorBoundary>
         </React.Suspense>
       </div>
@@ -924,64 +167,7 @@ export default function App() {
         </React.Suspense>
       )}
 
-
-      {/* ── Mobile bottom nav ── */}
-      <nav className="mobile-nav">
-        {MOBILE_TABS.filter(id => !(isAdmin && id === 'contacts')).map(id => {
-          const n = NAV.find(x => x.id === id)
-          if (!n) return null
-          return (
-            <button key={n.id} className={`mobile-nav__item${navRoute === n.id && !mobileMore ? ' active' : ''}`}
-              aria-current={navRoute === n.id ? 'page' : undefined}
-              onClick={() => { setMobileMore(false); setRoute(n.id) }}>
-              <Icon name={n.icon} size={22} />
-              <span>{n.label}</span>
-            </button>
-          )
-        })}
-        <button className={`mobile-nav__item${mobileMore ? ' active' : ''}`}
-          onClick={() => setMobileMore(m => !m)}>
-          <Icon name="more" size={22} />
-          <span>More</span>
-        </button>
-      </nav>
-
-      {/* ── Mobile "More" sheet ── */}
-      {mobileMore && (
-        <div className="mobile-menu-backdrop" onClick={() => setMobileMore(false)}>
-          <div className="mobile-menu" onClick={e => e.stopPropagation()}>
-            <div className="mobile-menu__handle" />
-            {/* Grouped like the sidebar, so a long list still reads at a glance. */}
-            {[
-              ['Work',      [...NAV_CORE, ...officeBase]],
-              ['Marketing & Tools', NAV_TOOLS],
-              ['Settings',  adminBase],
-            ].map(([label, items]) => {
-              const rows = items.filter(n => NAV.some(x => x.id === n.id) && !MOBILE_TABS.includes(n.id))
-              if (!rows.length) return null
-              return (
-                <React.Fragment key={label}>
-                  <div className="mobile-menu__label">{label}</div>
-                  {rows.map(n => (
-                    <div key={n.id} className={`mobile-menu__item${route === n.id ? ' active' : ''}`}
-                      role="button" tabIndex={0}
-                      onClick={() => { navTo(n.id); setMobileMore(false) }}
-                      onKeyDown={e => { if (e.key === 'Enter') { navTo(n.id); setMobileMore(false) } }}>
-                      <Icon name={n.icon} size={20} />
-                      <span>{n.label}</span>
-                    </div>
-                  ))}
-                </React.Fragment>
-              )
-            })}
-            <div className="mobile-menu__divider" />
-            <div className="mobile-menu__item danger" onClick={() => { setMobileMore(false); signOut() }}>
-              <Icon name="logout" size={20} />
-              <span>Sign out</span>
-            </div>
-          </div>
-        </div>
-      )}
+      <MobileNav nav={nav} route={route} navTo={navTo} isAdmin={isAdmin} onSignOut={signOut} />
 
       <QuickAdd db={db} setDb={setDb} activeAgent={activeAgent} go={setRoute} />
       <InstallPrompt />

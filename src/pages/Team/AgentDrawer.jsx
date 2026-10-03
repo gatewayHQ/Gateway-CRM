@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { supabase } from '../../lib/supabase.js'
+import { uploadAgentHeadshot, agentHeadshotPublicUrl } from '../../lib/services/teamAgents.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../../lib/imageCompress.js'
 import { saveAgentProfile } from '../../lib/services/agentProfile.js'
 import { canHoldOfficeAdmin } from '../../lib/officeAdmins.js'
@@ -104,10 +104,9 @@ export default function AgentDrawer({ open, onClose, agent, onSave, isAdmin = fa
     try {
       const { blob, ext, type } = await compressForUpload(file, 'headshot')
       const path = `agents/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
-      const { error } = await supabase.storage
-        .from('campaign-images').upload(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
+      const { error } = await uploadAgentHeadshot(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
       if (error) throw error
-      const { data: { publicUrl } } = supabase.storage.from('campaign-images').getPublicUrl(path)
+      const { data: { publicUrl } } = agentHeadshotPublicUrl(path)
       set('photo_url', publicUrl)
     } catch (e) {
       pushToast(e.message || 'Upload failed — try again', 'error')

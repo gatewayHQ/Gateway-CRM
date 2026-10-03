@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react'
-import { supabase } from '../lib/supabase.js'
+import { updateAgentNavHidden } from '../lib/services/teamAgents.js'
 import { Icon, pushToast } from '../components/UI.jsx'
 import BoldSignAdmin from './settings/BoldSignAdmin.jsx'
+import { getAuthUser, updateAuthUserMetadata } from '../lib/services/auth.js'
 
 const TRACKING_SCRIPT = `<!-- Gateway CRM — Lead Tracker -->
 <script>
@@ -41,7 +42,7 @@ export default function SettingsPage({ db, setDb, activeAgentId, hideableNav, go
   const saveNavPrefs = async () => {
     if (!activeAgentId) return
     setNavSaving(true)
-    const { error } = await supabase.from('agents').update({ nav_hidden: hiddenNav }).eq('id', activeAgentId)
+    const { error } = await updateAgentNavHidden(activeAgentId, hiddenNav)
     setNavSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
     setDb(p => ({ ...p, agents: (p.agents || []).map(a => a.id === activeAgentId ? { ...a, nav_hidden: hiddenNav } : a) }))
@@ -56,7 +57,7 @@ export default function SettingsPage({ db, setDb, activeAgentId, hideableNav, go
 
   // Load the key from Supabase auth user metadata on mount
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
+    getAuthUser().then(({ data: { user } }) => {
       if (!user) return
       const meta = user.user_metadata || {}
       setResendKey(meta.resend_key || localStorage.getItem('gw_resend_key') || '')
@@ -65,7 +66,7 @@ export default function SettingsPage({ db, setDb, activeAgentId, hideableNav, go
   }, [])
 
   const saveResendKey = async () => {
-    await supabase.auth.updateUser({ data: { resend_key: resendKey.trim(), resend_from: resendFrom.trim() } })
+    await updateAuthUserMetadata({ resend_key: resendKey.trim(), resend_from: resendFrom.trim() })
     localStorage.setItem('gw_resend_key', resendKey.trim())
     localStorage.setItem('gw_resend_from', resendFrom.trim())
     setResendKeySaved(true)
@@ -265,7 +266,7 @@ export default function SettingsPage({ db, setDb, activeAgentId, hideableNav, go
           </button>
           {resendKey && (
             <button className="btn btn--ghost btn--sm" style={{ marginLeft: 8 }} onClick={async () => {
-              await supabase.auth.updateUser({ data: { resend_key: '', resend_from: '' } })
+              await updateAuthUserMetadata({ resend_key: '', resend_from: '' })
               localStorage.removeItem('gw_resend_key')
               localStorage.removeItem('gw_resend_from')
               setResendKey(''); setResendFrom('')

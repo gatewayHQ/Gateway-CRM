@@ -1,5 +1,4 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react'
-import { supabase } from '../lib/supabase.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatCurrency, formatDate } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
@@ -7,8 +6,9 @@ import { getClosingGate, gateBadge } from '../lib/compliance.js'
 import { listRequiredForms } from '../lib/services/requiredForms.js'
 import { listDealSteps } from '../lib/services/steps.js'
 import { daysBetween } from '../lib/pipeline.js'
-import { TABLES, REVIEW_STATUS } from '../lib/constants.js'
+import { REVIEW_STATUS } from '../lib/constants.js'
 import { decideDealReview } from '../lib/services/review.js'
+import { fetchDealEnvelopesForGate } from '../lib/services/boldsignDocuments.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AdminReview — the broker's review inbox.
@@ -51,8 +51,7 @@ export default function AdminReviewPage({ db, setDb, activeAgent, go, isAdmin })
       listDealSteps(dealId),
       // boldsign_template_id is what ties a completed envelope to the state
       // packet it satisfies.
-      supabase.from(TABLES.BOLDSIGN_DOCUMENTS)
-        .select('id, status, document_name, boldsign_template_id').eq('deal_id', dealId),
+      fetchDealEnvelopesForGate(dealId),
       listRequiredForms(deal),
     ])
     setStepsByDeal(p => ({ ...p, [dealId]: s.steps || [] }))

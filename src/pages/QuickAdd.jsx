@@ -1,12 +1,12 @@
 import React, { useState } from 'react'
-import { supabase } from '../lib/supabase.js'
-import { syncTaskCalendar } from '../lib/services/tasks.js'
+import { syncTaskCalendar, createTask } from '../lib/services/tasks.js'
 import { Icon, Drawer, pushToast } from '../components/UI.jsx'
 import { STAGE_ORDER, toDateTimeLocalInput, fromDateTimeLocalInput } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
-import { upsertContact } from '../lib/services/contacts.js'
+import { upsertContactRecord } from '../lib/services/contactRecords.js'
 import { CONTACT_SOURCES } from '../lib/enums.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
+import { createDeal } from '../lib/services/dealRecords.js'
 
 function QuickContactDrawer({ open, onClose, agents, activeAgent, contacts = [], onSaved }) {
   const blank = () => ({ first_name: '', last_name: '', phone: '', email: '', type: 'buyer', source: 'referral', assigned_agent_id: activeAgent?.id || '' })
@@ -24,8 +24,7 @@ function QuickContactDrawer({ open, onClose, agents, activeAgent, contacts = [],
     // the point of capture.
     const owner = form.assigned_agent_id || activeAgent?.id || null
     const handingOff = Boolean(owner) && owner !== activeAgent?.id
-    const { contact, created, error } = await upsertContact(
-      supabase,
+    const { contact, created, error } = await upsertContactRecord(
       { ...form, status: 'active', tags: [], assigned_agent_id: owner },
       contacts,
       { readBack: !handingOff },
@@ -108,13 +107,13 @@ function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved, onOpen }
   const save = async () => {
     if (!form.title.trim()) { pushToast('Deal title required', 'error'); return }
     setSaving(true)
-    const { data, error } = await supabase.from('deals').insert([{
+    const { data, error } = await createDeal({
       ...form,
       value: form.value ? Number(form.value) : null,
       probability: 25,
       updated_at: new Date().toISOString(),
       agent_id: form.agent_id || activeAgent?.id || null,
-    }]).select().single()
+    })
     setSaving(false)
     if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
     pushToast(`Deal "${form.title}" added`)
@@ -171,13 +170,13 @@ function QuickTaskDrawer({ open, onClose, activeAgent, onSaved }) {
   const save = async () => {
     if (!form.title.trim()) { pushToast('Task title required', 'error'); return }
     setSaving(true)
-    const { data, error } = await supabase.from('tasks').insert([{
+    const { data, error } = await createTask({
       ...form,
       due_date: fromDateTimeLocalInput(form.due_date),
       completed: false,
       // Tasks are personal: always the agent adding it (tasks_agent_scope).
       agent_id: activeAgent?.id || null,
-    }]).select().single()
+    })
     setSaving(false)
     if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
     syncTaskCalendar(data?.id)

@@ -18,7 +18,7 @@
  *   create property → start deal → THEN add the second agent to the listing
  *
  * writes the new agent to the property and nowhere else, because an existing
- * deal never re-seeds (Pipeline.jsx: `deal?.id ? [] : …`). The deal's column
+ * deal never re-seeds (src/pages/deal/DealDrawer.jsx: `deal?.id ? [] : …`). The deal's column
  * was non-empty, so the fallback never fired, so the team card showed one name
  * — while RLS, reading the same stale column, hid the deal and every document
  * on it from an agent everyone believed was on the deal.

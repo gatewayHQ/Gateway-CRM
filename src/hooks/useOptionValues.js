@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase } from '../lib/supabase.js'
+import {
+  fetchOptionValues, insertOptionValue, mergeOptionValues, deleteOptionValue,
+} from '../lib/services/optionValues.js'
 
 /**
  * useOptionValues — single source of truth for a controlled-vocabulary field.
@@ -26,11 +28,7 @@ function notify(fieldKey) {
 
 async function fetchValues(fieldKey) {
   if (inflight.has(fieldKey)) return inflight.get(fieldKey)
-  const promise = supabase
-    .from('option_values')
-    .select('value')
-    .eq('field_key', fieldKey)
-    .order('value', { ascending: true })
+  const promise = fetchOptionValues(fieldKey)
     .then(({ data, error }) => {
       inflight.delete(fieldKey)
       if (error) {
@@ -92,9 +90,7 @@ export function useOptionValues(fieldKey) {
     cache.set(fieldKey, [...current, value].sort((a, b) => a.localeCompare(b)))
     notify(fieldKey)
 
-    const { error } = await supabase
-      .from('option_values')
-      .insert({ field_key: fieldKey, value })
+    const { error } = await insertOptionValue(fieldKey, value)
 
     if (error) {
       // 23505 = unique violation (case-insensitive race) — silently treat as success
@@ -114,11 +110,7 @@ export function useOptionValues(fieldKey) {
     if (!from || !to || from === to) return { ok: false, error: 'Invalid rename' }
 
     // Use the merge RPC — it handles both option_values + referencing rows atomically
-    const { data, error } = await supabase.rpc('merge_option_values', {
-      p_field: fieldKey,
-      p_from:  from,
-      p_to:    to,
-    })
+    const { data, error } = await mergeOptionValues(fieldKey, from, to)
     if (error) return { ok: false, error: error.message }
 
     // Refetch to refresh
@@ -131,11 +123,7 @@ export function useOptionValues(fieldKey) {
     let totalAffected = 0
     for (const from of fromValues) {
       if (from === toValue) continue
-      const { data, error } = await supabase.rpc('merge_option_values', {
-        p_field: fieldKey,
-        p_from:  from,
-        p_to:    toValue,
-      })
+      const { data, error } = await mergeOptionValues(fieldKey, from, toValue)
       if (error) return { ok: false, error: error.message }
       totalAffected += data || 0
     }
@@ -145,11 +133,7 @@ export function useOptionValues(fieldKey) {
   }, [fieldKey])
 
   const remove = useCallback(async (value) => {
-    const { error } = await supabase
-      .from('option_values')
-      .delete()
-      .eq('field_key', fieldKey)
-      .eq('value', value)
+    const { error } = await deleteOptionValue(fieldKey, value)
     if (error) return { ok: false, error: error.message }
     cache.delete(fieldKey)
     await fetchValues(fieldKey)

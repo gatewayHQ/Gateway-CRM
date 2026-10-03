@@ -3,7 +3,7 @@
 //
 // THE BUG THESE GUARD: `deals.co_agent_ids` is a COPY of the listing's
 // co-agents, taken once, when the property is converted into a deal. Add an
-// agent to the listing AFTERWARDS and the copy is never refreshed (Pipeline.jsx
+// agent to the listing AFTERWARDS and the copy is never refreshed (src/pages/deal/DealDrawer.jsx
 // re-seeds only for a NEW deal). The UI read the listing as a fallback and
 // showed them on the team card; RLS read only the copy and hid the deal, its
 // documents, its storage objects and its whole history from them.

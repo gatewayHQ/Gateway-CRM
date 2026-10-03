@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { supabase } from '../lib/supabase.js'
+import { getAuthSession } from '../lib/services/auth.js'
 import { Icon, Badge, EmptyState, Loading } from '../components/UI.jsx'
 import { formatCurrency, formatMoney, formatDate } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
@@ -25,7 +25,7 @@ export default function MyEarnings({ activeAgent }) {
   const load = async () => {
     setError(null)
     try {
-      const { data: { session } } = await supabase.auth.getSession()
+      const { data: { session } } = await getAuthSession()
       if (!session?.access_token) { setError('Please sign in again.'); return }
       const res = await fetch('/api/portal?action=my-earnings', {
         headers: { Authorization: `Bearer ${session.access_token}` },

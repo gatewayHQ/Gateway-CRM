@@ -10,8 +10,8 @@
  * Merging combines duplicates into a canonical value (e.g. "Cherokee Cherokee" → "Cherokee County").
  */
 
-import React, { useState, useEffect, useMemo } from 'react'
-import { supabase } from '../lib/supabase.js'
+import React, { useState, useEffect } from 'react'
+import { fetchOptionValueCounts } from '../lib/services/optionValues.js'
 import { Icon, ConfirmDialog, Modal, pushToast } from '../components/UI.jsx'
 import { useOptionValues } from '../hooks/useOptionValues.js'
 
@@ -46,10 +46,7 @@ export default function DataManagementPage() {
   // Load record counts from the view
   const loadCounts = async () => {
     setLoadingCounts(true)
-    const { data, error } = await supabase
-      .from('option_value_counts')
-      .select('value, record_count')
-      .eq('field_key', fieldKey)
+    const { data, error } = await fetchOptionValueCounts(fieldKey)
     setLoadingCounts(false)
     if (error) {
       // View missing — fall back to zeros, don't surface error

@@ -12,7 +12,7 @@
 // browser, drifting from the rule. These pin it to the rule.
 // ─────────────────────────────────────────────────────────────────────────────
 import { describe, it, expect } from 'vitest'
-import { listingsOnBoard, dealsOnBoard } from '../Pipeline.jsx'
+import { listingsOnBoard, dealsOnBoard } from '../pipeline/boardFilters.js'
 
 const DANA = 'agent-dana'
 const SAM  = 'agent-sam'

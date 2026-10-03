@@ -15,7 +15,7 @@
 // rendering an error. Search degrades; it never breaks.
 // ─────────────────────────────────────────────────────────────────────────────
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { supabase } from '../lib/supabase.js'
+import { searchContactsRemote, searchPropertiesRemote } from '../lib/services/contactSearch.js'
 import { useDebounce } from '../hooks/useDebounce.js'
 import { Icon } from './UI.jsx'
 import { STAGE_LABELS } from '../lib/stages.js'
@@ -57,8 +57,8 @@ export default function GlobalSearch({ db, visibleAgentIds = [], propertyAgentId
     setLoading(true)
     ;(async () => {
       const [c, p] = await Promise.all([
-        supabase.rpc('search_contacts',   { search_term: term, agent_ids: agentIds,    result_limit: PER_SECTION }),
-        supabase.rpc('search_properties', { search_term: term, agent_ids: propertyIds, result_limit: PER_SECTION }),
+        searchContactsRemote(term, agentIds, PER_SECTION),
+        searchPropertiesRemote(term, propertyIds, PER_SECTION),
       ])
       if (cancelled) return
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react'
+import React, { useState, useEffect } from 'react'
 import { fetchPublicProperty } from '../lib/publicProperty.js'
 import { streetLine, geocodeQuery, fullAddress as composeFullAddress } from '../lib/address.js'
 

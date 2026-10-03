@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { supabase } from '../lib/supabase.js'
+import { fetchLeadCaptureAgent } from '../lib/services/publicPages.js'
 
 function getSessionKey() {
   let s = localStorage.getItem('_gwsid')
@@ -22,7 +22,7 @@ export default function LeadCapturePage() {
 
   useEffect(() => {
     if (agentId) {
-      supabase.from('agents_public').select('id, name, role, tagline, bio, photo_url, color, phone, email, stats').eq('id', agentId).single()
+      fetchLeadCaptureAgent(agentId)
         .then(({ data }) => { if (data) setAgent(data) })
     }
   }, [agentId])

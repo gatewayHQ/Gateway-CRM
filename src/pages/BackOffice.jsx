@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react'
 import { saveAgentProfile } from '../lib/services/agentProfile.js'
 import { Icon, Avatar, Badge, ConfirmDialog, pushToast } from '../components/UI.jsx'
-import { formatMoney, formatDate } from '../lib/helpers.js'
+import { formatMoney } from '../lib/helpers.js'
 import { agentSliceForDeal, addByParty, partyAmounts, capStatusFor, todayIso, agentFee, DEFAULTS } from '../lib/commission.js'
 import SideSplit from '../components/SideSplit.jsx'
 

@@ -277,7 +277,7 @@ back into the original BoldSign document id.
 
 ## 4 · CRM UI
 
-The deal's **Signatures** tab (`SignaturesTab` in `src/pages/Pipeline.jsx`).
+The deal's **Signatures** tab (`SignaturesTab` in `src/pages/deal/signatures/SignaturesTab.jsx`).
 
 ```
 Packet · In progress · 2/3 signed

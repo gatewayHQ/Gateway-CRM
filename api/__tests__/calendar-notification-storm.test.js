@@ -7,7 +7,7 @@
  *
  *   1. The Key Dates tab saved and synced on EVERY onChange of a native date
  *      input — and a year typed digit by digit is four of them (0002, 0020,
- *      0202, 2026). That part is fixed in the browser (src/pages/Pipeline.jsx).
+ *      0202, 2026). That part is fixed in the browser (src/pages/deal/KeyDatesTab.jsx).
  *
  *   2. Those syncs overlapped, and the create path is read-then-write: both
  *      read "no event yet", both created one. The second ledger insert lost to

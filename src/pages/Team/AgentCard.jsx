@@ -1,5 +1,5 @@
 import React from 'react'
-import { Icon, Avatar } from '../../components/UI.jsx'
+import { Icon } from '../../components/UI.jsx'
 
 export default function AgentCard({ agent, contacts, deals, tasks, activeAgent, isAdmin, teamSplit, onSwitchAgent, onEdit, onDelete }) {
   const isActive = agent.id === activeAgent?.id

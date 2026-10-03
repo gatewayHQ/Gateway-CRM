@@ -25,6 +25,7 @@
 // stay visible while the listing behind it vanished.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { supabase } from '../supabase.js'
 import { fetchAllRows } from './fetchAll.js'
 const byNewest = (a, b) => new Date(b.created_at) - new Date(a.created_at)
 
@@ -96,3 +97,30 @@ export async function fetchVisibleProperties(client, { isAdmin, agentId, propert
 
   return { data: rows.sort(byNewest), error: null }
 }
+
+// ── Property writes (the property drawer / Properties page) ──────────────────
+
+export const createProperty = (body) =>
+  supabase.from('properties').insert([body]).select().single()
+
+export const updateProperty = (id, body) =>
+  supabase.from('properties').update(body).eq('id', id).select().single()
+
+export const updatePropertyComps = (id, comps) =>
+  supabase.from('properties').update({ comps }).eq('id', id)
+
+export const updatePropertyCoords = (id, lat, lng) =>
+  supabase.from('properties').update({ lat, lng }).eq('id', id)
+
+export const updatePropertyStatus = (id, status) =>
+  supabase.from('properties').update({ status }).eq('id', id)
+
+export const updatePropertyDetails = (id, details) =>
+  supabase.from('properties').update({ details }).eq('id', id)
+
+// deals.property_id is ON DELETE SET NULL — linked deals are kept, just unlinked.
+export const deleteProperty = (id) =>
+  supabase.from('properties').delete().eq('id', id)
+
+// fetchVisibleProperties bound to the shared client, for pages.
+export const loadVisibleProperties = (scope) => fetchVisibleProperties(supabase, scope)

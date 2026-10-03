@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
-import { supabase } from '../../lib/supabase.js'
+import { updateContact, insertContact, updateContactReadBack, insertContactReadBack } from '../../lib/services/contactRecords.js'
 import { Icon, Drawer, Tabs, pushToast } from '../../components/UI.jsx'
 import { normalizePhone, formatPhone } from '../../lib/phone.js'
 import { validateEmail, validateRequired, validateForm } from '../../lib/validation.js'
@@ -12,6 +12,8 @@ import EmailsTab from './EmailsTab.jsx'
 import { findMatchingProperties } from '../../lib/matching.js'
 import { formatCurrency } from '../../lib/helpers.js'
 import { streetLine } from '../../lib/address.js'
+import { fetchOutlookConnectionStatus } from '../../lib/services/outlook.js'
+import { getAuthSession } from '../../lib/services/auth.js'
 
 const BLANK = {
   first_name: '', last_name: '', email: '', phone: '',
@@ -44,7 +46,7 @@ export default function ContactDrawer({
   const [enriching, setEnriching] = useState(false)
 
   useEffect(() => {
-    supabase.from('ms_graph_connection_status').select('status').maybeSingle()
+    fetchOutlookConnectionStatus()
       .then(({ data }) => setOutlookConnected(data?.status === 'connected'))
   }, [])
 
@@ -64,7 +66,7 @@ export default function ContactDrawer({
     if (!form.email) return
     setEnriching(true)
     try {
-      const { data: { session } } = await supabase.auth.getSession()
+      const { data: { session } } = await getAuthSession()
       if (!session?.access_token) { pushToast('Please sign in again', 'error'); return }
       const res = await fetch('/api/email-send?action=outlook-contact-lookup', {
         method: 'POST',
@@ -229,13 +231,13 @@ export default function ContactDrawer({
     const doSave = (p) => {
       if (handingOff) {
         return (contact?.id
-          ? supabase.from('contacts').update(p).eq('id', contact.id)
-          : supabase.from('contacts').insert([{ ...p, id: newId }])
+          ? updateContact(contact.id, p)
+          : insertContact({ ...p, id: newId })
         ).then(r => (r.error ? r : { ...r, data: { ...p, id: contact?.id || newId } }))
       }
       return contact?.id
-        ? supabase.from('contacts').update(p).eq('id', contact.id).select().maybeSingle()
-        : supabase.from('contacts').insert([{ ...p, id: newId }]).select().maybeSingle()
+        ? updateContactReadBack(contact.id, p)
+        : insertContactReadBack({ ...p, id: newId })
     }
 
     // Retry transient transport failures ("Failed to fetch") with short backoff before

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { supabase } from '../../lib/supabase.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
+import { getAuthSession } from '../../lib/services/auth.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Contact "Emails" tab — the actual email correspondence with this contact's
@@ -80,7 +80,7 @@ export default function EmailsTab({ contact, onEmailSent }) {
     if (intent === 'auto') setLoading(true); else setRefreshing(true)
     setFetchError(null)
     try {
-      const { data: { session } } = await supabase.auth.getSession()
+      const { data: { session } } = await getAuthSession()
       if (!session?.access_token) { setFetchError('Please sign in again'); return }
       const res = await fetch('/api/email-send?action=outlook-messages', {
         method: 'POST',
@@ -124,7 +124,7 @@ export default function EmailsTab({ contact, onEmailSent }) {
     if (!body.trim()) { pushToast('Write something to send', 'error'); return }
     setSending(true)
     try {
-      const { data: { session } } = await supabase.auth.getSession()
+      const { data: { session } } = await getAuthSession()
       const res = await fetch('/api/email-send?action=outlook-send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },

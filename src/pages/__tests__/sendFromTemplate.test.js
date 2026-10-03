@@ -5,7 +5,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { SendFromTemplateModal, SignaturesGettingStarted } from '../Pipeline.jsx'
+import { SendFromTemplateModal } from '../deal/signatures/SendFromTemplateModal.jsx'
+import { SignaturesGettingStarted } from '../deal/signatures/SignaturesGettingStarted.jsx'
 
 const IOWA   = { template_id: 'ia-1', name: 'Iowa Listing Agreement', state: 'IA', transaction_type: 'listing' }
 const GENERAL = { template_id: 'gen-1', name: 'Wire Fraud Advisory', state: '', transaction_type: 'general' }

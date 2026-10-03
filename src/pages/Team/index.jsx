@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
-import { supabase } from '../../lib/supabase.js'
+import { fetchTeams, fetchAllTeamSplits, deleteTeamRecord, deleteTeamSplitsForTeam } from '../../lib/services/teams.js'
+import { fetchAgents } from '../../lib/services/teamAgents.js'
 import { deleteAgentProfile } from '../../lib/services/agentProfile.js'
 import { mutationErrorMessage } from '../../lib/services/db.js'
 import { Icon, EmptyState, ConfirmDialog, pushToast } from '../../components/UI.jsx'
@@ -28,8 +29,10 @@ export default function TeamPage({ db, setDb, activeAgent, isAdmin, onSwitchAgen
 
   const loadTeams = async () => {
     const [teamsRes, splitsRes] = await Promise.all([
-      supabase.from('teams').select('*').order('name', { ascending: true }),
-      supabase.from('team_splits').select('*').catch(() => ({ data: [] })),
+      fetchTeams(),
+      // A query builder is a thenable with no .catch — the two-argument then is
+      // how a missing table (un-migrated database) degrades to "no splits".
+      fetchAllTeamSplits().then(r => r, () => ({ data: [] })),
     ])
     // A failed read here used to render as "0 teams", which is indistinguishable
     // from having no teams — and made a save that worked look like it didn't.
@@ -51,7 +54,7 @@ export default function TeamPage({ db, setDb, activeAgent, isAdmin, onSwitchAgen
           : [...(p.agents || []), saved],
       }))
     }
-    const { data } = await supabase.from('agents').select('*').order('created_at', { ascending: true })
+    const { data } = await fetchAgents()
     if (data) setDb(p => ({ ...p, agents: data }))
   }
 
@@ -72,12 +75,12 @@ export default function TeamPage({ db, setDb, activeAgent, isAdmin, onSwitchAgen
   const deleteTeam = async (id) => {
     // Cascade: splits are deleted by FK, but delete explicitly for safety
     setConfirmTeam(null)
-    const splitsDel = await supabase.from('team_splits').delete().eq('team_id', id)
+    const splitsDel = await deleteTeamSplitsForTeam(id)
     if (splitsDel.error) {
       pushToast(mutationErrorMessage(splitsDel.error, splitsDel.status, 'Could not delete this team.'), 'error')
       return
     }
-    const teamDel = await supabase.from('teams').delete().eq('id', id)
+    const teamDel = await deleteTeamRecord(id)
     if (teamDel.error) {
       pushToast(mutationErrorMessage(teamDel.error, teamDel.status, 'Could not delete this team.'), 'error')
       loadTeams()   // members are already gone — re-read so the UI matches
