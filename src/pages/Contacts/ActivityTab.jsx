@@ -1,10 +1,10 @@
 import React, { useState } from 'react'
-import { supabase } from '../../lib/supabase.js'
+import { createActivity } from '../../lib/services/activities.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
 import { formatCurrency } from '../../lib/helpers.js'
 import { titleCase } from '../../lib/enums.js'
 import { mutationErrorMessage } from '../../lib/services/db.js'
-import { syncTaskCalendar } from '../../lib/services/tasks.js'
+import { syncTaskCalendar, createTask } from '../../lib/services/tasks.js'
 import { FOLLOW_UP_CHOICES, CALL_OUTCOMES, followUpDue } from '../../lib/followUp.js'
 
 const ACTIVITY_TYPES  = ['note', 'call', 'email', 'meeting', 'showing']
@@ -47,19 +47,19 @@ export default function ActivityTab({ contact, deals, tasks, activities, activeA
   const logActivity = async (text = body) => {
     if (!text.trim()) return
     setSaving(true)
-    const { data, error } = await supabase.from('activities').insert([{
+    const { data, error } = await createActivity({
       contact_id: contact.id,
       agent_id:   activeAgent?.id || null,
       type,
       body: text.trim(),
-    }]).select().single()
+    })
     if (error) { setSaving(false); pushToast(mutationErrorMessage(error), 'error'); return }
     onActivityAdded?.(data)
     setBody('')
 
     let task = null
     if (followUp) {
-      const { data: t, error: te } = await supabase.from('tasks').insert([{
+      const { data: t, error: te } = await createTask({
         title: `Follow up with ${name}`,
         type: type === 'email' ? 'email' : 'call',
         priority: 'medium',
@@ -67,7 +67,7 @@ export default function ActivityTab({ contact, deals, tasks, activities, activeA
         agent_id: activeAgent?.id || null,
         contact_id: contact.id,
         completed: false,
-      }]).select().single()
+      })
       if (te) pushToast(`Logged, but the follow-up wasn't saved: ${mutationErrorMessage(te)}`, 'error')
       else { task = t; syncTaskCalendar(t.id); onTaskAdded?.(t) }
       setFollowUp('')

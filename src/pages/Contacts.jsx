@@ -25,7 +25,10 @@
  */
 
 import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react'
-import { supabase } from '../lib/supabase.js'
+import {
+  fetchContactById, fetchLiveContacts, markContactsDeleted, hardDeleteContacts,
+  restoreContacts, updateContactField, reassignContacts, setContactsStatus,
+} from '../lib/services/contactRecords.js'
 import { heatScoresFor } from '../lib/helpers.js'
 import { CONTACT_TYPES, CONTACT_STATUSES, titleCase } from '../lib/enums.js'
 import { normalizePhone } from '../lib/phone.js'
@@ -99,7 +102,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
     onFocusHandled?.()
     const hit = (db.contacts || []).find(c => c.id === id)
     if (hit) { setEditing(hit); setDrawerOpen(true); return }
-    supabase.from('contacts').select('*').eq('id', id).maybeSingle().then(({ data }) => {
+    fetchContactById(id).then(({ data }) => {
       if (!data) { pushToast("That contact isn't in your book — it may have been reassigned.", 'info'); return }
       setDb(p => ({ ...p, contacts: [data, ...(p.contacts || []).filter(c => c.id !== data.id)] }))
       setEditing(data); setDrawerOpen(true)
@@ -223,11 +226,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
   // or the list silently collapses to team-scope after any save.
   const reload = useCallback(async () => {
     if (!isAdmin && !visibleAgentIds?.length) return
-    let q = supabase.from('contacts').select('*')
-      .is('deleted_at', null)
-      .order('created_at', { ascending: false })
-    if (!isAdmin) q = q.in('assigned_agent_id', visibleAgentIds)
-    const { data } = await q
+    const { data } = await fetchLiveContacts({ isAdmin, agentIds: visibleAgentIds })
     if (data) setDb(p => ({ ...p, contacts: data }))
   }, [visibleAgentIds, isAdmin, setDb])
 
@@ -243,13 +242,11 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
     setSelected(new Set())
 
     // Soft-delete in DB; falls back to hard delete if deleted_at column missing
-    let { error } = await supabase.from('contacts')
-      .update({ deleted_at: new Date().toISOString() })
-      .in('id', arr)
+    let { error } = await markContactsDeleted(arr)
 
     if (error?.message?.includes('column') || error?.message?.includes('deleted_at')) {
       // Schema not yet migrated — fall back to hard delete
-      const { error: delErr } = await supabase.from('contacts').delete().in('id', arr)
+      const { error: delErr } = await hardDeleteContacts(arr)
       error = delErr
     }
 
@@ -263,9 +260,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
         actionLabel: 'Undo',
         onAction: async () => {
           // Restore by clearing deleted_at (or re-fetching if hard-deleted)
-          const { error: restoreErr } = await supabase.from('contacts')
-            .update({ deleted_at: null })
-            .in('id', arr)
+          const { error: restoreErr } = await restoreContacts(arr)
           if (restoreErr) {
             pushToast('Could not undo — contact was hard-deleted', 'error')
           } else {
@@ -281,7 +276,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
   const inlineUpdate = useCallback(async (id, field, value) => {
     // Optimistic
     optimisticUpdate(id, { [field]: value })
-    const { error } = await supabase.from('contacts').update({ [field]: value }).eq('id', id)
+    const { error } = await updateContactField(id, field, value)
     if (error) {
       pushToast(mutationErrorMessage(error), 'error')
       reload()  // restore truth
@@ -296,7 +291,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
       ...prev,
       contacts: (prev.contacts || []).map(c => ids.includes(c.id) ? { ...c, assigned_agent_id: agentId } : c),
     }))
-    const { error } = await supabase.from('contacts').update({ assigned_agent_id: agentId }).in('id', ids)
+    const { error } = await reassignContacts(ids, agentId)
     if (error) { pushToast(mutationErrorMessage(error), 'error'); reload(); return }
     const agent = agents.find(a => a.id === agentId)
     pushToast(`${ids.length} reassigned to ${agent?.name || 'agent'}`)
@@ -310,7 +305,7 @@ export default function ContactsPage({ db, setDb, activeAgent, go, openCompose, 
       ...prev,
       contacts: (prev.contacts || []).map(c => ids.includes(c.id) ? { ...c, status } : c),
     }))
-    const { error } = await supabase.from('contacts').update({ status }).in('id', ids)
+    const { error } = await setContactsStatus(ids, status)
     if (error) { pushToast(error.message, 'error'); reload(); return }
     pushToast(`${ids.length} set to ${status}`)
     setSelected(new Set())

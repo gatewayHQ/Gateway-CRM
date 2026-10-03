@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { supabase } from '../../lib/supabase.js'
+import { insertContacts } from '../../lib/services/contactRecords.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
 import { normalizePhone } from '../../lib/phone.js'
 import { CONTACT_TYPES, CONTACT_STATUSES, CONTACT_SOURCES } from '../../lib/enums.js'
@@ -126,7 +126,7 @@ export default function CSVImportModal({ onClose, onImported, agents, activeAgen
           tags: [],
         }
       })
-      const { error } = await supabase.from('contacts').insert(chunk)
+      const { error } = await insertContacts(chunk)
       if (error) errs.push(`Rows ${i + 1}–${i + CHUNK}: ${error.message}`)
       done += chunk.length
       setProgress(Math.round(done / rowsToImport.length * 100))
