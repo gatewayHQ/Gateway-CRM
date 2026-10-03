@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { Icon } from './UI.jsx'
-import { fetchOutlookConnectionStatus } from '../lib/services/outlook.js'
+import { fetchOutlookConnectionStatus, isOutlookConnected } from '../lib/services/outlook.js'
 
 // ── Getting started ──────────────────────────────────────────────────────────
 // The first thing a NEW agent sees on the dashboard: the steps from an empty CRM
@@ -159,7 +159,7 @@ export default function GettingStarted({ db, activeAgent, isAdmin, go, startNew 
     if (!eligible || hidden) return
     let cancelled = false
     fetchOutlookConnectionStatus()
-      .then(({ data }) => { if (!cancelled) setOutlookConnected(data?.status === 'connected') })
+      .then(({ data }) => { if (!cancelled) setOutlookConnected(isOutlookConnected(data)) })
       .catch(() => { if (!cancelled) setOutlookConnected(false) })
     return () => { cancelled = true }
   }, [agentId, eligible, hidden])

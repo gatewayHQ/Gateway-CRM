@@ -4,7 +4,7 @@ import { fetchTemplates, createTemplate, updateTemplate, deleteTemplate, updateT
 import { Icon, Badge, Drawer, EmptyState, ConfirmDialog, Modal, pushToast } from '../components/UI.jsx'
 import { TEMPLATE_CATEGORIES, TEMPLATE_CATEGORY_LABELS } from '../lib/enums.js'
 import { getAuthSession, getAuthUser } from '../lib/services/auth.js'
-import { fetchOutlookConnection } from '../lib/services/outlook.js'
+import { fetchOutlookConnection, isOutlookConnected } from '../lib/services/outlook.js'
 import { logActivity } from '../lib/services/activities.js'
 
 // Load from Supabase auth metadata first (cross-device), fall back to localStorage
@@ -306,7 +306,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
     })
     loadUserKey('resend_from', 'gw_resend_from').then(f => setResendFrom(f))
     fetchOutlookConnection()
-      .then(({ data }) => setOutlookStatus(data && data.status === 'connected' ? data : false))
+      .then(({ data }) => setOutlookStatus(isOutlookConnected(data) ? data : false))
   }, [])
 
   const send = async (asDraft = false) => {

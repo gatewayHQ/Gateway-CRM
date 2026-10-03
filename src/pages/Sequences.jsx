@@ -26,7 +26,7 @@ import {
   matchListings, searchCriteria, wantsListings, STARTER_BUYER_SEQUENCE,
 } from '../lib/dripTokens.js'
 import { getAuthSession } from '../lib/services/auth.js'
-import { fetchAgentOutlookConnection } from '../lib/services/outlook.js'
+import { fetchAgentOutlookConnection, isOutlookConnected, outlookState } from '../lib/services/outlook.js'
 
 const LANE_LABELS = { residential: 'Residential website leads', commercial: 'Commercial website leads' }
 
@@ -423,7 +423,7 @@ export default function SequencesPage({ db, activeAgent, isAdmin, go }) {
     </div>
   )
 
-  const outlookOk = outlook?.status === 'connected'
+  const outlookOk = isOutlookConnected(outlook)
 
   return (
     <div className="page-content" style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
@@ -447,7 +447,7 @@ export default function SequencesPage({ db, activeAgent, isAdmin, go }) {
           <Icon name="alert" size={16} style={{ color: '#856404' }} />
           <div style={{ flex: 1 }}>
             <strong>Connect Outlook to send your drips.</strong> Email steps wait (nothing is lost) until your
-            Microsoft 365 mailbox is connected{outlook?.status === 'error' ? ' — your connection needs to be renewed' : ''}.
+            Microsoft 365 mailbox is connected{outlookState(outlook) === 'error' ? ' — your connection needs to be renewed' : ''}.
             Call steps still create tasks.
           </div>
           {go && <button className="btn btn--secondary btn--sm" onClick={() => go('integrations')}>Open Integrations</button>}

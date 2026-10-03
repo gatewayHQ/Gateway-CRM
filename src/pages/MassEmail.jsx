@@ -39,7 +39,7 @@ import {
 } from '../lib/dealAnnouncement.js'
 import { PREVIEW_UNSUBSCRIBE_URL } from '../lib/emailFooter.js'
 import { getAuthSession } from '../lib/services/auth.js'
-import { fetchOutlookConnection } from '../lib/services/outlook.js'
+import { fetchOutlookConnection, isOutlookConnected } from '../lib/services/outlook.js'
 
 const STEPS = [
   { id: 1, label: 'Topic'    },
@@ -190,7 +190,7 @@ export default function MassEmail({ db, activeAgent, go, focusProperty = null, o
 
   useEffect(() => {
     fetchOutlookConnection()
-      .then(({ data }) => setOutlook(data && data.status === 'connected' ? data : false))
+      .then(({ data }) => setOutlook(isOutlookConnected(data) ? data : false))
   }, [])
 
   // The subject/body follow the chosen status until the agent edits them —
