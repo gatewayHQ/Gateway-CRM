@@ -12,7 +12,7 @@ import EmailsTab from './EmailsTab.jsx'
 import { findMatchingProperties } from '../../lib/matching.js'
 import { formatCurrency } from '../../lib/helpers.js'
 import { streetLine } from '../../lib/address.js'
-import { fetchOutlookConnectionStatus } from '../../lib/services/outlook.js'
+import { fetchOutlookConnectionStatus, isOutlookConnected } from '../../lib/services/outlook.js'
 import { getAuthSession } from '../../lib/services/auth.js'
 
 const BLANK = {
@@ -47,7 +47,7 @@ export default function ContactDrawer({
 
   useEffect(() => {
     fetchOutlookConnectionStatus()
-      .then(({ data }) => setOutlookConnected(data?.status === 'connected'))
+      .then(({ data }) => setOutlookConnected(isOutlookConnected(data)))
   }, [])
 
   // Read-only lookup against the agent's own Outlook ADDRESS BOOK (/me/contacts)

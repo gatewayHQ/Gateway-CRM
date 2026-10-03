@@ -10,6 +10,8 @@
 
 // Issue codes are stable identifiers so the UI can route to the right tab and
 // the cron nudges can target the right next-action.
+import { isStepResolved, stepStatus } from './stepStatus.js'
+
 export const ISSUE_CODES = {
   STEPS_INCOMPLETE:    'steps_incomplete',
   SIGNATURES_MISSING:  'signatures_missing',
@@ -105,7 +107,9 @@ export function getClosingGate(deal, {
   const req = requiredSteps(steps)
 
   // 1) All required checklist steps complete
-  const openSteps = req.filter(s => !s.completed)
+  // Resolved = done or marked N/A (see stepStatus.js). An N/A is a decision the
+  // agent made on the record; the office sees those under `waived` when it reviews.
+  const openSteps = req.filter(s => !isStepResolved(s))
   if (openSteps.length > 0) {
     issues.push({
       code: ISSUE_CODES.STEPS_INCOMPLETE,
@@ -206,7 +210,9 @@ export function getClosingGate(deal, {
     })
   }
 
-  return { canClose: issues.length === 0, issues }
+  // Required steps marked N/A — not a blocker, but shown to whoever reviews the close.
+  const waived = req.filter(s => stepStatus(s) === 'na').map(s => s.title)
+  return { canClose: issues.length === 0, issues, waived }
 }
 
 // Shorthand for the badge on the deal card: green/amber/red.

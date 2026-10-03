@@ -19,8 +19,11 @@ export const createColdCallList = (name, agentId) =>
   supabase
     .from('cold_call_lists').insert([{ name, agent_id: agentId }]).select().single()
 
+// Returns the deleted row: a delete that row-level security refuses removes
+// nothing and reports no error, so an empty `data` is how a caller tells.
+// The list's leads go with it (on delete cascade).
 export const deleteColdCallList = (listId) =>
-  supabase.from('cold_call_lists').delete().eq('id', listId)
+  supabase.from('cold_call_lists').delete().eq('id', listId).select('id')
 
 // ── cold_call_leads ──────────────────────────────────────────────────────────
 

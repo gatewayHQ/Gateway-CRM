@@ -4,9 +4,17 @@ import { Icon, pushToast } from '../components/UI.jsx'
 import { WEBHOOK_EVENTS } from '../lib/webhooks.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
 import { getAuthSession } from '../lib/services/auth.js'
-import { fetchOutlookConnection } from '../lib/services/outlook.js'
+import { fetchOutlookConnection, outlookState } from '../lib/services/outlook.js'
 
 // ─── Outlook tab ──────────────────────────────────────────────────────────────
+
+// The status dot beside the card title, for each outlookState() (plus loading).
+const OUTLOOK_BADGE = {
+  checking:  { color: 'var(--gw-mist)',  label: 'Checking…' },
+  connected: { color: 'var(--gw-green)', label: 'Connected' },
+  error:     { color: 'var(--gw-red)',   label: 'Needs reconnect' },
+  none:      { color: 'var(--gw-mist)',  label: 'Not connected' },
+}
 
 function OutlookSection() {
   const [status, setStatus]     = useState(null)   // null = loading, {} shape from ms_graph_connection_status, or false = not connected
@@ -66,9 +74,11 @@ function OutlookSection() {
     setDisconnecting(false)
   }
 
-  const connected = !!status
-  const dotColor = status === null ? 'var(--gw-mist)' : status?.status === 'error' ? 'var(--gw-red)' : connected ? 'var(--gw-green)' : 'var(--gw-mist)'
-  const dotLabel = status === null ? 'Checking…' : status?.status === 'error' ? 'Needs reconnect' : connected ? 'Connected' : 'Not connected'
+  // 'connected' / 'error' show the account with Reconnect and Disconnect; no row
+  // or a disconnected one offers Connect. Same rule as every other screen.
+  const state    = status === null ? 'checking' : outlookState(status)
+  const hasAccount = state === 'connected' || state === 'error'
+  const { color: dotColor, label: dotLabel } = OUTLOOK_BADGE[state]
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -89,13 +99,13 @@ function OutlookSection() {
           </div>
         </div>
 
-        {connected ? (
+        {hasAccount ? (
           <>
             <div style={{ fontSize: 13, marginBottom: 4 }}>
               Signed in as <strong>{status.display_name || status.email}</strong>
             </div>
             <div style={{ fontSize: 12, color: 'var(--gw-mist)', marginBottom: 16 }}>{status.email}</div>
-            {status.status === 'error' && (
+            {state === 'error' && (
               <div style={{ padding: '10px 14px', background: '#fdecea', border: '1px solid var(--gw-red)', borderRadius: 'var(--radius)', fontSize: 12, marginBottom: 16 }}>
                 {status.last_error || 'Microsoft 365 needs you to reconnect.'}
               </div>

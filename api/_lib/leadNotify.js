@@ -34,7 +34,7 @@ const INTEREST_LABEL = {
  * Writes agent_notifications, which App.jsx is already subscribed to over
  * Supabase realtime — the bell updates without a refresh.
  */
-export async function notifyInApp(creds, { agentId, title, message }) {
+export async function notifyInApp(creds, { agentId, title, message, contactId = null }) {
   if (!agentId) return false
   try {
     const r = await fetch(`${creds.url}/rest/v1/agent_notifications`, {
@@ -45,6 +45,8 @@ export async function notifyInApp(creds, { agentId, title, message }) {
         title:    String(title).slice(0, 200),
         message:  String(message).slice(0, 1000),
         type:     'lead',
+        // So clicking it in the bell opens the lead (migration 0062).
+        contact_id: contactId || null,
       }),
     })
     return r.ok
@@ -257,6 +259,7 @@ export async function notifyAgentOfLead(creds, {
       ? `Cross-specialty lead: ${lead.name}`
       : `New website lead: ${lead.name}`,
     message: summary,
+    contactId: lead.contact_id,
   })
   const email = await sendLeadEmail({ to: agent.email, subject, html, text })
 

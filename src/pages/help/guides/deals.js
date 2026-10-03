@@ -74,7 +74,7 @@ export default [
     ],
     troubleshooting: [
       { problem: 'The checklist is empty', fix: 'Pick the deal’s **State** and type at the top of the Checklist tab and it fills in.' },
-      { problem: 'N/A items still block closing', fix: 'Mark them **complete** if they’re done; N/A still counts as outstanding unless the item says “if applicable”.' },
+      { problem: 'An item doesn’t apply to this deal', fix: 'Click its status until it shows **N/A**. It no longer holds up closing — the office sees it listed as “Marked N/A” when it reviews the deal.' },
       { problem: 'My client can’t see a document in the portal', fix: 'Share it from the **Documents** tab: **⋯** → **Share with client portal**.' },
     ],
     related: ['deal-documents', 'close-deal', 'send-from-template'],
@@ -211,7 +211,7 @@ export default [
     troubleshooting: [
       { problem: '“Cannot close: …”', fix: 'Something is still outstanding. Follow the **Fix** buttons on the Compliance card.' },
       { problem: 'The deal fell through', fix: 'Click **Mark Lost** on the deal page. **Reopen** brings it back to Lead.' },
-      { problem: 'A checklist item looks unticked but I did it', fix: 'Ticking a step on the deal page’s **Next Actions** card doesn’t tick the Checklist tab. Mark it complete on the **Checklist** tab too.' },
+      { problem: 'Ticking a step on the deal page — does the Checklist tab know?', fix: 'Yes. Ticking a step on the **Next Actions** card marks it complete on the **Checklist** tab too, and the other way round.' },
     ],
     related: ['deal-tabs', 'track-signatures', 'commission'],
   },

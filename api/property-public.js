@@ -356,6 +356,8 @@ async function handleGate(req, res) {
         title:    `New website lead: ${leadName}`,
         message:  detail.join(' · '),
         type:     'lead',
+        // So clicking it in the bell opens the lead (migration 0062).
+        contact_id: contactId || null,
       }),
     }).catch(() => {})
 

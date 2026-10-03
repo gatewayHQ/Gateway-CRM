@@ -3,7 +3,7 @@ import { syncTaskCalendar, deleteTask, setTaskCompleted, fetchAgentTasks, create
 import { mutationErrorMessage } from '../lib/services/db.js'
 import { formatDate, toDateTimeLocalInput, fromDateTimeLocalInput } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
-import { fetchOutlookConnectionStatus } from '../lib/services/outlook.js'
+import { fetchOutlookConnectionStatus, isOutlookConnected } from '../lib/services/outlook.js'
 import { getAuthSession } from '../lib/services/auth.js'
 
 function TaskDrawer({ open, onClose, task, contacts, deals, onSave, activeAgent }) {
@@ -25,7 +25,7 @@ function TaskDrawer({ open, onClose, task, contacts, deals, onSave, activeAgent 
   React.useEffect(() => {
     if (!open) return
     fetchOutlookConnectionStatus()
-      .then(({ data }) => setOutlookConnected(data?.status === 'connected'))
+      .then(({ data }) => setOutlookConnected(isOutlookConnected(data)))
   }, [open])
 
   // A due date on a task assigned to the viewer becomes an event on their own
