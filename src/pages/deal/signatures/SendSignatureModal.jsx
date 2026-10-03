@@ -7,7 +7,9 @@ import SignerPicker, { buildCandidates, isValidEmail } from '../../../components
 import { Icon, Modal, pushToast } from '../../../components/UI.jsx'
 import MarkupDocumentModal from '../../../components/MarkupDocumentModal.jsx'
 import { safeFileName } from '../../../lib/services/pdfEdit.js'
-import { createDealFileSignedUrl } from '../../../lib/services/documents.js'
+import { fetchDealFileBytes } from '../../../lib/services/documents.js'
+import DocumentQuickLook from '../../../components/DocumentQuickLook.jsx'
+import { IconButton } from '../../../components/ui/index.js'
 import { boldSignReturnUrl } from './boldsignDocs.js'
 import { BoldSignStepModal } from './BoldSignStepModal.jsx'
 import { SIGNER_COLORS } from './signatureSteps.js'
@@ -37,6 +39,15 @@ export function SendSignatureModal({ deal, contacts, properties, dealFiles, acti
   const [subject,    setSubject]   = React.useState(`Please sign: ${deal?.title || 'Document'}`)
   const [file,       setFile]      = React.useState(null)
   const [pickedFile, setPickedFile]= React.useState('')
+  // The deal document being previewed before it's picked, or ''.
+  const [looking, setLooking]      = React.useState('')
+  // Picking a deal document replaces any file chosen from the computer; picking
+  // the same one again unpicks it.
+  const pickDealFile = (name, { keep = false } = {}) => {
+    const unpick = !keep && pickedFile === name
+    setPickedFile(unpick ? '' : name)
+    if (!unpick) setFile(null)
+  }
   const [agentSigns, setAgentSigns]= React.useState(false)
   const [markup,     setMarkup]    = React.useState(null)
   const [opening,    setOpening]   = React.useState(false)
@@ -113,11 +124,7 @@ export function SendSignatureModal({ deal, contacts, properties, dealFiles, acti
         bytes = new Uint8Array(await file.arrayBuffer())
       } else {
         name = pickedFile.replace(/^\d+-/, '')
-        const { data, error } = await createDealFileSignedUrl(deal.id, pickedFile, 120)
-        if (error || !data?.signedUrl) throw new Error(error?.message || 'Could not open that document.')
-        const res = await fetch(data.signedUrl)
-        if (!res.ok) throw new Error(`Could not read ${name} (HTTP ${res.status}).`)
-        bytes = new Uint8Array(await res.arrayBuffer())
+        bytes = await fetchDealFileBytes(deal.id, pickedFile)
       }
       setMarkup({ fileName: name, bytes })
     } catch (e) {
@@ -289,11 +296,15 @@ export function SendSignatureModal({ deal, contacts, properties, dealFiles, acti
                 const name = f.name.replace(/^\d+-/,'')
                 const picked = pickedFile === f.name
                 return (
-                  <div key={f.name} onClick={()=>{ setPickedFile(picked?'':f.name); if(!picked){setFile(null)} }}
-                    style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', border:`1px solid ${picked?'var(--gw-azure)':'var(--gw-border)'}`, borderRadius:'var(--radius)', marginBottom:4, cursor:'pointer', background:picked?'var(--gw-sky)':'#fff' }}>
-                    <Icon name="file" size={13} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
-                    <span style={{ fontSize:12, flex:1, fontWeight:picked?700:400 }}>{name}</span>
-                    {picked && <Icon name="check" size={13} style={{ color:'var(--gw-azure)' }}/>}
+                  <div key={f.name}
+                    style={{ display:'flex', alignItems:'center', gap:4, border:`1px solid ${picked?'var(--gw-azure)':'var(--gw-border)'}`, borderRadius:'var(--radius)', marginBottom:4, background:picked?'var(--gw-sky)':'#fff' }}>
+                    <button type="button" aria-pressed={picked} onClick={()=>pickDealFile(f.name)}
+                      style={{ display:'flex', alignItems:'center', gap:8, flex:1, minWidth:0, padding:'7px 10px', border:0, background:'transparent', cursor:'pointer', textAlign:'left', fontFamily:'var(--font-body)' }}>
+                      <Icon name="file" size={13} style={{ color:'var(--gw-mist)', flexShrink:0 }}/>
+                      <span style={{ fontSize:12, flex:1, fontWeight:picked?700:400, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{name}</span>
+                      {picked && <Icon name="check" size={13} style={{ color:'var(--gw-azure)' }}/>}
+                    </button>
+                    <IconButton icon="eye" size="sm" label={`Quick look at ${name}`} onClick={()=>setLooking(f.name)} />
                   </div>
                 )
               })}
@@ -357,6 +368,21 @@ export function SendSignatureModal({ deal, contacts, properties, dealFiles, acti
           submitLabel="Use this version"
           onClose={() => setMarkup(null)}
           onSubmit={useMarkedVersion}
+        />
+      )}
+      {looking && (
+        <DocumentQuickLook
+          doc={{ name: looking, label: looking.replace(/^\d+-/, '') }}
+          list={dealFiles.map(f => ({ name: f.name, label: f.name.replace(/^\d+-/, '') }))}
+          onNavigate={d => setLooking(d.name)}
+          loadBytes={name => fetchDealFileBytes(deal.id, name)}
+          onClose={() => setLooking('')}
+          actions={[{
+            label: 'Use this document', icon: 'check',
+            // Only a PDF can be sent for signature.
+            show: d => /\.pdf$/i.test(d.name),
+            onClick: d => { pickDealFile(d.name, { keep: true }); setLooking('') },
+          }]}
         />
       )}
     </Modal>

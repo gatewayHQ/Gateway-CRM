@@ -197,3 +197,32 @@ th.is-right .ui-table__sort { flex-direction: row-reverse; }
   .ui-skeleton, .ui-table__progress::after { animation: none; }
   .ui-spinner { animation-duration: 1.6s; }
 }
+
+/* ── Quick Look (DocumentQuickLook) ── */
+.qlook .modal__body.qlook__body { padding: 0; background: var(--gw-bone); }
+.qlook__stage {
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  padding: 16px; min-height: 320px;
+}
+.qlook__page { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; max-width: 100%; }
+.qlook__page canvas { background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,0.18); max-width: 100%; height: auto; }
+.qlook__page-no { font-size: 11px; color: var(--gw-mist); }
+.qlook__page-error {
+  width: min(100%, 600px); padding: 40px 16px; text-align: center; font-size: 13px;
+  background: #fff; border: 1px dashed var(--gw-border); color: var(--gw-mist);
+}
+.qlook__image { max-width: 100%; height: auto; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,0.18); }
+.qlook__loading { display: flex; align-items: center; gap: 10px; margin: auto; color: var(--gw-mist); font-size: 13px; }
+.qlook__more { margin-bottom: 4px; }
+.qlook__nav { display: flex; gap: 2px; margin-right: auto; }
+@media (max-width: 768px) {
+  .qlook .modal__foot { flex-wrap: wrap; }
+  .qlook__stage { padding: 10px; }
+}
+/* A document's name on the deal Documents tab opens Quick Look. */
+.doc-row__name {
+  all: unset; cursor: pointer; min-width: 0; font-size: 12.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 3px;
+}
+.doc-row__name:hover { color: var(--gw-azure); text-decoration: underline; text-underline-offset: 2px; }
+.doc-row__name:focus-visible { outline: 2px solid var(--gw-azure); outline-offset: 2px; }

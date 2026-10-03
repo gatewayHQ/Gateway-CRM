@@ -3,14 +3,19 @@
 
 import React, { useState } from 'react'
 import { Icon, MenuButton, pushToast } from '../../components/UI.jsx'
+import { IconButton } from '../../components/ui/index.js'
+import DocumentQuickLook from '../../components/DocumentQuickLook.jsx'
 import { groupDocuments, documentsSummary, assignableKinds, kindById } from '../../lib/services/documentKinds.js'
-import { listDealFiles, uploadDealFile, createDealFileSignedUrl, removeDealFile } from '../../lib/services/documents.js'
+import { listDealFiles, uploadDealFile, createDealFileSignedUrl, removeDealFile, fetchDealFileBytes } from '../../lib/services/documents.js'
 import { fetchDealCompData, updateDealCompData } from '../../lib/services/dealRecords.js'
 import SplitDocumentModal from '../../components/SplitDocumentModal.jsx'
 import MergeDocumentsModal from '../../components/MergeDocumentsModal.jsx'
 import MarkupDocumentModal from '../../components/MarkupDocumentModal.jsx'
 import { splitPdfBytes, mergePdfBytes, pdfPageCount, safeFileName, moveItem } from '../../lib/services/pdfEdit.js'
 import { RequiredFormsPanel } from './RequiredFormsPanel.jsx'
+
+// How many recently opened files' bytes the tab keeps in hand.
+const BYTES_CACHE_SIZE = 4
 
 function formatBytes(bytes) {
   if (!bytes) return ''
@@ -42,6 +47,13 @@ export function DocumentsTab({ deal }) {
   const [merge, setMerge]         = useState(null)
   const [markup, setMarkup]       = useState(null)
   const [preparing, setPreparing] = useState('')   // which row is fetching its bytes
+  // Quick Look: the file being previewed (its storage name), or null.
+  const [look, setLook] = useState(null)
+  // Quick Look opened from Merge's "add document" list — ends in "Add to merge".
+  const [mergeLook, setMergeLook] = useState(null)
+  // The last few files' bytes, so flipping back and forth in Quick Look — or
+  // going from Quick Look straight into Split — doesn't download them again.
+  const bytesCache = React.useRef(new Map())
   // WHICH PILE EACH FILE IS IN, where an agent has said so by hand.
   // Kept in the deal's own comp_data next to portal_docs — the same jsonb the
   // client-portal sharing list already lives in — so correcting a guess needs
@@ -108,6 +120,7 @@ export function DocumentsTab({ deal }) {
     const { error } = await removeDealFile(deal.id, fileName)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast('File deleted', 'info')
+    bytesCache.current.delete(fileName)
     setFiles(p => p.filter(f => f.name !== fileName))
   }
 
@@ -127,6 +140,9 @@ export function DocumentsTab({ deal }) {
 
   const docGroups  = groupDocuments(files, docKinds)
   const docSummary = documentsSummary(docGroups)
+  // Quick Look steps through the files in the order they're shown.
+  const lookList   = docGroups.flatMap(g => g.files).map(f => ({ name: f.name, label: f.label }))
+  const lookDoc    = look ? lookList.find(d => d.name === look) || null : null
 
   // ─── Split & merge ─────────────────────────────────────────────────────────
   // Both run in the browser on bytes fetched with this agent's own signed URL
@@ -136,11 +152,12 @@ export function DocumentsTab({ deal }) {
   const displayNameOf = (name) => name.replace(/^\d+-/, '')
 
   const bytesOf = async (fileName) => {
-    const { data, error } = await createDealFileSignedUrl(deal.id, fileName, 120)
-    if (error || !data?.signedUrl) throw new Error(error?.message || 'Could not open that file.')
-    const res = await fetch(data.signedUrl)
-    if (!res.ok) throw new Error(`Could not read ${displayNameOf(fileName)} (HTTP ${res.status}).`)
-    return new Uint8Array(await res.arrayBuffer())
+    const cache = bytesCache.current
+    if (cache.has(fileName)) return cache.get(fileName)
+    const bytes = await fetchDealFileBytes(deal.id, fileName)
+    cache.set(fileName, bytes)
+    if (cache.size > BYTES_CACHE_SIZE) cache.delete(cache.keys().next().value)
+    return bytes
   }
 
   // One upload path for everything this screen writes, so a split piece, a
@@ -282,6 +299,24 @@ export function DocumentsTab({ deal }) {
 
   if (loading) return <div style={{ padding: 24, fontSize: 13, color: 'var(--gw-mist)' }}>Loading files…</div>
 
+  // From the preview straight into what it was opened for. The preview closes
+  // first, so the tool opens on its own rather than stacked on top of it.
+  const fromLook = (fn) => (doc) => { setLook(null); fn({ name: doc.name }) }
+  // PDFs on the deal not yet in the merge — what "add document" offers.
+  const mergeAvailable = merge
+    ? files.filter(f => isPdf(f.name) && !merge.items.some(i => i.key === f.name))
+        .map(f => ({ key: f.name, label: displayNameOf(f.name) }))
+    : []
+  const mergeLookList = mergeAvailable.map(d => ({ name: d.key, label: d.label }))
+  const mergeLookDoc  = mergeLook ? mergeLookList.find(d => d.name === mergeLook) || null : null
+
+  const pdfOnly = d => isPdf(d.name)
+  const lookActions = [
+    { label: 'Mark up…', show: pdfOnly, variant: 'secondary', onClick: fromLook(openMarkup) },
+    { label: 'Merge with…', show: pdfOnly, variant: 'secondary', onClick: fromLook(openMerge) },
+    { label: 'Split', show: pdfOnly, onClick: fromLook(openSplit) },
+  ]
+
   return (
     <div style={{ padding: 16, overflowY: 'auto', flex: 1 }}>
       {/* Required Forms — state-specific packet lookup */}
@@ -388,9 +423,12 @@ export function DocumentsTab({ deal }) {
                       </div>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                          <span style={{ fontSize: 12.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={file.name}>
+                          <button
+                            type="button" className="doc-row__name" onClick={() => setLook(file.name)}
+                            title={`Quick look at ${file.label}`}
+                          >
                             {file.label}
-                          </span>
+                          </button>
                           {file.signed && (
                             <span style={{ fontSize: 9, fontWeight: 700, background: 'var(--gw-green-light)', color: 'var(--gw-green)', padding: '1px 6px', borderRadius: 8, flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em' }}>signed</span>
                           )}
@@ -408,6 +446,7 @@ export function DocumentsTab({ deal }) {
                       {/* The one action this file is for. Splitting a scan into
                           its forms is the common one; everything else is behind
                           the menu, the same way the Signatures rows work. */}
+                      <IconButton icon="eye" size="sm" label={`Quick look at ${file.label}`} onClick={() => setLook(file.name)} />
                       {isPdf(file.name) && (
                         <button
                           className="btn btn--ghost btn--sm" style={{ fontSize: 11, flexShrink: 0 }}
@@ -447,6 +486,15 @@ export function DocumentsTab({ deal }) {
         </>
       )}
 
+      {lookDoc && (
+        <DocumentQuickLook
+          doc={lookDoc} list={lookList} onNavigate={d => setLook(d.name)}
+          loadBytes={bytesOf} onClose={() => setLook(null)}
+          onDownload={d => download(d.name)}
+          actions={lookActions}
+        />
+      )}
+
       {split && (
         <SplitDocumentModal
           fileName={split.fileName}
@@ -459,10 +507,9 @@ export function DocumentsTab({ deal }) {
       {merge && (
         <MergeDocumentsModal
           items={merge.items}
-          available={files
-            .filter(f => isPdf(f.name) && !merge.items.some(i => i.key === f.name))
-            .map(f => ({ key: f.name, label: displayNameOf(f.name) }))}
+          available={mergeAvailable}
           onAddFromDeal={addMergeFromDeal}
+          onPreview={doc => setMergeLook(doc.key)}
           onAddFromDisk={addMergeFromDisk}
           onRemove={key => setMerge(m => ({
             ...m,
@@ -472,6 +519,13 @@ export function DocumentsTab({ deal }) {
           onReorder={(from, to) => setMerge(m => ({ ...m, items: moveItem(m.items, from, to) }))}
           onClose={() => setMerge(null)}
           onSubmit={runMerge}
+        />
+      )}
+      {mergeLookDoc && (
+        <DocumentQuickLook
+          doc={mergeLookDoc} list={mergeLookList} onNavigate={d => setMergeLook(d.name)}
+          loadBytes={bytesOf} onClose={() => setMergeLook(null)}
+          actions={[{ label: 'Add to merge', icon: 'plus', onClick: d => { setMergeLook(null); addMergeFromDeal({ key: d.name, label: d.label }) } }]}
         />
       )}
 
