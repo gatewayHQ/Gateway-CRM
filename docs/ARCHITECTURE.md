@@ -66,6 +66,9 @@ src/
 │   │   └── MobileNav.jsx           bottom bar + More sheet
 │   └── __tests__/
 ├── pages/
+│   ├── campaigns/                  mail campaigns: page, form, detail, importer, builders/
+│   ├── commission/                 admin back office, commission drawer, charts
+│   ├── properties/                 listings: page, drawer, tabs, radius mailing
 │   ├── pipeline/                   the deals + listings board
 │   │   ├── PipelinePage.jsx        board shell, views (board/list/focus), filters
 │   │   ├── boardFilters.js         which deals/listings the board shows (pure)
@@ -115,8 +118,9 @@ Ordered by payoff. Each step is behavior-preserving and can ship on its own.
    client are the shell hooks that inject it into client-parameterised
    services (`agents.js`, `notifications.js`). Remaining lib-level users:
    `lib/audit.js`, `lib/webhooks.js`, `lib/om.js`.
-3. **`Campaigns.jsx` (≈2.9k) and `Commission.jsx` (≈1.2k):** same treatment as
-   Pipeline — a folder per page, presentational pieces separated from data.
+3. ~~**`Campaigns.jsx`, `Commission.jsx`, `Properties.jsx`**~~ **Done:** split
+   into `pages/campaigns/` (with `builders/`), `pages/commission/` and
+   `pages/properties/`, the same way as Pipeline.
 4. **The `db` / `setDb` prop** is threaded through every page. Once pages read
    through services, replace it with a `WorkspaceContext` exposing typed
    selectors and mutations, so a page re-renders only for the slice it uses.
