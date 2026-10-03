@@ -10,7 +10,7 @@
 // it into Form Library means admins manage all documents in one place.
 // ─────────────────────────────────────────────────────────────────────────────
 import React, { useState, useEffect } from 'react'
-import { supabase } from '../../lib/supabase.js'
+import { fetchSenderIdentities } from '../../lib/services/boldsignAdmin.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
 import {
   createIdentity, syncIdentities, resendIdentity,
@@ -31,7 +31,7 @@ export default function BoldSignAdmin({ agents = [], go }) {
   const [editName,   setEditName]   = useState('')
 
   const load = async () => {
-    const { data: ids } = await supabase.from('boldsign_sender_identities').select('*')
+    const { data: ids } = await fetchSenderIdentities()
     setIdentities(ids || [])
   }
   useEffect(() => { load() }, [])

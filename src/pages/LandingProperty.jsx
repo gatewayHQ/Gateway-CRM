@@ -12,7 +12,7 @@
  * UI is composed from the reusable luxury landing kit in components/landing.
  */
 import React, { useEffect, useState } from 'react'
-import { supabase } from '../lib/supabase.js'
+import { fetchPublicAgents, fetchPublicAgentsLegacy } from '../lib/services/publicPages.js'
 import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
 import { fetchPublicMailing } from '../lib/publicMailing.js'
 import '../components/landing/landing.css'
@@ -70,13 +70,9 @@ export default function LandingProperty({ mailingId, preview = null }) {
         if (ids.length) {
           // Include bio; fall back to the pre-0004 column set if that migration
           // hasn't run yet (selecting a missing column would otherwise error).
-          let { data: rows, error: agErr } = await supabase.from('agents_public')
-            .select('id, name, phone, email, photo_url, color, role, bio')
-            .in('id', ids)
+          let { data: rows, error: agErr } = await fetchPublicAgents(ids)
           if (agErr) {
-            ;({ data: rows } = await supabase.from('agents_public')
-              .select('id, name, phone, email, photo_url, color, role')
-              .in('id', ids))
+            ;({ data: rows } = await fetchPublicAgentsLegacy(ids))
           }
           const overrides = cfg.agent_overrides || {}
           const ordered = ids

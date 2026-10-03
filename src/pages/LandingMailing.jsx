@@ -29,7 +29,7 @@
  * prefers-reduced-motion, and full dark/light luxury theming from one accent.
  */
 import React, { useEffect, useMemo, useState } from 'react'
-import { supabase } from '../lib/supabase.js'
+import { fetchPublicAgents, fetchPublicAgentsLegacy } from '../lib/services/publicPages.js'
 import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
 import { fetchPublicMailing } from '../lib/publicMailing.js'
 import { useReveal, useCountUp, useScrollProgress, useParallax, usePrefersReducedMotion } from '../components/landing/hooks.js'
@@ -106,11 +106,9 @@ export default function LandingMailing({ mailingId }) {
       const cfg = m.landing_config || {}
       const ids = [...new Set([m.agent_id, ...(Array.isArray(cfg.agent_ids) ? cfg.agent_ids : [])].filter(Boolean))]
       if (ids.length) {
-        let { data: rows, error: agErr } = await supabase.from('agents_public')
-          .select('id, name, phone, email, photo_url, color, role, bio').in('id', ids)
+        let { data: rows, error: agErr } = await fetchPublicAgents(ids)
         if (agErr) {
-          ;({ data: rows } = await supabase.from('agents_public')
-            .select('id, name, phone, email, photo_url, color, role').in('id', ids))
+          ;({ data: rows } = await fetchPublicAgentsLegacy(ids))
         }
         const overrides = cfg.agent_overrides || {}
         const ordered = ids.map(id => (rows || []).find(r => r.id === id)).filter(Boolean)

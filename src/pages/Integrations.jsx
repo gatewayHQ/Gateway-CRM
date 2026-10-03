@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { supabase } from '../lib/supabase.js'
+import { getAuthSession, fetchOutlookConnectionStatus } from '../lib/services/integrations.js'
+import { fetchWebhookConfigs, createWebhookConfig, setWebhookConfigActive, deleteWebhookConfig } from '../lib/services/webhookConfigs.js'
 import { Icon, pushToast } from '../components/UI.jsx'
 import { WEBHOOK_EVENTS } from '../lib/webhooks.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
@@ -12,7 +13,7 @@ function OutlookSection() {
   const [disconnecting, setDisconnecting] = useState(false)
 
   const load = useCallback(async () => {
-    const { data, error } = await supabase.from('ms_graph_connection_status').select('*').maybeSingle()
+    const { data, error } = await fetchOutlookConnectionStatus()
     if (error) { pushToast(error.message, 'error'); setStatus(false); return }
     setStatus(data || false)
   }, [])
@@ -30,7 +31,7 @@ function OutlookSection() {
   const connect = async () => {
     setConnecting(true)
     try {
-      const { data: { session } } = await supabase.auth.getSession()
+      const { data: { session } } = await getAuthSession()
       if (!session?.access_token) { pushToast('Please sign in again', 'error'); setConnecting(false); return }
       const res = await fetch('/api/email-send?action=outlook-connect', {
         method: 'POST',
@@ -49,7 +50,7 @@ function OutlookSection() {
   const disconnect = async () => {
     setDisconnecting(true)
     try {
-      const { data: { session } } = await supabase.auth.getSession()
+      const { data: { session } } = await getAuthSession()
       const res = await fetch('/api/email-send?action=outlook-disconnect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
@@ -169,11 +170,7 @@ function AddWebhookForm({ onAdd, onCancel }) {
     if (!url.trim() || !url.startsWith('http')) { pushToast('Enter a valid URL starting with http', 'error'); return }
     if (!events.length)                      { pushToast('Select at least one trigger event', 'error'); return }
     setSaving(true)
-    const { data, error } = await supabase
-      .from('webhook_configs')
-      .insert([{ name: name.trim(), url: url.trim(), events, active: true }])
-      .select()
-      .single()
+    const { data, error } = await createWebhookConfig({ name: name.trim(), url: url.trim(), events, active: true })
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
     onAdd(data)
@@ -230,18 +227,18 @@ function WebhooksSection() {
   const [adding, setAdding]     = useState(false)
 
   useEffect(() => {
-    supabase.from('webhook_configs').select('*').order('created_at', { ascending: true })
+    fetchWebhookConfigs()
       .then(({ data }) => { setWebhooks(data || []); setLoading(false) })
   }, [])
 
   const toggle = useCallback(async (wh) => {
-    const { error } = await supabase.from('webhook_configs').update({ active: !wh.active }).eq('id', wh.id)
+    const { error } = await setWebhookConfigActive(wh.id, !wh.active)
     if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
     setWebhooks(p => p.map(w => w.id === wh.id ? { ...w, active: !wh.active } : w))
   }, [])
 
   const del = useCallback(async (id) => {
-    const { error } = await supabase.from('webhook_configs').delete().eq('id', id)
+    const { error } = await deleteWebhookConfig(id)
     if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
     setWebhooks(p => p.filter(w => w.id !== id))
     pushToast('Webhook deleted', 'info')

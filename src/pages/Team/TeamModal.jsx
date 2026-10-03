@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { supabase } from '../../lib/supabase.js'
+import { createTeam, updateTeam, upsertTeamSplits, deleteTeamSplitsForAgents } from '../../lib/services/teams.js'
 import { withRetry, mutationErrorMessage } from '../../lib/services/db.js'
 import { Icon, Avatar, Modal, pushToast } from '../../components/UI.jsx'
 
@@ -115,12 +115,12 @@ export default function TeamModal({ open, onClose, team, agents, splits, onSave 
     // ── 1. The team row ──────────────────────────────────────────────────────
     let teamId = team?.id
     if (teamId) {
-      const res = await withRetry(() => supabase.from('teams')
-        .update({ name: name.trim(), description: notes.trim(), type }).eq('id', teamId).select().single())
+      const res = await withRetry(() => updateTeam(teamId,
+        { name: name.trim(), description: notes.trim(), type }))
       if (res.error) return fail(res, 'Could not save this team.')
     } else {
-      const res = await withRetry(() => supabase.from('teams')
-        .insert([{ name: name.trim(), description: notes.trim(), type }]).select().single())
+      const res = await withRetry(() => createTeam(
+        { name: name.trim(), description: notes.trim(), type }))
       if (res.error) return fail(res, 'Could not create this team.')
       teamId = res.data?.id
       if (!teamId) { setSaving(false); pushToast('Could not create this team.', 'error'); return }
@@ -145,8 +145,7 @@ export default function TeamModal({ open, onClose, team, agents, splits, onSave 
     }))
 
     if (rows.length) {
-      const res = await withRetry(() => supabase.from('team_splits')
-        .upsert(rows, { onConflict: 'team_id,agent_id' }).select())
+      const res = await withRetry(() => upsertTeamSplits(rows))
       if (res.error) return fail(res, 'Could not save the team’s members.')
     }
 
@@ -156,8 +155,7 @@ export default function TeamModal({ open, onClose, team, agents, splits, onSave 
       .filter(s => s.team_id === teamId && !keepIds.has(s.agent_id))
       .map(s => s.agent_id)
     if (droppedIds.length) {
-      const res = await withRetry(() => supabase.from('team_splits')
-        .delete().eq('team_id', teamId).in('agent_id', droppedIds))
+      const res = await withRetry(() => deleteTeamSplitsForAgents(teamId, droppedIds))
       if (res.error) return fail(res, 'Members saved, but removing the old ones failed.')
     }
 

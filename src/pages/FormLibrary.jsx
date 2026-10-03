@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { supabase } from '../lib/supabase.js'
+import {
+  fetchFormPackets, insertFormPacket, updateFormPacket, deleteFormPacket,
+  formPacketStorage, uploadFormPacketFile, createFormPacketSignedUrl,
+} from '../lib/services/formPackets.js'
 import { Icon, pushToast, EmptyState, Modal } from '../components/UI.jsx'
 import { OPERATING_STATES } from '../lib/constants.js'
 import { templateEditorUrl } from '../lib/services/boldsign.js'
@@ -12,8 +15,6 @@ const TRANSACTION_TYPES = [
   { value: 'lease',   label: 'Lease / Rental' },
   { value: 'general', label: 'General / Other' },
 ]
-
-const BUCKET = 'form-packets'
 
 // The shelf label. Reads the brokerage's own operating-states list, so opening
 // a fourth state is one edit there rather than a lookup table that drifts.
@@ -200,13 +201,11 @@ function UploadModal({ packet, onClose, onSaved }) {
       for (let i = 0; i < files.length; i++) {
         const f = files[i]
         const path = packetStoragePath(form.state, form.transaction_type, f, i)
-        const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, f, {
-          upsert: true, contentType: 'application/pdf',
-        })
+        const { error: upErr } = await uploadFormPacketFile(path, f)
         if (upErr) { pushToast(`Could not upload "${f.name}": ${upErr.message}`, 'error'); return }
         // 10 minutes: long enough for BoldSign to pull a 25 MB packet, short enough
         // that the link is useless if it ever leaks.
-        const { data: signed, error: signErr } = await supabase.storage.from(BUCKET).createSignedUrl(path, 600)
+        const { data: signed, error: signErr } = await createFormPacketSignedUrl(path, 600)
         if (signErr || !signed?.signedUrl) {
           pushToast(`Could not prepare "${f.name}" for BoldSign${signErr?.message ? `: ${signErr.message}` : ''}`, 'error'); return
         }
@@ -283,9 +282,7 @@ function UploadModal({ packet, onClose, onSaved }) {
         for (let i = 0; i < files.length; i++) {
           const f = files[i]
           const path = packetStoragePath(form.state, form.transaction_type, f, i)
-          const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, f, {
-            upsert: true, contentType: 'application/pdf',
-          })
+          const { error: upErr } = await uploadFormPacketFile(path, f)
           if (upErr) { pushToast(upErr.message, 'error'); setSaving(false); return }
           uploaded.push({ path, name: f.name })
         }
@@ -311,8 +308,8 @@ function UploadModal({ packet, onClose, onSaved }) {
       // intermediate editor save — never insert twice for the same packet.
       const rowId = packet?.id || savedPacketIdRef.current
       const upsert = (p) => rowId
-        ? supabase.from('form_packets').update(p).eq('id', rowId).select()
-        : supabase.from('form_packets').insert([p]).select()
+        ? updateFormPacket(rowId, p)
+        : insertFormPacket(p)
       const { data, error, notice } = await upsertPacketRow(upsert, payload)
       if (error) { pushToast(`Couldn't save: ${error.message}`, 'error'); return }
       if (notice) pushToast(notice, 'info')
@@ -560,7 +557,7 @@ export default function FormLibraryPage({ isAdmin }) {
 
   const load = async () => {
     setLoading(true)
-    const { data, error } = await supabase.from('form_packets').select('*').order('state').order('transaction_type')
+    const { data, error } = await fetchFormPackets()
     if (error) {
       if (error.message?.includes('relation') || error.code === '42P01') setTableReady(false)
       else pushToast(error.message, 'error')
@@ -572,7 +569,7 @@ export default function FormLibraryPage({ isAdmin }) {
 
   const del = async (id) => {
     if (!window.confirm('Delete this form packet?')) return
-    await supabase.from('form_packets').delete().eq('id', id)
+    await deleteFormPacket(id)
     pushToast('Packet deleted', 'info')
     load()
   }
@@ -585,7 +582,7 @@ export default function FormLibraryPage({ isAdmin }) {
     if (!packetFiles(packet).length) { pushToast('No file uploaded for this packet', 'error'); return }
     setDownloading(p => ({ ...p, [packet.id]: true }))
     try {
-      const { files, zipped, recovered } = await deliverPacket(packet, { storage: supabase.storage.from(BUCKET) })
+      const { files, zipped, recovered } = await deliverPacket(packet, { storage: formPacketStorage() })
       if (zipped) pushToast(`Downloaded ${files} forms as a zip`, 'success')
       // The agent got the whole packet from the bucket; only an admin can fix the row.
       if (recovered && isAdmin) {
