@@ -145,7 +145,7 @@ export default [
     routes: ['leads'],
     action: { label: 'Open Website Leads', route: 'leads' },
     steps: [
-      { title: 'Get notified', body: 'When a website lead is yours, you get a bell notification and an email. It’s already a contact in your book, and your auto-start drip begins if you set one up.' },
+      { title: 'Get notified', body: 'When a website lead is yours, you get a bell notification and an email. Click the notification to open the lead — it’s already a contact in your book, and your auto-start drip begins if you set one up.' },
       { title: 'Find the lead', body: `${OPEN_TOOLS('Website Leads')} **Inquiries** lists every lead with who it went to and whether a drip started.` },
       { title: 'Work it from Contacts', body: 'Search for the person (top search box) and open them to call, email and log what happens.' },
       { title: 'Older form captures', body: 'On **Captured Leads**, click **Add to CRM** to turn a capture into a contact.' },
@@ -153,7 +153,7 @@ export default [
     ],
     troubleshooting: [
       { problem: 'I can’t reassign a lead', fix: 'Only an office admin can change the rotation or reassign a lead.' },
-      { problem: 'Clicking the bell notification doesn’t open the lead', fix: 'Search for their name in the top search box instead.' },
+      { problem: 'The notification opens “That contact isn’t in your book”', fix: 'The lead belongs to another agent (you were told as the cross-specialty agent). Ask them, or your office admin, if you should work it.' },
     ],
     related: ['drip-sequence', 'log-activity'],
   },
@@ -177,7 +177,7 @@ export default [
     troubleshooting: [
       { problem: 'Power Dialer is greyed out', fix: 'Every lead on the list has been called. Use the filters (**Callback**, **Called**) to go back to them.' },
       { problem: 'I set a callback but got no task', fix: 'Pick a **Callback Date** before clicking **Set Date**.' },
-      { problem: 'I deleted a list by mistake', fix: 'Deleting a list happens immediately and can’t be undone. Upload it again.' },
+      { problem: 'I deleted a list by mistake', fix: 'Deleting a list (after you confirm) removes its leads and call notes for good — contacts you converted are kept. Upload the file again to start over.' },
     ],
     related: ['add-contact', 'tasks'],
   },

@@ -295,7 +295,10 @@ describe('the happy path', () => {
     expect(postsTo('activities')).toHaveLength(1)
     expect(postsTo('agent_notifications')[0].body).toMatchObject({
       agent_id: AGENT_A.id, type: 'lead',
+      // The bell opens the lead's contact when clicked.
+      contact_id: res.body.contact_id,
     })
+    expect(res.body.contact_id).toBeTruthy()
     expect(emails()).toHaveLength(1)
     expect(emails()[0].body.to).toBe(AGENT_A.email)
     expect(emails()[0].body.subject).toContain('Jane Smith')

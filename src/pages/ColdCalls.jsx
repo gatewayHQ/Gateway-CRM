@@ -5,7 +5,8 @@ import {
   fetchColdCallLists, createColdCallList, deleteColdCallList, fetchColdCallLeads, insertColdCallLeads, updateColdCallLead,
 } from '../lib/services/coldCalls.js'
 import { fromDateTimeLocalInput } from '../lib/helpers.js'
-import { Icon, Modal, pushToast } from '../components/UI.jsx'
+import { Icon, Modal, ConfirmDialog, pushToast } from '../components/UI.jsx'
+import { friendlyDbError } from '../lib/dbErrors.js'
 import { CONTACT_TYPES, PROPERTY_TYPES, titleCase } from '../lib/enums.js'
 import { fetchContactPhones } from '../lib/services/contactRecords.js'
 import { createProperty } from '../lib/services/properties.js'
@@ -656,6 +657,10 @@ const CARD    = { background:'#fff', borderRadius:12, width:'100%', maxWidth:480
 // ── Main Page ─────────────────────────────────────────────────────────────
 export default function ColdCallsPage({ db, setDb, activeAgent }) {
   const [lists, setLists]             = useState([])
+  // The list waiting on "are you sure?" — deleting one takes every lead and
+  // call note on it, so it never happens on a single click.
+  const [confirmList, setConfirmList] = useState(null)
+  const [deletingList, setDeletingList] = useState(false)
   const [selected, setSelected]       = useState(null)
   const [leads, setLeads]             = useState([])
   const [loadingLeads, setLoadingLeads] = useState(false)
@@ -688,7 +693,16 @@ export default function ColdCallsPage({ db, setDb, activeAgent }) {
   const updateLead = (id, patch) => setLeads(p => p.map(l => l.id === id ? {...l, ...patch} : l))
 
   const deleteList = async (list) => {
-    await deleteColdCallList(list.id)
+    setDeletingList(true)
+    const { data, error } = await deleteColdCallList(list.id)
+    setDeletingList(false)
+    if (error || !data?.length) {
+      pushToast(error
+        ? `Couldn't delete this list: ${friendlyDbError(error) || error.message}`
+        : "Couldn't delete this list — you may not have permission to. Ask your office admin.", 'error')
+      return
+    }
+    setConfirmList(null)
     setLists(p => p.filter(l => l.id !== list.id))
     if (selected?.id === list.id) {
       const rest = lists.filter(l => l.id !== list.id)
@@ -698,6 +712,10 @@ export default function ColdCallsPage({ db, setDb, activeAgent }) {
   }
 
   const filtered = filterStatus === 'all' ? leads : leads.filter(l => l.status === filterStatus)
+  // Only the open list's leads are loaded, so only it can give an exact count.
+  const confirmLeadsText = selected?.id === confirmList?.id
+    ? `and its ${leads.length} lead${leads.length === 1 ? '' : 's'}`
+    : 'and every lead on it'
 
   const stats = {
     total:     leads.length,
@@ -755,8 +773,9 @@ export default function ColdCallsPage({ db, setDb, activeAgent }) {
                         <div style={{fontSize:10,color:'var(--gw-mist)',marginTop:2}}>{donePct}% dialed</div>
                       </div>
                     )}
-                    <button className="btn btn--ghost btn--icon btn--sm" style={{marginTop:4,opacity:0.4}}
-                      onClick={e=>{e.stopPropagation();deleteList(list)}}><Icon name="trash" size={11}/></button>
+                    <button type="button" className="btn btn--ghost btn--icon btn--sm" style={{marginTop:4,opacity:0.4}}
+                      aria-label={`Delete list ${list.name}`} title="Delete list"
+                      onClick={e=>{e.stopPropagation();setConfirmList(list)}}><Icon name="trash" size={11}/></button>
                   </div>
                 )
               })
@@ -871,6 +890,14 @@ export default function ColdCallsPage({ db, setDb, activeAgent }) {
         <ConvertModal lead={convertLead} agents={agents} activeAgent={activeAgent} setDb={setDb} contacts={db?.contacts || []}
           onClose={()=>setConvertLead(null)}
           onConverted={(c)=>{ updateLead(convertLead.id,{status:'converted',contact_id:c.id}); setConvertLead(null) }} />
+      )}
+      {confirmList && (
+        <ConfirmDialog
+          title="Delete this call list?"
+          message={`“${confirmList.name}” ${confirmLeadsText} will be deleted, with all their call notes. Contacts you already converted are kept. This can't be undone.`}
+          confirmLabel="Delete list" busy={deletingList} busyLabel="Deleting…"
+          onConfirm={() => deleteList(confirmList)} onCancel={() => setConfirmList(null)}
+        />
       )}
     </div>
   )
