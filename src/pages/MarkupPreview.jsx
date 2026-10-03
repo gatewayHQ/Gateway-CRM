@@ -104,7 +104,7 @@ export default function MarkupPreview() {
   const groups = groupMarks(marks)
 
   return (
-    <div>
+    <div className="page-content">
       <div className="page-header">
         <div>
           <div className="eyebrow-label">Preview · not wired to any deal</div>

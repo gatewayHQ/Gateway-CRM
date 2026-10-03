@@ -2,7 +2,7 @@
 // and the funnel from mailed → scanned → lead.
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Icon, Modal, pushToast, EmptyState } from '../../components/UI.jsx'
+import { Icon, Modal, pushToast, EmptyState, Loading } from '../../components/UI.jsx'
 import QrCode from '../../components/QrCode.jsx'
 import { groupMailings } from '../../lib/services/mailingGroups.js'
 import { streetLine } from '../../lib/address.js'
@@ -130,38 +130,42 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
   if (setupNeeded) {
     const isEnvError = /invalid path|server misconfigured/i.test(setupError)
     return (
-      <div style={{ padding:40, maxWidth:780 }}>
-        <h2 style={{ fontFamily:'var(--font-display)', margin:0 }}>Campaign Tracking — Setup Required</h2>
-        {isEnvError ? (
-          <>
+      <div className="page-content">
+        <div style={{ maxWidth:780 }}>
+          <h2 style={{ fontFamily:'var(--font-display)', margin:0 }}>Campaign Tracking — Setup Required</h2>
+          {isEnvError ? (
+            <>
+              <p style={{ color:'var(--gw-mist)', marginTop:8 }}>
+                The campaigns API can't reach the database. This is usually a missing environment variable in Vercel.
+              </p>
+              <p style={{ marginTop:8, fontSize:13 }}>
+                Go to <strong>Vercel → Project → Settings → Environment Variables</strong> and confirm these are set:
+              </p>
+              <ul style={{ fontSize:13, marginTop:8, lineHeight:1.8 }}>
+                <li><code>SUPABASE_URL</code> — your Supabase project URL (e.g. <code>https://xxxx.supabase.co</code>)</li>
+                <li><code>SUPABASE_SERVICE_KEY</code> — the <em>service_role</em> secret key from Supabase → Settings → API</li>
+              </ul>
+              {setupError && <pre style={{ marginTop:8, fontSize:11, background:'var(--gw-bone)', padding:'8px 12px', borderRadius:6, color:'var(--gw-red)', whiteSpace:'pre-wrap' }}>{setupError}</pre>}
+            </>
+          ) : (
             <p style={{ color:'var(--gw-mist)', marginTop:8 }}>
-              The campaigns API can't reach the database. This is usually a missing environment variable in Vercel.
+              The mailings tables haven't been created yet. Run the migration once in your Supabase SQL editor — it's in <code>src/lib/schema.sql</code> under the <strong>MAILINGS (v2)</strong> section.
             </p>
-            <p style={{ marginTop:8, fontSize:13 }}>
-              Go to <strong>Vercel → Project → Settings → Environment Variables</strong> and confirm these are set:
-            </p>
-            <ul style={{ fontSize:13, marginTop:8, lineHeight:1.8 }}>
-              <li><code>SUPABASE_URL</code> — your Supabase project URL (e.g. <code>https://xxxx.supabase.co</code>)</li>
-              <li><code>SUPABASE_SERVICE_KEY</code> — the <em>service_role</em> secret key from Supabase → Settings → API</li>
-            </ul>
-            {setupError && <pre style={{ marginTop:8, fontSize:11, background:'var(--gw-bone)', padding:'8px 12px', borderRadius:6, color:'var(--gw-red)', whiteSpace:'pre-wrap' }}>{setupError}</pre>}
-          </>
-        ) : (
-          <p style={{ color:'var(--gw-mist)', marginTop:8 }}>
-            The mailings tables haven't been created yet. Run the migration once in your Supabase SQL editor — it's in <code>src/lib/schema.sql</code> under the <strong>MAILINGS (v2)</strong> section.
-          </p>
-        )}
-        <button className="btn btn--primary" onClick={loadAll} style={{ marginTop:16 }}>
-          {isEnvError ? 'Retry' : "I've run the migration — Reload"}
-        </button>
+          )}
+          <button className="btn btn--primary" onClick={loadAll} style={{ marginTop:16 }}>
+            {isEnvError ? 'Retry' : "I've run the migration — Reload"}
+          </button>
+        </div>
       </div>
     )
   }
 
-  if (loading) return <div style={{ padding:40 }}>Loading mailings…</div>
+  if (loading) return <div className="page-content"><Loading /></div>
 
+  // `.page-content` is the scroll container — the shell (.main) clips its
+  // children, so a page root without it can't scroll past the first screen.
   return (
-    <div style={{ padding:'24px 32px' }}>
+    <div className="page-content">
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:20 }}>
         <div>
           <h1 style={{ margin:0, fontFamily:'var(--font-display)', fontSize:28 }}>Mail Campaigns</h1>
