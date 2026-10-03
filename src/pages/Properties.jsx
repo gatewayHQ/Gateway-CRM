@@ -1,5 +1,4 @@
 import React, { useState, useMemo, useRef } from 'react'
-import { supabase } from '../lib/supabase.js'
 import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
 import { formatCurrency } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, Modal, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -7,9 +6,13 @@ import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 import { fireWebhooks } from '../lib/webhooks.js'
 import { findMatchingBuyers } from '../lib/matching.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
-import { fetchVisibleProperties } from '../lib/services/properties.js'
+import { loadVisibleProperties, createProperty, updateProperty, updatePropertyComps, updatePropertyCoords, deleteProperty } from '../lib/services/properties.js'
+import { uploadPropertyPhoto, getPropertyPhotoPublicUrl, removePropertyPhotos } from '../lib/services/propertyPhotos.js'
+import { fetchPropertyShowings, createPropertyShowing, deletePropertyShowing } from '../lib/services/propertyShowings.js'
+import { fetchListingChecklistSteps, createListingChecklistSteps, createListingChecklistStep, updateListingChecklistStep, deleteListingChecklistStep } from '../lib/services/listingChecklist.js'
+import { syncDealContactsFromProperty, syncPropertyContacts, fetchPropertyContacts } from '../lib/services/propertyContacts.js'
+import { insertDealFromProperty, renameDealsForProperty, findOpenDealsOnListing, requestListingDealAccess } from '../lib/services/propertyDeals.js'
 import { coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
-import { findOpenDealsOnProperty, requestDealAccess } from '../lib/services/deals.js'
 import { isMissingSideColumn } from '../lib/dealPeople.js'
 import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
 import { OPERATING_STATES } from '../lib/constants.js'
@@ -289,11 +292,9 @@ function PhotoUploader({ photos = [], propertyId, onAdd, onRemove }) {
     for (const file of valid) {
       const { blob, ext, type } = await compressForUpload(file, 'property')
       const path = `${propertyId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
-      const { data, error } = await supabase.storage
-        .from('property-photos')
-        .upload(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
+      const { data, error } = await uploadPropertyPhoto(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
       if (error) { pushToast(`Upload failed: ${error.message}`, 'error'); continue }
-      const { data: { publicUrl } } = supabase.storage.from('property-photos').getPublicUrl(path)
+      const { data: { publicUrl } } = getPropertyPhotoPublicUrl(path)
       onAdd(publicUrl)
     }
     setUploading(false)
@@ -302,7 +303,7 @@ function PhotoUploader({ photos = [], propertyId, onAdd, onRemove }) {
 
   const remove = async (url) => {
     const match = url.match(/property-photos\/(.+?)(\?|$)/)
-    if (match) await supabase.storage.from('property-photos').remove([decodeURIComponent(match[1])])
+    if (match) await removePropertyPhotos([decodeURIComponent(match[1])])
     onRemove(url)
   }
 
@@ -412,7 +413,7 @@ function ShowingsTab({ property }) {
 
   const loadShowings = async () => {
     setLoading(true)
-    const { data, error } = await supabase.from('property_showings').select('*').eq('property_id', property.id).order('showing_date', { ascending:false })
+    const { data, error } = await fetchPropertyShowings(property.id)
     if (error?.code === '42P01') { setTableReady(false); setLoading(false); return }
     setShowings(data || [])
     setLoading(false)
@@ -421,13 +422,13 @@ function ShowingsTab({ property }) {
   const add = async () => {
     if (!form.showing_date) { pushToast('Date is required', 'error'); return }
     setAdding(true)
-    const { data, error } = await supabase.from('property_showings').insert([{
+    const { data, error } = await createPropertyShowing({
       property_id: property.id,
       showing_date: form.showing_date,
       buyer_agent_name: form.buyer_agent_name || null,
       feedback: form.feedback || null,
       rating: form.rating ? Number(form.rating) : null,
-    }]).select().single()
+    })
     setAdding(false)
     if (error) { pushToast(error.message, 'error'); return }
     setShowings(p => [data, ...p])
@@ -437,7 +438,7 @@ function ShowingsTab({ property }) {
   }
 
   const remove = async (id) => {
-    await supabase.from('property_showings').delete().eq('id', id)
+    await deletePropertyShowing(id)
     setShowings(p => p.filter(s => s.id !== id))
   }
 
@@ -534,11 +535,11 @@ function MarketingChecklistTab({ property }) {
 
   const loadSteps = async () => {
     setLoading(true)
-    const { data, error } = await supabase.from('listing_checklist_steps').select('*').eq('property_id', property.id).order('sort_order', { ascending:true })
+    const { data, error } = await fetchListingChecklistSteps(property.id)
     if (error?.code === '42P01') { setTableReady(false); setLoading(false); return }
     if ((data||[]).length === 0 && property.status === 'active') {
       const rows = DEFAULT_MARKETING_STEPS.map((title, i) => ({ property_id:property.id, title, completed:false, sort_order:i }))
-      const { data: created } = await supabase.from('listing_checklist_steps').insert(rows).select()
+      const { data: created } = await createListingChecklistSteps(rows)
       setSteps(created || [])
       pushToast('Marketing checklist created', 'info')
     } else {
@@ -550,23 +551,23 @@ function MarketingChecklistTab({ property }) {
   const toggle = async (step) => {
     const now = new Date().toISOString()
     const patch = { completed:!step.completed, completed_at:!step.completed ? now : null }
-    await supabase.from('listing_checklist_steps').update(patch).eq('id', step.id)
+    await updateListingChecklistStep(step.id, patch)
     setSteps(p => p.map(s => s.id === step.id ? { ...s, ...patch } : s))
   }
 
   const addStep = async () => {
     if (!newTitle.trim()) return
     setAdding(true)
-    const { data, error } = await supabase.from('listing_checklist_steps').insert([{
+    const { data, error } = await createListingChecklistStep({
       property_id:property.id, title:newTitle.trim(), completed:false, sort_order:steps.length,
-    }]).select().single()
+    })
     setAdding(false)
     if (error) { pushToast(error.message, 'error'); return }
     setSteps(p => [...p, data]); setNewTitle('')
   }
 
   const removeStep = async (id) => {
-    await supabase.from('listing_checklist_steps').delete().eq('id', id)
+    await deleteListingChecklistStep(id)
     setSteps(p => p.filter(s => s.id !== id))
   }
 
@@ -668,7 +669,7 @@ function CompsTab({ property, onUpdateComps }) {
       distance: form.distance ? Number(form.distance) : null,
     }
     const newComps = [...comps, newComp]
-    const { error } = await supabase.from('properties').update({ comps: newComps }).eq('id', property.id)
+    const { error } = await updatePropertyComps(property.id, newComps)
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
     onUpdateComps(newComps)
@@ -679,7 +680,7 @@ function CompsTab({ property, onUpdateComps }) {
 
   const remove = async (id) => {
     const newComps = comps.filter(c => c.id !== id)
-    await supabase.from('properties').update({ comps: newComps }).eq('id', property.id)
+    await updatePropertyComps(property.id, newComps)
     onUpdateComps(newComps)
   }
 
@@ -769,47 +770,13 @@ function CompsTab({ property, onUpdateComps }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Seed a freshly-created deal's additional contacts from a property's list.
-// Returns the inserted link rows so the caller can put them in global state —
-// the deal page and the deal drawer both read `db.dealContacts`, and without
-// this the co-owner reads as property-only until the next full reload.
-// A property's extra contacts are its OWNERS, so they arrive on the new deal's
-// seller side (migration 0040). Falls back to writing the links without a side
-// on a database where 0040 hasn't run — they then read as the deal's represented
-// side, which for a deal started from a listing is the seller side anyway.
-async function syncDealContactsFromProperty(dealId, contactIds) {
-  const rows = contactIds.map(contact_id => ({ deal_id: dealId, contact_id, side: 'seller' }))
-  try {
-    const { data, error } = await supabase.from('deal_contacts').insert(rows).select()
-    if (!error) return data || []
-    const retry = await supabase.from('deal_contacts')
-      .insert(rows.map(({ side, ...rest }) => rest)).select()
-    return retry.data || []
-  } catch (e) { console.error('[syncDealContactsFromProperty]', e); return [] }
-}
-
-// Reconcile a property's additional-contact link rows (property_contacts) to
-// match the chosen id list — inserts new links, deletes removed ones. Best-effort.
-async function syncPropertyContacts(propertyId, contactIds) {
-  try {
-    const { data: existing } = await supabase.from('property_contacts').select('contact_id').eq('property_id', propertyId)
-    const have = new Set((existing || []).map(r => r.contact_id))
-    const want = new Set(contactIds)
-    const toAdd    = contactIds.filter(id => !have.has(id))
-    const toRemove = [...have].filter(id => !want.has(id))
-    if (toAdd.length)    await supabase.from('property_contacts').insert(toAdd.map(contact_id => ({ property_id: propertyId, contact_id })))
-    if (toRemove.length) await supabase.from('property_contacts').delete().eq('property_id', propertyId).in('contact_id', toRemove)
-    return toAdd.length + toRemove.length > 0
-  } catch (e) { console.error('[syncPropertyContacts]', e); return false }
-}
-
 // Mirror a property's link rows into global state after writing them. The deal
 // page shows the property's extra contacts, and the deal drawer seeds its
 // picker from them, so both need the rows that now exist — App's loader only
 // refetches `property_contacts` on a full reload.
 async function reloadPropertyContacts(setDb, propertyId) {
   if (!setDb || !propertyId) return
-  const { data, error } = await supabase.from('property_contacts').select('*').eq('property_id', propertyId)
+  const { data, error } = await fetchPropertyContacts(propertyId)
   if (error) return   // table missing (pre-0021) — leave state as it was
   setDb(p => ({
     ...p,
@@ -868,7 +835,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     // to catch. "Start Deal" always creates a seller-side deal (see comp_data
     // below), so that is the side we ask about.
     if (!force) {
-      const { deals: existing, error: dupeErr } = await findOpenDealsOnProperty(supabase, property.id, 'seller')
+      const { deals: existing, error: dupeErr } = await findOpenDealsOnListing(property.id, 'seller')
       if (dupeErr) {
         // A failed check must not block the work. Log the reason and continue —
         // the unique index from migration 0054 is the backstop.
@@ -901,7 +868,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       co_agent_ids: coAgentIdsForNewDeal(form, primaryAgentId),
     }
     let payload = dealPayload
-    let { data, error } = await supabase.from('deals').insert([payload]).select().single()
+    let { data, error } = await insertDealFromProperty(payload)
     // Migration 0025 adds deals.co_agent_ids. Until it's applied, create the
     // deal without the co-agents rather than blocking the conversion — the
     // deal page still resolves them from the linked property.
@@ -909,7 +876,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     if (error && isMissingCoAgentColumn(error)) {
       const { co_agent_ids, ...rest } = payload
       payload = rest
-      ;({ data, error } = await supabase.from('deals').insert([payload]).select().single())
+      ;({ data, error } = await insertDealFromProperty(payload))
       coAgentsDropped = !error && dealPayload.co_agent_ids.length > 0
     }
     // Same for deals.seller_contact_id (migration 0040) — the owner still lands
@@ -917,7 +884,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     if (error && isMissingSideColumn(error)) {
       const { seller_contact_id, ...rest } = payload
       payload = rest
-      ;({ data, error } = await supabase.from('deals').insert([payload]).select().single())
+      ;({ data, error } = await insertDealFromProperty(payload))
     }
     setStartingDeal(false)
     if (error) { pushToast(error.message, 'error'); return }
@@ -981,8 +948,8 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     let error, data, status
     let unitDropped = false
     const write = (body) => property?.id
-      ? supabase.from('properties').update(body).eq('id', property.id).select().single()
-      : supabase.from('properties').insert([body]).select().single()
+      ? updateProperty(property.id, body)
+      : createProperty(body)
     ;({ error, data, status } = await write(payload))
     // Migration 0042 adds properties.unit. Until it is applied, save the
     // listing without the suite rather than refusing the save — same
@@ -1046,8 +1013,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       // was titled without one.
       const stale = (deals || []).filter(d => d.property_id === property.id && (d.title === oldTitle || d.title === property.address))
       if (stale.length) {
-        const { error: renameError } = await supabase
-          .from('deals').update({ title: newTitle }).in('id', stale.map(d => d.id))
+        const { error: renameError } = await renameDealsForProperty(stale.map(d => d.id), newTitle)
         if (renameError) pushToast('Property saved, but its deals kept the old address as their title.', 'error')
         else if (setDb) setDb(prev => ({
           ...prev,
@@ -1067,7 +1033,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
         )
         const geoData = await geoRes.json()
         if (geoData[0]) {
-          await supabase.from('properties').update({ lat: parseFloat(geoData[0].lat), lng: parseFloat(geoData[0].lon) }).eq('id', savedId)
+          await updatePropertyCoords(savedId, parseFloat(geoData[0].lat), parseFloat(geoData[0].lon))
         }
       } catch { /* geocoding failure is non-fatal */ }
     }
@@ -1286,7 +1252,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
                     disabled={asking === d.deal_id}
                     onClick={async () => {
                       setAsking(d.deal_id)
-                      const r = await requestDealAccess(supabase, d.deal_id)
+                      const r = await requestListingDealAccess(d.deal_id)
                       setAsking('')
                       pushToast(
                         r.ok ? `Asked ${d.agent_name || 'the owner'} to add you to this deal.` : (r.error || 'Could not send that request.'),
@@ -1411,7 +1377,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
     if (!src) {
       const addr = geocodeQuery(property)
       src = await geocodeAddress(addr)
-      if (src) await supabase.from('properties').update({ lat: src.lat, lng: src.lng }).eq('id', property.id)
+      if (src) await updatePropertyCoords(property.id, src.lat, src.lng)
     }
     if (!src) {
       pushToast('Could not geocode this property — ensure address, city, state are filled in', 'error')
@@ -1428,7 +1394,7 @@ function RadiusMailingModal({ property, contacts, allProperties, onClose }) {
         const addr = geocodeQuery(p)
         const coords = await geocodeAddress(addr)
         if (coords) {
-          await supabase.from('properties').update({ lat: coords.lat, lng: coords.lng }).eq('id', p.id)
+          await updatePropertyCoords(p.id, coords.lat, coords.lng)
           p.lat = coords.lat; p.lng = coords.lng
         }
         setGeoProgress({ done: i + 1, total: needsGeo.length })
@@ -1657,7 +1623,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAge
   // dropped everyone else's co-listings after every save.
   const reload = async () => {
     if (!isAdmin && !propertyAgentIds?.length) return
-    const { data, error } = await fetchVisibleProperties(supabase, {
+    const { data, error } = await loadVisibleProperties({
       isAdmin, agentId: activeAgent?.id, propertyAgentIds,
     })
     if (!error && data) setDb(p => ({ ...p, properties: data }))
@@ -1679,7 +1645,7 @@ export default function PropertiesPage({ db, setDb, activeAgent, go, propertyAge
   }
 
   const del = async (id) => {
-    await supabase.from('properties').delete().eq('id', id)
+    await deleteProperty(id)
     pushToast('Property deleted', 'info')
     setConfirm(null); reload()
   }
