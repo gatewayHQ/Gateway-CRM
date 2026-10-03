@@ -91,6 +91,13 @@ src/
     └── …                           (existing: deals, contacts, properties, …)
 ```
 
+## UI components
+
+Shared primitives live in `src/components/ui/` (Button, DataTable, Dialog,
+Field, Tabs, EmptyState, toasts, overlay/focus hooks); see
+[`docs/DESIGN_SYSTEM.md`](DESIGN_SYSTEM.md). Pages import from
+`components/ui`; legacy `components/UI.jsx` re-exports the overlapping pieces.
+
 ## Conventions
 
 - **Services take the client as their first argument**

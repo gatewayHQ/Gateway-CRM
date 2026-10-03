@@ -14,6 +14,7 @@ import ClientPortal from './pages/ClientPortal.jsx'
 import { initWebVitals } from './lib/perf.js'
 import { enableInstallableApp } from './lib/pwa.js'
 import './styles/app.css'
+import './styles/ui.css'
 
 initWebVitals()
 

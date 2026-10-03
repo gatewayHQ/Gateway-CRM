@@ -104,7 +104,9 @@ export default function OptionMultiSelect({
           setSearch('')
         }
       }
-    } else if (e.key === 'Escape') {
+    } else if (e.key === 'Escape' && open) {
+      // Close the list, not the dialog around it (see ui/layers.js).
+      e.preventDefault()
       setOpen(false)
     }
   }

@@ -1,0 +1,199 @@
+/* =============================================
+   DESIGN SYSTEM — src/components/ui/*
+   Builds on the tokens and base classes in app.css (.btn, .modal, .data-table,
+   .empty-state, .toast). Component classes are prefixed `ui-`; state classes
+   are `is-*`. Everything here respects prefers-reduced-motion.
+   ============================================= */
+
+/* ── Buttons ── */
+/* Disabled buttons used to look exactly like enabled ones. */
+.btn:disabled, .btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
+.btn.is-loading { opacity: 0.8; cursor: progress; }
+.btn--block { width: 100%; justify-content: center; }
+.btn--tone-accent { color: var(--gw-azure); }
+.btn--tone-danger { color: var(--gw-mist); }
+.btn--tone-danger:hover:not(:disabled) { color: var(--gw-red); background: var(--gw-red-light); }
+
+/* ── Spinner & skeleton ── */
+.ui-spinner-wrap { display: inline-flex; align-items: center; }
+.ui-spinner {
+  display: inline-block; flex-shrink: 0; border-style: solid; border-color: currentColor;
+  border-right-color: transparent; border-radius: 50%; opacity: 0.8;
+  animation: spin 650ms linear infinite;
+}
+.ui-skeleton {
+  display: block; background: linear-gradient(90deg, var(--gw-border) 0%, #eeece8 50%, var(--gw-border) 100%);
+  background-size: 200% 100%; animation: ui-shimmer 1.3s ease-in-out infinite;
+}
+.ui-skeleton-text { display: flex; flex-direction: column; width: 100%; }
+@keyframes ui-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+/* ── Empty state variants ── */
+.empty-state__actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.empty-state--sm { padding: 40px 16px; }
+.empty-state--sm .empty-state__icon { width: 44px; height: 44px; margin-bottom: 12px; }
+.empty-state--sm .empty-state__title { font-size: 17px; }
+.empty-state--error .empty-state__icon { background: var(--gw-red-light); color: var(--gw-red); }
+.empty-state--no-results .empty-state__icon { background: var(--gw-sky); color: var(--gw-azure); }
+.empty-state--error .empty-state__msg { max-width: 380px; }
+
+/* ── Field ── */
+.ui-field__error { font-size: 12px; color: var(--gw-red); margin-top: 4px; font-weight: 500; }
+.ui-field--invalid .form-label { color: var(--gw-red); }
+
+/* ── Dialog & drawer ── */
+/* Panels take programmatic focus on open (so screen readers announce them);
+   that focus shouldn't draw a ring around the whole panel. */
+.modal:focus, .drawer:focus { outline: none; }
+.ui-dialog__title { margin: 0; font: 600 18px/1.3 var(--font-display); }
+.ui-dialog__desc { margin: 4px 0 0; font-size: 13px; color: var(--gw-mist); line-height: 1.5; }
+
+/* ── Tabs ── */
+.ui-tabs {
+  display: flex; border-bottom: 1px solid var(--gw-border); background: var(--gw-bone);
+  padding-left: 8px; overflow-x: auto; scrollbar-width: none;
+}
+.ui-tabs::-webkit-scrollbar { display: none; }
+.ui-tabs__tab {
+  padding: 8px 16px; border: none; cursor: pointer; white-space: nowrap; flex-shrink: 0;
+  font: 600 13px var(--font-body); background: transparent; color: var(--gw-mist);
+  border-bottom: 2px solid transparent; transition: color 150ms, background 150ms, border-color 150ms;
+}
+.ui-tabs__tab:hover:not(:disabled) { color: var(--gw-ink); }
+.ui-tabs__tab.is-active { background: var(--gw-chalk); color: var(--gw-slate); border-bottom-color: var(--gw-slate); }
+.ui-tabs__tab:disabled { opacity: 0.5; cursor: not-allowed; }
+.ui-tabs__tab:focus-visible { outline-offset: -2px; }
+.ui-tabs__count {
+  margin-left: 5px; background: var(--gw-azure); color: #fff; border-radius: 10px;
+  font-size: 10px; padding: 1px 6px; font-weight: 700;
+}
+
+/* ── Toasts ── */
+.toast-region { display: flex; flex-direction: column; gap: 8px; }
+.toast__action {
+  margin-left: 8px; padding: 3px 10px; background: rgba(255,255,255,0.15);
+  border: 1px solid rgba(255,255,255,0.3); border-radius: 4px; color: inherit;
+  cursor: pointer; font: 600 12px var(--font-body);
+}
+.toast__action:hover { background: rgba(255,255,255,0.25); }
+.toast__close {
+  display: inline-flex; padding: 4px; margin: -4px -6px -4px 0; border: 0; border-radius: 4px;
+  background: transparent; color: inherit; opacity: 0.7; cursor: pointer;
+}
+.toast__close:hover { opacity: 1; background: rgba(255,255,255,0.15); }
+.toast :focus-visible { outline-color: #fff; }
+
+.ui-data-state { position: relative; }
+
+/* ── Banner ── */
+.ui-banner {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 13px;
+  border-bottom: 1px solid var(--gw-border);
+}
+.ui-banner > span { flex: 1; }
+.ui-banner--error { background: var(--gw-red-light); color: var(--gw-red); }
+
+/* ── DataTable ── */
+.ui-table { position: relative; background: var(--gw-chalk); }
+.ui-table__scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.ui-table__scroll.has-sticky { overflow-y: auto; }
+.ui-table__scroll.has-sticky thead th { position: sticky; top: 0; z-index: 1; }
+.ui-table__caption { caption-side: top; text-align: left; padding: 12px; font-weight: 600; }
+
+/* A <th scope="row"> in the body is the row's name, not a column header — it
+   should look like any other cell. */
+.ui-table__table tbody th {
+  text-align: left; font: inherit; font-size: 13px; text-transform: none; letter-spacing: normal;
+  color: inherit; background: transparent; padding: 12px; white-space: normal;
+  border-bottom: 1px solid var(--gw-border); vertical-align: middle;
+}
+.ui-table__table tbody tr:last-child th { border-bottom: none; }
+.ui-table__table tbody tr { cursor: default; }
+.ui-table__table tbody tr:hover { background: transparent; }
+.ui-table__table tbody tr.is-clickable { cursor: pointer; }
+.ui-table__table tbody tr.is-clickable:hover { background: var(--gw-sky); }
+.ui-table__table tbody tr.is-selected { background: var(--gw-sky); }
+.ui-table__table .is-right { text-align: right; }
+.ui-table__table .is-center { text-align: center; }
+.ui-table__table .is-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-table--compact .ui-table__table td, .ui-table--compact .ui-table__table tbody th { padding: 7px 12px; }
+.ui-table__blank { color: var(--gw-mist); }
+.ui-table__check-col { width: 40px; padding-right: 0 !important; }
+.ui-table__actions-col { width: 1%; white-space: nowrap; text-align: right; }
+.ui-table__actions-col > * { display: inline-flex; gap: 2px; justify-content: flex-end; }
+
+.ui-table__sort {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none;
+  font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; cursor: pointer;
+}
+.ui-table__sort:hover { color: var(--gw-ink); }
+.ui-table__sort-icon { opacity: 0.35; }
+.ui-table__sort-icon.is-active { opacity: 1; color: var(--gw-azure); }
+th.is-right .ui-table__sort { flex-direction: row-reverse; }
+
+/* The row's name is the keyboard target for "open this record" — a real
+   button, styled as plain text so the row still reads as a row. */
+.ui-table__row-link {
+  all: unset; display: block; cursor: pointer; border-radius: 3px; max-width: 100%;
+  font-weight: 600;
+}
+.ui-table__row-link:focus-visible { outline: 2px solid var(--gw-azure); outline-offset: 3px; }
+.ui-check { width: 16px; height: 16px; accent-color: var(--gw-slate-2); cursor: pointer; vertical-align: middle; }
+
+.ui-table__progress {
+  position: absolute; top: 0; left: 0; right: 0; height: 2px; z-index: 2; overflow: hidden;
+  background: var(--gw-sky);
+}
+.ui-table__progress::after {
+  content: ''; position: absolute; inset: 0; width: 35%; background: var(--gw-azure);
+  animation: ui-indeterminate 1.1s ease-in-out infinite;
+}
+@keyframes ui-indeterminate { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+
+.ui-table__bulk {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 12px;
+  background: var(--gw-slate); color: #fff; font-size: 13px;
+}
+.ui-table__bulk-count { font-weight: 600; }
+.ui-table__bulk .btn--ghost { color: rgba(255,255,255,0.8); }
+.ui-table__bulk .btn--ghost:hover { background: rgba(255,255,255,0.1); color: #fff; }
+.ui-table__bulk-actions { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+
+.ui-table__mobile-sort { padding: 8px 12px; border-bottom: 1px solid var(--gw-border); }
+.ui-table__mobile-sort .filter-select { width: 100%; }
+
+.ui-pagination {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 8px 12px; border-top: 1px solid var(--gw-border); font-size: 12px; color: var(--gw-mist);
+}
+.ui-pagination__controls { display: flex; align-items: center; gap: 6px; }
+.ui-pagination__page { color: var(--gw-ink); font-weight: 500; }
+
+/* Cards — the table on a phone. One record per card: its name, a subtitle
+   line, then label/value pairs. */
+.ui-cards { list-style: none; margin: 0; padding: 0; }
+.ui-cards__item {
+  display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px;
+  border-bottom: 1px solid var(--gw-border);
+}
+.ui-cards__item:last-child { border-bottom: none; }
+.ui-cards__item.is-clickable { cursor: pointer; }
+.ui-cards__item.is-clickable:active { background: var(--gw-sky); }
+.ui-cards__item.is-selected { background: var(--gw-sky); }
+.ui-cards__item .ui-check { margin-top: 2px; }
+.ui-cards__main { flex: 1; min-width: 0; }
+.ui-cards__title { font-size: 14px; }
+.ui-cards__title .ui-table__row-link { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ui-cards__sub { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 3px; font-size: 12px; color: var(--gw-mist); }
+.ui-cards__meta {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px 12px;
+  margin: 8px 0 0; font-size: 12px;
+}
+.ui-cards__meta dt { color: var(--gw-mist); font-size: 11px; }
+.ui-cards__meta dd { margin: 0; overflow: hidden; text-overflow: ellipsis; }
+.ui-cards__actions { display: flex; gap: 2px; flex-shrink: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-skeleton, .ui-table__progress::after { animation: none; }
+  .ui-spinner { animation-duration: 1.6s; }
+}

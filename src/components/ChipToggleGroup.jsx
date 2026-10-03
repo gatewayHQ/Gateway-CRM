@@ -107,7 +107,9 @@ function GridMode({ fieldKey, value, onChange, placeholder, allowAdd, disabled, 
                 if (!exactMatch && allowAdd && search.trim()) commitAdd(search)
                 if (exactMatch) toggle(allValues.find(v => eqi(v, search.trim())))
               }
-              if (e.key === 'Escape') setSearch('')
+              // Claim Escape only when there's a search to clear; otherwise it
+              // still reaches the dialog this sits in (see ui/layers.js).
+              if (e.key === 'Escape' && search) { e.preventDefault(); setSearch('') }
             }}
             placeholder={placeholder}
             disabled={disabled}
@@ -200,7 +202,7 @@ function GridMode({ fieldKey, value, onChange, placeholder, allowAdd, disabled, 
                 onChange={e => setAddDraft(e.target.value)}
                 onKeyDown={e => {
                   if (e.key === 'Enter') { e.preventDefault(); commitAdd() }
-                  if (e.key === 'Escape') { setAddMode(false); setAddDraft('') }
+                  if (e.key === 'Escape') { e.preventDefault(); setAddMode(false); setAddDraft('') }
                 }}
                 placeholder="New…"
                 style={{ padding: '4px 10px', borderRadius: 99, border: '1.5px solid var(--gw-azure)', fontSize: 12, width: 110, outline: 'none', fontFamily: 'var(--font-body)' }}
@@ -343,7 +345,7 @@ function SelectMode({ fieldKey, value, onChange, placeholder, allowAdd, disabled
                 if (match) add_(match)
               }
             }
-            if (e.key === 'Escape') { setOpen(false); setSearch('') }
+            if (e.key === 'Escape' && (open || search)) { e.preventDefault(); setOpen(false); setSearch('') }
           }}
           placeholder={hasSelected ? '' : placeholder}
           disabled={disabled}

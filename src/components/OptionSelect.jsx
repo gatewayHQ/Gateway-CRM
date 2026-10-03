@@ -83,7 +83,8 @@ export default function OptionSelect({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Escape') { setOpen(false); setSearch('') }
+              // Close the list, not the dialog around it (see ui/layers.js).
+              if (e.key === 'Escape') { e.preventDefault(); setOpen(false); setSearch('') }
               else if (e.key === 'Enter') {
                 e.preventDefault()
                 if (filtered.length > 0 && !exactMatch) select(filtered[0])

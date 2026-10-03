@@ -242,7 +242,7 @@ export default function DataManagementPage() {
                       onChange={(e) => setEditDraft(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter')  handleEditSave()
-                        if (e.key === 'Escape') setEditing(null)
+                        if (e.key === 'Escape') { e.preventDefault(); setEditing(null) }
                       }}
                       style={{ flex: 1 }}
                     />
