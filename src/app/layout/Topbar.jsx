@@ -1,8 +1,9 @@
 import React from 'react'
 import { Icon, Avatar, BrandLogo } from '../../components/UI.jsx'
+import { IconButton } from '../../components/ui/index.js'
 import GlobalSearch from '../../components/GlobalSearch.jsx'
 
-export default function Topbar({ pageTitle, onHome, search, activeAgent, bell, onSignOut }) {
+export default function Topbar({ pageTitle, onHome, search, activeAgent, bell, onSignOut, onHelp }) {
   return (
     <header className="topbar">
       {/* The sidebar — and with it the brand slot — is hidden under 768px,
@@ -30,6 +31,7 @@ export default function Topbar({ pageTitle, onHome, search, activeAgent, bell, o
           </div>
         </div>
       )}
+      {onHelp && <IconButton icon="help" label="Help for this page" onClick={onHelp} className="topbar__help" />}
       {bell}
       <button className="btn btn--ghost btn--icon" onClick={onSignOut} title="Sign out" style={{ marginLeft: 4 }}>
         <Icon name="logout" size={16} />

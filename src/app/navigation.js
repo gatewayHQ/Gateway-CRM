@@ -40,6 +40,7 @@ const NAV_TOOLS = [
 
 // Always visible at the bottom — never buried
 const NAV_ADMIN = [
+  { id: 'help',           label: 'Help & How-To',   icon: 'help'      },
   { id: 'integrations',   label: 'Integrations',    icon: 'link'      },
   { id: 'data-management', label: 'Data Management', icon: 'tag', adminOnly: true },
   { id: 'settings',       label: 'Settings',        icon: 'settings' },
@@ -92,6 +93,7 @@ const TITLES = {
   integrations: { title: 'Integrations',    crumb: 'Tools · Connections' },
   'data-management': { title: 'Data Management', crumb: 'Admin · Controlled Vocabulary' },
   settings:     { title: 'Settings',        crumb: 'Workspace' },
+  help:         { title: 'Help & How-To',   crumb: 'Guides · Step by step' },
 }
 
 const ADMIN_ONLY_IDS = new Set([...NAV_OFFICE, ...NAV_ADMIN].filter(n => n.adminOnly).map(n => n.id))
