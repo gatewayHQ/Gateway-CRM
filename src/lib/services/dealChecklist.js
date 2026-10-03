@@ -14,3 +14,24 @@ export async function seedChecklist(dealId, state, kind, propCategory) {
     .insert(checklistRows(dealId, checklistTemplate(state, kind, propCategory))).select()
   return data || null
 }
+
+// ── The Checklist tab's own reads and writes ──────────────────────────────────
+// Raw Supabase results; the tab decides what an error means.
+
+export const fetchDealChecklistSteps = (dealId) =>
+  supabase.from('transaction_steps').select('*').eq('deal_id', dealId).order('sort_order', { ascending: true })
+
+export const deleteDealChecklistSteps = (dealId) =>
+  supabase.from('transaction_steps').delete().eq('deal_id', dealId)
+
+export const insertChecklistSteps = (rows) =>
+  supabase.from('transaction_steps').insert(rows).select()
+
+export const insertChecklistStep = (row) =>
+  supabase.from('transaction_steps').insert([row]).select().single()
+
+export const updateChecklistStep = (stepId, patch) =>
+  supabase.from('transaction_steps').update(patch).eq('id', stepId)
+
+export const deleteChecklistStep = (stepId) =>
+  supabase.from('transaction_steps').delete().eq('id', stepId)

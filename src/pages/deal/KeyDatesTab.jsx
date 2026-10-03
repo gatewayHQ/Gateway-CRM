@@ -1,7 +1,8 @@
 // Deal drawer → Key Dates tab: closing, contingencies and other deadlines.
 
 import React, { useState } from 'react'
-import { supabase } from '../../lib/supabase.js'
+import { fetchDealCompData, updateDeal, getAuthSession } from '../../lib/services/dealRecords.js'
+import { fetchDealSentReminders } from '../../lib/services/dealActivity.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
 
 const DEFAULT_KEY_DATE_TYPES = ['Closing','Expiration','Financing Contingency','Inspection','HUD Approval','Appraisal','Lease Start Date','Possession Date']
@@ -54,7 +55,7 @@ export function KeyDatesTab({ deal }) {
   React.useEffect(() => {
     if (!deal?.id) return
     // Always fetch fresh from DB so custom dates survive tab switches
-    supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+    fetchDealCompData(deal.id)
       .then(({ data }) => {
         const existing = data?.comp_data?.key_dates
         if (existing && existing.length > 0) {
@@ -64,7 +65,7 @@ export function KeyDatesTab({ deal }) {
         }
       })
     // Load sent reminders for this deal
-    supabase.from('deadline_reminders').select('date_type, threshold').eq('deal_id', deal.id)
+    fetchDealSentReminders(deal.id)
       .then(({ data }) => setSentReminders(data || []))
   }, [deal?.id])
 
@@ -75,7 +76,7 @@ export function KeyDatesTab({ deal }) {
       const data = await resp.json()
       pushToast(`Test run: ${data.sent || 0} sent, ${data.skipped || 0} skipped`)
       // Refresh sent status
-      const { data: fresh } = await supabase.from('deadline_reminders').select('date_type, threshold').eq('deal_id', deal.id)
+      const { data: fresh } = await fetchDealSentReminders(deal.id)
       setSentReminders(fresh || [])
     } catch (e) {
       pushToast('Could not run reminders: ' + e.message, 'error')
@@ -93,7 +94,7 @@ export function KeyDatesTab({ deal }) {
   const persist = async (updated) => {
     setSaving(true)
     const comp_data = { ...(deal.comp_data || {}), key_dates: updated }
-    await supabase.from('deals').update({ comp_data, updated_at: new Date().toISOString() }).eq('id', deal.id)
+    await updateDeal(deal.id, { comp_data, updated_at: new Date().toISOString() })
     setSaving(false)
     syncOutlookCalendar(deal.id)
   }
@@ -141,7 +142,7 @@ export function KeyDatesTab({ deal }) {
     if (syncingRef.current) { resyncRef.current = true; return }
     syncingRef.current = true
     try {
-      const { data: { session } } = await supabase.auth.getSession()
+      const { data: { session } } = await getAuthSession()
       if (!session?.access_token) return
       await fetch('/api/email-send?action=outlook-calendar-sync', {
         method: 'POST',

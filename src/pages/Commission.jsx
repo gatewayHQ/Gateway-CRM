@@ -1,8 +1,8 @@
 import React, { useState } from 'react'
-import { supabase } from '../lib/supabase.js'
 import { Icon, Avatar, Badge, Drawer, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatCurrency, formatMoney } from '../lib/helpers.js'
-import { fetchVisibleDeals, fetchVisibleCommissions } from '../lib/services/deals.js'
+import { loadVisibleDeals, loadVisibleCommissions } from '../lib/services/dealRecords.js'
+import { insertCommission, updateCommission } from '../lib/services/commissions.js'
 import MyEarnings from './MyEarnings.jsx'
 import { BrokerageReport, CapsEditor } from './BackOffice.jsx'
 import {
@@ -186,8 +186,8 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
       updated_at: new Date().toISOString(),
     }
     let error
-    if (commission?.id) { ;({ error } = await supabase.from('commissions').update(payload).eq('id', commission.id)) }
-    else                { ;({ error } = await supabase.from('commissions').insert([payload])) }
+    if (commission?.id) { ;({ error } = await updateCommission(commission.id, payload)) }
+    else                { ;({ error } = await insertCommission(payload)) }
     setSaving(false)
     if (error) {
       // If the structured columns don't exist yet (migration 0005 not run), retry
@@ -195,8 +195,8 @@ function CommissionDrawer({ open, onClose, deal, commission, agents = [], onSave
       if (/sides|participants|column/i.test(error.message)) {
         const { sides, participants, ...legacy } = payload
         const retry = commission?.id
-          ? await supabase.from('commissions').update(legacy).eq('id', commission.id)
-          : await supabase.from('commissions').insert([legacy])
+          ? await updateCommission(commission.id, legacy)
+          : await insertCommission(legacy)
         if (retry.error) { pushToast(retry.error.message, 'error'); return }
         pushToast('Saved (run migration 0005 to enable two-sided deals)')
         onSave(); onClose(); return
@@ -803,10 +803,10 @@ function AdminBackOffice({ db, setDb, activeAgent, isAdmin, dealAgentIds }) {
   // Scoped exactly like the initial App.jsx load — a non-admin's refresh must
   // not replace their scoped deals/commissions with firm-wide data.
   const reload = async () => {
-    const dealsRes = await fetchVisibleDeals(supabase, {
+    const dealsRes = await loadVisibleDeals({
       isAdmin, agentId: activeAgent?.id, dealAgentIds,
     })
-    const commRes = await fetchVisibleCommissions(supabase, {
+    const commRes = await loadVisibleCommissions({
       isAdmin, dealIds: (dealsRes.data || []).map(d => d.id),
     })
     setDb(p => ({ ...p, deals: dealsRes.data||[], commissions: commRes.data||[], commissionsReady: !commRes.error }))

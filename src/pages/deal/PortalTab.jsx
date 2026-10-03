@@ -1,7 +1,7 @@
 // Deal drawer → Portal tab: the client portal link for this deal.
 
 import React from 'react'
-import { supabase } from '../../lib/supabase.js'
+import { fetchDealPortalAccess, enableDealPortal, disableDealPortal } from '../../lib/services/clientPortal.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
 
 // ── Client Portal tab — enable a shareable read-only link for the client ──────
@@ -14,7 +14,7 @@ export function PortalTab({ deal }) {
 
   React.useEffect(() => {
     if (!deal?.id) return
-    supabase.from('deals').select('portal_token, portal_enabled').eq('id', deal.id).single()
+    fetchDealPortalAccess(deal.id)
       .then(({ data, error }) => {
         if (!error && data) { setEnabled(!!data.portal_enabled); setToken(data.portal_token || null) }
         setLoading(false)
@@ -26,7 +26,7 @@ export function PortalTab({ deal }) {
   const enable = async () => {
     setBusy(true)
     const newToken = token || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`)
-    const { error } = await supabase.from('deals').update({ portal_token: newToken, portal_enabled: true }).eq('id', deal.id)
+    const { error } = await enableDealPortal(deal.id, newToken)
     setBusy(false)
     if (error) { pushToast(error.message, 'error'); return }
     setToken(newToken); setEnabled(true)
@@ -35,7 +35,7 @@ export function PortalTab({ deal }) {
 
   const disable = async () => {
     setBusy(true)
-    const { error } = await supabase.from('deals').update({ portal_enabled: false }).eq('id', deal.id)
+    const { error } = await disableDealPortal(deal.id)
     setBusy(false)
     if (error) { pushToast(error.message, 'error'); return }
     setEnabled(false)
