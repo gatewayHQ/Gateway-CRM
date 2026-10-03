@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { dealContactIdsFor, dealContactKeyFor } from '../../pages/Pipeline.jsx'
+import { dealContactIdsFor, dealContactKeyFor } from '../services/dealContacts.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The tab-switch bug, in one sentence: a re-fetch that changed nothing handed the

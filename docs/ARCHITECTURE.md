@@ -56,9 +56,26 @@ src/
 │   │   ├── Topbar.jsx
 │   │   └── MobileNav.jsx           bottom bar + More sheet
 │   └── __tests__/
+├── pages/
+│   ├── pipeline/                   the deals + listings board
+│   │   ├── PipelinePage.jsx        board shell, views (board/list/focus), filters
+│   │   ├── boardFilters.js         which deals/listings the board shows (pure)
+│   │   └── listingStatus.js, ListingCard.jsx, StageHeader.jsx
+│   └── deal/                       the deal drawer (board + deal page share it)
+│       ├── DealDrawer.jsx          Details tab + tab host
+│       ├── CommissionFields.jsx
+│       ├── DealTermsTab.jsx, KeyDatesTab.jsx, ChecklistTab.jsx, PortalTab.jsx
+│       ├── DocumentsTab.jsx, RequiredFormsPanel.jsx, dealStorage.js
+│       └── signatures/             Signatures tab + BoldSign send flows
+│           ├── SignaturesTab.jsx, SignaturesGettingStarted.jsx, SignatureDialogs.jsx
+│           ├── SendFromTemplateModal.jsx, DraftReviewStep.jsx, templateFields.js
+│           ├── SendSignatureModal.jsx, BoldSignStepModal.jsx
+│           └── boldsignDocs.js, signatureSteps.js
 └── lib/services/
     ├── agents.js                   roster, team splits, identity claim, profile create
     ├── notifications.js            agent_notifications reads/writes/realtime
+    ├── dealChecklist.js            seed a deal's transaction checklist
+    ├── dealContacts.js             deal_contacts reconcile / reload / selectors
     └── …                           (existing: deals, contacts, properties, …)
 ```
 
@@ -79,10 +96,10 @@ src/
 
 Ordered by payoff. Each step is behavior-preserving and can ship on its own.
 
-1. **`pages/Pipeline.jsx` (≈7.6k lines, 45 direct `supabase.from` calls).**
-   Split into `pages/pipeline/` — board, deal drawer, drawer tabs as separate
-   modules — and move its queries into `lib/services/deals.js` /
-   `dealStage.js` / `documents.js`, which already exist.
+1. ~~**`pages/Pipeline.jsx`** (≈7.6k lines).~~ **Done:** split into
+   `pages/pipeline/` (board) and `pages/deal/` (drawer, tabs, `signatures/`),
+   with its data helpers moved to `lib/services/dealChecklist.js` and
+   `dealContacts.js`. Its remaining inline queries move in step 2.
 2. **Direct Supabase calls in pages** (~39 `.jsx` files). Move each into the
    matching `lib/services/*` module. Start with `Properties.jsx` (25),
    `Sequences.jsx` (13) and `ColdCalls.jsx` (12).

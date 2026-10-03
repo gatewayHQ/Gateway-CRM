@@ -10,7 +10,7 @@
 //
 // The closing gate is not here: it needs the deal's checklist, envelopes and
 // commission, which only the deal page loads. The board sends a drop on Closed
-// to the deal page instead (see Pipeline.jsx).
+// to the deal page instead (see src/pages/deal/DealDrawer.jsx).
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from '../supabase.js'
 import { withRetry } from './db.js'

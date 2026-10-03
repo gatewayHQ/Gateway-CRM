@@ -180,7 +180,7 @@ Escape — and before this the draft was a dead end: it showed in the Signatures
 with a "Draft" chip, no way back in, and the only route forward was deleting it and
 rebuilding the whole send.
 
-- **`Edit & Send`** on any `draft` row (`SignaturesTab`, `Pipeline.jsx`) calls
+- **`Edit & Send`** on any `draft` row (`SignaturesTab`, `src/pages/deal/signatures/`) calls
   `document-edit-url` → `POST /v1/document/createEmbeddedEditUrl?documentId=…`
   (`{ editUrl }`) and reopens the same document with the toolbar, Preview and Send
   buttons on. Signers and placed fields are whatever the agent left behind.
@@ -443,7 +443,7 @@ one deal must never rewrite the form every other deal sends from (same reasoning
 as migration 0026).
 
 Code: `src/lib/services/templateWork.js` (+ its tests),
-`SendFromTemplateModal` in `src/pages/Pipeline.jsx`,
+`SendFromTemplateModal` in `src/pages/deal/signatures/SendFromTemplateModal.jsx`,
 `migrations/0044_deal_template_drafts.sql`.
 
 ### Why creating the draft doesn't need the editor
@@ -954,7 +954,7 @@ template with the template's defaults and the agent re-did the work from memory.
   - The event/origin rules are a pure exported function, `classifyBoldSignMessage()`, unit-tested in `src/components/__tests__/BoldSignFrame.test.js`.
 - **Return-page fallback.** The template editor's `RedirectUrl` now points at `public/boldsign-return.html` — a tiny same-origin page (so the CRM doesn't re-render inside the iframe). `BoldSignFrame` detects the return two ways: the page posts a `gwTemplateEditorDone` message, and the iframe's `load` event reads the same-origin URL and matches the `returnUrlMarker` prop. `FormLibrary` guards against the two signals double-saving with a ref.
 - The client portal (`ClientPortal.jsx`) shows "Documents to Sign" and opens the signing UI in a full-screen overlay.
-- Form Library's "Build in BoldSign" / "Rebuild in BoldSign" (`FormLibrary.jsx`) and both send flows in `Pipeline.jsx` all use the same component — template authoring is no longer a separate `window.open` tab.
+- Form Library's "Build in BoldSign" / "Rebuild in BoldSign" (`FormLibrary.jsx`) and both send flows in `src/pages/deal/signatures/` all use the same component — template authoring is no longer a separate `window.open` tab.
 - **Required:** add prod + preview domains to BoldSign → Settings → Embedded → Approved domains, or iframes are blocked. The `RedirectUrl` domain (your own origin) is already covered by this.
 
 ## Templates — authoring & catalog
@@ -1925,5 +1925,5 @@ Full pass over sender identities, text tags, drafts deletion, auto-storage, and 
 - *Quick win* — Settings → BoldSign has no visibility into *how many* agents are still unapproved/unregistered; an admin has to scan the full agent list. A small "N agents need approval" banner would make the identity rollout (see main flow above) self-tracking.
 - *Quick win* — `recordDocumentVersion()` is best-effort and silently swallows failures (by design, so a webhook never 500s on a metadata-only problem) but nothing surfaces those failures anywhere; consider a lightweight `console.error`-visible-in-Vercel-logs tag so a persistent failure isn't invisible forever.
 - *Medium* — Template roles are fixed cardinality at creation time (one BoldSign role = one signer slot); multi-signer-per-role scenarios (e.g. two sellers) need the template over-provisioned with extra named roles (`Seller 1`, `Seller 2`) up front, then left blank per-send. Not a bug, but undocumented outside this conversation — worth its own doc section if it comes up again.
-- *Medium* — No loading/skeleton state on the embedded editor iframe itself while BoldSign's app boots inside it (`BoldSignFrame` renders the iframe immediately with no interstitial); on a slow connection the modal looks empty for a beat. Same is true of the send-flow embeds in `Pipeline.jsx`.
+- *Medium* — No loading/skeleton state on the embedded editor iframe itself while BoldSign's app boots inside it (`BoldSignFrame` renders the iframe immediately with no interstitial); on a slow connection the modal looks empty for a beat. Same is true of the send-flow embeds in `src/pages/deal/signatures/`.
 - *Larger* — The nightly drift-sync cron (`boldsign-sync`) and this modal's own template creation both write `boldsign_template_id`, but there's no reconciliation UI for the case where a template is edited directly in the BoldSign dashboard (title/role changes) rather than through the CRM — Form Library's cached `name`/`doc_type`/`field_tokens` can drift silently from what's actually in BoldSign.

@@ -4109,7 +4109,7 @@ create policy email_blast_recipients_scope on email_blast_recipients for select 
 -- `documents` or `document_versions` tables — it lists storage directly:
 --
 --     supabase.storage.from('deal-documents').list(`deal-${deal.id}`)
---     — src/pages/Pipeline.jsx (DocumentsTab), src/pages/DealPage.jsx
+--     — src/pages/deal/DocumentsTab.jsx, src/pages/DealPage.jsx
 --
 -- so `storage.objects` row policies, not the scoped tables above, decide what
 -- an agent sees on that tab. For a long time those policies were not in this
@@ -4123,7 +4123,7 @@ create policy email_blast_recipients_scope on email_blast_recipients for select 
 -- office admins all resolve to the same set, so they all see the same files.
 --
 -- The object→deal link is the path. Every writer agrees on `deal-<uuid>/…`
--- (Pipeline.jsx, src/lib/services/documents.js, api/boldsign.js,
+-- (src/pages/deal/DocumentsTab.jsx, src/lib/services/documents.js, api/boldsign.js,
 -- api/_handlers/closing-packet.js); `app_storage_deal_id()` reads it back out
 -- and returns NULL for anything else, so an unattributable object is
 -- admin-only. `service_role` bypasses RLS entirely, so the BoldSign archive

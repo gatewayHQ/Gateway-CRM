@@ -10,7 +10,7 @@
 //   • api/cron.js       ?task=calendar-sync — nightly sweep, every deal AND
 //     every open task with a due date
 //   • api/email-send.js ?action=outlook-calendar-sync      — on-demand, one
-//     deal, fired right after an agent edits a key date (src/pages/Pipeline.jsx)
+//     deal, fired right after an agent edits a key date (src/pages/deal/KeyDatesTab.jsx)
 //     ?action=outlook-task-calendar-sync — on-demand, one task, fired right
 //     after a task is created/edited/completed/deleted (src/lib/services/tasks.js)
 //

@@ -7,7 +7,7 @@
 // Outlook reminder, which fires the moment the event is created. This guard is
 // what keeps them in the input box instead of on somebody's phone.
 import { describe, it, expect } from 'vitest'
-import { plausibleKeyDate } from '../Pipeline.jsx'
+import { plausibleKeyDate } from '../deal/KeyDatesTab.jsx'
 
 describe('plausibleKeyDate', () => {
   it('accepts a real date', () => {

@@ -317,7 +317,7 @@ async function handleOutlookDisconnect(req, res) {
 }
 
 // ─── Microsoft Graph: on-demand calendar sync (one deal) ─────────────────────
-// Fired right after an agent edits a key date (src/pages/Pipeline.jsx). Only
+// Fired right after an agent edits a key date (src/pages/deal/KeyDatesTab.jsx). Only
 // the deal's ASSIGNED agent may trigger this — it writes to THEIR Outlook
 // calendar, so a co-agent (who can otherwise see/edit the deal) has no
 // business pushing events onto someone else's personal calendar.

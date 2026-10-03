@@ -12,7 +12,7 @@ import { HIDEABLE_NAV, isDealRoute, parseDealRoute } from './navigation.js'
 const Dashboard          = React.lazy(() => import('../pages/Dashboard.jsx'))
 const ContactsPage       = React.lazy(() => import('../pages/Contacts.jsx'))
 const PropertiesPage     = React.lazy(() => import('../pages/Properties.jsx'))
-const PipelinePage       = React.lazy(() => import('../pages/Pipeline.jsx'))
+const PipelinePage       = React.lazy(() => import('../pages/pipeline/PipelinePage.jsx'))
 const DealPage           = React.lazy(() => import('../pages/DealPage.jsx'))
 const TasksPage          = React.lazy(() => import('../pages/Tasks.jsx'))
 const MessagesPage       = React.lazy(() => import('../pages/Messages.jsx'))
