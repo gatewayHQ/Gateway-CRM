@@ -2,7 +2,12 @@
 // what it is waiting on, with the actions each one allows.
 
 import React from 'react'
-import { supabase } from '../../../lib/supabase.js'
+import {
+  fetchDealBoldsignDocuments, updateBoldsignDocument, subscribeToDealBoldsignDocuments,
+  fetchSendableFormPackets, fetchDealFieldLayouts, fetchPacketTimeline,
+} from '../../../lib/services/boldsignDocuments.js'
+import { listDealFolder } from '../../../lib/services/documents.js'
+import { fetchDealCommissionParticipants } from '../../../lib/services/commissions.js'
 import { propertyLabel } from '../../../lib/address.js'
 import {
   packetEditUrl, packetAddInitials, packetCloneUrl, packetSync, packetChangeSigner, revokeDocument as apiRevokeDocument, packetState, canFixPacket, fixPacketBlockedReason, canSendCorrection, canRevoke, canChangeSigner, isInFlight, isEditPending, editPendingMs, documentEditUrl, fileDocumentToDeal, getDocStatus, downloadSigned as apiDownloadSigned, downloadAudit as apiDownloadAudit, deleteDocument as apiDeleteDocument, remindDocument as apiRemindDocument, sendDraft as apiSendDraft, signerRows, outstandingSigners, waitingOnLabel, describeSignerState, signerProgress, dealAgentList,
@@ -13,7 +18,6 @@ import { Icon, ConfirmDialog, MenuButton, pushToast } from '../../../components/
 import { groupPackets, summaryLine, nextStep, showsStatusChip, daysOut as packetDaysOut, OVERDUE_DAYS } from '../../../lib/services/signaturesView.js'
 import MlsPackModal from '../../../components/MlsPackModal.jsx'
 import ComposePacketModal from '../../../components/ComposePacketModal.jsx'
-import { BUCKET } from '../dealStorage.js'
 import { boldSignReturnUrl, printBoldSignDocument, saveBoldSignDocumentPdf } from './boldsignDocs.js'
 import { SignaturesGettingStarted } from './SignaturesGettingStarted.jsx'
 import { SendSignatureModal } from './SendSignatureModal.jsx'
@@ -100,35 +104,28 @@ export function SignaturesTab({ deal, contacts, properties, extraContacts = [], 
     loadLayouts()
 
     // Realtime subscription — auto-update status when webhook fires
-    const channel = supabase.channel(`sig-documents-${deal.id}`)
-      .on('postgres_changes', {
-        event: '*', schema: 'public', table: 'boldsign_documents',
-        filter: `deal_id=eq.${deal.id}`,
-      }, payload => {
-        if (payload.eventType === 'DELETE') {
-          setEnvelopes(prev => prev.filter(e => e.id !== payload.old?.id))
-          return
-        }
-        // INSERT as well as UPDATE: every send path writes its row server-side
-        // before handing back a send URL, so a document that went out from
-        // another tab (or from BoldSign itself) used to be invisible here until
-        // the agent reloaded the deal.
-        setEnvelopes(prev => (prev.some(e => e.id === payload.new.id)
-          ? prev.map(e => e.id === payload.new.id ? { ...e, ...payload.new } : e)
-          : [payload.new, ...prev]))
-        if (payload.new.status === 'completed' && payload.old?.status !== 'completed') {
-          loadDealFiles() // signed copy should now be in storage
-          pushToast('Document fully signed — signed copy saved to Documents tab', 'success')
-        }
-      })
-      .subscribe()
-
-    return () => { supabase.removeChannel(channel) }
+    return subscribeToDealBoldsignDocuments(deal.id, payload => {
+      if (payload.eventType === 'DELETE') {
+        setEnvelopes(prev => prev.filter(e => e.id !== payload.old?.id))
+        return
+      }
+      // INSERT as well as UPDATE: every send path writes its row server-side
+      // before handing back a send URL, so a document that went out from
+      // another tab (or from BoldSign itself) used to be invisible here until
+      // the agent reloaded the deal.
+      setEnvelopes(prev => (prev.some(e => e.id === payload.new.id)
+        ? prev.map(e => e.id === payload.new.id ? { ...e, ...payload.new } : e)
+        : [payload.new, ...prev]))
+      if (payload.new.status === 'completed' && payload.old?.status !== 'completed') {
+        loadDealFiles() // signed copy should now be in storage
+        pushToast('Document fully signed — signed copy saved to Documents tab', 'success')
+      }
+    })
   }, [deal?.id])
 
   const loadEnvelopes = async () => {
     setLoading(true)
-    const { data, error } = await supabase.from('boldsign_documents').select('*').eq('deal_id', deal.id).order('created_at', { ascending: false })
+    const { data, error } = await fetchDealBoldsignDocuments(deal.id)
     if (error?.code === '42P01') { setTableReady(false); setLoading(false); return }
     setEnvelopes(data || [])
     setLoading(false)
@@ -154,17 +151,11 @@ export function SignaturesTab({ deal, contacts, properties, extraContacts = [], 
     // packet falls back to the built-in self-validating panel, which is exactly
     // the behavior that shipped before 0043.
     const BASE_COLUMNS = 'template_id:boldsign_template_id, name, state, transaction_type, doc_type, field_tokens, active'
-    const query = (columns) => supabase
-      .from('form_packets')
-      .select(columns)
-      .not('boldsign_template_id', 'is', null)
-      .eq('active', true)
-      .order('name')
 
-    let { data, error } = await query(`${BASE_COLUMNS}, signing_panel`)
+    let { data, error } = await fetchSendableFormPackets(`${BASE_COLUMNS}, signing_panel`)
     if (error && (error.code === '42703' || error.code === 'PGRST204' || /signing_panel/.test(error.message || ''))) {
       console.warn('[boldsign] form_packets.signing_panel is missing — falling back to built-in packet panels; apply migrations/0043_form_packet_signing_panel.sql')
-      ;({ data, error } = await query(BASE_COLUMNS))
+      ;({ data, error } = await fetchSendableFormPackets(BASE_COLUMNS))
     }
     if (error) {
       const missingColumn = error.code === '42703' || error.code === 'PGRST204' || /boldsign_template_id|form_packets/.test(error.message || '')
@@ -186,16 +177,13 @@ export function SignaturesTab({ deal, contacts, properties, extraContacts = [], 
   // applied this table doesn't exist, and the whole feature should degrade to "no
   // saved layouts" rather than break the Signatures tab.
   const loadLayouts = async () => {
-    const { data, error } = await supabase
-      .from('deal_field_layouts')
-      .select('template_id, field_count, document_name, updated_at')
-      .eq('deal_id', deal.id)
+    const { data, error } = await fetchDealFieldLayouts(deal.id)
     if (error) { setLayouts([]); return }
     setLayouts((data || []).filter(l => l.field_count > 0))
   }
 
   const loadDealFiles = async () => {
-    const { data } = await supabase.storage.from(BUCKET).list(`deal-${deal.id}`, { sortBy: { column: 'created_at', order: 'desc' } })
+    const { data } = await listDealFolder(deal.id)
     // Same folder filter as the Documents tab — a `print/` entry is not a sendable
     // document and must not appear in the "pick from deal documents" list.
     setDealFiles((data || []).filter(f => f.name !== '.emptyFolderPlaceholder' && f.id))
@@ -205,7 +193,7 @@ export function SignaturesTab({ deal, contacts, properties, extraContacts = [], 
   // under RLS, so this quietly yields nothing for a regular agent — who then
   // sees owner + co_agent_ids, exactly what the deal page shows them.
   const loadParticipants = async () => {
-    const { data } = await supabase.from('commissions').select('participants').eq('deal_id', deal.id).maybeSingle()
+    const { data } = await fetchDealCommissionParticipants(deal.id)
     const ids = (Array.isArray(data?.participants) ? data.participants : [])
       .map(p => p?.agent_id).filter(Boolean)
     setParticipantIds(ids)
@@ -241,7 +229,7 @@ export function SignaturesTab({ deal, contacts, properties, extraContacts = [], 
     // not just shown. A document sent before per-signer state existed gets its
     // recipient list filled in the first time anyone refreshes it.
     if (Array.isArray(data.signers) && data.signers.length) patch.signers = data.signers
-    await supabase.from('boldsign_documents').update(patch).eq('id', env.id)
+    await updateBoldsignDocument(env.id, patch)
     setEnvelopes(prev => prev.map(e => e.id === env.id ? { ...e, ...patch } : e))
     const rows = signerRows({ ...env, ...patch })
     const left = outstandingSigners(rows).length
@@ -542,12 +530,7 @@ export function SignaturesTab({ deal, contacts, properties, extraContacts = [], 
     if (timelineFor === env.id) { setTimelineFor(null); return }
     setTimelineFor(env.id)
     if (timeline[env.id]) return
-    const { data, error } = await supabase
-      .from('signature_packet_events')
-      .select('id, event, status, signer_name, signer_email, occurred_at')
-      .eq('document_id', env.document_id)
-      .order('occurred_at', { ascending: false })
-      .limit(50)
+    const { data, error } = await fetchPacketTimeline(env.document_id)
     setTimeline(t => ({ ...t, [env.id]: error ? [] : (data || []) }))
   }
 

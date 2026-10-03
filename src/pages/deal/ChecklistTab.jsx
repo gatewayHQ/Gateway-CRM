@@ -1,11 +1,14 @@
 // Deal drawer → Checklist tab: the transaction steps for this deal.
 
 import React, { useState } from 'react'
-import { supabase } from '../../lib/supabase.js'
 import { CHECKLIST_KINDS, checklistKindFor, checklistStateFor, checklistTemplate, checklistRows } from '../../lib/checklistTemplates.js'
 import { OPERATING_STATES } from '../../lib/constants.js'
 import { Icon, ConfirmDialog, pushToast } from '../../components/UI.jsx'
-import { seedChecklist } from '../../lib/services/dealChecklist.js'
+import {
+  seedChecklist, fetchDealChecklistSteps, deleteDealChecklistSteps, insertChecklistSteps,
+  insertChecklistStep, updateChecklistStep, deleteChecklistStep,
+} from '../../lib/services/dealChecklist.js'
+import { fetchDealChecklistMeta, fetchDealCompData, updateDealCompData } from '../../lib/services/dealRecords.js'
 
 const STATUS_BADGE_MAP = {
   complete: { label: 'complete',            bg: '#f0fdf4', color: '#16a34a', border: '#bbf7d0' },
@@ -41,8 +44,8 @@ export function ChecklistTab({ deal, property }) {
     ;(async () => {
       setLoading(true)
       const [{ data: fresh }, { data: rows, error }] = await Promise.all([
-        supabase.from('deals').select('comp_data, prop_category').eq('id', deal.id).single(),
-        supabase.from('transaction_steps').select('*').eq('deal_id', deal.id).order('sort_order', { ascending: true }),
+        fetchDealChecklistMeta(deal.id),
+        fetchDealChecklistSteps(deal.id),
       ])
       if (cancelled) return
       if (error) { setReady(false); setLoading(false); return }
@@ -66,8 +69,8 @@ export function ChecklistTab({ deal, property }) {
   // comp_data is re-read before writing so this never overwrites a field
   // another tab changed while this one was open.
   const saveMeta = async (patch) => {
-    const { data: cur } = await supabase.from('deals').select('comp_data').eq('id', deal.id).single()
-    const { error } = await supabase.from('deals').update({ comp_data: { ...(cur?.comp_data || {}), ...patch } }).eq('id', deal.id)
+    const { data: cur } = await fetchDealCompData(deal.id)
+    const { error } = await updateDealCompData(deal.id, { ...(cur?.comp_data || {}), ...patch })
     if (error) pushToast(`Could not save the checklist settings: ${error.message}`, 'error')
   }
 
@@ -84,9 +87,9 @@ export function ChecklistTab({ deal, property }) {
       const prev = done.get(r.title)
       return prev ? { ...r, completed: true, doc_status: prev.doc_status || 'complete', completed_at: prev.completed_at || null } : r
     })
-    const { error: delErr } = await supabase.from('transaction_steps').delete().eq('deal_id', deal.id)
+    const { error: delErr } = await deleteDealChecklistSteps(deal.id)
     if (delErr) { setReplacing(false); pushToast(delErr.message, 'error'); return }
-    const { data, error } = await supabase.from('transaction_steps').insert(rows).select()
+    const { data, error } = await insertChecklistSteps(rows)
     setReplacing(false)
     setReplaceAsk(null)
     if (error) { pushToast(error.message, 'error'); return }
@@ -126,17 +129,17 @@ export function ChecklistTab({ deal, property }) {
       completed:    next === 'complete' || next === 'approved',
       completed_at: (next === 'complete' || next === 'approved') ? now : null,
     }
-    await supabase.from('transaction_steps').update(patch).eq('id', step.id)
+    await updateChecklistStep(step.id, patch)
     setSteps(p => p.map(s => s.id === step.id ? { ...s, ...patch } : s))
   }
 
   const addStep = async () => {
     if (!newTitle.trim()) return
     setAdding(true)
-    const { data, error } = await supabase.from('transaction_steps').insert([{
+    const { data, error } = await insertChecklistStep({
       deal_id: deal.id, title: newTitle.trim(), completed: false, sort_order: steps.length,
       doc_action: 'manual', doc_status: 'pending', if_applicable: false,
-    }]).select().single()
+    })
     setAdding(false)
     if (error) { pushToast(error.message, 'error'); return }
     setSteps(p => [...p, data])
@@ -144,7 +147,7 @@ export function ChecklistTab({ deal, property }) {
   }
 
   const removeStep = async (id) => {
-    await supabase.from('transaction_steps').delete().eq('id', id)
+    await deleteChecklistStep(id)
     setSteps(p => p.filter(s => s.id !== id))
   }
 

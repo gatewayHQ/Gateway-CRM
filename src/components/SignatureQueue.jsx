@@ -20,7 +20,7 @@
 // ('sent','delivered')` is the index this query was written for.
 // ─────────────────────────────────────────────────────────────────────────────
 import React from 'react'
-import { supabase } from '../lib/supabase.js'
+import { fetchSignatureQueueDocuments, subscribeToSignatureQueue } from '../lib/services/boldsignDocuments.js'
 import { remindDocument, signerRows, outstandingSigners, waitingOnLabel, signerProgress } from '../lib/services/boldsign.js'
 import { Icon, pushToast } from './UI.jsx'
 
@@ -109,12 +109,7 @@ export default function SignatureQueue({ deals = [], properties = [], go }) {
   const [reminding, setReminding] = React.useState({})
 
   const load = React.useCallback(async () => {
-    const { data, error } = await supabase
-      .from('boldsign_documents')
-      .select('id, deal_id, document_id, document_name, signer_name, signers, status, sent_at, created_at, last_reminded_at, reminder_count')
-      .in('status', [...AWAITING, DRAFT])
-      .order('sent_at', { ascending: true, nullsFirst: false })
-      .limit(100)
+    const { data, error } = await fetchSignatureQueueDocuments([...AWAITING, DRAFT])
     if (error) { setBroken(true); setLoading(false); return }
     setBroken(false)
     setRows(data || [])
@@ -127,10 +122,7 @@ export default function SignatureQueue({ deals = [], properties = [], go }) {
     // tile is only as fresh as the last page load, and the single most
     // satisfying thing this list does — a row disappearing because someone just
     // signed — would need a refresh to see.
-    const channel = supabase.channel('dash-signature-queue')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'boldsign_documents' }, () => load())
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
+    return subscribeToSignatureQueue(() => load())
   }, [load])
 
   const { awaiting, drafts } = React.useMemo(() => buildQueue(rows), [rows])

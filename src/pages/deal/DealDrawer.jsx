@@ -2,8 +2,8 @@
 // Signatures and Portal tabs. Shared by the Pipeline board and the deal page.
 
 import React, { useState, useRef } from 'react'
-import { supabase } from '../../lib/supabase.js'
-import { findOpenDealsOnProperty } from '../../lib/services/deals.js'
+import { updateDeal, insertDeal, checkOpenDealsOnProperty } from '../../lib/services/dealRecords.js'
+import { updateListingDetails } from '../../lib/services/dealListings.js'
 import { formatCurrency } from '../../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor } from '../../lib/stages.js'
 import { DEAL_TABS, dealTabOrDefault } from '../../lib/dealTabs.js'
@@ -347,7 +347,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       // not among them. Editing an existing deal is never blocked.
       if (!deal?.id && payload.property_id) {
         const side = String(payload.comp_data?.transaction_type || '').trim() || null
-        const { deals: clash, error: clashErr } = await findOpenDealsOnProperty(supabase, payload.property_id, side)
+        const { deals: clash, error: clashErr } = await checkOpenDealsOnProperty(payload.property_id, side)
         if (clashErr) {
           console.warn('Duplicate-deal check failed, continuing:', clashErr)
         } else {
@@ -367,10 +367,10 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
 
       const write = async (body) => {
         if (deal?.id) {
-          const { error } = await supabase.from('deals').update(body).eq('id', deal.id)
+          const { error } = await updateDeal(deal.id, body)
           return { error, savedId: deal.id }
         }
-        const { data, error } = await supabase.from('deals').insert([body]).select('id').single()
+        const { data, error } = await insertDeal(body)
         return { error, savedId: data?.id }
       }
 
@@ -439,9 +439,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       if (savedId && linkedProperty && removedFromListing.length) {
         const keptOnListing = propertyCoAgentIds(linkedProperty)
           .filter(id => !removedFromListing.includes(id))
-        const { error: listingErr } = await supabase.from('properties')
-          .update({ details: { ...(linkedProperty.details || {}), co_agent_ids: keptOnListing } })
-          .eq('id', linkedProperty.id)
+        const { error: listingErr } = await updateListingDetails(linkedProperty.id, { ...(linkedProperty.details || {}), co_agent_ids: keptOnListing })
         if (listingErr) {
           console.warn('[DealDrawer] could not update the listing team:', listingErr)
           pushToast('Deal saved, but those agents are still on the listing — ask an office admin to remove them there.', 'error')

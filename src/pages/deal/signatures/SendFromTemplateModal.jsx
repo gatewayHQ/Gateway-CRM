@@ -1,7 +1,7 @@
 // Send from Template: pick a state form, fill it from the deal, review, send.
 
 import React from 'react'
-import { supabase } from '../../../lib/supabase.js'
+import { createSignerContact, linkContactToDeal } from '../../../lib/services/dealContacts.js'
 import { OPERATING_STATES } from '../../../lib/constants.js'
 import { streetLine } from '../../../lib/address.js'
 import {
@@ -340,17 +340,16 @@ export function SendFromTemplateModal({ deal, contacts, properties, extraContact
     setSavingContact(true)
     try {
       const parts = name.split(/\s+/)
-      const { data, error } = await supabase.from('contacts').insert([{
+      const { data, error } = await createSignerContact({
         first_name: parts[0] || name,
         last_name:  parts.slice(1).join(' ') || '',
         email,
         assigned_agent_id: activeAgent?.id || null,
-      }]).select('id, first_name, last_name, email').single()
+      })
       if (error) throw error
       // Link them to the deal too — a signer who is not on the deal is a
       // contact you will have to find again by search.
-      const { error: linkErr } = await supabase.from('deal_contacts')
-        .insert([{ deal_id: deal.id, contact_id: data.id }])
+      const { error: linkErr } = await linkContactToDeal(deal.id, data.id)
       if (linkErr && !/duplicate|unique/i.test(linkErr.message || '')) {
         pushToast(`Saved ${name} to contacts, but they could not be added to this deal: ${linkErr.message}`, 'info')
       } else {

@@ -1,13 +1,13 @@
 // Send an uploaded document for signature.
 
 import React from 'react'
-import { supabase } from '../../../lib/supabase.js'
-import { documentEmbedUrl, uploadSendablePdf, signSendableUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../../../lib/services/boldsign.js'
+import { documentEmbedUrl, formatBytes as fmtBytes, MAX_SEND_BYTES } from '../../../lib/services/boldsign.js'
+import { uploadSendableDealPdf, signSendableDealUrl } from '../../../lib/services/boldsignDocuments.js'
 import SignerPicker, { buildCandidates, isValidEmail } from '../../../components/SignerPicker.jsx'
 import { Icon, Modal, pushToast } from '../../../components/UI.jsx'
 import MarkupDocumentModal from '../../../components/MarkupDocumentModal.jsx'
 import { safeFileName } from '../../../lib/services/pdfEdit.js'
-import { BUCKET } from '../dealStorage.js'
+import { createDealFileSignedUrl } from '../../../lib/services/documents.js'
 import { boldSignReturnUrl } from './boldsignDocs.js'
 import { BoldSignStepModal } from './BoldSignStepModal.jsx'
 import { SIGNER_COLORS } from './signatureSteps.js'
@@ -113,8 +113,7 @@ export function SendSignatureModal({ deal, contacts, properties, dealFiles, acti
         bytes = new Uint8Array(await file.arrayBuffer())
       } else {
         name = pickedFile.replace(/^\d+-/, '')
-        const { data, error } = await supabase.storage.from(BUCKET)
-          .createSignedUrl(`deal-${deal.id}/${pickedFile}`, 120)
+        const { data, error } = await createDealFileSignedUrl(deal.id, pickedFile, 120)
         if (error || !data?.signedUrl) throw new Error(error?.message || 'Could not open that document.')
         const res = await fetch(data.signedUrl)
         if (!res.ok) throw new Error(`Could not read ${name} (HTTP ${res.status}).`)
@@ -155,14 +154,14 @@ export function SendSignatureModal({ deal, contacts, properties, dealFiles, acti
     try {
       let path
       if (file) {
-        const up = await uploadSendablePdf(supabase, { file, dealId: deal.id })
+        const up = await uploadSendableDealPdf({ file, dealId: deal.id })
         path = up.path
         finalDocName = up.name
       } else {
         path = `deal-${deal.id}/${pickedFile}`
         finalDocName = pickedFile.replace(/^\d+-/, '')
       }
-      documentUrl = await signSendableUrl(supabase, path)
+      documentUrl = await signSendableDealUrl(path)
     } catch (err) {
       setSending(false)
       pushToast(err.message, 'error')

@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
-import { supabase } from '../lib/supabase.js'
+import { fetchDeal, updateDealCompData, getAuthSession } from '../lib/services/dealRecords.js'
+import { createDealActivity, createDealTask, markTaskComplete } from '../lib/services/dealActivity.js'
+import { fetchDealBoldsignDocuments } from '../lib/services/boldsignDocuments.js'
 import { syncTaskCalendar } from '../lib/services/tasks.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
@@ -16,7 +18,7 @@ import { getClosingGate, gateBadge } from '../lib/compliance.js'
 import { listRequiredForms } from '../lib/services/requiredForms.js'
 import { audit, useDealAudit } from '../lib/audit.js'
 import { changeDealStage } from '../lib/services/dealStage.js'
-import { TABLES, REVIEW_STATUS } from '../lib/constants.js'
+import { REVIEW_STATUS } from '../lib/constants.js'
 import { uploadDealDocument, signDealDocumentUrl, listDealFiles } from '../lib/services/documents.js'
 import { submitDealForReview, decideDealReview } from '../lib/services/review.js'
 import { generateClosingPacket, listClosingPackets, openClosingPacket } from '../lib/services/closingPacket.js'
@@ -125,7 +127,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
 
   useEffect(() => {
     if (deals.find(d => d.id === dealId)) return
-    supabase.from('deals').select('*').eq('id', dealId).single().then(({ data, error }) => {
+    fetchDeal(dealId).then(({ data, error }) => {
       if (data) setFetched(data)
       else if (error) setMissing(true)
     })
@@ -145,7 +147,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
     if (!dealId) return
     const [f, e, s] = await Promise.all([
       listDealFiles(dealId),
-      supabase.from(TABLES.BOLDSIGN_DOCUMENTS).select('*').eq('deal_id', dealId).order('created_at', { ascending: false }),
+      fetchDealBoldsignDocuments(dealId),
       listDealSteps(dealId),
     ])
     setFiles(f.files)
@@ -170,7 +172,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
     openDrawer(openTab)
   }, [dealId, openTab])
   const refreshDeal = useCallback(async () => {
-    const { data } = await supabase.from('deals').select('*').eq('id', dealId).single()
+    const { data } = await fetchDeal(dealId)
     if (data) {
       setFetched(data)
       setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === dealId ? data : d) }))
@@ -212,7 +214,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
     let alive = true
     ;(async () => {
       try {
-        const { data: { session } } = await supabase.auth.getSession()
+        const { data: { session } } = await getAuthSession()
         if (!session?.access_token) return
         const res = await fetch(`/api/portal?action=my-earnings&deal_id=${dealId}`, {
           headers: { Authorization: `Bearer ${session.access_token}` },
@@ -358,10 +360,10 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
     const body = logBody.trim()
     if (!body || !deal) return
     setLogging(true)
-    const { data, error, status } = await withRetry(() => supabase.from('activities').insert([{
+    const { data, error, status } = await withRetry(() => createDealActivity({
       deal_id: deal.id, contact_id: deal.contact_id || null,
       agent_id: activeAgent?.id || null, type: logType, body,
-    }]).select().single())
+    }))
     setLogging(false)
     if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
     setDb(p => ({ ...p, activities: [data, ...(p.activities || [])] }))
@@ -374,18 +376,18 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
     const title = newTask.trim()
     if (!title || !deal) return
     const due = new Date(); due.setDate(due.getDate() + 3); due.setHours(9, 0, 0, 0)
-    const { data, error, status } = await withRetry(() => supabase.from('tasks').insert([{
+    const { data, error, status } = await withRetry(() => createDealTask({
       title, type: 'follow-up', priority: 'medium', due_date: due.toISOString(),
       agent_id: activeAgent?.id || null, contact_id: deal.contact_id || null,
       deal_id: deal.id, completed: false,
-    }]).select().single())
+    }))
     if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
     syncTaskCalendar(data?.id)
     setDb(p => ({ ...p, tasks: [data, ...(p.tasks || [])] }))
     setNewTask('')
   }
   const completeTask = async (task) => {
-    await supabase.from('tasks').update({ completed: true }).eq('id', task.id)
+    await markTaskComplete(task.id)
     syncTaskCalendar(task.id)
     setDb(p => ({ ...p, tasks: (p.tasks || []).map(t => t.id === task.id ? { ...t, completed: true } : t) }))
     pushToast('Task completed')
@@ -400,7 +402,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
   const persistKeyDate = async (idx, date) => {
     const updated = (cd.key_dates || []).map((d, i) => i === idx ? { ...d, date } : d)
     const comp_data = { ...cd, key_dates: updated }
-    const { error, status } = await withRetry(() => supabase.from('deals').update({ comp_data }).eq('id', deal.id))
+    const { error, status } = await withRetry(() => updateDealCompData(deal.id, comp_data))
     if (error) { pushToast(mutationErrorMessage(error, status), 'error'); return }
     setDb(p => ({ ...p, deals: (p.deals || []).map(d => d.id === deal.id ? { ...d, comp_data } : d) }))
     setFetched(f => f && f.id === deal.id ? { ...f, comp_data } : f)

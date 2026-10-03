@@ -2,15 +2,14 @@
 // split / merge / markup tools.
 
 import React, { useState } from 'react'
-import { supabase } from '../../lib/supabase.js'
 import { Icon, MenuButton, pushToast } from '../../components/UI.jsx'
 import { groupDocuments, documentsSummary, assignableKinds, kindById } from '../../lib/services/documentKinds.js'
-import { listDealFiles } from '../../lib/services/documents.js'
+import { listDealFiles, uploadDealFile, createDealFileSignedUrl, removeDealFile } from '../../lib/services/documents.js'
+import { fetchDealCompData, updateDealCompData } from '../../lib/services/dealRecords.js'
 import SplitDocumentModal from '../../components/SplitDocumentModal.jsx'
 import MergeDocumentsModal from '../../components/MergeDocumentsModal.jsx'
 import MarkupDocumentModal from '../../components/MarkupDocumentModal.jsx'
 import { splitPdfBytes, mergePdfBytes, pdfPageCount, safeFileName, moveItem } from '../../lib/services/pdfEdit.js'
-import { BUCKET } from './dealStorage.js'
 import { RequiredFormsPanel } from './RequiredFormsPanel.jsx'
 
 function formatBytes(bytes) {
@@ -54,7 +53,7 @@ export function DocumentsTab({ deal }) {
     if (!deal?.id) return
     loadFiles()
     // Load which docs are shared with the client portal (fresh from DB)
-    supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+    fetchDealCompData(deal.id)
       .then(({ data }) => {
         setSharedDocs(Array.isArray(data?.comp_data?.portal_docs) ? data.comp_data.portal_docs : [])
         const kinds = data?.comp_data?.doc_kinds
@@ -68,9 +67,9 @@ export function DocumentsTab({ deal }) {
       : [...sharedDocs, fileName]
     setSharedDocs(next)
     // Re-fetch comp_data so we don't clobber concurrent edits (key dates, etc.)
-    const { data } = await supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+    const { data } = await fetchDealCompData(deal.id)
     const comp_data = { ...(data?.comp_data || {}), portal_docs: next }
-    const { error } = await supabase.from('deals').update({ comp_data }).eq('id', deal.id)
+    const { error } = await updateDealCompData(deal.id, comp_data)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast(next.includes(fileName) ? 'Shared with client' : 'Removed from client portal', 'info')
   }
@@ -90,7 +89,7 @@ export function DocumentsTab({ deal }) {
     if (file.size > 50 * 1024 * 1024) { pushToast('File must be under 50 MB', 'error'); return }
     setUploading(true)
     const path = `deal-${deal.id}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`
-    const { error } = await supabase.storage.from(BUCKET).upload(path, file, { upsert: false })
+    const { error } = await uploadDealFile(path, file, { upsert: false })
     setUploading(false)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast(`${file.name} uploaded`)
@@ -98,7 +97,7 @@ export function DocumentsTab({ deal }) {
   }
 
   const download = async (fileName) => {
-    const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(`deal-${deal.id}/${fileName}`, 60)
+    const { data, error } = await createDealFileSignedUrl(deal.id, fileName, 60)
     if (error) { pushToast('Could not create download link', 'error'); return }
     const a = document.createElement('a')
     a.href = data.signedUrl; a.download = fileName; a.target = '_blank'
@@ -106,7 +105,7 @@ export function DocumentsTab({ deal }) {
   }
 
   const remove = async (fileName) => {
-    const { error } = await supabase.storage.from(BUCKET).remove([`deal-${deal.id}/${fileName}`])
+    const { error } = await removeDealFile(deal.id, fileName)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast('File deleted', 'info')
     setFiles(p => p.filter(f => f.name !== fileName))
@@ -119,9 +118,9 @@ export function DocumentsTab({ deal }) {
   const fileAs = async (fileName, kindId) => {
     const next = { ...docKinds, [fileName]: kindId }
     setDocKinds(next)                                   // the row moves at once
-    const { data } = await supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+    const { data } = await fetchDealCompData(deal.id)
     const comp_data = { ...(data?.comp_data || {}), doc_kinds: next }
-    const { error } = await supabase.from('deals').update({ comp_data }).eq('id', deal.id)
+    const { error } = await updateDealCompData(deal.id, comp_data)
     if (error) { pushToast(`Could not file that document: ${error.message}`, 'error'); return }
     pushToast(`Filed under ${kindById(kindId).label}.`, 'info')
   }
@@ -137,7 +136,7 @@ export function DocumentsTab({ deal }) {
   const displayNameOf = (name) => name.replace(/^\d+-/, '')
 
   const bytesOf = async (fileName) => {
-    const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(`deal-${deal.id}/${fileName}`, 120)
+    const { data, error } = await createDealFileSignedUrl(deal.id, fileName, 120)
     if (error || !data?.signedUrl) throw new Error(error?.message || 'Could not open that file.')
     const res = await fetch(data.signedUrl)
     if (!res.ok) throw new Error(`Could not read ${displayNameOf(fileName)} (HTTP ${res.status}).`)
@@ -150,8 +149,7 @@ export function DocumentsTab({ deal }) {
     // safeFileName is the authority on the name (see pdfEdit.js) — sanitizing it
     // again here would store something other than what the screen promised.
     const path = `deal-${deal.id}/${Date.now()}-${safeFileName(fileName)}`
-    const { error } = await supabase.storage.from(BUCKET)
-      .upload(path, new Blob([bytes], { type: 'application/pdf' }), { upsert: false, contentType: 'application/pdf' })
+    const { error } = await uploadDealFile(path, new Blob([bytes], { type: 'application/pdf' }), { upsert: false, contentType: 'application/pdf' })
     if (error) throw new Error(error.message)
     return path
   }

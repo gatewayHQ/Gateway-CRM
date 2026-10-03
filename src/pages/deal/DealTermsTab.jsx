@@ -1,7 +1,7 @@
 // Deal drawer → Terms tab: the contract terms forms are filled from.
 
 import React from 'react'
-import { supabase } from '../../lib/supabase.js'
+import { fetchDealCompData, updateDeal } from '../../lib/services/dealRecords.js'
 import { readDealTerms, termsForDeal, termsFilled, buildTermsPatch, normalizeTermValue, derivedTermHint } from '../../lib/services/dealTerms.js'
 import { pushToast } from '../../components/UI.jsx'
 
@@ -34,7 +34,7 @@ export function DealTermsTab({ deal }) {
   React.useEffect(() => {
     if (!deal?.id) return
     let cancelled = false
-    supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+    fetchDealCompData(deal.id)
       .then(({ data }) => {
         if (cancelled) return
         setValues(readDealTerms({ comp_data: data?.comp_data || {} }))
@@ -62,11 +62,10 @@ export function DealTermsTab({ deal }) {
       // transaction type all live in this same jsonb, and a concurrent edit on
       // another tab must survive this write — so comp_data is re-read
       // immediately before merging, the same way KeyDatesTab and PortalTab do.
-      const { data, error: readErr } = await supabase.from('deals').select('comp_data').eq('id', deal.id).single()
+      const { data, error: readErr } = await fetchDealCompData(deal.id)
       if (readErr) throw readErr
       const comp_data = { ...(data?.comp_data || {}), ...buildTermsPatch(values) }
-      const { error } = await supabase.from('deals')
-        .update({ comp_data, updated_at: new Date().toISOString() }).eq('id', deal.id)
+      const { error } = await updateDeal(deal.id, { comp_data, updated_at: new Date().toISOString() })
       if (error) throw error
       setDirty(false)
       pushToast('Deal terms saved — every agreement for this deal fills these in from now on.', 'success')

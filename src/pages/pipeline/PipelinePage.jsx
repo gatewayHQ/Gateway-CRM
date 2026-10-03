@@ -2,8 +2,9 @@
 // The deal itself opens in DealDrawer (src/pages/deal/).
 
 import React, { useState, useRef, useMemo, useCallback } from 'react'
-import { supabase } from '../../lib/supabase.js'
-import { fetchVisibleDeals } from '../../lib/services/deals.js'
+import { loadVisibleDeals, deleteDeal } from '../../lib/services/dealRecords.js'
+import { unlinkDealTasks } from '../../lib/services/dealActivity.js'
+import { updateListingStatus, deleteListing } from '../../lib/services/dealListings.js'
 import { formatCurrency, formatDate, getKeyDateUrgency, getNearestKeyDate } from '../../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor, isOpenStage } from '../../lib/stages.js'
 import { changeDealStage } from '../../lib/services/dealStage.js'
@@ -230,7 +231,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   }, [visibleListings])
 
   const reload = useCallback(async () => {
-    const { data } = await fetchVisibleDeals(supabase, {
+    const { data } = await loadVisibleDeals({
       isAdmin, agentId: activeAgent?.id, dealAgentIds,
     })
     setDb(p => ({ ...p, deals: data || [] }))
@@ -244,8 +245,8 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
     // "violates foreign key constraint tasks_deal_id_fkey". The database now
     // clears those itself (migration 0029); this stays because it costs nothing
     // and keeps deletes working on a database that hasn't had 0029 applied yet.
-    await supabase.from('tasks').update({ deal_id: null }).eq('deal_id', id)
-    const { error } = await supabase.from('deals').delete().eq('id', id)
+    await unlinkDealTasks(id)
+    const { error } = await deleteDeal(id)
     if (error) { pushToast(friendlyDbError(error) || error.message, 'error'); setConfirm(null); return }
     pushToast('Deal deleted', 'info')
     setConfirm(null); reload()
@@ -255,7 +256,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   // Listings are `properties`; documents/signatures live on the deal that links
   // to a property (deal.property_id), so opening a listing routes to that deal.
   const moveListingStatus = useCallback(async (propertyId, newStatus) => {
-    const { error } = await supabase.from('properties').update({ status: newStatus }).eq('id', propertyId)
+    const { error } = await updateListingStatus(propertyId, newStatus)
     if (error) { pushToast(error.message, 'error'); return }
     setDb(p => ({ ...p, properties: (p.properties || []).map(pr => pr.id === propertyId ? { ...pr, status: newStatus } : pr) }))
     pushToast(`Listing moved to ${LISTING_STATUS_LABELS[newStatus]}`)
@@ -263,7 +264,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
   const delProperty = useCallback(async (id) => {
     // deals.property_id is ON DELETE SET NULL — linked deals are kept, just unlinked.
-    const { error } = await supabase.from('properties').delete().eq('id', id)
+    const { error } = await deleteListing(id)
     if (error) { pushToast(error.message, 'error'); setConfirmProp(null); return }
     setDb(p => ({ ...p, properties: (p.properties || []).filter(pr => pr.id !== id) }))
     pushToast('Listing removed', 'info'); setConfirmProp(null)
