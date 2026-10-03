@@ -16,7 +16,10 @@
  * Sequences page, and private to them.
  */
 import React, { useEffect, useMemo, useState } from 'react'
-import { supabase } from '../../lib/supabase.js'
+import {
+  fetchLeadRotationMembers, fetchLeadRotations, setLeadRotationMemberActive,
+  deleteLeadRotationMember, upsertLeadRotationMembers,
+} from '../../lib/services/leadRotationMembers.js'
 import { Avatar, Icon, pushToast } from '../../components/UI.jsx'
 import { formatDate } from '../../lib/helpers.js'
 import { orderRing, nextUp } from '../../lib/leadRotation.js'
@@ -35,8 +38,8 @@ export default function RoundRobinPanel({ agents = [], isAdmin }) {
 
   const load = async () => {
     const [m, r] = await Promise.all([
-      supabase.from('lead_rotation_members').select('*'),
-      supabase.from('lead_rotations').select('*'),
+      fetchLeadRotationMembers(),
+      fetchLeadRotations(),
     ])
     if (m.error || r.error) { setState('missing'); return }
     setMembers(m.data || [])
@@ -60,16 +63,16 @@ export default function RoundRobinPanel({ agents = [], isAdmin }) {
   }
 
   const toggle = (m) => run(
-    () => supabase.from('lead_rotation_members').update({ active: !m.active }).eq('lane', m.lane).eq('agent_id', m.agent_id),
+    () => setLeadRotationMemberActive(m.lane, m.agent_id, !m.active),
     `${agentsById.get(m.agent_id)?.name || 'Agent'} ${m.active ? 'paused — skipped until turned back on' : 'back in the rotation'}`)
 
   const remove = (m) => run(
-    () => supabase.from('lead_rotation_members').delete().eq('lane', m.lane).eq('agent_id', m.agent_id),
+    () => deleteLeadRotationMember(m.lane, m.agent_id),
     'Removed from the rotation')
 
   const add = (lane, agentId, count) => agentId && run(
-    () => supabase.from('lead_rotation_members').upsert(
-      [{ lane, agent_id: agentId, active: true, sort_order: (count + 1) * 10 }], { onConflict: 'lane,agent_id' }),
+    () => upsertLeadRotationMembers(
+      [{ lane, agent_id: agentId, active: true, sort_order: (count + 1) * 10 }]),
     'Added to the rotation')
 
   // Rewrites every member's sort_order in the lane, so the displayed order and
@@ -78,9 +81,8 @@ export default function RoundRobinPanel({ agents = [], isAdmin }) {
     const j = idx + dir
     if (j < 0 || j >= ordered.length) return
     const next = [...ordered]; [next[idx], next[j]] = [next[j], next[idx]]
-    run(() => supabase.from('lead_rotation_members').upsert(
-      next.map((m, i) => ({ lane: m.lane, agent_id: m.agent_id, active: m.active, sort_order: (i + 1) * 10 })),
-      { onConflict: 'lane,agent_id' }))
+    run(() => upsertLeadRotationMembers(
+      next.map((m, i) => ({ lane: m.lane, agent_id: m.agent_id, active: m.active, sort_order: (i + 1) * 10 }))))
   }
 
   if (state === 'loading') return <div className="loading"><div className="spinner" /> Loading…</div>

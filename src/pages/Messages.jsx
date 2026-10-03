@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { supabase } from '../lib/supabase.js'
+import {
+  fetchConversations, markConversationRead, subscribeToConversations,
+  fetchConversationMessages, subscribeToConversationMessages,
+} from '../lib/services/messages.js'
 import { Icon, Avatar, EmptyState, pushToast } from '../components/UI.jsx'
 
 function fmtTime(ts) {
@@ -243,10 +246,7 @@ export default function MessagesPage({ db, activeAgent }) {
 
   // ── Load conversations ────────────────────────────────────────────────────
   const loadConvs = useCallback(async () => {
-    const { data, error } = await supabase
-      .from('conversations')
-      .select('*')
-      .order('last_message_at', { ascending: false })
+    const { data, error } = await fetchConversations()
     if (error?.code === '42P01') { setHasTable(false); setLoading(false); return }
     setConvs(data || [])
     setLoading(false)
@@ -256,10 +256,7 @@ export default function MessagesPage({ db, activeAgent }) {
 
   // ── Real-time: conversation list ──────────────────────────────────────────
   useEffect(() => {
-    const ch = supabase.channel('gw-convs')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations' }, loadConvs)
-      .subscribe()
-    return () => supabase.removeChannel(ch)
+    return subscribeToConversations(loadConvs)
   }, [loadConvs])
 
   // ── Real-time: active thread ──────────────────────────────────────────────
@@ -267,22 +264,11 @@ export default function MessagesPage({ db, activeAgent }) {
     if (!activeConv?.id) return
 
     // Load history
-    supabase
-      .from('messages')
-      .select('*')
-      .eq('conversation_id', activeConv.id)
-      .order('created_at', { ascending: true })
+    fetchConversationMessages(activeConv.id)
       .then(({ data }) => setMsgs(data || []))
 
     // Subscribe to new messages
-    const ch = supabase.channel(`gw-msgs-${activeConv.id}`)
-      .on('postgres_changes', {
-        event: 'INSERT', schema: 'public', table: 'messages',
-        filter: `conversation_id=eq.${activeConv.id}`,
-      }, payload => setMsgs(p => [...p, payload.new]))
-      .subscribe()
-
-    return () => supabase.removeChannel(ch)
+    return subscribeToConversationMessages(activeConv.id, payload => setMsgs(p => [...p, payload.new]))
   }, [activeConv?.id])
 
   // ── Select conversation ───────────────────────────────────────────────────
@@ -294,7 +280,7 @@ export default function MessagesPage({ db, activeAgent }) {
   // ── Mark as read ──────────────────────────────────────────────────────────
   const markRead = async (convId) => {
     setConvs(p => p.map(c => c.id === convId ? { ...c, unread_count: 0 } : c))
-    await supabase.from('conversations').update({ unread_count: 0 }).eq('id', convId)
+    await markConversationRead(convId)
   }
 
   // ── Send outbound SMS ─────────────────────────────────────────────────────

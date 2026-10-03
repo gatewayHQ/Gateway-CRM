@@ -1,11 +1,9 @@
 // The state form packets an agent can download from the Documents tab.
 
 import React from 'react'
-import { supabase } from '../../lib/supabase.js'
+import { fetchFormPacketsFor, formPacketStorage } from '../../lib/services/formPackets.js'
 import { deliverPacket, packetFiles } from '../../lib/packetDownload.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
-
-const FORM_PACKET_BUCKET = 'form-packets'
 
 const TX_TYPE_LABELS = { buyer: 'Buyer Contract', seller: 'Listing / Seller', lease: 'Lease / Rental', general: 'General / Other' }
 
@@ -20,8 +18,7 @@ export function RequiredFormsPanel() {
   const search = async () => {
     if (!state.trim()) { pushToast('Enter a state abbreviation', 'error'); return }
     setSearching(true)
-    const { data } = await supabase.from('form_packets').select('*')
-      .eq('state', state.trim().toUpperCase()).eq('transaction_type', txType)
+    const { data } = await fetchFormPacketsFor(state.trim().toUpperCase(), txType)
     setPackets(data || [])
     setSearching(false)
   }
@@ -34,7 +31,7 @@ export function RequiredFormsPanel() {
     if (!packetFiles(packet).length) { pushToast('No file uploaded for this packet yet', 'error'); return }
     setDownloading(p => ({ ...p, [packet.id]: true }))
     try {
-      const { files, zipped } = await deliverPacket(packet, { storage: supabase.storage.from(FORM_PACKET_BUCKET) })
+      const { files, zipped } = await deliverPacket(packet, { storage: formPacketStorage() })
       if (zipped) pushToast(`Downloaded ${files} forms as a zip`, 'success')
     } catch (e) {
       pushToast(e.message, 'error')

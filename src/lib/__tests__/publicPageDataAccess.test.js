@@ -19,6 +19,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const pagesDir = fileURLToPath(new URL('../../pages/', import.meta.url))
+const servicesDir = fileURLToPath(new URL('../services/', import.meta.url))
 const mainJsx  = readFileSync(fileURLToPath(new URL('../../main.jsx', import.meta.url)), 'utf8')
 const apiDir   = fileURLToPath(new URL('../../../api/', import.meta.url))
 
@@ -56,9 +57,23 @@ function stripComments(src) {
 }
 
 /**
+ * The data-access modules (src/lib/services/*) a page imports. Public pages do
+ * their anon-key reads through these rather than calling `supabase` inline, so
+ * the code that actually runs the query lives here — and must be scanned as if
+ * it were part of the page, or the guard below would pass vacuously.
+ */
+function importedServiceModules(pageSrc) {
+  return [...new Set(
+    [...pageSrc.matchAll(/from\s+'\.\.\/lib\/services\/([^']+)'/g)].map(m => m[1])
+  )]
+}
+
+/**
  * The components main.jsx mounts BEFORE <App/> — i.e. the ones that render for a
  * visitor with no session. Derived from main.jsx rather than hardcoded, so a new
  * public route is covered the day it is added.
+ *
+ * `src` is the page's code PLUS the code of every service module it imports.
  */
 function publicPageFiles() {
   const mounted = [...mainJsx.matchAll(/publicView\s*=\s*<([A-Z][A-Za-z0-9_]*)/g)].map(m => m[1])
@@ -69,7 +84,9 @@ function publicPageFiles() {
   const files = [...new Set(mounted)].map(name => imports.get(name)).filter(Boolean)
   return files.map(f => {
     const raw = readFileSync(pagesDir + f, 'utf8')
-    return { file: f, src: stripComments(raw), raw }
+    const services = importedServiceModules(raw)
+    const serviceSrc = services.map(s => stripComments(readFileSync(servicesDir + s, 'utf8')))
+    return { file: f, src: [stripComments(raw), ...serviceSrc].join('\n'), raw, services }
   })
 }
 
@@ -81,6 +98,9 @@ describe('public pages never read RLS-closed tables with the anon key', () => {
     // every assertion below would be vacuously passing.
     expect(pages.length).toBeGreaterThan(5)
     expect(pages.map(p => p.file)).toContain('LandingProperty.jsx')
+    // ...and the service modules they read through, so the scans below cover the
+    // queries that live outside the page files.
+    expect(pages.find(p => p.file === 'LandingProperty.jsx').services).toContain('publicPages.js')
   })
 
   for (const table of CLOSED_TO_ANON) {

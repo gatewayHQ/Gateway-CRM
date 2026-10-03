@@ -15,7 +15,7 @@
  */
 
 import React, { useEffect, useState } from 'react'
-import { supabase } from '../lib/supabase.js'
+import { fetchPublicAdvisor, fetchPublicAdvisorLegacy } from '../lib/services/publicPages.js'
 
 const ACCENT = '#c9a961'
 
@@ -31,13 +31,9 @@ export default function AdvisorProfile({ agentId }) {
     let active = true
     ;(async () => {
       // Try the full column set; fall back if migrations 0004/0006 haven't run.
-      let { data, error: e } = await supabase.from('agents_public')
-        .select('id, name, role, tagline, bio, photo_url, color, phone, email, stats')
-        .eq('id', agentId).maybeSingle()
+      let { data, error: e } = await fetchPublicAdvisor(agentId)
       if (e) {
-        ;({ data } = await supabase.from('agents_public')
-          .select('id, name, role, photo_url, color, phone, email')
-          .eq('id', agentId).maybeSingle())
+        ;({ data } = await fetchPublicAdvisorLegacy(agentId))
       }
       if (!active) return
       if (!data) { setError('Advisor not found'); setLoading(false); return }
