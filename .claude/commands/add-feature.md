@@ -16,7 +16,8 @@ Parse the argument to determine:
 ## Step 2 — Read existing code
 
 Read the affected page file(s) fully. Also read:
-- `src/components/UI.jsx` — available UI primitives (Drawer, Modal, Badge, Avatar, Icon, SearchDropdown, pushToast, etc.)
+- `docs/DESIGN_SYSTEM.md` and `src/components/ui/` — the design system (Button, IconButton, DataTable, DataState, Dialog, Field, Tabs, EmptyState, pushToast). Use these for new UI.
+- `src/components/UI.jsx` — legacy primitives (Drawer, Modal, ConfirmDialog, Badge, Avatar, SearchDropdown, MenuButton, etc.)
 - `src/lib/schema.sql` — existing tables and columns
 - `src/lib/supabase.js` — client setup
 - `src/lib/helpers.js` — utility functions
