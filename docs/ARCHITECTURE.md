@@ -121,6 +121,14 @@ Ordered by payoff. Each step is behavior-preserving and can ship on its own.
 3. ~~**`Campaigns.jsx`, `Commission.jsx`, `Properties.jsx`**~~ **Done:** split
    into `pages/campaigns/` (with `builders/`), `pages/commission/` and
    `pages/properties/`, the same way as Pipeline.
-4. **The `db` / `setDb` prop** is threaded through every page. Once pages read
-   through services, replace it with a `WorkspaceContext` exposing typed
-   selectors and mutations, so a page re-renders only for the slice it uses.
+4. **The `db` / `setDb` prop — measured, deferred.** Drilling turned out to be
+   shallow: `db={db}` is passed in 10 places, all one level (App → page →
+   direct child), and pages mostly hand children explicit slices
+   (`agents={db.agents}`). A context would churn ~40 files for little decoupling.
+   The real win — a page re-rendering only for its slice — needs a subscribable
+   store (`useSyncExternalStore` over the workspace), which changes render
+   timing; do it when a profiler shows `setDb` re-renders cost something.
+5. **Next candidates:** `DealPage.jsx` (943), `MassEmail.jsx` (910),
+   `ColdCalls.jsx` (877) and `FormLibrary.jsx` (804) split the same way;
+   `lib/audit.js`, `lib/webhooks.js` and `lib/om.js` still use the client
+   directly and could move under `lib/services/`.
