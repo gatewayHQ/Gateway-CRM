@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { getAuthSession } from '../../lib/services/contactOutlook.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
+import { getAuthSession } from '../../lib/services/auth.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Contact "Emails" tab — the actual email correspondence with this contact's

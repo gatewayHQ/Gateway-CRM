@@ -11,7 +11,6 @@ import { uploadPropertyPhoto, getPropertyPhotoPublicUrl, removePropertyPhotos } 
 import { fetchPropertyShowings, createPropertyShowing, deletePropertyShowing } from '../lib/services/propertyShowings.js'
 import { fetchListingChecklistSteps, createListingChecklistSteps, createListingChecklistStep, updateListingChecklistStep, deleteListingChecklistStep } from '../lib/services/listingChecklist.js'
 import { syncDealContactsFromProperty, syncPropertyContacts, fetchPropertyContacts } from '../lib/services/propertyContacts.js'
-import { insertDealFromProperty, renameDealsForProperty, findOpenDealsOnListing, requestListingDealAccess } from '../lib/services/propertyDeals.js'
 import { coAgentIdsForNewDeal, isMissingCoAgentColumn } from '../lib/coAgents.js'
 import { isMissingSideColumn } from '../lib/dealPeople.js'
 import { RESIDENTIAL_PROPERTY_TYPES, COMMERCIAL_PROPERTY_TYPES, PROPERTY_TYPE_LABELS, PROPERTY_STATUSES } from '../lib/enums.js'
@@ -21,6 +20,7 @@ import { PropertyPricingHistoryTab } from '../components/PricingHistoryPanel.jsx
 import { syncPriceChange } from '../lib/services/pricing.js'
 import { priceChanged } from '../lib/pricing.js'
 import { streetLine, geocodeQuery, normalizeUnit, isMissingUnitColumn } from '../lib/address.js'
+import { checkOpenDealsOnProperty, createDeal, renameDeals, requestAccessToDeal } from '../lib/services/dealRecords.js'
 
 // Types where commercial fields apply
 const COMMERCIAL_TYPES = COMMERCIAL_PROPERTY_TYPES
@@ -835,7 +835,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     // to catch. "Start Deal" always creates a seller-side deal (see comp_data
     // below), so that is the side we ask about.
     if (!force) {
-      const { deals: existing, error: dupeErr } = await findOpenDealsOnListing(property.id, 'seller')
+      const { deals: existing, error: dupeErr } = await checkOpenDealsOnProperty(property.id, 'seller')
       if (dupeErr) {
         // A failed check must not block the work. Log the reason and continue —
         // the unique index from migration 0054 is the backstop.
@@ -868,7 +868,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       co_agent_ids: coAgentIdsForNewDeal(form, primaryAgentId),
     }
     let payload = dealPayload
-    let { data, error } = await insertDealFromProperty(payload)
+    let { data, error } = await createDeal(payload)
     // Migration 0025 adds deals.co_agent_ids. Until it's applied, create the
     // deal without the co-agents rather than blocking the conversion — the
     // deal page still resolves them from the linked property.
@@ -876,7 +876,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     if (error && isMissingCoAgentColumn(error)) {
       const { co_agent_ids, ...rest } = payload
       payload = rest
-      ;({ data, error } = await insertDealFromProperty(payload))
+      ;({ data, error } = await createDeal(payload))
       coAgentsDropped = !error && dealPayload.co_agent_ids.length > 0
     }
     // Same for deals.seller_contact_id (migration 0040) — the owner still lands
@@ -884,7 +884,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
     if (error && isMissingSideColumn(error)) {
       const { seller_contact_id, ...rest } = payload
       payload = rest
-      ;({ data, error } = await insertDealFromProperty(payload))
+      ;({ data, error } = await createDeal(payload))
     }
     setStartingDeal(false)
     if (error) { pushToast(error.message, 'error'); return }
@@ -1013,7 +1013,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
       // was titled without one.
       const stale = (deals || []).filter(d => d.property_id === property.id && (d.title === oldTitle || d.title === property.address))
       if (stale.length) {
-        const { error: renameError } = await renameDealsForProperty(stale.map(d => d.id), newTitle)
+        const { error: renameError } = await renameDeals(stale.map(d => d.id), newTitle)
         if (renameError) pushToast('Property saved, but its deals kept the old address as their title.', 'error')
         else if (setDb) setDb(prev => ({
           ...prev,
@@ -1252,7 +1252,7 @@ function PropertyDrawer({ open, onClose, property, agents, contacts, propertyCon
                     disabled={asking === d.deal_id}
                     onClick={async () => {
                       setAsking(d.deal_id)
-                      const r = await requestListingDealAccess(d.deal_id)
+                      const r = await requestAccessToDeal(d.deal_id)
                       setAsking('')
                       pushToast(
                         r.ok ? `Asked ${d.agent_name || 'the owner'} to add you to this deal.` : (r.error || 'Could not send that request.'),

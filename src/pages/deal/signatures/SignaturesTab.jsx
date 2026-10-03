@@ -3,8 +3,7 @@
 
 import React from 'react'
 import {
-  fetchDealBoldsignDocuments, updateBoldsignDocument, subscribeToDealBoldsignDocuments,
-  fetchSendableFormPackets, fetchDealFieldLayouts, fetchPacketTimeline,
+  fetchDealBoldsignDocuments, updateBoldsignDocument, subscribeToDealBoldsignDocuments, fetchDealFieldLayouts, fetchPacketTimeline,
 } from '../../../lib/services/boldsignDocuments.js'
 import { listDealFolder } from '../../../lib/services/documents.js'
 import { fetchDealCommissionParticipants } from '../../../lib/services/commissions.js'
@@ -24,6 +23,7 @@ import { SendSignatureModal } from './SendSignatureModal.jsx'
 import { BoldSignStepModal } from './BoldSignStepModal.jsx'
 import { SendFromTemplateModal } from './SendFromTemplateModal.jsx'
 import { AcknowledgementDialog, ChangeSignerDialog } from './SignatureDialogs.jsx'
+import { fetchSendableFormPackets } from '../../../lib/services/formPackets.js'
 
 // The colour a group's rail and dot are drawn in. One tone per group, so the
 // left edge of a row says which group it is in even after the header scrolls

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { fetchTeams, fetchTeamSplits, deleteTeam, deleteTeamSplitsForTeam } from '../../lib/services/teams.js'
+import { fetchTeams, fetchAllTeamSplits, deleteTeamRecord, deleteTeamSplitsForTeam } from '../../lib/services/teams.js'
 import { fetchAgents } from '../../lib/services/teamAgents.js'
 import { deleteAgentProfile } from '../../lib/services/agentProfile.js'
 import { mutationErrorMessage } from '../../lib/services/db.js'
@@ -30,7 +30,7 @@ export default function TeamPage({ db, setDb, activeAgent, isAdmin, onSwitchAgen
   const loadTeams = async () => {
     const [teamsRes, splitsRes] = await Promise.all([
       fetchTeams(),
-      fetchTeamSplits().catch(() => ({ data: [] })),
+      fetchAllTeamSplits().catch(() => ({ data: [] })),
     ])
     // A failed read here used to render as "0 teams", which is indistinguishable
     // from having no teams — and made a save that worked look like it didn't.
@@ -78,7 +78,7 @@ export default function TeamPage({ db, setDb, activeAgent, isAdmin, onSwitchAgen
       pushToast(mutationErrorMessage(splitsDel.error, splitsDel.status, 'Could not delete this team.'), 'error')
       return
     }
-    const teamDel = await deleteTeam(id)
+    const teamDel = await deleteTeamRecord(id)
     if (teamDel.error) {
       pushToast(mutationErrorMessage(teamDel.error, teamDel.status, 'Could not delete this team.'), 'error')
       loadTeams()   // members are already gone — re-read so the UI matches

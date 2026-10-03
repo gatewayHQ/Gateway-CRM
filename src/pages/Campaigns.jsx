@@ -12,14 +12,15 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { uploadCampaignImage, getCampaignImagePublicUrl, fetchMailingContacts } from '../lib/services/campaigns.js'
+import { uploadCampaignImage, getCampaignImagePublicUrl } from '../lib/services/campaigns.js'
 import { compressForUpload } from '../lib/imageCompress.js'
 import { Icon, Modal, pushToast, EmptyState, ConfirmDialog } from '../components/UI.jsx'
 import QrCode from '../components/QrCode.jsx'
-import { groupMailings, mailingsSummary } from '../lib/services/mailingGroups.js'
+import { groupMailings } from '../lib/services/mailingGroups.js'
 import { shortUrl, downloadQr } from '../lib/qr.js'
 import { streetLine } from '../lib/address.js'
 import { normalizeOm, uploadOm, deleteOm, formatBytes } from '../lib/om.js'
+import { fetchMailingContacts } from '../lib/services/contactRecords.js'
 
 const MAILING_TYPE_OPTS = [
   { value: 'postcard',    label: 'Postcard'    },

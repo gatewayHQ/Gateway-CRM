@@ -7,11 +7,11 @@
 // is the agent list read and per-agent UI preferences.
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from '../supabase.js'
+import { fetchAgentRoster } from './agents.js'
 
 const HEADSHOT_BUCKET = 'campaign-images'
 
-export const fetchAgents = () =>
-  supabase.from('agents').select('*').order('created_at', { ascending: true })
+export const fetchAgents = () => fetchAgentRoster(supabase)
 
 // Sidebar customization (Settings → hidden nav items).
 export const updateAgentNavHidden = (agentId, navHidden) =>

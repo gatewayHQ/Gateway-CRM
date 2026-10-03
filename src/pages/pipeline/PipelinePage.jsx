@@ -3,8 +3,6 @@
 
 import React, { useState, useRef, useMemo, useCallback } from 'react'
 import { loadVisibleDeals, deleteDeal } from '../../lib/services/dealRecords.js'
-import { unlinkDealTasks } from '../../lib/services/dealActivity.js'
-import { updateListingStatus, deleteListing } from '../../lib/services/dealListings.js'
 import { formatCurrency, formatDate, getKeyDateUrgency, getNearestKeyDate } from '../../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor, isOpenStage } from '../../lib/stages.js'
 import { changeDealStage } from '../../lib/services/dealStage.js'
@@ -25,6 +23,8 @@ import { LISTING_STATUS_COLORS, LISTING_STATUS_LABELS, LISTING_STATUS_ORDER } fr
 import { StageHeader } from './StageHeader.jsx'
 import { ListingCard } from './ListingCard.jsx'
 import { DealDrawer } from '../deal/DealDrawer.jsx'
+import { unlinkDealTasks } from '../../lib/services/tasks.js'
+import { deleteProperty, updatePropertyStatus } from '../../lib/services/properties.js'
 
 export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgentIds, go, focusRecord, onFocusHandled }) {
   const [drawer, setDrawer] = useState(false)
@@ -256,7 +256,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
   // Listings are `properties`; documents/signatures live on the deal that links
   // to a property (deal.property_id), so opening a listing routes to that deal.
   const moveListingStatus = useCallback(async (propertyId, newStatus) => {
-    const { error } = await updateListingStatus(propertyId, newStatus)
+    const { error } = await updatePropertyStatus(propertyId, newStatus)
     if (error) { pushToast(error.message, 'error'); return }
     setDb(p => ({ ...p, properties: (p.properties || []).map(pr => pr.id === propertyId ? { ...pr, status: newStatus } : pr) }))
     pushToast(`Listing moved to ${LISTING_STATUS_LABELS[newStatus]}`)
@@ -264,7 +264,7 @@ export default function PipelinePage({ db, setDb, activeAgent, isAdmin, dealAgen
 
   const delProperty = useCallback(async (id) => {
     // deals.property_id is ON DELETE SET NULL — linked deals are kept, just unlinked.
-    const { error } = await deleteListing(id)
+    const { error } = await deleteProperty(id)
     if (error) { pushToast(error.message, 'error'); setConfirmProp(null); return }
     setDb(p => ({ ...p, properties: (p.properties || []).filter(pr => pr.id !== id) }))
     pushToast('Listing removed', 'info'); setConfirmProp(null)

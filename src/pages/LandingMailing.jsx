@@ -28,7 +28,7 @@
  * subtle scroll-reveal + parallax + count-up animations that all respect
  * prefers-reduced-motion, and full dark/light luxury theming from one accent.
  */
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { fetchPublicAgents, fetchPublicAgentsLegacy } from '../lib/services/publicPages.js'
 import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
 import { fetchPublicMailing } from '../lib/publicMailing.js'

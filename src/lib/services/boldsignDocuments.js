@@ -57,15 +57,6 @@ export function subscribeToSignatureQueue(onChange) {
 
 // ── Around the packets ───────────────────────────────────────────────────────
 
-/** Form Library entries that can be sent from a template, by name. */
-export const fetchSendableFormPackets = (columns) =>
-  supabase
-    .from('form_packets')
-    .select(columns)
-    .not('boldsign_template_id', 'is', null)
-    .eq('active', true)
-    .order('name')
-
 // deal_field_layouts is migration 0026; callers treat an error as "no layouts".
 export const fetchDealFieldLayouts = (dealId) =>
   supabase

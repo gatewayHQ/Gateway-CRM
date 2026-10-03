@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { upsertContact } from '../lib/services/contacts.js'
-import { supabase } from '../lib/supabase.js'
-import { syncTaskCalendar } from '../lib/services/tasks.js'
+import { upsertContactRecord } from '../lib/services/contactRecords.js'
+import { syncTaskCalendar, createTask } from '../lib/services/tasks.js'
 import {
-  fetchColdCallLists, createColdCallList, deleteColdCallList, fetchColdCallLeads, insertColdCallLeads,
-  updateColdCallLead, fetchContactPhones, insertColdCallProperty, insertColdCallActivity, insertCallbackTask,
+  fetchColdCallLists, createColdCallList, deleteColdCallList, fetchColdCallLeads, insertColdCallLeads, updateColdCallLead,
 } from '../lib/services/coldCalls.js'
 import { fromDateTimeLocalInput } from '../lib/helpers.js'
 import { Icon, Modal, pushToast } from '../components/UI.jsx'
 import { CONTACT_TYPES, PROPERTY_TYPES, titleCase } from '../lib/enums.js'
+import { fetchContactPhones } from '../lib/services/contactRecords.js'
+import { createProperty } from '../lib/services/properties.js'
+import { logActivity } from '../lib/services/activities.js'
 
 // ── SQL shown when tables are missing ─────────────────────────────────────
 const SQL_SETUP = `create table if not exists cold_call_lists (
@@ -325,7 +326,7 @@ function ConvertModal({ lead, agents, activeAgent, setDb, contacts = [], onClose
     }
     // Converting the same owner twice (or an owner already reached through a
     // website capture) updates their record instead of creating a duplicate.
-    const { contact: data, created, error } = await upsertContact(supabase, contactPayload, contacts)
+    const { contact: data, created, error } = await upsertContactRecord(contactPayload, contacts)
     if (error || !data) { setSaving(false); pushToast(error || 'Failed to save contact', 'error'); return }
     if (setDb) setDb(p => ({
       ...p,
@@ -339,7 +340,7 @@ function ConvertModal({ lead, agents, activeAgent, setDb, contacts = [], onClose
       const VALID_PROP_TYPES = PROPERTY_TYPES
       const rawType = (lead.prop_type || '').toLowerCase().trim()
       const safeType = VALID_PROP_TYPES.includes(rawType) ? rawType : 'residential'
-      const { data: propData } = await insertColdCallProperty({
+      const { data: propData } = await createProperty({
         address: [lead.property_address, lead.town, lead.state].filter(Boolean).join(', '),
         type: safeType,
         details: { category: lead.prop_type || 'residential', unit_count: lead.unit_count || null },
@@ -352,7 +353,7 @@ function ConvertModal({ lead, agents, activeAgent, setDb, contacts = [], onClose
 
     // Log call notes as activity on contact timeline
     if (lead?.call_notes?.trim()) {
-      await insertColdCallActivity({
+      await logActivity({
         contact_id: data.id,
         agent_id: form.assigned_agent_id || null,
         type: 'call', body: lead.call_notes,
@@ -482,7 +483,7 @@ function PowerDialer({ leads, startIndex, agents, activeAgent, onClose, onUpdate
     if (status === 'called') patch.call_count = (lead.call_count || 0) + 1
     await updateColdCallLead(lead.id, patch)
     if (status === 'callback' && extra.callback_date) {
-      const { data: callbackTask } = await insertCallbackTask({
+      const { data: callbackTask } = await createTask({
         title: `Callback: ${lead.contact_name || lead.property_address || 'Cold Call Lead'}`,
         type: 'call', priority: 'high',
         // 9am in the agent's own zone, not 9am UTC — the callback task's date

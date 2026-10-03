@@ -87,3 +87,11 @@ export const createTask = (task) =>
 /** Overwrite a task's fields. No read-back; no calendar sync. */
 export const updateTask = (id, patch) =>
   supabase.from('tasks').update(patch).eq('id', id)
+
+export const markTaskComplete = (taskId) =>
+  supabase.from('tasks').update({ completed: true }).eq('id', taskId)
+
+// RLS makes tasks strictly personal, so this only ever reaches the caller's
+// own tasks on the deal.
+export const unlinkDealTasks = (dealId) =>
+  supabase.from('tasks').update({ deal_id: null }).eq('deal_id', dealId)

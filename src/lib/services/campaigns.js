@@ -22,6 +22,3 @@ export const getCampaignImagePublicUrl = (path) =>
 
 // ── contacts ─────────────────────────────────────────────────────────────────
 
-/** Contacts with the owner mailing address, for picking mailing recipients. */
-export const fetchMailingContacts = () =>
-  supabase.from('contacts').select('id, first_name, last_name, email, phone, owner_address, owner_city, owner_state, owner_zip').order('last_name')

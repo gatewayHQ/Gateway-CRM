@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
-import { fetchOutlookConnectionStatus, getAuthSession } from '../../lib/services/contactOutlook.js'
 import { updateContact, insertContact, updateContactReadBack, insertContactReadBack } from '../../lib/services/contactRecords.js'
 import { Icon, Drawer, Tabs, pushToast } from '../../components/UI.jsx'
 import { normalizePhone, formatPhone } from '../../lib/phone.js'
@@ -13,6 +12,8 @@ import EmailsTab from './EmailsTab.jsx'
 import { findMatchingProperties } from '../../lib/matching.js'
 import { formatCurrency } from '../../lib/helpers.js'
 import { streetLine } from '../../lib/address.js'
+import { fetchOutlookConnectionStatus } from '../../lib/services/outlook.js'
+import { getAuthSession } from '../../lib/services/auth.js'
 
 const BLANK = {
   first_name: '', last_name: '', email: '', phone: '',

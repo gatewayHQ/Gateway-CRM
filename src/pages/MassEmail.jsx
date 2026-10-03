@@ -21,7 +21,6 @@
  */
 
 import React, { useEffect, useMemo, useState } from 'react'
-import { getAuthSession, fetchOutlookConnection } from '../lib/services/marketingAccount.js'
 import { uploadCampaignImage, getCampaignImagePublicUrl } from '../lib/services/campaigns.js'
 import { createTemplate } from '../lib/services/templates.js'
 import { compressForUpload, isWebpUrl } from '../lib/imageCompress.js'
@@ -39,6 +38,8 @@ import {
   requiresProperty, announcementHeader, normalizeCustomHeader, CUSTOM_HEADER_MAX,
 } from '../lib/dealAnnouncement.js'
 import { PREVIEW_UNSUBSCRIBE_URL } from '../lib/emailFooter.js'
+import { getAuthSession } from '../lib/services/auth.js'
+import { fetchOutlookConnection } from '../lib/services/outlook.js'
 
 const STEPS = [
   { id: 1, label: 'Topic'    },

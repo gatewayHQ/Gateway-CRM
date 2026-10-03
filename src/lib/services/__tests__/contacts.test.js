@@ -147,15 +147,15 @@ describe('upsertContact', () => {
 })
 
 describe('the conversion paths use the shared helper', () => {
-  // Leads and QuickAdd reach upsertContact through upsertContactRecord, the
+  // The pages reach upsertContact through upsertContactRecord, the
   // client-bound wrapper in contactRecords.js (asserted below).
   it.each([
-    ['ColdCalls', '../../../pages/ColdCalls.jsx', /upsertContact\(/],
-    ['Leads',     '../../../pages/Leads.jsx',     /upsertContactRecord\(/],
-    ['QuickAdd',  '../../../pages/QuickAdd.jsx',  /upsertContactRecord\(/],
-  ])('%s converts through upsertContact, not a raw insert', (_name, rel, call) => {
+    ['ColdCalls', '../../../pages/ColdCalls.jsx'],
+    ['Leads',     '../../../pages/Leads.jsx'],
+    ['QuickAdd',  '../../../pages/QuickAdd.jsx'],
+  ])('%s converts through upsertContact, not a raw insert', (_name, rel) => {
     const src = read(rel)
-    expect(src).toMatch(call)
+    expect(src).toMatch(/upsertContactRecord\(/)
     expect(src).not.toMatch(/from\('contacts'\)\.insert/)
     // …nor a raw insert moved into the contact-records service.
     expect(src).not.toMatch(/\binsertContact(s|ReadBack)?\(/)

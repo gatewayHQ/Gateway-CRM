@@ -3,7 +3,7 @@ import {
   fetchConversations, markConversationRead, subscribeToConversations,
   fetchConversationMessages, subscribeToConversationMessages,
 } from '../lib/services/messages.js'
-import { Icon, Avatar, EmptyState, pushToast } from '../components/UI.jsx'
+import { Icon, EmptyState, pushToast } from '../components/UI.jsx'
 
 function fmtTime(ts) {
   if (!ts) return ''

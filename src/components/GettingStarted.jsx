@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
-import { fetchOutlookConnectionStatus } from '../lib/services/contactOutlook.js'
 import { Icon } from './UI.jsx'
+import { fetchOutlookConnectionStatus } from '../lib/services/outlook.js'
 
 // ── Getting started ──────────────────────────────────────────────────────────
 // The first thing a NEW agent sees on the dashboard: the steps from an empty CRM

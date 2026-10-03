@@ -1,7 +1,7 @@
 // Send from Template: pick a state form, fill it from the deal, review, send.
 
 import React from 'react'
-import { createSignerContact, linkContactToDeal } from '../../../lib/services/dealContacts.js'
+import { linkContactToDeal } from '../../../lib/services/dealContacts.js'
 import { OPERATING_STATES } from '../../../lib/constants.js'
 import { streetLine } from '../../../lib/address.js'
 import {
@@ -17,6 +17,7 @@ import { fieldInfo, groupFields, prettyLabel } from './templateFields.js'
 import { BoldSignStepModal } from './BoldSignStepModal.jsx'
 import { DraftReviewStep } from './DraftReviewStep.jsx'
 import { SIGNER_COLORS, templateStep } from './signatureSteps.js'
+import { createSignerContact } from '../../../lib/services/contactRecords.js'
 
 export function SendFromTemplateModal({ deal, contacts, properties, extraContacts = [], sideClients = null, dealAgents = [], templates, activeAgent, onClose, onSent, onSaved }) {
   const contact  = contacts?.find(c => c.id === deal?.contact_id)

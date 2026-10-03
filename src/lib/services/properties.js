@@ -112,6 +112,13 @@ export const updatePropertyComps = (id, comps) =>
 export const updatePropertyCoords = (id, lat, lng) =>
   supabase.from('properties').update({ lat, lng }).eq('id', id)
 
+export const updatePropertyStatus = (id, status) =>
+  supabase.from('properties').update({ status }).eq('id', id)
+
+export const updatePropertyDetails = (id, details) =>
+  supabase.from('properties').update({ details }).eq('id', id)
+
+// deals.property_id is ON DELETE SET NULL — linked deals are kept, just unlinked.
 export const deleteProperty = (id) =>
   supabase.from('properties').delete().eq('id', id)
 

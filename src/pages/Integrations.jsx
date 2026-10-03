@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { getAuthSession, fetchOutlookConnectionStatus } from '../lib/services/integrations.js'
 import { fetchWebhookConfigs, createWebhookConfig, setWebhookConfigActive, deleteWebhookConfig } from '../lib/services/webhookConfigs.js'
 import { Icon, pushToast } from '../components/UI.jsx'
 import { WEBHOOK_EVENTS } from '../lib/webhooks.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
+import { getAuthSession } from '../lib/services/auth.js'
+import { fetchOutlookConnection } from '../lib/services/outlook.js'
 
 // ─── Outlook tab ──────────────────────────────────────────────────────────────
 
@@ -13,7 +14,7 @@ function OutlookSection() {
   const [disconnecting, setDisconnecting] = useState(false)
 
   const load = useCallback(async () => {
-    const { data, error } = await fetchOutlookConnectionStatus()
+    const { data, error } = await fetchOutlookConnection()
     if (error) { pushToast(error.message, 'error'); setStatus(false); return }
     setStatus(data || false)
   }, [])

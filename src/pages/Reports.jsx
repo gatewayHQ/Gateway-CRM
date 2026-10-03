@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react'
-import { formatCurrency, formatDate } from '../lib/helpers.js'
+import { formatCurrency } from '../lib/helpers.js'
 import { CONTACT_SOURCES as SOURCES } from '../lib/enums.js'
 import { daysInStage, isRotting, daysBetween } from '../lib/pipeline.js'
 import { isOpenStage } from '../lib/stages.js'

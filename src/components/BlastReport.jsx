@@ -30,8 +30,9 @@
 // opens.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import React, { useEffect, useMemo, useState } from 'react'
-import { supabase } from '../lib/supabase.js'
+import React, { useEffect, useState } from 'react'
+import { getAuthSession } from '../lib/services/auth.js'
+import { fetchRecentEmailBlasts, fetchBlastRecipients } from '../lib/services/emailBlasts.js'
 import { Badge, EmptyState, Icon, pushToast } from './UI.jsx'
 import { announcementHeader } from '../lib/dealAnnouncement.js'
 
@@ -56,7 +57,7 @@ const FILTERS = [
 ]
 
 async function authedPost(action, payload = {}) {
-  const { data: { session } } = await supabase.auth.getSession()
+  const { data: { session } } = await getAuthSession()
   const res = await fetch(`/api/email-send?action=${action}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
@@ -95,11 +96,7 @@ export default function BlastReport({ activeAgent }) {
   useEffect(() => {
     let live = true
     ;(async () => {
-      const { data, error: err } = await supabase
-        .from('email_blasts')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(RECENT_LIMIT)
+      const { data, error: err } = await fetchRecentEmailBlasts(RECENT_LIMIT)
       if (!live) return
       if (err) { setError(err.message); setBlasts([]); return }
       setBlasts(data || [])
@@ -132,11 +129,7 @@ export default function BlastReport({ activeAgent }) {
     setFilter('all')
     if (rows[blast.id]) return
     setLoadingRows(true)
-    const read = (cols) => supabase
-      .from('email_blast_recipients')
-      .select(cols)
-      .eq('blast_id', blast.id)
-      .order('status', { ascending: true })
+    const read = (cols) => fetchBlastRecipients(blast.id, cols)
     // The bounce columns arrive with migration 0059; until then the report
     // reads everything else rather than failing outright.
     let { data, error: err } = await read(`${RECIPIENT_COLS}, ${BOUNCE_COLS}`)

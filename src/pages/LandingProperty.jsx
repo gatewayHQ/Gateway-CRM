@@ -16,10 +16,7 @@ import { fetchPublicAgents, fetchPublicAgentsLegacy } from '../lib/services/publ
 import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
 import { fetchPublicMailing } from '../lib/publicMailing.js'
 import '../components/landing/landing.css'
-import {
-  LandingShell, Hero, Section, DetailGrid, Gallery, Lightbox,
-  LeadForm, AgentCard, AgentTeam, Button, Reveal, Skeleton, StatePanel, OmGate,
-} from '../components/landing'
+import { LandingShell, Hero, Section, DetailGrid, Gallery, Lightbox, LeadForm, AgentCard, AgentTeam, Button, Skeleton, StatePanel, OmGate } from '../components/landing'
 import { normalizeOm, requestOm } from '../lib/om.js'
 
 const toNum = (v) => {

@@ -77,3 +77,16 @@ export const insertContactReadBack = (row) =>
  */
 export const upsertContactRecord = (payload, existingRows, opts) =>
   upsertContact(supabase, payload, existingRows, opts)
+
+/** Every contact's phone, for flagging imported cold-call leads as possible duplicates. */
+export const fetchContactPhones = () =>
+  // contacts stores a single phone (text), not a phones[] array.
+  supabase.from('contacts').select('phone')
+
+/** Contacts with the owner mailing address, for picking mailing recipients. */
+export const fetchMailingContacts = () =>
+  supabase.from('contacts').select('id, first_name, last_name, email, phone, owner_address, owner_city, owner_state, owner_zip').order('last_name')
+
+/** Create a contact for a new signer and read back just enough to name them. */
+export const createSignerContact = (row) =>
+  supabase.from('contacts').insert([row]).select('id, first_name, last_name, email').single()

@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { supabase } from '../lib/supabase.js'
+import { signInWithPassword } from '../lib/services/auth.js'
 import { BrandLogo } from '../components/UI.jsx'
 
 export default function LoginPage() {
@@ -12,7 +12,7 @@ export default function LoginPage() {
     e.preventDefault()
     setError('')
     setLoading(true)
-    const { error: err } = await supabase.auth.signInWithPassword({ email, password })
+    const { error: err } = await signInWithPassword({ email, password })
     if (err) setError(err.message)
     setLoading(false)
   }

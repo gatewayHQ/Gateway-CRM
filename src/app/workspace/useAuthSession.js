@@ -1,17 +1,17 @@
 import { useEffect, useState } from 'react'
-import { supabase } from '../../lib/supabase.js'
+import { getAuthSession, onAuthStateChange } from '../../lib/services/auth.js'
 
 /** The current Supabase auth session, kept live across sign-in/out and token refreshes. */
 export function useAuthSession() {
   const [session, setSession] = useState(null)
 
   useEffect(() => {
-    supabase.auth.getSession()
+    getAuthSession()
       .then(({ data }) => setSession(data.session ?? null))
       .catch(() => setSession(null))
     let subscription
     try {
-      const { data } = supabase.auth.onAuthStateChange((_e, s) => setSession(s ?? null))
+      const { data } = onAuthStateChange((_e, s) => setSession(s ?? null))
       subscription = data.subscription
     } catch {
       setSession(null)
@@ -22,4 +22,3 @@ export function useAuthSession() {
   return session
 }
 
-export const signOutUser = () => supabase.auth.signOut()

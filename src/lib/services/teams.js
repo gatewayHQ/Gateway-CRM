@@ -18,12 +18,12 @@ export const createTeam = (team) =>
 export const updateTeam = (teamId, fields) =>
   supabase.from('teams').update(fields).eq('id', teamId).select().single()
 
-export const deleteTeam = (teamId) =>
+export const deleteTeamRecord = (teamId) =>
   supabase.from('teams').delete().eq('id', teamId)
 
 // ── team_splits ──────────────────────────────────────────────────────────────
 
-export const fetchTeamSplits = () =>
+export const fetchAllTeamSplits = () =>
   supabase.from('team_splits').select('*')
 
 export const upsertTeamSplits = (rows) =>

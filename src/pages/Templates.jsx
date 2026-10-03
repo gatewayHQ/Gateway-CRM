@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react'
 import Anthropic from '@anthropic-ai/sdk'
-import { getAuthSession, getAuthUser, fetchOutlookConnection } from '../lib/services/marketingAccount.js'
-import {
-  fetchTemplates, createTemplate, updateTemplate, deleteTemplate, updateTemplateUsageCount, insertEmailActivity,
-} from '../lib/services/templates.js'
+import { fetchTemplates, createTemplate, updateTemplate, deleteTemplate, updateTemplateUsageCount } from '../lib/services/templates.js'
 import { Icon, Badge, Drawer, EmptyState, ConfirmDialog, Modal, pushToast } from '../components/UI.jsx'
 import { TEMPLATE_CATEGORIES, TEMPLATE_CATEGORY_LABELS } from '../lib/enums.js'
+import { getAuthSession, getAuthUser } from '../lib/services/auth.js'
+import { fetchOutlookConnection } from '../lib/services/outlook.js'
+import { logActivity } from '../lib/services/activities.js'
 
 // Load from Supabase auth metadata first (cross-device), fall back to localStorage
 async function loadUserKey(metaField, localKey) {
@@ -371,7 +371,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
 
         // Log the sent email as an activity
         if (contact?.id) {
-          await insertEmailActivity({
+          await logActivity({
             contact_id: contact.id,
             agent_id: agent.id || null,
             type: 'email',

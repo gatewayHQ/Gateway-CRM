@@ -14,7 +14,6 @@
  *     src/lib/dripTokens.js, which renders the preview AND the real send.
  */
 import React, { useState, useEffect, useMemo, useRef } from 'react'
-import { getAuthSession, fetchAgentOutlookConnection } from '../lib/services/marketingAccount.js'
 import {
   fetchSequencesWithSteps, insertSequence, clearAutoEnrollLane, updateSequence, deleteSequenceById,
   claimSequence, insertSequenceSteps, deleteSequenceSteps, fetchSequenceEnrollments, insertEnrollments,
@@ -26,6 +25,8 @@ import {
   DRIP_TOKENS, SAMPLE_TOKENS, dripTokens, renderDripEmail, renderDripText,
   matchListings, searchCriteria, wantsListings, STARTER_BUYER_SEQUENCE,
 } from '../lib/dripTokens.js'
+import { getAuthSession } from '../lib/services/auth.js'
+import { fetchAgentOutlookConnection } from '../lib/services/outlook.js'
 
 const LANE_LABELS = { residential: 'Residential website leads', commercial: 'Commercial website leads' }
 

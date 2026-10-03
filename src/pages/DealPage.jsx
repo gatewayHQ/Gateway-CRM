@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
-import { fetchDeal, updateDealCompData, getAuthSession } from '../lib/services/dealRecords.js'
-import { createDealActivity, createDealTask, markTaskComplete } from '../lib/services/dealActivity.js'
+import { fetchDeal, updateDealCompData } from '../lib/services/dealRecords.js'
 import { fetchDealBoldsignDocuments } from '../lib/services/boldsignDocuments.js'
-import { syncTaskCalendar } from '../lib/services/tasks.js'
+import { syncTaskCalendar, createTask, markTaskComplete } from '../lib/services/tasks.js'
 import { withRetry, mutationErrorMessage } from '../lib/services/db.js'
 import { Icon, Avatar, Badge, EmptyState, pushToast } from '../components/UI.jsx'
 import { readDealTerms, termsFilled } from '../lib/services/dealTerms.js'
@@ -24,6 +23,8 @@ import { submitDealForReview, decideDealReview } from '../lib/services/review.js
 import { generateClosingPacket, listClosingPackets, openClosingPacket } from '../lib/services/closingPacket.js'
 import { listDealSteps, toggleDealStep } from '../lib/services/steps.js'
 import { streetLine } from '../lib/address.js'
+import { getAuthSession } from '../lib/services/auth.js'
+import { createActivity } from '../lib/services/activities.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Deal Page — the whole deal on one screen: stage rail, property, people,
@@ -360,7 +361,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
     const body = logBody.trim()
     if (!body || !deal) return
     setLogging(true)
-    const { data, error, status } = await withRetry(() => createDealActivity({
+    const { data, error, status } = await withRetry(() => createActivity({
       deal_id: deal.id, contact_id: deal.contact_id || null,
       agent_id: activeAgent?.id || null, type: logType, body,
     }))
@@ -376,7 +377,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
     const title = newTask.trim()
     if (!title || !deal) return
     const due = new Date(); due.setDate(due.getDate() + 3); due.setHours(9, 0, 0, 0)
-    const { data, error, status } = await withRetry(() => createDealTask({
+    const { data, error, status } = await withRetry(() => createTask({
       title, type: 'follow-up', priority: 'medium', due_date: due.toISOString(),
       agent_id: activeAgent?.id || null, contact_id: deal.contact_id || null,
       deal_id: deal.id, completed: false,

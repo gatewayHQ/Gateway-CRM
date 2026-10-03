@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react'
 import { updateAgentNavHidden } from '../lib/services/teamAgents.js'
-import { getAuthUser, updateAuthUserMetadata } from '../lib/services/integrations.js'
 import { Icon, pushToast } from '../components/UI.jsx'
 import BoldSignAdmin from './settings/BoldSignAdmin.jsx'
+import { getAuthUser, updateAuthUserMetadata } from '../lib/services/auth.js'
 
 const TRACKING_SCRIPT = `<!-- Gateway CRM — Lead Tracker -->
 <script>

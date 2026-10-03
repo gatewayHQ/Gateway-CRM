@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useCallback } from 'react'
 import { syncTaskCalendar, deleteTask, setTaskCompleted, fetchAgentTasks, createTask, updateTask } from '../lib/services/tasks.js'
-import { fetchOutlookConnectionStatus, getAuthSession } from '../lib/services/contactOutlook.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
 import { formatDate, toDateTimeLocalInput, fromDateTimeLocalInput } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
+import { fetchOutlookConnectionStatus } from '../lib/services/outlook.js'
+import { getAuthSession } from '../lib/services/auth.js'
 
 function TaskDrawer({ open, onClose, task, contacts, deals, onSave, activeAgent }) {
   const blank = { title:'', type:'follow-up', priority:'medium', due_date:'', contact_id:'', deal_id:'', agent_id:'', notes:'', completed:false }

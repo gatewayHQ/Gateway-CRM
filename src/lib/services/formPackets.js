@@ -40,3 +40,12 @@ export const uploadFormPacketFile = (path, file) =>
 
 export const createFormPacketSignedUrl = (path, expiresIn) =>
   supabase.storage.from(FORM_PACKET_BUCKET).createSignedUrl(path, expiresIn)
+
+/** Form Library entries that can be sent from a template, by name. */
+export const fetchSendableFormPackets = (columns) =>
+  supabase
+    .from('form_packets')
+    .select(columns)
+    .not('boldsign_template_id', 'is', null)
+    .eq('active', true)
+    .order('name')

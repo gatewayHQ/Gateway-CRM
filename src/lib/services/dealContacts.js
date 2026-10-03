@@ -87,12 +87,11 @@ export function dealContactKeyFor(dealContacts, dealId) {
     .join(',')
 }
 
-// A signer saved to the CRM from the send screen. Lives here rather than in
-// contacts.js because it is always followed by linkContactToDeal() below.
-export const createSignerContact = (row) =>
-  supabase.from('contacts').insert([row]).select('id, first_name, last_name, email').single()
-
 // One deal_contacts link. A duplicate is reported as an error by the database;
 // the caller decides whether that matters.
 export const linkContactToDeal = (dealId, contactId) =>
   supabase.from('deal_contacts').insert([{ deal_id: dealId, contact_id: contactId }])
+
+/** Every deal_contacts row the caller can see (RLS-scoped to visible deals). */
+export const fetchAllDealContacts = () =>
+  supabase.from('deal_contacts').select('*')

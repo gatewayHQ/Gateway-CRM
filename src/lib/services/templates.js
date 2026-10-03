@@ -28,6 +28,3 @@ export const updateTemplateUsageCount = (templateId, usageCount) =>
 
 // ── activities ───────────────────────────────────────────────────────────────
 
-/** Log an email sent from a template on the contact's timeline. */
-export const insertEmailActivity = (row) =>
-  supabase.from('activities').insert([row])

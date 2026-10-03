@@ -13,7 +13,7 @@
 // another tab is not clobbered — that read-merge-write stays in the caller.
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from '../supabase.js'
-import { fetchVisibleDeals, fetchVisibleCommissions, findOpenDealsOnProperty } from './deals.js'
+import { fetchVisibleDeals, fetchVisibleCommissions, findOpenDealsOnProperty, requestDealAccess } from './deals.js'
 
 export const fetchDeal = (dealId) =>
   supabase.from('deals').select('*').eq('id', dealId).single()
@@ -31,15 +31,20 @@ export const updateDealCompData = (dealId, comp_data) =>
 export const updateDeal = (dealId, patch) =>
   supabase.from('deals').update(patch).eq('id', dealId)
 
+/** Insert a deal and read the whole saved row back. */
+export const createDeal = (body) =>
+  supabase.from('deals').insert([body]).select().single()
+
+/** Insert a deal and read back only its id. */
 export const insertDeal = (body) =>
   supabase.from('deals').insert([body]).select('id').single()
 
+/** Retitle several deals at once (a listing's address changed). */
+export const renameDeals = (dealIds, title) =>
+  supabase.from('deals').update({ title }).in('id', dealIds)
+
 export const deleteDeal = (dealId) =>
   supabase.from('deals').delete().eq('id', dealId)
-
-// The signed-in session, for the bearer token on deal-scoped /api calls
-// (Outlook calendar sync, the agent's own commission slice).
-export const getAuthSession = () => supabase.auth.getSession()
 
 // ── Shared-client bindings of deals.js ────────────────────────────────────────
 // deals.js takes the client as an argument (so its tests can pass a fake);
@@ -51,3 +56,6 @@ export const loadVisibleCommissions = (opts) => fetchVisibleCommissions(supabase
 
 export const checkOpenDealsOnProperty = (propertyId, side) =>
   findOpenDealsOnProperty(supabase, propertyId, side)
+
+export const requestAccessToDeal = (dealId) =>
+  requestDealAccess(supabase, dealId)

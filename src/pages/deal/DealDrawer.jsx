@@ -3,7 +3,6 @@
 
 import React, { useState, useRef } from 'react'
 import { updateDeal, insertDeal, checkOpenDealsOnProperty } from '../../lib/services/dealRecords.js'
-import { updateListingDetails } from '../../lib/services/dealListings.js'
 import { formatCurrency } from '../../lib/helpers.js'
 import { TRACKS, UNIFIED, boardStageFor } from '../../lib/stages.js'
 import { DEAL_TABS, dealTabOrDefault } from '../../lib/dealTabs.js'
@@ -30,6 +29,7 @@ import { ChecklistTab } from './ChecklistTab.jsx'
 import { DocumentsTab } from './DocumentsTab.jsx'
 import { SignaturesTab } from './signatures/SignaturesTab.jsx'
 import { PortalTab } from './PortalTab.jsx'
+import { updatePropertyDetails } from '../../lib/services/properties.js'
 
 // The deal drawer's two widths. 860 is the working default — wide enough for
 // all seven tabs and a two-column form; the wide one takes most of a laptop
@@ -439,7 +439,7 @@ export function DealDrawer({ open, onClose, deal, agents, contacts, properties, 
       if (savedId && linkedProperty && removedFromListing.length) {
         const keptOnListing = propertyCoAgentIds(linkedProperty)
           .filter(id => !removedFromListing.includes(id))
-        const { error: listingErr } = await updateListingDetails(linkedProperty.id, { ...(linkedProperty.details || {}), co_agent_ids: keptOnListing })
+        const { error: listingErr } = await updatePropertyDetails(linkedProperty.id, { ...(linkedProperty.details || {}), co_agent_ids: keptOnListing })
         if (listingErr) {
           console.warn('[DealDrawer] could not update the listing team:', listingErr)
           pushToast('Deal saved, but those agents are still on the listing — ask an office admin to remove them there.', 'error')

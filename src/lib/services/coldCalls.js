@@ -36,19 +36,3 @@ export const updateColdCallLead = (leadId, patch) =>
 
 // ── rows a call or a conversion writes elsewhere ─────────────────────────────
 
-/** Every contact's phone, for flagging imported leads as possible duplicates. */
-export const fetchContactPhones = () =>
-  // contacts stores a single phone (text), not a phones[] array.
-  supabase.from('contacts').select('phone')
-
-/** The property a converted lead was about; reads the new row back. */
-export const insertColdCallProperty = (row) =>
-  supabase.from('properties').insert([row]).select().single()
-
-/** The call notes, logged on the new contact's timeline. */
-export const insertColdCallActivity = (row) =>
-  supabase.from('activities').insert([row])
-
-/** A callback task; reads the new row back so its calendar event can sync. */
-export const insertCallbackTask = (row) =>
-  supabase.from('tasks').insert([row]).select().single()

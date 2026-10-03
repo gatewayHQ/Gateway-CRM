@@ -1,9 +1,10 @@
 // Deal drawer → Key Dates tab: closing, contingencies and other deadlines.
 
 import React, { useState } from 'react'
-import { fetchDealCompData, updateDeal, getAuthSession } from '../../lib/services/dealRecords.js'
-import { fetchDealSentReminders } from '../../lib/services/dealActivity.js'
+import { fetchDealCompData, updateDeal } from '../../lib/services/dealRecords.js'
 import { Icon, pushToast } from '../../components/UI.jsx'
+import { getAuthSession } from '../../lib/services/auth.js'
+import { fetchDealSentReminders } from '../../lib/services/deadlineReminders.js'
 
 const DEFAULT_KEY_DATE_TYPES = ['Closing','Expiration','Financing Contingency','Inspection','HUD Approval','Appraisal','Lease Start Date','Possession Date']
 

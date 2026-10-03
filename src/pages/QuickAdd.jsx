@@ -1,12 +1,12 @@
 import React, { useState } from 'react'
 import { syncTaskCalendar, createTask } from '../lib/services/tasks.js'
-import { createQuickDeal } from '../lib/services/dashboard.js'
 import { Icon, Drawer, pushToast } from '../components/UI.jsx'
 import { STAGE_ORDER, toDateTimeLocalInput, fromDateTimeLocalInput } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
 import { upsertContactRecord } from '../lib/services/contactRecords.js'
 import { CONTACT_SOURCES } from '../lib/enums.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
+import { createDeal } from '../lib/services/dealRecords.js'
 
 function QuickContactDrawer({ open, onClose, agents, activeAgent, contacts = [], onSaved }) {
   const blank = () => ({ first_name: '', last_name: '', phone: '', email: '', type: 'buyer', source: 'referral', assigned_agent_id: activeAgent?.id || '' })
@@ -107,7 +107,7 @@ function QuickDealDrawer({ open, onClose, agents, activeAgent, onSaved, onOpen }
   const save = async () => {
     if (!form.title.trim()) { pushToast('Deal title required', 'error'); return }
     setSaving(true)
-    const { data, error } = await createQuickDeal({
+    const { data, error } = await createDeal({
       ...form,
       value: form.value ? Number(form.value) : null,
       probability: 25,

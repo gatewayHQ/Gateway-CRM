@@ -17,6 +17,11 @@ import { fetchVisibleDeals, fetchVisibleCommissions } from '../../lib/services/d
 import { fetchVisibleProperties } from '../../lib/services/properties.js'
 import { fetchVisibleContacts } from '../../lib/services/contacts.js'
 import { fetchAgentRoster, fetchTeamSplits, resolveSignedInAgent } from '../../lib/services/agents.js'
+import { fetchAgentTasks } from '../../lib/services/tasks.js'
+import { fetchTemplates } from '../../lib/services/templates.js'
+import { fetchActivities } from '../../lib/services/activities.js'
+import { fetchAllDealContacts } from '../../lib/services/dealContacts.js'
+import { fetchAllPropertyContacts } from '../../lib/services/propertyContacts.js'
 import { isOfficeAdmin } from '../../lib/officeAdmins.js'
 import { teamVisibleAgentIds } from '../../lib/teamVisibility.js'
 
@@ -78,15 +83,15 @@ export async function loadScopedData(supabase, { agent, agents, visibility }) {
     // Own + team-shared + co-listed (commission participant) deals
     fetchVisibleDeals(supabase, { isAdmin, agentId, dealAgentIds: visibility.deals }),
     // Tasks are personal — never shared, even for an admin
-    fetchAllRows(() => supabase.from('tasks').select('*').eq('agent_id', agentId).order('due_date', { ascending: true })),
-    fetchAllRows(() => supabase.from('templates').select('*').order('created_at', { ascending: false })),
-    fetchAllRows(() => supabase.from('activities').select('*').order('created_at', { ascending: false })),
+    fetchAllRows(() => fetchAgentTasks(agentId)),
+    fetchAllRows(fetchTemplates),
+    fetchAllRows(fetchActivities),
     // Additional-contact links (husband & wife etc. — migration 0021).
     // deal_contacts is RLS-scoped to visible deals; property_contacts is
     // open like properties. If the migration hasn't run yet these error and
     // the app degrades gracefully to single-contact behavior.
-    fetchAllRows(() => supabase.from('deal_contacts').select('*')),
-    fetchAllRows(() => supabase.from('property_contacts').select('*')),
+    fetchAllRows(fetchAllDealContacts),
+    fetchAllRows(fetchAllPropertyContacts),
     // Commissions are back-office data: only admins load raw rows. Agents
     // get their own slice via /api/portal?action=my-earnings (the database
     // enforces this too — non-admin queries return zero rows).

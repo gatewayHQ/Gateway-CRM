@@ -39,3 +39,7 @@ export async function syncPropertyContacts(propertyId, contactIds) {
 
 export const fetchPropertyContacts = (propertyId) =>
   supabase.from('property_contacts').select('*').eq('property_id', propertyId)
+
+/** Every property_contacts row (open like properties). */
+export const fetchAllPropertyContacts = () =>
+  supabase.from('property_contacts').select('*')
