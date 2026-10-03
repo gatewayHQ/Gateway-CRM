@@ -409,7 +409,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
 
       {outlookStatus === false && resendReady === false && (
         <div style={{ margin: '0 24px', marginTop: 16, padding: '10px 14px', background: '#fff8ec', border: '1px solid var(--gw-amber)', borderRadius: 'var(--radius)', fontSize: 12, lineHeight: 1.6 }}>
-          <strong>Email sending not configured.</strong> Connect Outlook or set up Resend in <strong>Settings → Integrations</strong> to send directly from the CRM.
+          <strong>Email sending not configured.</strong> Connect Outlook under <strong>Integrations</strong> (or add a Resend key in <strong>Settings</strong>) to send directly from the CRM.
           Clicking Send will open your local email client instead.
         </div>
       )}

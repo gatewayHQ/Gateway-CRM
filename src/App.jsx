@@ -133,6 +133,7 @@ export default function App() {
           }}
           activeAgent={activeAgent}
           onSignOut={signOut}
+          onHelp={navigation.openHelp}
           bell={
             <NotificationBell
               notifications={bell.notifications}

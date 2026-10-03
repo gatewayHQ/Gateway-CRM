@@ -93,6 +93,9 @@ export function useAppNavigation({ agents, activeAgentId }) {
       { contact: 'contacts', property: 'properties', deal: 'pipeline' }[kind],
     ),
 
+    // The top bar's "?": Help, opened on the guides for the screen it was pressed on.
+    openHelp: () => openRecord({ type: 'help-for', route }, 'help'),
+
     openSearchResult: (item) => {
       const target = routeForResult(item)
       if (!target) return

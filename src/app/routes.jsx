@@ -30,6 +30,7 @@ const IntegrationsPage   = React.lazy(() => import('../pages/Integrations.jsx'))
 const CampaignsPage      = React.lazy(() => import('../pages/campaigns/CampaignsPage.jsx'))
 const FormLibraryPage    = React.lazy(() => import('../pages/FormLibrary.jsx'))
 const AdminReviewPage    = React.lazy(() => import('../pages/AdminReview.jsx'))
+const HelpPage           = React.lazy(() => import('../pages/help/HelpPage.jsx'))
 // Unreleased. Reached only by ?preview=markup — deliberately not in the nav,
 // so testing it cannot become an agent stumbling onto it mid-transaction.
 const MarkupPreviewPage  = React.lazy(() => import('../pages/MarkupPreview.jsx'))
@@ -74,8 +75,12 @@ const ROUTES = {
   integrations: ({ page: { isAdmin } }) => <IntegrationsPage isAdmin={isAdmin} />,
   'data-management': ({ page: { isAdmin } }) => (isAdmin ? <DataManagementPage /> : null),
   settings:     (ctx) => <SettingsPage {...ctx.page} activeAgentId={ctx.activeAgentId} hideableNav={HIDEABLE_NAV} />,
+  help:         (ctx) => <HelpPage {...ctx.page} {...focusProps(ctx)} />,
   'markup-preview': () => <MarkupPreviewPage />,
 }
+
+/** Every screen id — the Help guides' "Take me there" links are checked against it. */
+export const ROUTE_IDS = Object.keys(ROUTES)
 
 /** The screen for `route`, or nothing for a route this build doesn't know. */
 export function RouteOutlet({ route, ...ctx }) {

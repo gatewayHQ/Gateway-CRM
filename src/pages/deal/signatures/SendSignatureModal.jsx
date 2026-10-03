@@ -220,7 +220,7 @@ export function SendSignatureModal({ deal, contacts, properties, dealFiles, acti
         heading="Place fields & send"
         onClose={onClose}
         onDone={() => { pushToast('Sent for signature', 'success'); onSent() }}
-        onDraft={() => pushToast('Saved as a draft — nothing has been sent yet. You can keep working, or reopen it from the Signatures tab with "Edit & Send".', 'info')}
+        onDraft={() => pushToast('Saved as a draft — nothing has been sent yet. You can keep working, or reopen it from the Signatures tab with "Edit Fields".', 'info')}
       />
     )
   }
