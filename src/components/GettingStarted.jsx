@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { supabase } from '../lib/supabase.js'
+import { fetchOutlookConnectionStatus } from '../lib/services/contactOutlook.js'
 import { Icon } from './UI.jsx'
 
 // ── Getting started ──────────────────────────────────────────────────────────
@@ -158,7 +158,7 @@ export default function GettingStarted({ db, activeAgent, isAdmin, go, startNew 
   useEffect(() => {
     if (!eligible || hidden) return
     let cancelled = false
-    supabase.from('ms_graph_connection_status').select('status').maybeSingle()
+    fetchOutlookConnectionStatus()
       .then(({ data }) => { if (!cancelled) setOutlookConnected(data?.status === 'connected') })
       .catch(() => { if (!cancelled) setOutlookConnected(false) })
     return () => { cancelled = true }

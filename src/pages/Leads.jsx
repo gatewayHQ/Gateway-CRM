@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
-import { upsertContact } from '../lib/services/contacts.js'
-import { supabase } from '../lib/supabase.js'
+import { upsertContactRecord } from '../lib/services/contactRecords.js'
+import { fetchVisitorEvents, fetchLeadCaptures, fetchRecentLeadInquiries, linkLeadCaptureToContact } from '../lib/services/leads.js'
 import { Icon, Badge, Avatar, EmptyState, pushToast } from '../components/UI.jsx'
 import { formatDate } from '../lib/helpers.js'
 import { searchSummary } from '../lib/dripTokens.js'
@@ -43,11 +43,9 @@ export default function LeadsPage({ db, isAdmin }) {
     // The round-robin inquiries (migration 0037). Loaded on their own so a
     // database without the legacy capture tables still shows them.
     const [ev, cap, inq] = await Promise.all([
-      supabase.from('visitor_events').select('*').order('created_at', { ascending: false }),
-      supabase.from('lead_captures').select('*').order('created_at', { ascending: false }),
-      supabase.from('leads')
-        .select('*, lead_property_views(title, url, position)')
-        .order('created_at', { ascending: false }).limit(300),
+      fetchVisitorEvents(),
+      fetchLeadCaptures(),
+      fetchRecentLeadInquiries(),
     ])
     setInquiries(inq.error ? null : (inq.data || []))
     if (ev.error || cap.error) {
@@ -64,7 +62,7 @@ export default function LeadsPage({ db, isAdmin }) {
     setConverting(capture.id)
     // Route through upsertContact so converting a capture for someone already
     // in the database updates them instead of creating a second row.
-    const { contact: data, created, error } = await upsertContact(supabase, {
+    const { contact: data, created, error } = await upsertContactRecord({
       first_name: capture.first_name,
       last_name: capture.last_name,
       email: capture.email,
@@ -79,7 +77,7 @@ export default function LeadsPage({ db, isAdmin }) {
       assigned_agent_id: capture.agent_id || null,
     }, db?.contacts || [])
     if (!error && data) {
-      await supabase.from('lead_captures').update({ converted_contact_id: data.id }).eq('id', capture.id)
+      await linkLeadCaptureToContact(capture.id, data.id)
       setCaptures(prev => prev.map(c => c.id === capture.id ? { ...c, converted_contact_id: data.id } : c))
       pushToast(created ? `${capture.first_name} added to Contacts` : `${capture.first_name} already existed — capture linked to their record`)
     } else {

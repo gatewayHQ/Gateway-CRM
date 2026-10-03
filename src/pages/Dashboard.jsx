@@ -1,6 +1,5 @@
 import React, { useMemo } from 'react'
-import { supabase } from '../lib/supabase.js'
-import { syncTaskCalendar } from '../lib/services/tasks.js'
+import { syncTaskCalendar, createTask } from '../lib/services/tasks.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
 import { formatCurrency, STAGE_ORDER, upcomingReminders } from '../lib/helpers.js'
 import { useStageLabels } from '../lib/stageLabelContext.js'
@@ -46,7 +45,7 @@ export default function Dashboard({ db, setDb, activeAgent, isAdmin, go, startNe
       agent_id: activeAgent?.id || null,
       completed: false,
     }
-    const { data, error } = await supabase.from('tasks').insert([payload]).select().single()
+    const { data, error } = await createTask(payload)
     if (error) { pushToast(mutationErrorMessage(error), 'error'); return }
     syncTaskCalendar(data?.id)
     setDb(p => ({ ...p, tasks: [data, ...p.tasks] }))

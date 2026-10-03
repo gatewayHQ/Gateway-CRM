@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback } from 'react'
-import { supabase } from '../lib/supabase.js'
-import { syncTaskCalendar, deleteTask, setTaskCompleted } from '../lib/services/tasks.js'
+import { syncTaskCalendar, deleteTask, setTaskCompleted, fetchAgentTasks, createTask, updateTask } from '../lib/services/tasks.js'
+import { fetchOutlookConnectionStatus, getAuthSession } from '../lib/services/contactOutlook.js'
 import { mutationErrorMessage } from '../lib/services/db.js'
 import { formatDate, toDateTimeLocalInput, fromDateTimeLocalInput } from '../lib/helpers.js'
 import { Icon, Badge, Avatar, Drawer, EmptyState, ConfirmDialog, SearchDropdown, pushToast } from '../components/UI.jsx'
@@ -23,7 +23,7 @@ function TaskDrawer({ open, onClose, task, contacts, deals, onSave, activeAgent 
 
   React.useEffect(() => {
     if (!open) return
-    supabase.from('ms_graph_connection_status').select('status').maybeSingle()
+    fetchOutlookConnectionStatus()
       .then(({ data }) => setOutlookConnected(data?.status === 'connected'))
   }, [open])
 
@@ -46,7 +46,7 @@ function TaskDrawer({ open, onClose, task, contacts, deals, onSave, activeAgent 
     setAvailability('loading')
     ;(async () => {
       try {
-        const { data: { session } } = await supabase.auth.getSession()
+        const { data: { session } } = await getAuthSession()
         if (!session?.access_token) return
         const res = await fetch('/api/email-send?action=outlook-freebusy', {
           method: 'POST',
@@ -83,10 +83,10 @@ function TaskDrawer({ open, onClose, task, contacts, deals, onSave, activeAgent 
       }
       let error, savedId = task?.id || null
       if (task?.id) {
-        ;({ error } = await supabase.from('tasks').update(payload).eq('id', task.id))
+        ;({ error } = await updateTask(task.id, payload))
       } else {
         let data
-        ;({ data, error } = await supabase.from('tasks').insert([payload]).select().single())
+        ;({ data, error } = await createTask(payload))
         savedId = data?.id || null
       }
       if (error) { pushToast(error.message, 'error'); return }
@@ -233,9 +233,7 @@ export default function TasksPage({ db, setDb, activeAgent }) {
 
   const reload = useCallback(async () => {
     if (!activeAgent?.id) return
-    const { data } = await supabase.from('tasks').select('*')
-      .eq('agent_id', activeAgent.id)
-      .order('due_date', { ascending: true })
+    const { data } = await fetchAgentTasks(activeAgent.id)
     setDb(p => ({ ...p, tasks: data || [] }))
   }, [setDb, activeAgent?.id])
 

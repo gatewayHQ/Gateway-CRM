@@ -70,3 +70,20 @@ export async function setTaskCompleted(id, completed) {
   if (!res.error) syncTaskCalendar(id)
   return res
 }
+
+/** The agent's own tasks, soonest due first. */
+export const fetchAgentTasks = (agentId) =>
+  supabase.from('tasks').select('*')
+    .eq('agent_id', agentId)
+    .order('due_date', { ascending: true })
+
+/**
+ * Insert one task and read the saved row back. Does not sync the calendar —
+ * callers call syncTaskCalendar(data.id) themselves after a successful save.
+ */
+export const createTask = (task) =>
+  supabase.from('tasks').insert([task]).select().single()
+
+/** Overwrite a task's fields. No read-back; no calendar sync. */
+export const updateTask = (id, patch) =>
+  supabase.from('tasks').update(patch).eq('id', id)
