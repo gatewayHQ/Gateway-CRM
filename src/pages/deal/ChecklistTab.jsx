@@ -3,6 +3,7 @@
 import React, { useState } from 'react'
 import { CHECKLIST_KINDS, checklistKindFor, checklistStateFor, checklistTemplate, checklistRows } from '../../lib/checklistTemplates.js'
 import { OPERATING_STATES } from '../../lib/constants.js'
+import { NEXT_STEP_STATUS, isStepDone, isStepResolved, stepPatch, stepStatus } from '../../lib/stepStatus.js'
 import { Icon, ConfirmDialog, pushToast } from '../../components/UI.jsx'
 import {
   seedChecklist, fetchDealChecklistSteps, deleteDealChecklistSteps, insertChecklistSteps,
@@ -74,18 +75,16 @@ export function ChecklistTab({ deal, property }) {
     if (error) pushToast(`Could not save the checklist settings: ${error.message}`, 'error')
   }
 
-  const isDoneStep = (s) => s.doc_status === 'complete' || s.doc_status === 'approved' || (!s.doc_status && s.completed)
-
   // Swap in the checklist for a state + kind. Steps that appear in both lists
-  // keep their progress, so switching (or reloading) never un-ticks work that
-  // still applies; anything completed that the new list drops is counted, and
-  // the agent is asked first.
+  // keep their status — done or N/A — so switching (or reloading) never undoes
+  // a decision that still applies; anything completed that the new list drops
+  // is counted, and the agent is asked first.
   const replaceChecklist = async (st, k) => {
     setReplacing(true)
-    const done = new Map(steps.filter(isDoneStep).map(s => [s.title, s]))
+    const kept = new Map(steps.filter(isStepResolved).map(s => [s.title, s]))
     const rows = checklistRows(deal.id, checklistTemplate(st, k, deal?.prop_category)).map(r => {
-      const prev = done.get(r.title)
-      return prev ? { ...r, completed: true, doc_status: prev.doc_status || 'complete', completed_at: prev.completed_at || null } : r
+      const prev = kept.get(r.title)
+      return prev ? { ...r, ...stepPatch(stepStatus(prev), prev.completed_at || null) } : r
     })
     const { error: delErr } = await deleteDealChecklistSteps(deal.id)
     if (delErr) { setReplacing(false); pushToast(delErr.message, 'error'); return }
@@ -101,7 +100,7 @@ export function ChecklistTab({ deal, property }) {
   const requestReplace = (st, k) => {
     if (!st) return
     const keep = new Set(checklistTemplate(st, k, deal?.prop_category).map(t => t.title))
-    const lost = steps.filter(s => isDoneStep(s) && !keep.has(s.title)).length
+    const lost = steps.filter(s => isStepDone(s) && !keep.has(s.title)).length
     if (lost) setReplaceAsk({ state: st, kind: k, lost })
     else replaceChecklist(st, k)
   }
@@ -121,15 +120,9 @@ export function ChecklistTab({ deal, property }) {
   }
 
   const cycleStatus = async (step) => {
-    const cur = step.doc_status || (step.completed ? 'complete' : 'pending')
-    const next = { pending: 'complete', complete: 'approved', approved: 'na', na: 'pending' }[cur] || 'pending'
-    const now  = new Date().toISOString()
-    const patch = {
-      doc_status:   next,
-      completed:    next === 'complete' || next === 'approved',
-      completed_at: (next === 'complete' || next === 'approved') ? now : null,
-    }
-    await updateChecklistStep(step.id, patch)
+    const patch = stepPatch(NEXT_STEP_STATUS[stepStatus(step)] || 'pending')
+    const { error } = await updateChecklistStep(step.id, patch)
+    if (error) { pushToast(`Could not update that step: ${error.message}`, 'error'); return }
     setSteps(p => p.map(s => s.id === step.id ? { ...s, ...patch } : s))
   }
 
@@ -161,7 +154,7 @@ export function ChecklistTab({ deal, property }) {
 
   if (loading) return <div style={{ padding: 24, color: 'var(--gw-mist)', fontSize: 13 }}>Loading checklist…</div>
 
-  const doneCount = steps.filter(s => s.doc_status === 'complete' || s.doc_status === 'approved' || (!s.doc_status && s.completed)).length
+  const doneCount = steps.filter(isStepDone).length
   const pct       = steps.length > 0 ? Math.round(doneCount / steps.length * 100) : 0
 
   return (
@@ -216,7 +209,7 @@ export function ChecklistTab({ deal, property }) {
 
         {/* Document rows */}
         {steps.map(step => {
-          const status = step.doc_status || (step.completed ? 'complete' : 'pending')
+          const status = stepStatus(step)
           const action = step.doc_action  || 'manual'
           const isDone = status === 'complete' || status === 'approved'
           const statusBadge = STATUS_BADGE_MAP[status]
@@ -226,12 +219,15 @@ export function ChecklistTab({ deal, property }) {
             <div key={step.id}
               style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--gw-border)' }}>
               {/* Checkbox */}
-              <div onClick={() => cycleStatus(step)} style={{ width: 18, height: 18, borderRadius: 3, flexShrink: 0, cursor: 'pointer', transition: 'all 140ms',
+              <button type="button" onClick={() => cycleStatus(step)}
+                aria-label={`${step.title}: ${statusBadge?.label || 'pending'}. Change status`}
+                title="Click to change: complete → approved → N/A → pending"
+                style={{ width: 18, height: 18, borderRadius: 3, flexShrink: 0, cursor: 'pointer', transition: 'all 140ms', padding: 0,
                 border: `2px solid ${isDone ? 'var(--gw-green)' : 'var(--gw-border)'}`,
                 background: isDone ? 'var(--gw-green)' : '#fff',
                 display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 {isDone && <Icon name="check" size={10} style={{ color: '#fff' }} />}
-              </div>
+              </button>
 
               {/* Title */}
               <div style={{ flex: 1, minWidth: 0 }}>

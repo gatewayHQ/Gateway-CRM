@@ -111,6 +111,28 @@ describe('getClosingGate', () => {
   })
 })
 
+describe('getClosingGate — N/A checklist steps', () => {
+  const required = (status, completed) => ({ id: 'n1', title: 'HOA documents', doc_status: status, completed, if_applicable: false, doc_action: 'manual' })
+
+  it('does not block closing on a required step the agent marked N/A', () => {
+    const gate = getClosingGate(dealReady(), { steps: [...steps(2), required('na', true)], envelopes: [], commission })
+    expect(gate.canClose).toBe(true)
+    expect(gate.waived).toEqual(['HOA documents'])
+  })
+
+  it('also accepts N/A rows saved before the fix (completed:false underneath)', () => {
+    const gate = getClosingGate(dealReady(), { steps: [...steps(2), required('na', false)], envelopes: [], commission })
+    expect(gate.issues.some(i => i.code === ISSUE_CODES.STEPS_INCOMPLETE)).toBe(false)
+  })
+
+  it('still blocks on a pending step, and lists nothing as waived', () => {
+    const gate = getClosingGate(dealReady(), { steps: [...steps(2), required('pending', false)], envelopes: [], commission })
+    expect(gate.canClose).toBe(false)
+    expect(gate.issues.find(i => i.code === ISSUE_CODES.STEPS_INCOMPLETE).detail).toEqual(['HOA documents'])
+    expect(gate.waived).toEqual([])
+  })
+})
+
 describe('gateBadge', () => {
   it('green Ready when canClose', () => {
     const b = gateBadge({ canClose: true, issues: [] })

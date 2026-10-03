@@ -41,6 +41,7 @@ import { createClient } from '@supabase/supabase-js'
 import { boldsign, listAllTemplates, getRateLimitState } from './boldsign.js'
 import { normalizeSigners, outstandingSigners } from '../src/lib/services/boldsignSigners.js'
 import { OPERATING_STATES } from '../src/lib/constants.js'
+import { isStepResolved } from '../src/lib/stepStatus.js'
 import { ALL_DEAL_STAGES, isOpenStage } from '../src/lib/stages.js'
 import { streetLine, readPropertiesWithUnit } from '../src/lib/address.js'
 import { syncAllDealCalendars, syncAllTaskCalendars, pruneAllDuplicateCalendarEvents } from './_lib/calendarSync.js'
@@ -515,11 +516,11 @@ async function runNudges(supabase, { baseUrl = null } = {}) {
   // Pull steps for any deal we may need to nag (cheap: one query for all)
   const dealIds = dealsArr.map(d => d.id)
   const { data: stepRows } = await supabase
-    .from('transaction_steps').select('deal_id, completed, if_applicable')
+    .from('transaction_steps').select('deal_id, completed, doc_status, if_applicable')
     .in('deal_id', dealIds)
   const openByDeal = new Map()
   for (const s of stepRows || []) {
-    if (s.if_applicable || s.completed) continue
+    if (s.if_applicable || isStepResolved(s)) continue   // N/A is not "open"
     openByDeal.set(s.deal_id, (openByDeal.get(s.deal_id) || 0) + 1)
   }
 

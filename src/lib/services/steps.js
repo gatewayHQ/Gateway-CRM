@@ -9,6 +9,7 @@
 import { supabase } from '../supabase.js'
 import { TABLES } from '../constants.js'
 import { audit } from '../audit.js'
+import { isStepResolved, stepPatch } from '../stepStatus.js'
 
 // `satisfied_by` arrives with migration 0028 (which envelope proves this
 // sign-step). Selected separately so a database that has not applied 0028 yet
@@ -31,14 +32,17 @@ export async function listDealSteps(dealId) {
   return { steps: data || [], error: error?.message || null }
 }
 
+// Ticks a step done, or back to pending. Writes doc_status as well as
+// `completed` (via stepPatch), so the Checklist tab shows the same thing the
+// deal page does. Returns the fields written (`patch`), for the caller's local state.
 export async function toggleDealStep(deal, step, { actorId } = {}) {
   if (!step?.id) return { ok: false, error: 'step missing' }
-  const completed = !step.completed
+  const patch = stepPatch(isStepResolved(step) ? 'pending' : 'complete')
   const { error } = await supabase
     .from(TABLES.TRANSACTION_STEPS)
-    .update({ completed, completed_at: completed ? new Date().toISOString() : null })
+    .update(patch)
     .eq('id', step.id)
   if (error) return { ok: false, error: error.message }
   audit.stepToggled(deal, step, actorId)
-  return { ok: true, completed }
+  return { ok: true, patch }
 }

@@ -22,6 +22,7 @@ import { uploadDealDocument, signDealDocumentUrl, listDealFiles } from '../lib/s
 import { submitDealForReview, decideDealReview } from '../lib/services/review.js'
 import { generateClosingPacket, listClosingPackets, openClosingPacket } from '../lib/services/closingPacket.js'
 import { listDealSteps, toggleDealStep } from '../lib/services/steps.js'
+import { isStepResolved } from '../lib/stepStatus.js'
 import { streetLine } from '../lib/address.js'
 import { getAuthSession } from '../lib/services/auth.js'
 import { createActivity } from '../lib/services/activities.js'
@@ -397,7 +398,7 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
   const toggleStep = async (step) => {
     const r = await toggleDealStep(deal, step, { actorId: activeAgent?.id })
     if (!r.ok) { pushToast(r.error, 'error'); return }
-    setSteps(s => s.map(x => x.id === step.id ? { ...x, completed: r.completed } : x))
+    setSteps(s => s.map(x => x.id === step.id ? { ...x, ...r.patch } : x))
   }
 
   const persistKeyDate = async (idx, date) => {
@@ -441,8 +442,9 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
   const railStages   = track.stages.filter(s => s !== 'lost')
   const currentCol   = boardStageFor(deal, track.id)
   const currentIdx   = railStages.indexOf(currentCol)
-  const doneSteps    = steps.filter(s => s.completed).length
-  const nextStep     = steps.find(s => !s.completed)
+  // N/A counts as dealt with — the next step is the next one still to do.
+  const doneSteps    = steps.filter(isStepResolved).length
+  const nextStep     = steps.find(s => !isStepResolved(s))
   const keyDates     = cd.key_dates || []
   // How much of what this deal's agreements ask for is already on file. Read
   // straight off comp_data — the same jsonb the Deal Terms tab writes.
@@ -794,6 +796,11 @@ export default function DealPage({ db, setDb, activeAgent, go, isAdmin, dealId, 
                 </li>
               ))}
             </ul>
+          )}
+          {gate.waived?.length > 0 && (
+            <div style={{ fontSize: 12, color: 'var(--gw-mist)' }}>
+              Marked N/A: {gate.waived.slice(0, 4).join(' · ')}{gate.waived.length > 4 ? ` · +${gate.waived.length - 4} more` : ''}
+            </div>
           )}
           {isAdmin && deal.review_status === 'pending' && (
             <div style={{ borderTop: '1px solid var(--gw-border)', paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
