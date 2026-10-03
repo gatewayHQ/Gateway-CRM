@@ -1,12 +1,15 @@
 import React, { useState, useEffect } from 'react'
 import Anthropic from '@anthropic-ai/sdk'
-import { supabase } from '../lib/supabase.js'
+import { getAuthSession, getAuthUser, fetchOutlookConnection } from '../lib/services/marketingAccount.js'
+import {
+  fetchTemplates, createTemplate, updateTemplate, deleteTemplate, updateTemplateUsageCount, insertEmailActivity,
+} from '../lib/services/templates.js'
 import { Icon, Badge, Drawer, EmptyState, ConfirmDialog, Modal, pushToast } from '../components/UI.jsx'
 import { TEMPLATE_CATEGORIES, TEMPLATE_CATEGORY_LABELS } from '../lib/enums.js'
 
 // Load from Supabase auth metadata first (cross-device), fall back to localStorage
 async function loadUserKey(metaField, localKey) {
-  const { data: { user } } = await supabase.auth.getUser()
+  const { data: { user } } = await getAuthUser()
   return user?.user_metadata?.[metaField] || localStorage.getItem(localKey) || ''
 }
 
@@ -75,9 +78,9 @@ Rules:
     setSaving(true)
     let error
     if (template?.id) {
-      ({ error } = await supabase.from('templates').update(form).eq('id', template.id))
+      ({ error } = await updateTemplate(template.id, form))
     } else {
-      ({ error } = await supabase.from('templates').insert([form]))
+      ({ error } = await createTemplate(form))
     }
     setSaving(false)
     if (error) { pushToast(error.message, 'error'); return }
@@ -302,7 +305,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
       setResendReady(!!k)
     })
     loadUserKey('resend_from', 'gw_resend_from').then(f => setResendFrom(f))
-    supabase.from('ms_graph_connection_status').select('*').maybeSingle()
+    fetchOutlookConnection()
       .then(({ data }) => setOutlookStatus(data && data.status === 'connected' ? data : false))
   }, [])
 
@@ -312,7 +315,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
 
     if (outlookStatus) {
       try {
-        const { data: { session } } = await supabase.auth.getSession()
+        const { data: { session } } = await getAuthSession()
         const html = body.split(/\n\n+/).map(p => `<p style="margin:0 0 16px 0">${p.replace(/\n/g, '<br>')}</p>`).join('')
         const res = await fetch('/api/email-send?action=outlook-send', {
           method: 'POST',
@@ -331,7 +334,7 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
           return
         }
         if (ctx?.templateId) {
-          await supabase.from('templates').update({ usage_count: (ctx.usageCount || 0) + 1 }).eq('id', ctx.templateId)
+          await updateTemplateUsageCount(ctx.templateId, (ctx.usageCount || 0) + 1)
         }
         setSending(false)
         pushToast(asDraft ? 'Saved to your Outlook drafts' : `Email sent to ${to}`)
@@ -368,16 +371,16 @@ export function ComposeModal({ ctx, db, activeAgent, onClose }) {
 
         // Log the sent email as an activity
         if (contact?.id) {
-          await supabase.from('activities').insert([{
+          await insertEmailActivity({
             contact_id: contact.id,
             agent_id: agent.id || null,
             type: 'email',
             notes: `Sent: "${subject}"\n\n${body}`,
-          }])
+          })
         }
 
         if (ctx?.templateId) {
-          await supabase.from('templates').update({ usage_count: (ctx.usageCount || 0) + 1 }).eq('id', ctx.templateId)
+          await updateTemplateUsageCount(ctx.templateId, (ctx.usageCount || 0) + 1)
         }
 
         setSending(false)
@@ -469,19 +472,19 @@ export default function TemplatesPage({ db, setDb, activeAgent, openCompose }) {
   const filtered = templates.filter(t => !filterCat || t.category === filterCat)
 
   const reload = async () => {
-    const { data } = await supabase.from('templates').select('*').order('created_at', { ascending: false })
+    const { data } = await fetchTemplates()
     setDb(p => ({ ...p, templates: data || [] }))
   }
 
   const del = async (id) => {
-    await supabase.from('templates').delete().eq('id', id)
+    await deleteTemplate(id)
     pushToast('Template deleted', 'info')
     setConfirm(null); reload()
   }
 
   const duplicate = async (t) => {
     const { id, created_at, ...rest } = t
-    await supabase.from('templates').insert([{ ...rest, name: `${t.name} (copy)`, usage_count: 0 }])
+    await createTemplate({ ...rest, name: `${t.name} (copy)`, usage_count: 0 })
     pushToast('Template duplicated')
     reload()
   }

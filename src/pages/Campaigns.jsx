@@ -12,8 +12,8 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { supabase } from '../lib/supabase.js'
-import { compressForUpload, IMMUTABLE_CACHE } from '../lib/imageCompress.js'
+import { uploadCampaignImage, getCampaignImagePublicUrl, fetchMailingContacts } from '../lib/services/campaigns.js'
+import { compressForUpload } from '../lib/imageCompress.js'
 import { Icon, Modal, pushToast, EmptyState, ConfirmDialog } from '../components/UI.jsx'
 import QrCode from '../components/QrCode.jsx'
 import { groupMailings, mailingsSummary } from '../lib/services/mailingGroups.js'
@@ -571,11 +571,9 @@ async function uploadImageToStorage(file, setUploading, idx) {
   try {
     const { blob, ext, type } = await compressForUpload(file, 'landing')
     const path = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
-    const { error: upErr } = await supabase.storage
-      .from('campaign-images')
-      .upload(path, blob, { contentType: type, upsert: false, cacheControl: IMMUTABLE_CACHE })
+    const { error: upErr } = await uploadCampaignImage(path, blob, type)
     if (upErr) throw upErr
-    const { data: { publicUrl } } = supabase.storage.from('campaign-images').getPublicUrl(path)
+    const { data: { publicUrl } } = getCampaignImagePublicUrl(path)
     return publicUrl
   } finally {
     setUploading(u => { const n = { ...u }; delete n[idx]; return n })
@@ -2554,7 +2552,7 @@ export default function CampaignsPage({ db, isAdmin, activeAgent }) {
       // whole brokerage for everyone, so an agent's "Scans (30d)" disagreed with
       // the campaigns listed directly beneath it.
       api('dashboard', listParams, 'GET'),
-      supabase.from('contacts').select('id, first_name, last_name, email, phone, owner_address, owner_city, owner_state, owner_zip').order('last_name'),
+      fetchMailingContacts(),
     ])
     if (mRes.error && /does not exist|relation|invalid path|server misconfigured/i.test(mRes.error)) {
       setSetupNeeded(true)

@@ -2,6 +2,10 @@ import React, { useState, useEffect, useRef } from 'react'
 import { upsertContact } from '../lib/services/contacts.js'
 import { supabase } from '../lib/supabase.js'
 import { syncTaskCalendar } from '../lib/services/tasks.js'
+import {
+  fetchColdCallLists, createColdCallList, deleteColdCallList, fetchColdCallLeads, insertColdCallLeads,
+  updateColdCallLead, fetchContactPhones, insertColdCallProperty, insertColdCallActivity, insertCallbackTask,
+} from '../lib/services/coldCalls.js'
 import { fromDateTimeLocalInput } from '../lib/helpers.js'
 import { Icon, Modal, pushToast } from '../components/UI.jsx'
 import { CONTACT_TYPES, PROPERTY_TYPES, titleCase } from '../lib/enums.js'
@@ -146,8 +150,7 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
     const assignedAgent = listAgent || activeAgent?.id
     if (!assignedAgent) { pushToast('No active agent — please refresh and sign in again', 'error'); return }
     setImporting(true); setStep(4)
-    const { data: list, error: le } = await supabase
-      .from('cold_call_lists').insert([{ name: listName.trim(), agent_id: assignedAgent }]).select().single()
+    const { data: list, error: le } = await createColdCallList(listName.trim(), assignedAgent)
     if (le) { pushToast('Failed: ' + le.message, 'error'); setImporting(false); return }
 
     const getVal = (row, field) => {
@@ -177,7 +180,7 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
     const allImportPhones = importLeads.flatMap(l => l.phones).map(p => p.replace(/\D/g,''))
     if (allImportPhones.length > 0) {
       // contacts stores a single phone (text), not a phones[] array.
-      const { data: existingContacts } = await supabase.from('contacts').select('phone')
+      const { data: existingContacts } = await fetchContactPhones()
       for (const c of (existingContacts || [])) {
         if (c.phone) dupePhoneSet.add(c.phone.replace(/\D/g, ''))
       }
@@ -191,7 +194,7 @@ function UploadModal({ open, onClose, agents, activeAgent, onUploaded }) {
 
     let done = 0
     for (let i = 0; i < leads.length; i += 50) {
-      const { error } = await supabase.from('cold_call_leads').insert(leads.slice(i, i + 50))
+      const { error } = await insertColdCallLeads(leads.slice(i, i + 50))
       if (error) { pushToast('Import error: ' + error.message, 'error'); break }
       done += Math.min(50, leads.length - i)
       setProgress(Math.round(done / leads.length * 100))
@@ -336,12 +339,12 @@ function ConvertModal({ lead, agents, activeAgent, setDb, contacts = [], onClose
       const VALID_PROP_TYPES = PROPERTY_TYPES
       const rawType = (lead.prop_type || '').toLowerCase().trim()
       const safeType = VALID_PROP_TYPES.includes(rawType) ? rawType : 'residential'
-      const { data: propData } = await supabase.from('properties').insert([{
+      const { data: propData } = await insertColdCallProperty({
         address: [lead.property_address, lead.town, lead.state].filter(Boolean).join(', '),
         type: safeType,
         details: { category: lead.prop_type || 'residential', unit_count: lead.unit_count || null },
         linked_contact_id: data.id, status: 'active',
-      }]).select().single()
+      })
       if (propData && setDb) {
         setDb(p => ({ ...p, properties: [propData, ...(p.properties || [])] }))
       }
@@ -349,14 +352,14 @@ function ConvertModal({ lead, agents, activeAgent, setDb, contacts = [], onClose
 
     // Log call notes as activity on contact timeline
     if (lead?.call_notes?.trim()) {
-      await supabase.from('activities').insert([{
+      await insertColdCallActivity({
         contact_id: data.id,
         agent_id: form.assigned_agent_id || null,
         type: 'call', body: lead.call_notes,
-      }])
+      })
     }
 
-    await supabase.from('cold_call_leads').update({ status: 'converted', contact_id: data.id }).eq('id', lead.id)
+    await updateColdCallLead(lead.id, { status: 'converted', contact_id: data.id })
     setSaving(false)
     pushToast(`Contact created: ${form.first_name} ${form.last_name}`)
     onConverted(data)
@@ -462,7 +465,7 @@ function PowerDialer({ leads, startIndex, agents, activeAgent, onClose, onUpdate
 
   const saveNotes = async () => {
     if (!lead) return
-    await supabase.from('cold_call_leads').update({ call_notes: notes }).eq('id', lead.id)
+    await updateColdCallLead(lead.id, { call_notes: notes })
     onUpdate(lead.id, { call_notes: notes })
   }
 
@@ -477,9 +480,9 @@ function PowerDialer({ leads, startIndex, agents, activeAgent, onClose, onUpdate
     setSaving(true)
     const patch = { status, call_notes: notes, called_at: new Date().toISOString(), ...extra }
     if (status === 'called') patch.call_count = (lead.call_count || 0) + 1
-    await supabase.from('cold_call_leads').update(patch).eq('id', lead.id)
+    await updateColdCallLead(lead.id, patch)
     if (status === 'callback' && extra.callback_date) {
-      const { data: callbackTask } = await supabase.from('tasks').insert([{
+      const { data: callbackTask } = await insertCallbackTask({
         title: `Callback: ${lead.contact_name || lead.property_address || 'Cold Call Lead'}`,
         type: 'call', priority: 'high',
         // 9am in the agent's own zone, not 9am UTC — the callback task's date
@@ -488,7 +491,7 @@ function PowerDialer({ leads, startIndex, agents, activeAgent, onClose, onUpdate
         agent_id: activeAgent?.id || null,
         notes: notes || null,
         completed: false,
-      }]).select().single()
+      })
       syncTaskCalendar(callbackTask?.id)
       pushToast('Callback task created')
     }
@@ -667,7 +670,7 @@ export default function ColdCallsPage({ db, setDb, activeAgent }) {
   useEffect(() => { loadLists() }, [])
 
   const loadLists = async () => {
-    const { data, error } = await supabase.from('cold_call_lists').select('*').order('created_at', { ascending: false })
+    const { data, error } = await fetchColdCallLists()
     if (error?.code === '42P01') { setReady(false); return }
     const rows = data || []
     setLists(rows)
@@ -677,14 +680,14 @@ export default function ColdCallsPage({ db, setDb, activeAgent }) {
   useEffect(() => {
     if (!selected) return
     setLoadingLeads(true)
-    supabase.from('cold_call_leads').select('*').eq('list_id', selected.id).order('created_at', { ascending: true })
+    fetchColdCallLeads(selected.id)
       .then(({ data }) => { setLeads(data || []); setLoadingLeads(false) })
   }, [selected?.id])
 
   const updateLead = (id, patch) => setLeads(p => p.map(l => l.id === id ? {...l, ...patch} : l))
 
   const deleteList = async (list) => {
-    await supabase.from('cold_call_lists').delete().eq('id', list.id)
+    await deleteColdCallList(list.id)
     setLists(p => p.filter(l => l.id !== list.id))
     if (selected?.id === list.id) {
       const rest = lists.filter(l => l.id !== list.id)
@@ -857,7 +860,7 @@ export default function ColdCallsPage({ db, setDb, activeAgent }) {
 
       {uploadOpen && (
         <UploadModal open={uploadOpen} onClose={()=>setUploadOpen(false)} agents={agents} activeAgent={activeAgent}
-          onUploaded={()=>{ loadLists(); if(selected) { supabase.from('cold_call_leads').select('*').eq('list_id',selected.id).order('created_at',{ascending:true}).then(({data})=>setLeads(data||[])) } }} />
+          onUploaded={()=>{ loadLists(); if(selected) { fetchColdCallLeads(selected.id).then(({data})=>setLeads(data||[])) } }} />
       )}
       {dialer && (
         <PowerDialer leads={leads} startIndex={dialerStart} agents={agents} activeAgent={activeAgent}
