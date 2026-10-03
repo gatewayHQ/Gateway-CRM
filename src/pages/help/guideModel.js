@@ -124,9 +124,16 @@ export function validateGuides(guides, { categories, routes }) {
     if (!g.steps?.length) problems.push(`${where} has no steps`)
     for (const [i, s] of (g.steps || []).entries()) {
       if (!s.title || !s.body) problems.push(`${where} step ${i + 1} needs a title and a body`)
-      if (formatText(s.body).length && String(s.body).split('**').length % 2 === 0) {
-        problems.push(`${where} step ${i + 1} has an unmatched **`)
-      }
+    }
+    // Every piece of text that gets **bold** formatting must pair its markers.
+    const texts = [
+      ['summary', g.summary],
+      ...(g.before || []).map((t, i) => [`before ${i + 1}`, t]),
+      ...(g.steps || []).flatMap((s, i) => [[`step ${i + 1}`, s.body], [`step ${i + 1} tip`, s.tip]]),
+      ...(g.troubleshooting || []).flatMap((t, i) => [[`problem ${i + 1}`, t.problem], [`fix ${i + 1}`, t.fix]]),
+    ]
+    for (const [label, text] of texts) {
+      if (text && String(text).split('**').length % 2 === 0) problems.push(`${where} ${label} has an unmatched **`)
     }
     for (const r of g.routes || []) if (!routes.includes(r)) problems.push(`${where} lists unknown screen "${r}"`)
     if (g.action && !routes.includes(g.action.route)) problems.push(`${where} "Take me there" goes to unknown screen "${g.action.route}"`)

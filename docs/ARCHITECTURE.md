@@ -98,6 +98,15 @@ Field, Tabs, EmptyState, toasts, overlay/focus hooks); see
 [`docs/DESIGN_SYSTEM.md`](DESIGN_SYSTEM.md). Pages import from
 `components/ui`; legacy `components/UI.jsx` re-exports the overlapping pieces.
 
+## Help & How-To content
+
+The in-app guides (`src/pages/help/`) are plain data in `guides/*.js`, one
+file per topic, written from the real screens: **bold** text is the exact
+on-screen label. When you rename a button, change a flow or add a screen,
+update its guide in the same change. `guides.test.js` runs `validateGuides`
+in CI (unknown screens, missing related guides, unmatched `**`) and checks
+that common questions ("split pdf", "send for signature") find the right guide.
+
 ## Conventions
 
 - **Services take the client as their first argument**

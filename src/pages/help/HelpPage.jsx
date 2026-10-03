@@ -17,6 +17,7 @@ function Rich({ text }) {
 }
 
 const categoryOf = (id) => CATEGORIES.find(c => c.id === id)
+const guideCount = (n) => `${n} guide${n === 1 ? '' : 's'}`
 
 function GuideLink({ guide, onOpen }) {
   const cat = categoryOf(guide.category)
@@ -66,7 +67,7 @@ function GuideDetail({ guide, guides, onBack, onOpen, onAction }) {
           {guide.adminOnly && <span className="help-guide__admin">Office admins only</span>}
         </div>
         {guide.action && (
-          <Button variant="primary" icon="send" onClick={() => onAction(guide.action)} className="help-guide__go">
+          <Button variant="primary" iconRight="chevronRight" onClick={() => onAction(guide.action)} className="help-guide__go">
             {guide.action.label}
           </Button>
         )}
@@ -131,19 +132,20 @@ export default function HelpPage({ isAdmin, go, startNew, focusRecord, onFocusHa
     onFocusHandled?.()
   }, [focusRecord]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const open = (id) => { setOpenId(id); scrollRef.current?.scrollTo?.({ top: 0 }) }
-  const back = () => { setOpenId(null); scrollRef.current?.scrollTo?.({ top: 0 }) }
+  // Opening or leaving a guide starts at the top of the page, not wherever the list was scrolled to.
+  const show = (id) => { setOpenId(id); scrollRef.current?.scrollTo?.({ top: 0 }) }
   const takeMeThere = (action) => (action.startNew && startNew ? startNew(action.startNew) : go?.(action.route))
 
   const guide = openId && guides.find(g => g.id === openId)
   const results = useMemo(() => searchGuides(guides, query), [guides, query])
   const contextGuides = contextRoute ? guidesForRoute(guides, contextRoute) : []
+  const contextTitle = contextRoute ? pageTitleFor(contextRoute).title || 'this page' : ''
   const searching = query.trim().length > 0
 
   return (
     <div className="page-content help" ref={scrollRef}>
       {guide ? (
-        <GuideDetail guide={guide} guides={guides} onBack={back} onOpen={open} onAction={takeMeThere} />
+        <GuideDetail guide={guide} guides={guides} onBack={() => show(null)} onOpen={show} onAction={takeMeThere} />
       ) : (
         <>
           <div className="page-header">
@@ -163,14 +165,14 @@ export default function HelpPage({ isAdmin, go, startNew, focusRecord, onFocusHa
             />
           </div>
           <div role="status" className="sr-only">
-            {searching ? `${results.length} guide${results.length === 1 ? '' : 's'} found` : ''}
+            {searching ? `${guideCount(results.length)} found` : ''}
           </div>
 
           {searching ? (
             results.length ? (
               <section aria-label="Search results">
-                <h2 className="help-section-title">{results.length} guide{results.length === 1 ? '' : 's'} for “{query.trim()}”</h2>
-                <GuideList guides={results} onOpen={open} label="Search results" />
+                <h2 className="help-section-title">{guideCount(results.length)} for “{query.trim()}”</h2>
+                <GuideList guides={results} onOpen={show} label="Search results" />
               </section>
             ) : (
               <EmptyState
@@ -185,12 +187,12 @@ export default function HelpPage({ isAdmin, go, startNew, focusRecord, onFocusHa
                 <section className="help-context" aria-labelledby="help-context-title">
                   <div className="help-context__head">
                     <h2 id="help-context-title" className="help-section-title">
-                      Help with {pageTitleFor(contextRoute).title || 'this page'}
+                      Help with {contextTitle}
                     </h2>
                     <Button size="sm" variant="ghost" onClick={() => setContextRoute(null)}>Show everything</Button>
                   </div>
                   {contextGuides.length
-                    ? <GuideList guides={contextGuides} onOpen={open} label={`Guides for ${pageTitleFor(contextRoute).title || 'this page'}`} />
+                    ? <GuideList guides={contextGuides} onOpen={show} label={`Guides for ${contextTitle}`} />
                     : <p className="help-muted">There's no guide for this screen yet — browse the topics below.</p>}
                 </section>
               )}
@@ -202,7 +204,7 @@ export default function HelpPage({ isAdmin, go, startNew, focusRecord, onFocusHa
                       <span className="help-topic__icon" aria-hidden="true"><Icon name={c.icon} size={16} /></span>
                       {c.label}
                     </h2>
-                    <GuideList guides={c.guides} onOpen={open} label={c.label} />
+                    <GuideList guides={c.guides} onOpen={show} label={c.label} />
                   </section>
                 ))}
               </div>

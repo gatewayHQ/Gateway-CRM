@@ -83,7 +83,7 @@ export function PortalTab({ deal }) {
 
           <div style={{ fontSize: 11, color: 'var(--gw-mist)', marginTop: 14, lineHeight: 1.6, borderTop: '1px solid var(--gw-border)', paddingTop: 12 }}>
             Anyone with this link can view the portal — no login required. Only documents you mark
-            <strong> “Share with client”</strong> on the Documents tab appear. Disable any time to revoke access.
+            <strong> “Share with client portal”</strong> on the Documents tab appear. Disable any time to revoke access.
           </div>
         </>
       )}
