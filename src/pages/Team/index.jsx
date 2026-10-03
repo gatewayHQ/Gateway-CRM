@@ -30,7 +30,9 @@ export default function TeamPage({ db, setDb, activeAgent, isAdmin, onSwitchAgen
   const loadTeams = async () => {
     const [teamsRes, splitsRes] = await Promise.all([
       fetchTeams(),
-      fetchAllTeamSplits().catch(() => ({ data: [] })),
+      // A query builder is a thenable with no .catch — the two-argument then is
+      // how a missing table (un-migrated database) degrades to "no splits".
+      fetchAllTeamSplits().then(r => r, () => ({ data: [] })),
     ])
     // A failed read here used to render as "0 teams", which is indistinguishable
     // from having no teams — and made a save that worked look like it didn't.
