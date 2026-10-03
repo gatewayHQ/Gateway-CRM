@@ -27,9 +27,18 @@ code goes. `api/` (Vercel functions) is out of scope here.
  └──────────────────────────────────────────────────────────────┘
 ```
 
-**Dependency rule:** an import may only point *down* this stack. Layout
-components never import Supabase; services never import React; pure rule
-modules import neither.
+**Dependency rule:** an import may only point *down* this stack. Pages,
+components and hooks never call Supabase directly; services never import
+React; pure rule modules import neither.
+
+**Service conventions.** One module per table or aggregate (`dealRecords.js`
+is the `deals` row, `contactRecords.js` the `contacts` row, `auth.js` Supabase
+Auth, `outlook.js` the Graph connection view, …). Functions return the
+Supabase result untouched (`{ data, error, … }` or the builder), so callers
+keep their own retries, fallbacks and messages. Most import the shared client;
+the older scoped readers (`fetchVisibleDeals`, `upsertContact`, …) take the
+client as their first argument so tests can pass a stub, and each has a
+shared-client binding (`loadVisibleDeals`, `upsertContactRecord`, …) for pages.
 
 ## The app shell (`src/app/`)
 
@@ -100,9 +109,12 @@ Ordered by payoff. Each step is behavior-preserving and can ship on its own.
    `pages/pipeline/` (board) and `pages/deal/` (drawer, tabs, `signatures/`),
    with its data helpers moved to `lib/services/dealChecklist.js` and
    `dealContacts.js`. Its remaining inline queries move in step 2.
-2. **Direct Supabase calls in pages** (~39 `.jsx` files). Move each into the
-   matching `lib/services/*` module. Start with `Properties.jsx` (25),
-   `Sequences.jsx` (13) and `ColdCalls.jsx` (12).
+2. ~~**Direct Supabase calls in pages**~~ **Done:** ~240 calls in 48 files
+   moved into `lib/services/`. Pages, components and hooks no longer call
+   `supabase.from/rpc/storage/channel/auth`; the only UI-layer imports of the
+   client are the shell hooks that inject it into client-parameterised
+   services (`agents.js`, `notifications.js`). Remaining lib-level users:
+   `lib/audit.js`, `lib/webhooks.js`, `lib/om.js`.
 3. **`Campaigns.jsx` (≈2.9k) and `Commission.jsx` (≈1.2k):** same treatment as
    Pipeline — a folder per page, presentational pieces separated from data.
 4. **The `db` / `setDb` prop** is threaded through every page. Once pages read
