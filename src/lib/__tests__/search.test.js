@@ -154,10 +154,11 @@ describe('routeForResult', () => {
 })
 
 describe('the box is actually wired up', () => {
-  const app = read('../../App.jsx')
+  // The top bar moved out of App.jsx into the shell's layout components.
+  const app = read('../../app/layout/Topbar.jsx')
   const cmp = read('../../components/GlobalSearch.jsx')
 
-  it('App.jsx no longer renders the dead handler-less input', () => {
+  it('the top bar no longer renders the dead handler-less input', () => {
     expect(app).not.toMatch(/<input placeholder="Search contacts, properties, deals…" defaultValue="" \/>/)
     expect(app).toMatch(/<GlobalSearch/)
   })
