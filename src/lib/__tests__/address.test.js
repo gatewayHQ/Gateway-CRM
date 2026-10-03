@@ -92,7 +92,9 @@ describe('geocoding', () => {
 
   it('is what the pages that hit a geocoder or a map actually call', () => {
     // (Integrations.jsx geocoded for the Mailchimp radius sync, removed Oct 2026.)
-    for (const rel of ['../../pages/Properties.jsx']) {
+    // The property drawer geocodes on save; the radius-mailing modal geocodes
+    // the subject property and its neighbours.
+    for (const rel of ['../../pages/properties/PropertyDrawer.jsx', '../../pages/properties/RadiusMailingModal.jsx']) {
       const src = read(rel)
       expect(src).toMatch(/geocodeQuery\(/)
       // No hand-rolled join feeding nominatim/maps — that is how the suite leaks in.
@@ -183,7 +185,7 @@ describe('a database without migration 0042', () => {
   })
 
   it('lets the property drawer save without the suite rather than failing', () => {
-    const src = read('../../pages/Properties.jsx')
+    const src = read('../../pages/properties/PropertyDrawer.jsx')
     expect(src).toMatch(/isMissingUnitColumn\(error\)/)
     expect(src).toMatch(/migration 0042/)
   })

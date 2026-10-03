@@ -2,7 +2,7 @@
 // The failure that matters is a corrupt or hostile value there taking the whole
 // Campaigns page down on load — an agent would just see a blank screen.
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { readCollapsePrefs } from '../Campaigns.jsx'
+import { readCollapsePrefs } from '../campaigns/collapsePrefs.js'
 
 const KEY = 'gw.campaigns.sections'
 

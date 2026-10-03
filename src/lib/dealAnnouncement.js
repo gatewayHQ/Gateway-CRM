@@ -160,7 +160,7 @@ const money = (val) => {
 /**
  * Every photo the CRM already holds for a property, newest first in the order
  * the agent arranged them. Properties store uploads under details.photos[]
- * (public URLs in the `property-photos` bucket, see src/pages/Properties.jsx).
+ * (public URLs in the `property-photos` bucket, see src/pages/properties/PhotoUploader.jsx).
  */
 export function propertyPhotos(property) {
   const photos = property?.details?.photos
