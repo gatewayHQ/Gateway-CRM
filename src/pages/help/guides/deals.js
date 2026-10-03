@@ -85,7 +85,7 @@ export default [
     title: 'Upload and organise a deal’s documents',
     summary: 'Upload files to a deal, file them into the right pile, download them, and share them with your client.',
     minutes: 2,
-    keywords: ['upload', 'documents', 'files', 'attach', 'pdf', 'download', 'file', 'share with client', 'required forms'],
+    keywords: ['upload', 'documents', 'files', 'attach', 'pdf', 'download', 'file', 'share with client', 'required forms', 'quick look', 'preview', 'view'],
     routes: ['pipeline'],
     action: { label: 'Open Pipeline', route: 'pipeline' },
     steps: [
@@ -93,6 +93,7 @@ export default [
       { title: 'Open the Documents tab', body: 'Click the **Documents** tab.' },
       { title: 'Upload', body: 'Drop a file on **Drop a file or click to upload** (PDF, Word or images, up to 50 MB).' },
       { title: 'File it', body: 'Files are sorted into piles like **Offers & purchase** or **Disclosures** from their name. To move one, click **⋯** → **File as …**.' },
+      { title: 'Take a quick look', body: 'Click a document’s name (or the eye icon) to preview it without downloading. Use the arrows — or ← and → on your keyboard — to flip through the deal’s documents, and **Split**, **Merge with…** or **Mark up…** right from the preview.', tip: 'Merging and sending your own PDF for signature have the same eye icon, so you can check a file before you pick it.' },
       { title: 'Download or share', body: 'Click **⋯** → **Download**. To show a file in the client portal, click **⋯** → **Share with client portal**.' },
       { title: 'Need blank state forms?', body: 'Open **Required Forms** at the top of the tab, enter the state and type, and click **Find Forms**.' },
     ],

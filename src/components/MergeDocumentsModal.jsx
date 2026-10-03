@@ -1,5 +1,6 @@
 import React from 'react'
 import { Icon, Modal, pushToast } from './UI.jsx'
+import { IconButton } from './ui/index.js'
 import { validateMerge, baseName } from '../lib/services/pdfEdit.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -19,7 +20,7 @@ import { validateMerge, baseName } from '../lib/services/pdfEdit.js'
 // uploaded to the deal as part of the merge rather than living only inside the
 // merged copy.
 // ─────────────────────────────────────────────────────────────────────────────
-export default function MergeDocumentsModal({ items, available = [], onClose, onAddFromDeal, onAddFromDisk, onRemove, onReorder, onSubmit }) {
+export default function MergeDocumentsModal({ items, available = [], onClose, onAddFromDeal, onAddFromDisk, onRemove, onReorder, onSubmit, onPreview }) {
   const [name, setName] = React.useState('')
   const [picking, setPicking] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
@@ -109,15 +110,21 @@ export default function MergeDocumentsModal({ items, available = [], onClose, on
               </div>
             )}
             {available.map(doc => (
-              <button
-                key={doc.key}
-                className="btn btn--ghost"
-                style={{ display: 'flex', width: '100%', justifyContent: 'flex-start', gap: 8, padding: '8px 12px', borderRadius: 0, borderBottom: '1px solid var(--gw-border)', fontSize: 13 }}
-                onClick={() => { onAddFromDeal(doc); setPicking(false) }}
-              >
-                <Icon name="document" size={13} style={{ color: 'var(--gw-azure)', flexShrink: 0 }} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.label}</span>
-              </button>
+              <div key={doc.key} style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--gw-border)' }}>
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  style={{ display: 'flex', flex: 1, minWidth: 0, justifyContent: 'flex-start', gap: 8, padding: '8px 12px', borderRadius: 0, fontSize: 13 }}
+                  onClick={() => { onAddFromDeal(doc); setPicking(false) }}
+                >
+                  <Icon name="document" size={13} style={{ color: 'var(--gw-azure)', flexShrink: 0 }} />
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.label}</span>
+                </button>
+                {/* Look before adding — filenames alone don't say which scan is which. */}
+                {onPreview && (
+                  <IconButton icon="eye" size="sm" label={`Quick look at ${doc.label}`} onClick={() => onPreview(doc)} style={{ marginRight: 6 }} />
+                )}
+              </div>
             ))}
             <button
               className="btn btn--ghost"

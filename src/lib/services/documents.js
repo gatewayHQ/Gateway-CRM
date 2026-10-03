@@ -204,6 +204,21 @@ export const uploadDealFile = (path, body, options) =>
 export const createDealFileSignedUrl = (dealId, fileName, expiresInSeconds) =>
   supabase.storage.from(BUCKETS.DEAL_DOCS).createSignedUrl(`${dealFolder(dealId)}/${fileName}`, expiresInSeconds)
 
+/**
+ * A deal file's bytes, read with the agent's own short-lived signed URL — so
+ * storage's row rules decide, exactly as for a download. Throws a message an
+ * agent can act on. Used by Quick Look, split, merge, mark-up and the
+ * send-your-own-PDF picker, which all need the file in hand rather than a link.
+ */
+export async function fetchDealFileBytes(dealId, fileName, { fetchImpl = fetch } = {}) {
+  const shownName = fileName.replace(/^\d+-/, '')
+  const { data, error } = await createDealFileSignedUrl(dealId, fileName, 120)
+  if (error || !data?.signedUrl) throw new Error(error?.message || `Could not open ${shownName}.`)
+  const res = await fetchImpl(data.signedUrl)
+  if (!res.ok) throw new Error(`Could not read ${shownName} (HTTP ${res.status}).`)
+  return new Uint8Array(await res.arrayBuffer())
+}
+
 export const removeDealFile = (dealId, fileName) =>
   supabase.storage.from(BUCKETS.DEAL_DOCS).remove([`${dealFolder(dealId)}/${fileName}`])
 
