@@ -14,7 +14,12 @@
  *     src/lib/dripTokens.js, which renders the preview AND the real send.
  */
 import React, { useState, useEffect, useMemo, useRef } from 'react'
-import { supabase } from '../lib/supabase.js'
+import { getAuthSession, fetchAgentOutlookConnection } from '../lib/services/marketingAccount.js'
+import {
+  fetchSequencesWithSteps, insertSequence, clearAutoEnrollLane, updateSequence, deleteSequenceById,
+  claimSequence, insertSequenceSteps, deleteSequenceSteps, fetchSequenceEnrollments, insertEnrollments,
+  updateEnrollment,
+} from '../lib/services/sequences.js'
 import { Icon, Modal, ConfirmDialog, pushToast } from '../components/UI.jsx'
 import ContactMultiSelect from '../components/ContactMultiSelect.jsx'
 import {
@@ -33,7 +38,7 @@ const STATUS_STYLE = {
 }
 
 async function authedPost(action, payload = {}) {
-  const { data: { session } } = await supabase.auth.getSession()
+  const { data: { session } } = await getAuthSession()
   const res = await fetch(`/api/email-send?action=${action}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
@@ -170,10 +175,10 @@ function EnrollModal({ sequence, steps, contacts, enrolledIds, onClose, onEnroll
     if (!ids.length) return
     setSaving(true)
     const started = new Date().toISOString()
-    const { data, error } = await supabase.from('contact_sequences').insert(ids.map(contact_id => ({
+    const { data, error } = await insertEnrollments(ids.map(contact_id => ({
       contact_id, sequence_id: sequence.id, agent_id: sequence.agent_id,
       started_at: started, current_step: 0, status: 'active',
-    }))).select('id')
+    })))
     if (error) {
       setSaving(false)
       pushToast(error.code === '23505' ? 'One of those contacts is already in this sequence.' : error.message, 'error')
@@ -256,14 +261,12 @@ export default function SequencesPage({ db, activeAgent, isAdmin, go }) {
   useEffect(() => { if (me) { loadSequences(); loadOutlook() } }, [me])
 
   const loadOutlook = async () => {
-    const { data } = await supabase.from('ms_graph_connection_status')
-      .select('email, status').eq('agent_id', me).maybeSingle()
+    const { data } = await fetchAgentOutlookConnection(me)
     setOutlook(data || null)
   }
 
   const loadSequences = async (keepId = selected?.id) => {
-    const { data, error } = await supabase.from('sequences')
-      .select('*, sequence_steps(*)').order('created_at', { ascending: false })
+    const { data, error } = await fetchSequencesWithSteps()
     if (error) { setReady(false); return }
     // A missing agent_id column means migration 0060 has not been applied —
     // every sequence would look shared. Refuse to pretend otherwise.
@@ -285,21 +288,17 @@ export default function SequencesPage({ db, activeAgent, isAdmin, go }) {
     setSteps([...(seq.sequence_steps || [])].sort((a, b) => a.sort_order - b.sort_order)
       .map(s => ({ ...s, step_type: s.step_type || 'email' })))
     setDirty(false)
-    const { data } = await supabase.from('contact_sequences')
-      .select('*, contacts(first_name,last_name,email)')
-      .eq('sequence_id', seq.id)
-      .order('started_at', { ascending: false })
+    const { data } = await fetchSequenceEnrollments(seq.id)
     setEnrollments(data || [])
   }
 
   const createSequence = async (template = null) => {
     const name = (template?.name || newName).trim()
     if (!name || !me) return
-    const { data, error } = await supabase.from('sequences')
-      .insert([{ name, description: template?.description || '', agent_id: me }]).select().single()
+    const { data, error } = await insertSequence({ name, description: template?.description || '', agent_id: me })
     if (error) { pushToast(error.message, 'error'); return }
     if (template) {
-      const { error: stepErr } = await supabase.from('sequence_steps').insert(
+      const { error: stepErr } = await insertSequenceSteps(
         template.steps.map((s, i) => ({ ...s, sequence_id: data.id, sort_order: i })))
       if (stepErr) pushToast(`Sequence created, but its steps did not save: ${stepErr.message}`, 'error')
     }
@@ -314,20 +313,19 @@ export default function SequencesPage({ db, activeAgent, isAdmin, go }) {
     try {
       // One auto-start sequence per lane per agent: free the lane first.
       if (lane && lane !== selected.auto_enroll_lane) {
-        const { error } = await supabase.from('sequences').update({ auto_enroll_lane: null })
-          .eq('agent_id', me).eq('auto_enroll_lane', lane).neq('id', selected.id)
+        const { error } = await clearAutoEnrollLane(me, lane, selected.id)
         if (error) throw error
       }
-      const { error: upErr } = await supabase.from('sequences').update({
+      const { error: upErr } = await updateSequence(selected.id, {
         name: seqName.trim() || selected.name, description: seqDesc,
         auto_enroll_lane: lane || null, updated_at: new Date().toISOString(),
-      }).eq('id', selected.id)
+      })
       if (upErr) throw upErr
 
-      const { error: delErr } = await supabase.from('sequence_steps').delete().eq('sequence_id', selected.id)
+      const { error: delErr } = await deleteSequenceSteps(selected.id)
       if (delErr) throw delErr
       if (steps.length > 0) {
-        const { error: insErr } = await supabase.from('sequence_steps').insert(
+        const { error: insErr } = await insertSequenceSteps(
           steps.map((s, i) => ({
             sequence_id: selected.id, subject: s.subject, body: s.body,
             delay_days: Number(s.delay_days) || 0, sort_order: i, step_type: s.step_type || 'email',
@@ -345,7 +343,7 @@ export default function SequencesPage({ db, activeAgent, isAdmin, go }) {
   }
 
   const deleteSequence = async () => {
-    const { error } = await supabase.from('sequences').delete().eq('id', selected.id)
+    const { error } = await deleteSequenceById(selected.id)
     setConfirm(null)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast('Sequence deleted', 'info')
@@ -353,7 +351,7 @@ export default function SequencesPage({ db, activeAgent, isAdmin, go }) {
   }
 
   const claim = async (seq) => {
-    const { error } = await supabase.from('sequences').update({ agent_id: me }).eq('id', seq.id)
+    const { error } = await claimSequence(seq.id, me)
     if (error) { pushToast(error.message, 'error'); return }
     pushToast(`"${seq.name}" is now yours`)
     loadSequences(seq.id)
@@ -377,7 +375,7 @@ export default function SequencesPage({ db, activeAgent, isAdmin, go }) {
     const patch = status === 'stopped'
       ? { status, stopped_reason: 'Stopped by agent' }
       : { status, ...(status === 'active' ? { last_error: null } : {}) }
-    const { error } = await supabase.from('contact_sequences').update(patch).eq('id', enrollId)
+    const { error } = await updateEnrollment(enrollId, patch)
     if (error) { pushToast(error.message, 'error'); return }
     setEnrollments(p => p.map(e => e.id === enrollId ? { ...e, ...patch } : e))
   }
