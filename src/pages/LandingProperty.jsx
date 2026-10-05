@@ -28,7 +28,7 @@ import { fetchPublicMailing } from '../lib/publicMailing.js'
 import '../components/landing/landing.css'
 import {
   LandingShell, Section, DetailGrid, Gallery, Lightbox, LeadForm, AgentCard, AgentTeam, Button, Skeleton, StatePanel, OmGate,
-  DealHero, AnchorNav, DealRoomTeaser, DealRoomOpen, MobileCtaBar, openDownload,
+  DealHero, AnchorNav, DealRoomTeaser, DealRoomOpen, MobileCtaBar, openDownload, LineIcon,
 } from '../components/landing'
 import { normalizeOm, requestOm } from '../lib/om.js'
 import { loadAccessToken, saveAccessToken, takeTokenFromUrl, fetchDealRoom, requestDocument } from '../lib/dealRoomAccess.js'
@@ -242,7 +242,7 @@ export default function LandingProperty({ mailingId, preview = null }) {
   return (
     <LandingShell
       accent={accent}
-      className="lx-root--mbar"
+      className="lx-root--mbar lx-root--still"
       headerCta={agent?.phone && (
         <Button href={`tel:${agent.phone}`} variant="ghost" style={{ padding: '8px 16px', fontSize: 13 }}>
           Call {firstName || 'Us'}
@@ -258,7 +258,6 @@ export default function LandingProperty({ mailingId, preview = null }) {
         stats={heroStats}
         callForOffers={cfg.call_for_offers_date}
         primaryCta={primaryCta}
-        secondaryCta={agent?.phone ? { label: `Call ${firstName || 'the listing agent'}`, href: `tel:${agent.phone}` } : null}
         unlocked={unlocked}
       />
       <AnchorNav items={anchors} />
@@ -276,7 +275,7 @@ export default function LandingProperty({ mailingId, preview = null }) {
 
             <div id="overview" style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
               {details.length > 0 && (
-                <Section className="lx-card"><DetailGrid items={details} /></Section>
+                <Section className="lx-card"><DetailGrid items={details} still /></Section>
               )}
 
               {(cfg.subheadline || cfg.description) && (
@@ -311,7 +310,8 @@ export default function LandingProperty({ mailingId, preview = null }) {
                 <Gallery images={galleryImages} onOpen={(i) => setLightbox(i + 1)} />
                 {!unlocked && room?.gated_photo_count > 0 && (
                   <p style={{ fontSize: 13, color: 'var(--lx-mist)', margin: '10px 0 0' }}>
-                    🔒 {room.gated_photo_count} more photo{room.gated_photo_count === 1 ? '' : 's'} in the{' '}
+                    <LineIcon name="lock" size={13} style={{ verticalAlign: '-2px', marginRight: 6 }} />
+                    {room.gated_photo_count} more photo{room.gated_photo_count === 1 ? '' : 's'} in the{' '}
                     <a href="#deal-room" style={{ color: 'var(--lx-accent)' }}>Deal Room</a>
                   </p>
                 )}
@@ -331,7 +331,7 @@ export default function LandingProperty({ mailingId, preview = null }) {
                         subtext={room.teaser
                           ? 'Financials, rent roll, the OM and every update as the deal moves. Register once — it opens instantly.'
                           : undefined}
-                        ctaLabel="Enter the Deal Room →" />
+                        ctaLabel="Enter the Deal Room" />
                 <DealRoomTeaser summary={room} priceGated={priceMode === 'gated'} />
                 {agent?.phone && (
                   <p style={{ fontSize: 13, color: 'var(--lx-mist)', textAlign: 'center', margin: 0 }}>

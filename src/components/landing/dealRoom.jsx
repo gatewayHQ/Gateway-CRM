@@ -1,9 +1,12 @@
 /**
  * Landing kit — the Deal Room pieces.
  *
- *   DealHero      full-bleed listing hero: status pill + Call for Offers
- *                 countdown, headline, location line, a glass stat bar and the
- *                 "Access OM & Deal Room" call to action.
+ *   DealHero      full-bleed listing hero: status label + Call for Offers
+ *                 countdown, headline, location line, a hairline stat row and
+ *                 the "Access OM & Deal Room" call to action.
+ *
+ * Style: still and quiet on purpose — no motion, no emoji. Thin-stroke line
+ * icons, hairline rules, square-ish corners.
  *   AnchorNav     sticky in-page section links under the hero.
  *   DealRoomTeaser what is behind the wall, shown locked: the numbers' labels
  *                 with their values hidden, the document list, the photo and
@@ -12,10 +15,29 @@
  *   MobileCtaBar  a bottom bar on phones so the call to action never scrolls away.
  */
 import React from 'react'
-import { Reveal, Button } from './primitives.jsx'
-import { useParallax } from './hooks.js'
+import { Button } from './primitives.jsx'
 import { daysUntil, formatLongDate } from '../../lib/dealRoomAccess.js'
 import { formatBytes, DEAL_ROOM_DOC_KINDS } from '../../lib/om.js'
+
+/** Thin-stroke line icons, drawn in currentColor. */
+const ICON_PATHS = {
+  lock:     'M7 11V8a5 5 0 0 1 10 0v3M5.5 11h13v9.5h-13z',
+  unlock:   'M7 11V8a5 5 0 0 1 9.6-2M5.5 11h13v9.5h-13z',
+  file:     'M14 3H6.5v18h11V6.5L14 3zM14 3v3.5h3.5',
+  sheet:    'M5 4h14v16H5zM5 9.5h14M5 15h14M10.5 4v16',
+  image:    'M4 5h16v14H4zM4 15.5l4.5-4.5 4 4 2.5-2.5L20 17.5M15.5 9.5h.01',
+  arrow:    'M5 12h14M13 6l6 6-6 6',
+  download: 'M12 4v11M7 10.5l5 5 5-5M5 20h14',
+}
+export function LineIcon({ name, size = 16, style }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+         style={{ flexShrink: 0, ...style }}>
+      <path d={ICON_PATHS[name] || ICON_PATHS.file} />
+    </svg>
+  )
+}
 
 /** "Call for Offers · October 8 · 3 days left" — or null when no date is set. */
 export function callForOffersLabel(isoDate, now = new Date()) {
@@ -30,51 +52,48 @@ export function callForOffersLabel(isoDate, now = new Date()) {
 
 export function DealHero({
   image, status = 'Exclusive Offering', assetLine, title, location, stats = [],
-  callForOffers, primaryCta, secondaryCta, unlocked = false,
+  callForOffers, primaryCta, unlocked = false,
 }) {
-  const parallaxRef = useParallax(0.12)
   const cfo = callForOffersLabel(callForOffers)
   const bg = image
     ? { backgroundImage: `url(${image})` }
     : { background: 'linear-gradient(135deg, var(--lx-accent) 0%, #2c3a5e 100%)' }
   return (
     <section className="lx-dhero" aria-label={typeof title === 'string' ? title : 'Featured property'}>
-      <div ref={image ? parallaxRef : null} className={`lx-hero__bg${image ? ' lx-hero__bg--zoom' : ''}`}
-           style={bg} aria-hidden="true" />
+      <div className="lx-hero__bg" style={bg} aria-hidden="true" />
       <div className="lx-dhero__scrim" aria-hidden="true" />
       <div className="lx-container lx-dhero__inner">
-        <Reveal className="lx-dhero__pills">
-          <span className="lx-pill">{status}</span>
+        <div className="lx-dhero__meta">
+          <span>{status}</span>
           {cfo && (
-            <span className={`lx-pill lx-pill--gold${cfo.urgent ? ' lx-pill--pulse' : ''}`}>
-              Call for Offers · {cfo.date} · <b>{cfo.left}</b>
+            <span className="lx-dhero__cfo">
+              Call for Offers {cfo.date} <span aria-hidden="true">/</span> <b>{cfo.left}</b>
             </span>
           )}
-        </Reveal>
-        {assetLine && <Reveal as="div" delay={40} className="lx-dhero__asset">{assetLine}</Reveal>}
-        <Reveal as="h1" delay={80} className="lx-serif lx-dhero__title">{title}</Reveal>
-        {location && <Reveal as="div" delay={120} className="lx-dhero__loc">{location}</Reveal>}
-        <Reveal delay={170} className="lx-dhero__ctas">
-          {primaryCta && (
+        </div>
+        {assetLine && <div className="lx-dhero__asset">{assetLine}</div>}
+        <h1 className="lx-serif lx-dhero__title">{title}</h1>
+        {location && <div className="lx-dhero__loc">{location}</div>}
+        {primaryCta && (
+          <div className="lx-dhero__ctas">
             <a href={primaryCta.href} onClick={primaryCta.onClick} className="lx-btn lx-btn--gold">
-              {unlocked ? '✓ ' : '🔒 '}{primaryCta.label}
+              <LineIcon name={unlocked ? 'unlock' : 'lock'} />
+              {primaryCta.label}
+              <LineIcon name="arrow" />
             </a>
-          )}
-          {secondaryCta && (
-            <a href={secondaryCta.href} className="lx-btn lx-btn--glass">{secondaryCta.label}</a>
-          )}
-        </Reveal>
+          </div>
+        )}
       </div>
       {stats.length > 0 && (
         <div className="lx-container lx-dhero__barwrap">
-          <Reveal delay={220} className="lx-dhero__bar" role="list">
+          <div className="lx-dhero__bar" role="list">
             {stats.map((s, i) => (
               <div className="lx-dhero__stat" role="listitem" key={i}>
-                <div className="lx-serif lx-dhero__statv">{s.value}</div>
                 <div className="lx-dhero__statl">{s.label}</div>
+                <div className="lx-serif lx-dhero__statv">{s.value}</div>
               </div>
             ))}
-          </Reveal>
+          </div>
         </div>
       )}
     </section>
@@ -109,7 +128,7 @@ export function DealRoomTeaser({ summary, priceGated = false }) {
           {fields.map(f => (
             <div key={f} className="lx-locked__tile">
               <div className="lx-detail__label">{FIELD_LABEL[f] || f}</div>
-              <div className="lx-locked__val" aria-hidden="true">●●●●</div>
+              <div className="lx-locked__val" aria-hidden="true"><LineIcon name="lock" size={14} /></div>
               <span className="lx-sr-only">Hidden until you register</span>
             </div>
           ))}
@@ -117,13 +136,13 @@ export function DealRoomTeaser({ summary, priceGated = false }) {
       )}
       <ul className="lx-locked__list">
         {(summary.doc_titles || []).map((t, i) => (
-          <li key={i}><span aria-hidden="true">🔒</span> {t}</li>
+          <li key={i}><LineIcon name="file" size={15} /> {t}</li>
         ))}
         {summary.gated_photo_count > 0 && (
-          <li><span aria-hidden="true">🔒</span> {summary.gated_photo_count} more photo{summary.gated_photo_count === 1 ? '' : 's'}</li>
+          <li><LineIcon name="image" size={15} /> {summary.gated_photo_count} more photo{summary.gated_photo_count === 1 ? '' : 's'}</li>
         )}
         {summary.update_count > 0 && (
-          <li><span aria-hidden="true">🔒</span> {summary.update_count} deal update{summary.update_count === 1 ? '' : 's'}
+          <li><LineIcon name="sheet" size={15} /> {summary.update_count} deal update{summary.update_count === 1 ? '' : 's'}
             {summary.last_update_at ? ` · latest ${formatLongDate(summary.last_update_at)}` : ''}</li>
         )}
       </ul>
@@ -131,7 +150,7 @@ export function DealRoomTeaser({ summary, priceGated = false }) {
   )
 }
 
-const KIND_ICON = { om: '📘', rent_roll: '📊', t12: '📈', financials: '💵', photos: '🖼️', survey: '📐', other: '📄' }
+const KIND_ICON = { om: 'file', rent_roll: 'sheet', t12: 'sheet', financials: 'sheet', photos: 'image', survey: 'file', other: 'file' }
 const KIND_LABEL = {
   om: 'Offering Memorandum',
   ...Object.fromEntries(DEAL_ROOM_DOC_KINDS.map(k => [k.value, k.label])),
@@ -180,14 +199,14 @@ export function DealRoomOpen({ room, visitorName, onDownload, downloading, error
           <ul className="lx-docs">
             {room.documents.map(d => (
               <li key={d.id} className="lx-doc">
-                <span className="lx-doc__icon" aria-hidden="true">{KIND_ICON[d.kind] || '📄'}</span>
+                <span className="lx-doc__icon"><LineIcon name={KIND_ICON[d.kind]} size={18} /></span>
                 <span className="lx-doc__name">
                   <b>{d.title || KIND_LABEL[d.kind] || d.filename}</b>
                   <small>{[d.filename, formatBytes(d.size)].filter(Boolean).join(' · ')}</small>
                 </span>
                 <Button variant="ghost" onClick={() => onDownload?.(d)} loading={downloading === d.id}
-                        style={{ padding: '8px 14px', fontSize: 13 }}>
-                  Download
+                        style={{ padding: '7px 12px', fontSize: 12.5 }}>
+                  <LineIcon name="download" size={14} /> Download
                 </Button>
               </li>
             ))}

@@ -29,6 +29,7 @@
  */
 import React, { useEffect, useState } from 'react'
 import { loadIdentity, saveIdentity, forgetIdentity } from '../../lib/dealRoomAccess.js'
+import { LineIcon } from './dealRoom.jsx'
 
 const isEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(v).trim())
 const digits  = (v) => (String(v).match(/\d/g) || []).length
@@ -103,38 +104,37 @@ export function OmGate({
   }
 
   const panel = {
-    borderRadius: 12,
+    borderRadius: 4,
     padding: 22,
     border: dark ? '1px solid #2f2f2f' : '1px solid var(--lx-line, #e5e2da)',
     background: dark ? '#181818' : '#fff',
-    boxShadow: dark ? '0 24px 64px rgba(0,0,0,0.45)' : 'var(--lx-shadow-md, 0 12px 32px rgba(20,24,40,0.08))',
+    boxShadow: 'none',
   }
   const inkStrong = dark ? '#f3f0e6' : 'var(--lx-ink, #1e2642)'
   const inkSoft   = dark ? '#8c8c84' : 'var(--lx-mist, #7b8393)'
   const inkBody   = dark ? '#bdbcb4' : 'var(--lx-ink-2, #4a5163)'
 
   const chip = (selected) => ({
-    padding: '7px 12px', borderRadius: 999, fontSize: 12.5, cursor: 'pointer', fontWeight: 600,
+    padding: '7px 12px', borderRadius: 3, fontSize: 12.5, cursor: 'pointer', fontWeight: 600,
     border: `1px solid ${selected ? accent : (dark ? '#3a3a3a' : 'var(--lx-line, #e5e2da)')}`,
     background: selected ? `${accent}22` : 'transparent',
     color: selected ? inkStrong : inkBody,
   })
   const onAccent = readableOn(accent)
   const primaryBtn = {
-    padding: '12px 16px', borderRadius: 8, border: 'none', cursor: 'pointer',
-    fontWeight: 700, fontSize: 13.5, background: accent, color: onAccent,
+    padding: '13px 16px', borderRadius: 3, border: 'none', cursor: 'pointer',
+    fontWeight: 600, fontSize: 13, letterSpacing: '.04em', background: accent, color: onAccent,
     opacity: status === 'submitting' ? 0.7 : 1, width: '100%',
   }
-  const submitText = status === 'submitting' ? 'Opening…' : (ctaLabel || 'Get the OM →')
+  const submitText = status === 'submitting' ? 'Opening…' : (ctaLabel || 'Get the OM')
 
   return (
     <section id={id} style={panel} aria-labelledby="om-gate-heading">
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-        <div aria-hidden="true" style={{
-          width: 40, height: 40, borderRadius: 8, flexShrink: 0, fontSize: 18,
-          display: 'grid', placeItems: 'center',
-          background: `${accent}22`, color: accent, border: `1px solid ${accent}55`,
-        }}>{status === 'done' ? '🔓' : '🔒'}</div>
+        <div style={{
+          width: 38, height: 38, flexShrink: 0, display: 'grid', placeItems: 'center',
+          color: accent, border: `1px solid ${accent}66`, borderRadius: 3,
+        }}><LineIcon name={status === 'done' ? 'unlock' : 'lock'} size={18} /></div>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 10.5, letterSpacing: 1.6, textTransform: 'uppercase', color: accent, marginBottom: 4 }}>
             {status === 'done' ? 'Unlocked' : 'Instant access'}
@@ -159,10 +159,10 @@ export function OmGate({
                  onClick={(e) => { e.preventDefault(); openDownload(grant) }}
                  style={{
                    display: 'block', textAlign: 'center', textDecoration: 'none',
-                   padding: '12px 16px', borderRadius: 8, fontWeight: 700, fontSize: 13.5,
+                   padding: '13px 16px', borderRadius: 3, fontWeight: 600, fontSize: 13,
                    background: accent, color: onAccent,
                  }}>
-                Download the {heading} ↓
+                Download the {heading}
               </a>
               <p style={{ fontSize: 11, color: inkSoft, textAlign: 'center', margin: '10px 0 0' }}>
                 This link expires shortly — download it now and keep the file.
@@ -185,7 +185,7 @@ export function OmGate({
           <button type="button" style={primaryBtn} disabled={status === 'submitting'}
                   aria-busy={status === 'submitting' || undefined}
                   onClick={() => send({ ...known, buyer_role: '', is_1031: '' })}>
-            {status === 'submitting' ? 'Opening…' : `Continue as ${known.name.split(/\s+/)[0]} →`}
+            {status === 'submitting' ? 'Opening…' : `Continue as ${known.name.split(/\s+/)[0]}`}
           </button>
           <p style={{ fontSize: 11.5, color: inkSoft, textAlign: 'center', margin: '10px 0 0' }}>
             {known.email} ·{' '}
@@ -295,7 +295,7 @@ function GateField({ label, error, dark, accent, ...rest }) {
              aria-describedby={error ? `${id}-err` : undefined}
              style={{
                width: '100%', boxSizing: 'border-box', padding: '10px 12px', fontSize: 14,
-               borderRadius: 7, outline: 'none',
+               borderRadius: 3, outline: 'none',
                border: `1px solid ${error ? '#e57373' : (dark ? '#333' : 'var(--lx-line, #e5e2da)')}`,
                background: dark ? '#101010' : '#fff',
                color: dark ? '#f3f0e6' : 'var(--lx-ink, #1e2642)',
