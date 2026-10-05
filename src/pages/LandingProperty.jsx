@@ -7,7 +7,17 @@
  *     description, features[], images[{url,caption,price}], cta_text, accent,
  *     detail_mode, units, price_per_unit, cap_rate, noi, gross_income,
  *     building_sqft, occupancy,
- *     om: { filename, title, size, available } }   ← gated OM download
+ *     eyebrow, asset_line, location_line, call_for_offers_date, price_display,
+ *     om: { filename, title, size, available },     ← gated OM download
+ *     deal_room: { available, teaser, doc_titles, gated_fields, … } }
+ *
+ * DEAL ROOM. When the campaign has an OM or other Deal Room documents, the page
+ * is a public teaser (hero, story, highlights, a few photos) and ONE
+ * registration form opens the rest: the underwriting numbers, the full gallery,
+ * every document and the dated updates. What is public and what is gated is
+ * decided on the server (api/_lib/dealRoom.js) — the gated numbers are not in
+ * this page's data until the visitor registers. A registered visitor, or one
+ * arriving from a "New in the Deal Room" email (?dr=…), walks straight back in.
  *
  * UI is composed from the reusable luxury landing kit in components/landing.
  */
@@ -16,8 +26,12 @@ import { fetchPublicAgents, fetchPublicAgentsLegacy } from '../lib/services/publ
 import { initScanTracking, withVisitId } from '../lib/scanTracking.js'
 import { fetchPublicMailing } from '../lib/publicMailing.js'
 import '../components/landing/landing.css'
-import { LandingShell, Hero, Section, DetailGrid, Gallery, Lightbox, LeadForm, AgentCard, AgentTeam, Button, Skeleton, StatePanel, OmGate } from '../components/landing'
+import {
+  LandingShell, Section, DetailGrid, Gallery, Lightbox, LeadForm, AgentCard, AgentTeam, Button, Skeleton, StatePanel, OmGate,
+  DealHero, AnchorNav, DealRoomTeaser, DealRoomOpen, MobileCtaBar, openDownload,
+} from '../components/landing'
 import { normalizeOm, requestOm } from '../lib/om.js'
+import { loadAccessToken, saveAccessToken, takeTokenFromUrl, fetchDealRoom, requestDocument } from '../lib/dealRoomAccess.js'
 
 const toNum = (v) => {
   const n = Number(String(v ?? '').replace(/[^0-9.]/g, ''))
@@ -39,6 +53,25 @@ export default function LandingProperty({ mailingId, preview = null }) {
   const [loading, setLoading] = useState(!preview)
   const [error, setError] = useState(null)
   const [lightbox, setLightbox] = useState(-1) // -1 = closed
+  // Deal Room: the unlocked contents, the visitor's access token, and the
+  // document currently being fetched.
+  const [dealRoom, setDealRoom] = useState(null)
+  const [accessToken, setAccessToken] = useState(null)
+  const [docBusy, setDocBusy] = useState(null)
+  const [docError, setDocError] = useState(null)
+
+  // A visitor who registered before (or clicked a "New in the Deal Room" email)
+  // walks straight back in.
+  useEffect(() => {
+    if (preview || !mailingId) return
+    const token = takeTokenFromUrl(mailingId) || loadAccessToken(mailingId)
+    if (!token) return
+    let active = true
+    fetchDealRoom(mailingId, token)
+      .then(room => { if (active && room) { setAccessToken(token); setDealRoom(room) } })
+      .catch(() => { /* stay on the public page; the form still works */ })
+    return () => { active = false }
+  }, [mailingId, preview])
 
   // Capture the QR scan's visit id (and replay the scan if the server could not
   // confirm the write) before anything else — see src/lib/scanTracking.js.
@@ -103,19 +136,30 @@ export default function LandingProperty({ mailingId, preview = null }) {
   const headline = cfg.headline || mailing.name || 'Property For Sale'
   const ctaText = cfg.cta_text || 'Get more info'
   const features = (Array.isArray(cfg.features) ? cfg.features : []).filter(Boolean)
-  const images = (Array.isArray(cfg.images) ? cfg.images : [])
+  const normImages = (list) => (Array.isArray(list) ? list : [])
     .map(v => (typeof v === 'string'
       ? { url: v, caption: '', price: '' }
       // Existing mailings store a `units` field used as a caption fallback —
       // preserve that so already-created campaigns render unchanged.
       : { url: v.url, caption: v.caption || v.units || '', price: v.price || '' }))
     .filter(v => v?.url)
+  // Once the visitor is inside the Deal Room they get the full photo set; the
+  // public page only ever received the first few (api/_lib/dealRoom.js).
+  const images = normImages(dealRoom?.images?.length ? dealRoom.images : cfg.images)
   const heroImage = images[0]?.url
   const galleryImages = images.slice(1)
 
   const isCommercial = cfg.detail_mode === 'commercial'
+  const priceMode = ['unpriced', 'call_for_offers', 'gated'].includes(cfg.price_display) ? cfg.price_display : 'public'
+  const priceDetail =
+    priceMode === 'call_for_offers' ? { label: 'Price', value: 'Call for Offers' }
+    : priceMode === 'unpriced'      ? { label: 'Price', value: 'Unpriced' }
+    : priceMode === 'gated'         ? null
+    : cfg.price != null             ? { label: 'Price', value: toNum(cfg.price), prefix: '$' } : null
+  // Whatever the server left in the public config. In teaser mode the
+  // underwriting numbers are simply absent here — they arrive with the room.
   const details = (isCommercial ? [
-    cfg.price          != null && { label: 'Price',        value: toNum(cfg.price), prefix: '$' },
+    priceDetail,
     cfg.units          != null && { label: 'Units',        value: toNum(cfg.units) },
     cfg.price_per_unit != null && { label: 'Price / Unit', value: toNum(cfg.price_per_unit), prefix: '$' },
     cfg.cap_rate       != null && { label: 'Cap Rate',     value: asPct(cfg.cap_rate) },
@@ -125,7 +169,7 @@ export default function LandingProperty({ mailingId, preview = null }) {
     cfg.occupancy      != null && { label: 'Occupancy',    value: asPct(cfg.occupancy) },
     cfg.year_built     != null && { label: 'Year Built',   value: String(cfg.year_built) },
   ] : [
-    cfg.price      != null && { label: 'Price',     value: toNum(cfg.price), prefix: '$' },
+    priceDetail,
     cfg.beds       != null && { label: 'Bedrooms',  value: toNum(cfg.beds) },
     cfg.baths      != null && { label: 'Bathrooms', value: toNum(cfg.baths) },
     cfg.sqft       != null && { label: 'Sq Ft',     value: toNum(cfg.sqft) },
@@ -133,15 +177,44 @@ export default function LandingProperty({ mailingId, preview = null }) {
     cfg.year_built != null && { label: 'Year Built', value: String(cfg.year_built) },
   ]).filter(Boolean).filter(d => d.value !== null && d.value !== '' && d.value !== 'NaN')
 
-  // The OM download gate. Present only when the builder attached a PDF; the
-  // page never holds a URL for it — see components/landing/OmGate.jsx.
+  // Hero stat bar: the first four public facts, formatted as text.
+  const heroStats = details.slice(0, 4).map(d => ({
+    label: d.label,
+    value: typeof d.value === 'number' ? `${d.prefix || ''}${d.value.toLocaleString()}${d.suffix || ''}` : d.value,
+  }))
+
+  // The Deal Room. `room` is the public summary (what is behind the wall);
+  // `dealRoom` is the unlocked contents once this visitor has registered.
   const om = normalizeOm(cfg.om)
+  const room = cfg.deal_room?.available
+    ? cfg.deal_room
+    : om ? { available: true, teaser: false, doc_titles: [om.title || 'Offering Memorandum'], gated_fields: [], gated_photo_count: 0, update_count: 0 } : null
+  const hasRoom = !!room
+  const unlocked = !!dealRoom
+
   const unlockOm = async (fields) => {
     if (preview) {
       await new Promise(r => setTimeout(r, 700))
+      setDealRoom({ financials: {}, images: cfg.images || [], documents: om ? [{ id: 'om', kind: 'om', title: om.title, filename: om.filename, size: om.size }] : [], updates: [] })
       return { url: '', filename: om?.filename }
     }
-    return requestOm(withVisitId({ mailing_id: mailingId, source_landing: 'property', ...fields }))
+    const res = await requestOm(withVisitId({ mailing_id: mailingId, source_landing: 'property', ...fields }))
+    if (res.access_token) { saveAccessToken(mailingId, res.access_token); setAccessToken(res.access_token) }
+    if (res.deal_room) setDealRoom(res.deal_room)
+    return res
+  }
+
+  const downloadDoc = async (doc) => {
+    if (preview) return
+    setDocBusy(doc.id); setDocError(null)
+    try {
+      const grant = await requestDocument(mailingId, accessToken, doc.id)
+      openDownload(grant)
+    } catch (err) {
+      setDocError(err.message)
+    } finally {
+      setDocBusy(null)
+    }
   }
 
   const submitLead = async (form) => {
@@ -154,46 +227,79 @@ export default function LandingProperty({ mailingId, preview = null }) {
     if (!res.ok || data.error) throw new Error(data.error || 'Could not submit — please try again.')
   }
 
+  const firstName = agent?.name?.split(' ')[0]
+  const primaryCta = hasRoom
+    ? { label: unlocked ? 'Open the Deal Room' : 'Access OM & Deal Room', href: '#deal-room' }
+    : { label: ctaText, href: '#contact' }
+  const anchors = [
+    { href: '#overview', label: 'Overview' },
+    features.length > 0 && { href: '#highlights', label: 'Highlights' },
+    galleryImages.length > 0 && { href: '#gallery', label: 'Gallery' },
+    hasRoom ? { href: '#deal-room', label: 'Deal Room' } : { href: '#contact', label: 'Contact' },
+    agents.length > 0 && { href: '#advisors', label: agents.length > 1 ? 'Advisors' : 'Advisor' },
+  ].filter(Boolean)
+
   return (
     <LandingShell
       accent={accent}
+      className="lx-root--mbar"
       headerCta={agent?.phone && (
         <Button href={`tel:${agent.phone}`} variant="ghost" style={{ padding: '8px 16px', fontSize: 13 }}>
-          Call {agent.name?.split(' ')[0] || 'Us'}
+          Call {firstName || 'Us'}
         </Button>
       )}
     >
-      {/* Stats intentionally omitted here — they appear in the details card below. */}
-      <Hero image={heroImage} eyebrow="Property For Sale" title={headline} />
+      <DealHero
+        image={heroImage}
+        status={cfg.eyebrow || (isCommercial ? 'Exclusive Offering' : 'Property For Sale')}
+        assetLine={cfg.asset_line}
+        title={headline}
+        location={cfg.location_line}
+        stats={heroStats}
+        callForOffers={cfg.call_for_offers_date}
+        primaryCta={primaryCta}
+        secondaryCta={agent?.phone ? { label: `Call ${firstName || 'the listing agent'}`, href: `tel:${agent.phone}` } : null}
+        unlocked={unlocked}
+      />
+      <AnchorNav items={anchors} />
 
       <div className="lx-container" style={{ padding: '28px 0 72px' }}>
         <div className="lx-grid-2">
           {/* Left column */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-            {details.length > 0 && (
-              <Section className="lx-card"><DetailGrid items={details} /></Section>
+            {unlocked && (
+              <div id="deal-room">
+                <DealRoomOpen room={dealRoom} visitorName={dealRoom.visitor?.first_name}
+                              onDownload={downloadDoc} downloading={docBusy} error={docError} />
+              </div>
             )}
 
-            {(cfg.subheadline || cfg.description) && (
-              <Section className="lx-card" delay={60}>
-                {cfg.subheadline && (
-                  <p className="lx-serif" style={{ fontSize: 19, lineHeight: 1.6, fontWeight: 500, margin: '0 0 10px' }}>
-                    {cfg.subheadline}
-                  </p>
-                )}
-                {cfg.description && (
-                  <p style={{ lineHeight: 1.75, color: 'var(--lx-ink-2)', margin: 0, fontSize: 14.5 }}>{cfg.description}</p>
-                )}
-              </Section>
-            )}
+            <div id="overview" style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+              {details.length > 0 && (
+                <Section className="lx-card"><DetailGrid items={details} /></Section>
+              )}
+
+              {(cfg.subheadline || cfg.description) && (
+                <Section className="lx-card" delay={60}>
+                  {cfg.subheadline && (
+                    <p className="lx-serif" style={{ fontSize: 19, lineHeight: 1.6, fontWeight: 500, margin: '0 0 10px' }}>
+                      {cfg.subheadline}
+                    </p>
+                  )}
+                  {cfg.description && (
+                    <p style={{ lineHeight: 1.75, color: 'var(--lx-ink-2)', margin: 0, fontSize: 14.5 }}>{cfg.description}</p>
+                  )}
+                </Section>
+              )}
+            </div>
 
             {features.length > 0 && (
-              <Section title="Property Highlights" className="lx-card" delay={80}>
-                <ul className="lx-features" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+              <Section title="Investment Highlights" delay={80} id="highlights">
+                <ul className="lx-hl">
                   {features.map((f, i) => (
-                    <li className="lx-feature" key={i}>
-                      <span className="lx-feature__tick" aria-hidden="true">✓</span>
-                      <span>{f}</span>
+                    <li className="lx-hl__item" key={i}>
+                      <span className="lx-hl__n">{String(i + 1).padStart(2, '0')}</span>
+                      {f}
                     </li>
                   ))}
                 </ul>
@@ -201,32 +307,55 @@ export default function LandingProperty({ mailingId, preview = null }) {
             )}
 
             {galleryImages.length > 0 && (
-              <Section title="Gallery" delay={100}>
+              <Section title="Gallery" delay={100} id="gallery">
                 <Gallery images={galleryImages} onOpen={(i) => setLightbox(i + 1)} />
+                {!unlocked && room?.gated_photo_count > 0 && (
+                  <p style={{ fontSize: 13, color: 'var(--lx-mist)', margin: '10px 0 0' }}>
+                    🔒 {room.gated_photo_count} more photo{room.gated_photo_count === 1 ? '' : 's'} in the{' '}
+                    <a href="#deal-room" style={{ color: 'var(--lx-accent)' }}>Deal Room</a>
+                  </p>
+                )}
               </Section>
             )}
           </div>
 
-          {/* Right column — sticky CTA */}
+          {/* Right column — sticky call to action */}
           <aside className="lx-sticky">
-            {/* The OM sits above the contact form on purpose: it is what the
-                scanner came for, and it captures strictly more (name + phone +
-                email, all required) than the form below it. */}
-            {om && (
-              <div style={{ marginBottom: 24 }}>
-                <OmGate om={om} onUnlock={unlockOm} accent={accent} />
+            {hasRoom && !unlocked && (
+              <>
+                {/* One form, not two: the Deal Room registration is the only
+                    ask. A plain "call me" form beside it used to win the
+                    easier half of every visitor and lose the email. */}
+                <OmGate id="deal-room" om={om} forceShow onUnlock={unlockOm} accent={accent} qualifiers
+                        title={room.teaser ? 'Offering Memorandum & Deal Room' : (om?.title || 'Offering Memorandum')}
+                        subtext={room.teaser
+                          ? 'Financials, rent roll, the OM and every update as the deal moves. Register once — it opens instantly.'
+                          : undefined}
+                        ctaLabel="Enter the Deal Room →" />
+                <DealRoomTeaser summary={room} priceGated={priceMode === 'gated'} />
+                {agent?.phone && (
+                  <p style={{ fontSize: 13, color: 'var(--lx-mist)', textAlign: 'center', margin: 0 }}>
+                    Prefer to talk? <a href={`tel:${agent.phone}`} style={{ color: 'var(--lx-accent)', fontWeight: 600 }}>Call {firstName}</a>
+                  </p>
+                )}
+              </>
+            )}
+            {!hasRoom && (
+              <div id="contact">
+                <LeadForm title={ctaText} cta={ctaText} onSubmit={submitLead} agentName={agent?.name} />
               </div>
             )}
-            <LeadForm title={ctaText} cta={ctaText} onSubmit={submitLead} agentName={agent?.name} />
             <AgentCard agent={agent} accent={accent} />
           </aside>
         </div>
 
         {/* Meet your advisor(s) — full width, below the listing details */}
-        <div style={{ marginTop: 'clamp(36px, 7vw, 72px)' }}>
+        <div id="advisors" style={{ marginTop: 'clamp(36px, 7vw, 72px)' }}>
           <AgentTeam agents={agents} accent={accent} />
         </div>
       </div>
+
+      <MobileCtaBar label={primaryCta.label} href={primaryCta.href} phone={agent?.phone} />
 
       {lightbox >= 0 && (
         <Lightbox images={images} index={lightbox} onClose={() => setLightbox(-1)} onIndex={setLightbox} />

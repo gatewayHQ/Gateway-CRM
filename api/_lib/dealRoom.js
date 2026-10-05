@@ -1,0 +1,241 @@
+/**
+ * The Deal Room behind a QR landing page.
+ *
+ * A property landing page is a public TEASER — photo, headline, location, a few
+ * size facts, the story — and a Deal Room behind one form: the underwriting
+ * numbers, the full gallery, the OM and the other diligence documents, and a
+ * dated list of updates the listing agent posts as the deal moves. The trade is
+ * the same one the OM gate always made (name + phone + email for the file),
+ * widened so that what an investor actually needs to price the deal is on the
+ * paid side of it.
+ *
+ * Everything here is pure (no I/O), so the rules about what an anonymous
+ * browser may see live in one testable place:
+ *
+ *   publicTeaserConfig(cfg)  what ?action=landing hands to anyone with the link
+ *   privateDealRoom(cfg)     what ?action=deal_room hands to a registered visitor
+ *   dealRoomDocs(cfg)        every document, keyed by a stable id
+ *   mintAccess / readAccess  the signed token that keeps a visitor signed in
+ *
+ * landing_config keys this module reads (all optional — a campaign that sets
+ * none of them renders exactly as before):
+ *
+ *   teaser_mode          bool  — default ON when the page has a Deal Room
+ *   price_display        'public' (default) | 'unpriced' | 'call_for_offers' | 'gated'
+ *   call_for_offers_date 'YYYY-MM-DD'
+ *   public_photo_count   int   — photos shown before the wall (default 3)
+ *   om                   { path, filename, title, size }      — see src/lib/om.js
+ *   deal_room: {
+ *     documents: [{ id, path, filename, title, kind, size, uploaded_at }],
+ *     updates:   [{ id, date, title, body }],
+ *   }
+ */
+import crypto from 'crypto'
+
+/** Underwriting numbers that move behind the wall in teaser mode. */
+export const GATED_FIELDS = ['cap_rate', 'noi', 'gross_income', 'price_per_unit', 'occupancy']
+
+export const PRICE_DISPLAY = ['public', 'unpriced', 'call_for_offers', 'gated']
+
+export const DOC_KINDS = ['om', 'rent_roll', 't12', 'financials', 'photos', 'survey', 'other']
+
+export const DEFAULT_PUBLIC_PHOTOS = 3
+
+/** A registered visitor stays signed in on their device this long. */
+export const ACCESS_MAX_AGE_MS = 180 * 24 * 60 * 60 * 1000
+
+const OM_DOC_ID = 'om'
+
+function cleanDoc(d, fallbackId) {
+  if (!d || typeof d !== 'object') return null
+  const path = String(d.path || '').trim()
+  if (!path) return null
+  return {
+    id:          String(d.id || fallbackId).slice(0, 64),
+    path,
+    filename:    String(d.filename || path.split('/').pop() || 'document').slice(0, 200),
+    title:       String(d.title || '').slice(0, 160),
+    kind:        DOC_KINDS.includes(d.kind) ? d.kind : 'other',
+    size:        Number.isFinite(Number(d.size)) ? Number(d.size) : null,
+    uploaded_at: d.uploaded_at || null,
+  }
+}
+
+/**
+ * Every Deal Room document, the legacy single `om` first (id 'om'), then the
+ * `deal_room.documents` list. Ids are unique; a later duplicate is dropped.
+ */
+export function dealRoomDocs(cfg) {
+  const out = []
+  const seen = new Set()
+  const push = (d) => { if (d && !seen.has(d.id)) { seen.add(d.id); out.push(d) } }
+  const om = cfg?.om
+  if (typeof om === 'string') push(cleanDoc({ path: om, kind: 'om' }, OM_DOC_ID))
+  else if (om && typeof om === 'object') push(cleanDoc({ ...om, id: OM_DOC_ID, kind: 'om' }, OM_DOC_ID))
+  const list = Array.isArray(cfg?.deal_room?.documents) ? cfg.deal_room.documents : []
+  list.forEach((d, i) => push(cleanDoc(d, `doc-${i + 1}`)))
+  return out
+}
+
+export function dealRoomUpdates(cfg) {
+  const list = Array.isArray(cfg?.deal_room?.updates) ? cfg.deal_room.updates : []
+  return list
+    .filter(u => u && (u.title || u.body))
+    .map((u, i) => ({
+      id:    String(u.id || `upd-${i + 1}`).slice(0, 64),
+      date:  /^\d{4}-\d{2}-\d{2}/.test(String(u.date || '')) ? String(u.date).slice(0, 10) : null,
+      title: String(u.title || '').slice(0, 200),
+      body:  String(u.body || '').slice(0, 4000),
+    }))
+    // Newest first; undated updates sink.
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
+}
+
+/** True when the page has anything behind the wall at all. */
+export function hasDealRoom(cfg) {
+  return dealRoomDocs(cfg).length > 0
+}
+
+/** Teaser mode is on by default whenever there is a Deal Room to send people to. */
+export function isTeaser(cfg) {
+  return hasDealRoom(cfg) && cfg?.teaser_mode !== false
+}
+
+export function priceDisplay(cfg) {
+  return PRICE_DISPLAY.includes(cfg?.price_display) ? cfg.price_display : 'public'
+}
+
+function imagesOf(cfg) {
+  return Array.isArray(cfg?.images) ? cfg.images.filter(Boolean) : []
+}
+
+function publicPhotoCount(cfg) {
+  const n = Number(cfg?.public_photo_count)
+  return Number.isInteger(n) && n >= 1 && n <= 10 ? n : DEFAULT_PUBLIC_PHOTOS
+}
+
+/** A document as a browser may see it: never the storage path. */
+function docSummary(d) {
+  const { path, ...rest } = d
+  return rest
+}
+
+/**
+ * The config ?action=landing returns to anyone holding the link.
+ *
+ * Storage paths are always removed. In teaser mode the gated numbers, the
+ * photos past the public count, a hidden price and every update's body are
+ * removed too — stripped on the server, because a field the page merely
+ * declines to render is still sitting in the JSON for anyone who looks.
+ */
+export function publicTeaserConfig(cfg) {
+  const base = cfg && typeof cfg === 'object' ? { ...cfg } : {}
+  const docs    = dealRoomDocs(base)
+  const updates = dealRoomUpdates(base)
+  const teaser  = isTeaser(base)
+  const price   = priceDisplay(base)
+
+  // The OM descriptor the existing OmGate understands (src/lib/om.js).
+  const om = docs.find(d => d.id === OM_DOC_ID)
+  if (om) base.om = { filename: om.filename, title: om.title, size: om.size, available: true }
+  else delete base.om
+
+  delete base.deal_room
+  delete base.followup_sequence_id
+
+  const images = imagesOf(base)
+  if (teaser) {
+    GATED_FIELDS.forEach(k => { delete base[k] })
+    base.images = images.slice(0, publicPhotoCount(base))
+  }
+  if (price !== 'public') delete base.price
+
+  if (docs.length) {
+    base.deal_room = {
+      available:      true,
+      teaser,
+      doc_count:      docs.length,
+      doc_titles:     docs.map(d => d.title || kindLabel(d.kind)),
+      update_count:   updates.length,
+      last_update_at: updates[0]?.date || null,
+      gated_photo_count: teaser ? Math.max(0, images.length - base.images.length) : 0,
+      gated_fields:   teaser ? GATED_FIELDS.filter(k => cfg?.[k] != null && cfg[k] !== '') : [],
+    }
+  }
+  return base
+}
+
+/** What a registered visitor gets: the numbers, the photos, the documents, the updates. */
+export function privateDealRoom(cfg) {
+  const c = cfg || {}
+  const financials = {}
+  GATED_FIELDS.forEach(k => { if (c[k] != null && c[k] !== '') financials[k] = c[k] })
+  if (c.price != null && c.price !== '' && priceDisplay(c) === 'gated') financials.price = c.price
+  return {
+    financials,
+    images:    imagesOf(c),
+    documents: dealRoomDocs(c).map(docSummary),
+    updates:   dealRoomUpdates(c),
+  }
+}
+
+export function kindLabel(kind) {
+  return ({
+    om: 'Offering Memorandum', rent_roll: 'Rent Roll', t12: 'T-12 Operating Statement',
+    financials: 'Financials', photos: 'Photo Package', survey: 'Survey / Site Plan', other: 'Document',
+  })[kind] || 'Document'
+}
+
+// ─── Access tokens ───────────────────────────────────────────────────────────
+// Issued once a visitor registers, kept in their browser, and minted per
+// recipient into "New in the Deal Room" emails so a click lands signed in. It
+// names the mailing and the registration row, so it opens one Deal Room only.
+
+function secret() {
+  return process.env.SCAN_SIGNING_SECRET
+      || process.env.SUPABASE_SERVICE_KEY
+      || process.env.SUPABASE_SERVICE_ROLE_KEY
+      || ''
+}
+
+const mac = (body) => crypto.createHmac('sha256', `deal-room:${secret()}`).update(body).digest('base64url').slice(0, 32)
+
+export function mintAccess({ mailingId, email, now = Date.now() }) {
+  if (!secret()) throw new Error('Server misconfigured: no signing secret for Deal Room access')
+  const body = Buffer.from(JSON.stringify({
+    m: String(mailingId), e: String(email || '').trim().toLowerCase(), t: now,
+  })).toString('base64url')
+  return `${body}.${mac(body)}`
+}
+
+/** Returns { mailingId, email } or null for a forged, expired or other-mailing token. */
+export function readAccess(token, mailingId, now = Date.now()) {
+  try {
+    if (!secret()) return null
+    const [body, sig] = String(token || '').split('.')
+    if (!body || !sig) return null
+    const want = mac(body)
+    const a = Buffer.from(sig), b = Buffer.from(want)
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null
+    const obj = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'))
+    if (!obj?.t || now - obj.t > ACCESS_MAX_AGE_MS) return null
+    if (mailingId && String(obj.m) !== String(mailingId)) return null
+    if (!obj.e) return null
+    return { mailingId: String(obj.m), email: String(obj.e) }
+  } catch { return null }
+}
+
+// ─── Registration fields ─────────────────────────────────────────────────────
+
+export const BUYER_ROLES = ['principal', 'broker', 'lender', 'other']
+
+/** Normalise the optional qualifiers the gate collects. Never throws. */
+export function cleanQualifiers({ mailing_address, buyer_role, is_1031 } = {}) {
+  const addr = String(mailing_address || '').replace(/\s+/g, ' ').trim().slice(0, 300)
+  return {
+    mailing_address: addr || null,
+    buyer_role:      BUYER_ROLES.includes(buyer_role) ? buyer_role : null,
+    is_1031:         is_1031 === true || is_1031 === 'yes' ? true
+                   : is_1031 === false || is_1031 === 'no' ? false : null,
+  }
+}

@@ -17,35 +17,79 @@
  *   • On success the panel stays put with a "Download again" link. A visitor who
  *     lost the tab must not have to re-type their details to get the file back.
  *
+ *   • Mailing address, "I am a" and 1031 are OPTIONAL. Asked, never demanded:
+ *     a required address turns people away, and a lead without one still has
+ *     a name, a phone and an email.
+ *   • A visitor who registered on any Gateway page before is offered
+ *     "Continue as Jane" (src/lib/dealRoomAccess.js) — one tap, and the agent
+ *     on THIS campaign still gets the lead.
+ *
  * `theme="dark"` matches the multifamily/valuation pages; the default light
  * theme matches the luxury landing kit.
  */
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
+import { loadIdentity, saveIdentity, forgetIdentity } from '../../lib/dealRoomAccess.js'
 
 const isEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(v).trim())
 const digits  = (v) => (String(v).match(/\d/g) || []).length
 
+const ROLES = [
+  { value: 'principal', label: 'Principal / Buyer' },
+  { value: 'broker',    label: 'Broker' },
+  { value: 'lender',    label: 'Lender' },
+]
+
 export function OmGate({
-  om,                       // normalized descriptor from lib/om.js (null → renders nothing)
-  onUnlock,                 // async ({ name, phone, email }) => ({ url, filename })
+  om,                       // normalized descriptor from lib/om.js (null → renders nothing unless forceShow)
+  onUnlock,                 // async ({ name, phone, email, mailing_address, buyer_role, is_1031 }) => ({ url?, filename? })
   accent = '#c9a961',
   theme = 'light',
   title,
   subtext,
+  ctaLabel,                 // submit button text (default "Get the OM →")
+  qualifiers = false,       // show the optional "I am a" + 1031 questions
+  forceShow = false,        // render even with no OM file (a Deal Room with other documents)
+  id,
 }) {
-  const [form, setForm]     = useState({ name: '', phone: '', email: '' })
+  const [form, setForm]     = useState({ name: '', phone: '', email: '', mailing_address: '', buyer_role: '', is_1031: '' })
   const [errors, setErrors] = useState({})
   const [status, setStatus] = useState('idle')   // idle | submitting | done | error
   const [topError, setTopError] = useState(null)
   const [grant, setGrant]   = useState(null)     // { url, filename } once unlocked
+  const [known, setKnown]   = useState(null)     // a returning visitor's saved details
 
-  if (!om) return null
+  useEffect(() => { setKnown(loadIdentity()) }, [])
+
+  if (!om && !forceShow) return null
 
   const dark = theme === 'dark'
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }))
+  const pick = (k, v) => setForm(f => ({ ...f, [k]: f[k] === v ? '' : v }))
 
-  const heading  = title   || om.title || 'Offering Memorandum'
-  const sizeHint = om.size ? `PDF · ${formatSize(om.size)}` : 'PDF'
+  const heading  = title   || om?.title || 'Offering Memorandum'
+  const sizeHint = om?.size ? `PDF · ${formatSize(om.size)}` : (om ? 'PDF' : 'Financials · Documents · Updates')
+
+  const send = async (fields) => {
+    setStatus('submitting'); setTopError(null)
+    try {
+      const res = await onUnlock({
+        name: fields.name.trim(), phone: fields.phone.trim(), email: fields.email.trim(),
+        mailing_address: String(fields.mailing_address || '').trim(),
+        buyer_role: fields.buyer_role || undefined,
+        is_1031: fields.is_1031 === 'yes' ? true : fields.is_1031 === 'no' ? false : undefined,
+      })
+      saveIdentity({
+        name: fields.name.trim(), phone: fields.phone.trim(), email: fields.email.trim(),
+        mailing_address: String(fields.mailing_address || '').trim(),
+      })
+      setGrant(res || {})
+      setStatus('done')
+      if (res?.url) openDownload(res)
+    } catch (err) {
+      setStatus('error')
+      setTopError(err?.message || "We couldn't prepare the download. Please try again.")
+    }
+  }
 
   const submit = async (e) => {
     e.preventDefault()
@@ -55,19 +99,7 @@ export function OmGate({
     if (!isEmail(form.email))        next.email = "That doesn't look like an email address"
     setErrors(next)
     if (Object.keys(next).length) return
-
-    setStatus('submitting'); setTopError(null)
-    try {
-      const res = await onUnlock({
-        name: form.name.trim(), phone: form.phone.trim(), email: form.email.trim(),
-      })
-      setGrant(res)
-      setStatus('done')
-      openDownload(res)
-    } catch (err) {
-      setStatus('error')
-      setTopError(err?.message || "We couldn't prepare the download. Please try again.")
-    }
+    send(form)
   }
 
   const panel = {
@@ -79,15 +111,30 @@ export function OmGate({
   }
   const inkStrong = dark ? '#f3f0e6' : 'var(--lx-ink, #1e2642)'
   const inkSoft   = dark ? '#8c8c84' : 'var(--lx-mist, #7b8393)'
+  const inkBody   = dark ? '#bdbcb4' : 'var(--lx-ink-2, #4a5163)'
+
+  const chip = (selected) => ({
+    padding: '7px 12px', borderRadius: 999, fontSize: 12.5, cursor: 'pointer', fontWeight: 600,
+    border: `1px solid ${selected ? accent : (dark ? '#3a3a3a' : 'var(--lx-line, #e5e2da)')}`,
+    background: selected ? `${accent}22` : 'transparent',
+    color: selected ? inkStrong : inkBody,
+  })
+  const onAccent = readableOn(accent)
+  const primaryBtn = {
+    padding: '12px 16px', borderRadius: 8, border: 'none', cursor: 'pointer',
+    fontWeight: 700, fontSize: 13.5, background: accent, color: onAccent,
+    opacity: status === 'submitting' ? 0.7 : 1, width: '100%',
+  }
+  const submitText = status === 'submitting' ? 'Opening…' : (ctaLabel || 'Get the OM →')
 
   return (
-    <section style={panel} aria-labelledby="om-gate-heading">
+    <section id={id} style={panel} aria-labelledby="om-gate-heading">
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
         <div aria-hidden="true" style={{
           width: 40, height: 40, borderRadius: 8, flexShrink: 0, fontSize: 18,
           display: 'grid', placeItems: 'center',
           background: `${accent}22`, color: accent, border: `1px solid ${accent}55`,
-        }}>📄</div>
+        }}>{status === 'done' ? '🔓' : '🔒'}</div>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 10.5, letterSpacing: 1.6, textTransform: 'uppercase', color: accent, marginBottom: 4 }}>
             {status === 'done' ? 'Unlocked' : 'Instant access'}
@@ -103,25 +150,54 @@ export function OmGate({
 
       {status === 'done' && grant ? (
         <div style={{ marginTop: 16 }} role="status">
-          <p style={{ fontSize: 13.5, lineHeight: 1.6, color: dark ? '#bdbcb4' : 'var(--lx-ink-2, #4a5163)', margin: '0 0 14px' }}>
-            Your download has started. If nothing happened, use the button below.
+          {grant.url ? (
+            <>
+              <p style={{ fontSize: 13.5, lineHeight: 1.6, color: inkBody, margin: '0 0 14px' }}>
+                Your download has started. If nothing happened, use the button below.
+              </p>
+              <a href={grant.url} download={grant.filename} target="_blank" rel="noopener noreferrer"
+                 onClick={(e) => { e.preventDefault(); openDownload(grant) }}
+                 style={{
+                   display: 'block', textAlign: 'center', textDecoration: 'none',
+                   padding: '12px 16px', borderRadius: 8, fontWeight: 700, fontSize: 13.5,
+                   background: accent, color: onAccent,
+                 }}>
+                Download the {heading} ↓
+              </a>
+              <p style={{ fontSize: 11, color: inkSoft, textAlign: 'center', margin: '10px 0 0' }}>
+                This link expires shortly — download it now and keep the file.
+              </p>
+            </>
+          ) : (
+            <p style={{ fontSize: 13.5, lineHeight: 1.6, color: inkBody, margin: 0 }}>
+              You're in. Everything is open below.
+            </p>
+          )}
+        </div>
+      ) : known ? (
+        <div style={{ marginTop: 16 }}>
+          <p style={{ fontSize: 13, lineHeight: 1.6, color: inkBody, margin: '0 0 14px' }}>
+            {subtext || 'Full financials, rent roll and photos — instantly.'}
           </p>
-          <a href={grant.url} download={grant.filename} target="_blank" rel="noopener noreferrer"
-             onClick={(e) => { e.preventDefault(); openDownload(grant) }}
-             style={{
-               display: 'block', textAlign: 'center', textDecoration: 'none',
-               padding: '12px 16px', borderRadius: 8, fontWeight: 700, fontSize: 13.5,
-               background: accent, color: '#15130f',
-             }}>
-            Download the {heading} ↓
-          </a>
-          <p style={{ fontSize: 11, color: inkSoft, textAlign: 'center', margin: '10px 0 0' }}>
-            This link expires shortly — download it now and keep the file.
+          <div aria-live="polite">
+            {topError && <div role="alert" style={{ fontSize: 12, color: '#e57373', marginBottom: 8 }}>{topError}</div>}
+          </div>
+          <button type="button" style={primaryBtn} disabled={status === 'submitting'}
+                  aria-busy={status === 'submitting' || undefined}
+                  onClick={() => send({ ...known, buyer_role: '', is_1031: '' })}>
+            {status === 'submitting' ? 'Opening…' : `Continue as ${known.name.split(/\s+/)[0]} →`}
+          </button>
+          <p style={{ fontSize: 11.5, color: inkSoft, textAlign: 'center', margin: '10px 0 0' }}>
+            {known.email} ·{' '}
+            <button type="button" onClick={() => { forgetIdentity(); setKnown(null) }}
+                    style={{ background: 'none', border: 0, padding: 0, color: accent, cursor: 'pointer', fontSize: 11.5, textDecoration: 'underline' }}>
+              Not you?
+            </button>
           </p>
         </div>
       ) : (
         <>
-          <p style={{ fontSize: 13, lineHeight: 1.6, color: dark ? '#bdbcb4' : 'var(--lx-ink-2, #4a5163)', margin: '14px 0 16px' }}>
+          <p style={{ fontSize: 13, lineHeight: 1.6, color: inkBody, margin: '14px 0 16px' }}>
             {subtext || 'Full financials, rent roll and photos. Tell us where to send it and it downloads immediately.'}
           </p>
           <form onSubmit={submit} noValidate style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -131,18 +207,45 @@ export function OmGate({
                        value={form.phone} onChange={set('phone')} autoComplete="tel" placeholder="(515) 555-0134" />
             <GateField label="Email *" error={errors.email} dark={dark} accent={accent} type="email"
                        value={form.email} onChange={set('email')} autoComplete="email" placeholder="jane@company.com" />
+            <GateField label="Mailing address (optional)" dark={dark} accent={accent}
+                       value={form.mailing_address} onChange={set('mailing_address')}
+                       autoComplete="street-address" placeholder="123 Main St, Des Moines, IA 50309" />
+            {qualifiers && (
+              <>
+                <fieldset style={{ border: 0, padding: 0, margin: '2px 0 0' }}>
+                  <legend style={{ fontSize: 10.5, letterSpacing: 0.8, textTransform: 'uppercase', color: inkSoft, fontWeight: 600, marginBottom: 6 }}>
+                    I am a (optional)
+                  </legend>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {ROLES.map(r => (
+                      <button key={r.value} type="button" aria-pressed={form.buyer_role === r.value}
+                              style={chip(form.buyer_role === r.value)} onClick={() => pick('buyer_role', r.value)}>
+                        {r.label}
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
+                <fieldset style={{ border: 0, padding: 0, margin: '2px 0 0' }}>
+                  <legend style={{ fontSize: 10.5, letterSpacing: 0.8, textTransform: 'uppercase', color: inkSoft, fontWeight: 600, marginBottom: 6 }}>
+                    In a 1031 exchange? (optional)
+                  </legend>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    {[['yes', 'Yes'], ['no', 'No']].map(([v, l]) => (
+                      <button key={v} type="button" aria-pressed={form.is_1031 === v}
+                              style={chip(form.is_1031 === v)} onClick={() => pick('is_1031', v)}>{l}</button>
+                    ))}
+                  </div>
+                </fieldset>
+              </>
+            )}
             <div aria-live="polite">
               {topError && (
                 <div role="alert" style={{ fontSize: 12, color: '#e57373', marginBottom: 2 }}>{topError}</div>
               )}
             </div>
             <button type="submit" disabled={status === 'submitting'} aria-busy={status === 'submitting' || undefined}
-                    style={{
-                      padding: '12px 16px', borderRadius: 8, border: 'none', cursor: 'pointer',
-                      fontWeight: 700, fontSize: 13.5, background: accent, color: '#15130f',
-                      opacity: status === 'submitting' ? 0.7 : 1,
-                    }}>
-              {status === 'submitting' ? 'Preparing your download…' : 'Get the OM →'}
+                    style={primaryBtn}>
+              {submitText}
             </button>
             <p style={{ fontSize: 11, color: inkSoft, textAlign: 'center', margin: '2px 0 0', lineHeight: 1.5 }}>
               We'll only use this to follow up on this property. No lists, no spam.
@@ -164,7 +267,7 @@ export function OmGate({
  * on an `<a target="_blank" download>` opens the viewer alongside the page and
  * degrades to a normal navigation where popups are blocked.
  */
-function openDownload({ url, filename }) {
+export function openDownload({ url, filename }) {
   if (!url) return
   try {
     const a = document.createElement('a')
@@ -203,6 +306,20 @@ function GateField({ label, error, dark, accent, ...rest }) {
       {error && <div id={`${id}-err`} role="alert" style={{ fontSize: 11.5, color: '#e57373', marginTop: 4 }}>{error}</div>}
     </div>
   )
+}
+
+/**
+ * Dark ink on a light accent (the default gold), white on a dark one (navy):
+ * the old fixed near-black label vanished on every navy-accented page.
+ */
+export function readableOn(hex) {
+  const m = String(hex || '').trim().match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i)
+  if (!m) return '#15130f'
+  const h = m[1].length === 3 ? m[1].split('').map(c => c + c).join('') : m[1]
+  const [r, g, b] = [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16) / 255)
+    .map(c => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
+  const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+  return lum > 0.4 ? '#15130f' : '#ffffff'
 }
 
 function formatSize(bytes) {

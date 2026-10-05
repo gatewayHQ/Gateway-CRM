@@ -12,10 +12,10 @@ const initials = (name = '') =>
 /* ── LandingShell ───────────────────────────────────────────────────────────
    Page frame: sets the `.lx-root` scope + accent, sticky translucent header,
    scroll-progress bar, and footer. Children render between header and footer. */
-export function LandingShell({ accent, brand = 'Gateway Real Estate Advisors', headerCta, footer, children }) {
+export function LandingShell({ accent, brand = 'Gateway Real Estate Advisors', headerCta, footer, className = '', children }) {
   const stuck = useStuck()
   return (
-    <div className="lx-root" style={{ '--lx-accent': accent || undefined, minHeight: '100vh' }}>
+    <div className={`lx-root ${className}`.trim()} style={{ '--lx-accent': accent || undefined, minHeight: '100vh' }}>
       <ScrollProgress />
       <header className="lx-header" data-stuck={stuck}>
         <span className="lx-serif lx-brand">{brand}</span>
