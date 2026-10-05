@@ -28,7 +28,10 @@ export function MailingDetail({ mailing, agents, properties, contacts, activeAge
 
   const isMailingList = mailing.landing_type === 'mailing'
   const attachedOm    = normalizeOm(mailing.landing_config?.om)
-  const hasOmAttached = !!attachedOm
+  const roomDocs      = Array.isArray(mailing.landing_config?.deal_room?.documents) ? mailing.landing_config.deal_room.documents : []
+  const roomUpdates   = Array.isArray(mailing.landing_config?.deal_room?.updates) ? mailing.landing_config.deal_room.updates : []
+  // "Has a Deal Room": an OM, or any other document behind the registration.
+  const hasOmAttached = !!attachedOm || roomDocs.length > 0
 
   const refresh = async () => {
     setLoading(true)
@@ -127,9 +130,10 @@ export function MailingDetail({ mailing, agents, properties, contacts, activeAge
     a.click()
   }
   const exportOmRequestsCSV = () => {
-    const headers = ['Name', 'Email', 'Phone', 'Downloads', 'First Download', 'Last Download', 'From A Scan']
+    const headers = ['Name', 'Email', 'Phone', 'Mailing Address', 'Role', '1031', 'Visits', 'Downloads', 'First Download', 'Last Download', 'From A Scan']
     const rows = omRequests.map(r => [
-      r.name || '', r.email || '', r.phone || '', r.download_count ?? 1,
+      r.name || '', r.email || '', r.phone || '', r.mailing_address || '', r.buyer_role || '',
+      r.is_1031 === true ? 'Yes' : r.is_1031 === false ? 'No' : '', r.visit_count ?? 1, r.download_count ?? 1,
       r.created_at ? new Date(r.created_at).toISOString().slice(0, 16).replace('T', ' ') : '',
       r.last_download_at ? new Date(r.last_download_at).toISOString().slice(0, 16).replace('T', ' ') : '',
       r.visit_id ? 'Yes' : 'No',
@@ -138,7 +142,7 @@ export function MailingDetail({ mailing, agents, properties, contacts, activeAge
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
-    a.download = `${mailing.name.replace(/[^a-z0-9]/gi, '_')}-om-downloads.csv`
+    a.download = `${mailing.name.replace(/[^a-z0-9]/gi, '_')}-deal-room.csv`
     a.click()
   }
 
@@ -170,7 +174,7 @@ export function MailingDetail({ mailing, agents, properties, contacts, activeAge
           { id:'recipients', label:`Recipients (${analytics?.recipients_total ?? recipients.length})` },
           { id:'scans',      label:`Scans (${analytics?.total_scans ?? scans.length})` },
           ...(isMailingList ? [] : [{ id:'leads', label:`Leads (${analytics?.total_leads ?? leads.length})` }]),
-          ...(hasOmAttached ? [{ id:'om', label:`OM Downloads (${omRequests.length})` }] : []),
+          ...(hasOmAttached ? [{ id:'om', label:`Deal Room (${omRequests.length})` }] : []),
           { id:'edit',       label:'Edit' },
         ].map(t => (
           <button key={t.id}
@@ -468,14 +472,18 @@ export function MailingDetail({ mailing, agents, properties, contacts, activeAge
           <>
             <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:12, flexWrap:'wrap' }}>
               <div style={{ fontSize:13, color:'var(--gw-mist)' }}>
-                <strong style={{ color:'var(--gw-ink)' }}>{omRequests.length}</strong> unlocked
-                {attachedOm && <> · <span style={{ color:'var(--gw-ink)' }}>{attachedOm.filename}</span></>}
+                <strong style={{ color:'var(--gw-ink)' }}>{omRequests.length}</strong> registered
+                {' · '}{(attachedOm ? 1 : 0) + roomDocs.length} document{(attachedOm ? 1 : 0) + roomDocs.length === 1 ? '' : 's'}
+                {omRequests.some(r => (r.visit_count ?? 1) > 1) && (
+                  <> · <strong style={{ color:'var(--gw-ink)' }}>{omRequests.filter(r => (r.visit_count ?? 1) > 1).length}</strong> came back</>
+                )}
               </div>
               <button className="btn btn--secondary" style={{ fontSize:12, marginLeft:'auto' }}
                       disabled={omRequests.length === 0} onClick={exportOmRequestsCSV}>
                 <Icon name="download" size={12} /> Export CSV
               </button>
             </div>
+            <DealRoomNotify mailing={mailing} updates={roomUpdates} registered={omRequests.length} />
             {omRequests.length === 0 ? (
               <EmptyState title="Nobody has opened the OM yet"
                           message="The download is gated: whoever wants the offering memorandum gives their name, phone and email first. Everyone who does shows up here — and as a lead." />
@@ -488,6 +496,11 @@ export function MailingDetail({ mailing, agents, properties, contacts, activeAge
                         {r.name || 'Anonymous'}
                       </div>
                       <div style={{ fontSize:11, color:'var(--gw-mist)', flexShrink:0, display:'flex', gap:8, alignItems:'center' }}>
+                        {(r.visit_count ?? 1) > 1 && (
+                          <span title="Times they've opened the Deal Room" style={{ color:'#b8860b', fontWeight:700 }}>
+                            {r.visit_count} visits
+                          </span>
+                        )}
                         {r.download_count > 1 && (
                           <span title="Times they've re-opened the download">×{r.download_count}</span>
                         )}
@@ -498,6 +511,9 @@ export function MailingDetail({ mailing, agents, properties, contacts, activeAge
                       {r.email && <a href={`mailto:${r.email}`} style={{ color:'inherit' }}><Icon name="mail" size={11} /> {r.email}</a>}
                       {r.phone && <a href={`tel:${r.phone}`} style={{ color:'inherit' }}><Icon name="phone" size={11} /> {r.phone}</a>}
                       {r.visit_id && <span title="Came from a tracked QR scan"><Icon name="link" size={11} /> from a scan</span>}
+                      {r.mailing_address && <span><Icon name="building" size={11} /> {r.mailing_address}</span>}
+                      {r.buyer_role && <span style={{ textTransform:'capitalize' }}>{r.buyer_role}</span>}
+                      {r.is_1031 === true && <span style={{ fontWeight:700, color:'var(--gw-ink)' }}>1031</span>}
                     </div>
                   </div>
                 ))}
@@ -599,5 +615,72 @@ export function MailingDetail({ mailing, agents, properties, contacts, activeAge
         />
       )}
     </Modal>
+  )
+}
+
+// ─── "New in the Deal Room" email ─────────────────────────────────────────────
+/**
+ * Emails everyone registered for this Deal Room from the agent's own Outlook,
+ * each with their own signed link (api/campaigns.js action=deal_room_notify).
+ * Pick a saved update or write a note; a person gets each update once however
+ * often Send is pressed, so a long list can be finished by pressing it again.
+ */
+function DealRoomNotify({ mailing, updates, registered }) {
+  const [open, setOpen] = useState(false)
+  const [updateId, setUpdateId] = useState(updates[0]?.id || '')
+  const [note, setNote] = useState('')
+  const [sending, setSending] = useState(false)
+
+  const send = async () => {
+    setSending(true)
+    try {
+      const r = await api('deal_room_notify', { mailing_id: mailing.id, update_id: updateId || null, note })
+      if (r.error) throw new Error(r.error)
+      const parts = [`Sent to ${r.sent}`]
+      if (r.skipped) parts.push(`${r.skipped} skipped (already sent or opted out)`)
+      if (r.failed) parts.push(`${r.failed} failed`)
+      if (r.remaining) parts.push(`${r.remaining} left — press Send again`)
+      pushToast(parts.join(' · '), r.failed ? 'error' : 'success')
+      if (!r.remaining && !r.failed) setOpen(false)
+    } catch (err) {
+      pushToast(err.message, 'error')
+    } finally {
+      setSending(false)
+    }
+  }
+
+  if (!registered) return null
+  if (!open) {
+    return (
+      <button className="btn btn--primary" style={{ fontSize:12, marginBottom:12 }} onClick={() => setOpen(true)}>
+        <Icon name="mail" size={12} /> Email everyone registered ({registered})
+      </button>
+    )
+  }
+  return (
+    <div style={{ border:'1px solid #f0e0c0', background:'#fffdf8', borderRadius:10, padding:12, marginBottom:12, display:'grid', gap:8 }}>
+      <div style={{ fontSize:13, fontWeight:700 }}>New in the Deal Room</div>
+      <div style={{ fontSize:11.5, color:'var(--gw-mist)', lineHeight:1.45 }}>
+        Goes from your Outlook to the {registered} people who registered. Each email carries their own link, so a click
+        opens the Deal Room signed in and shows up here as a return visit.
+      </div>
+      <select className="input" value={updateId} onChange={e => setUpdateId(e.target.value)}>
+        <option value="">No update — just my note</option>
+        {updates.filter(u => u.title).map(u => (
+          <option key={u.id} value={u.id}>{u.date ? `${u.date} — ` : ''}{u.title}</option>
+        ))}
+      </select>
+      <textarea className="input" rows={3} value={note} onChange={e => setNote(e.target.value)}
+                placeholder="We just uploaded the September financials. Occupancy improved to 91%. Call for Offers is October 8th — let me know if you have questions." />
+      {!updates.length && (
+        <div style={{ fontSize:11.5, color:'var(--gw-mist)' }}>Tip: add dated updates under Edit → Deal Room so they also show on the page.</div>
+      )}
+      <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
+        <button className="btn btn--ghost" style={{ fontSize:12 }} onClick={() => setOpen(false)}>Cancel</button>
+        <button className="btn btn--primary" style={{ fontSize:12 }} disabled={sending || (!updateId && !note.trim())} onClick={send}>
+          {sending ? 'Sending…' : 'Send'}
+        </button>
+      </div>
+    </div>
   )
 }

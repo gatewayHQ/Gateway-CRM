@@ -112,7 +112,8 @@ export async function deleteOm(path) {
  * The public half: trade the visitor's details for a signed download URL.
  *
  * Throws with a message fit to show a visitor. On success returns
- * { url, filename } — the caller opens it.
+ * { url, filename, access_token, deal_room } — the caller opens the URL (when
+ * there is an OM file) and keeps the token (src/lib/dealRoomAccess.js).
  */
 export async function requestOm(payload) {
   const res = await fetch('/api/campaigns', {
@@ -121,8 +122,58 @@ export async function requestOm(payload) {
     body: JSON.stringify({ action: 'om_request', ...payload }),
   })
   const data = await res.json().catch(() => ({}))
-  if (!res.ok || data.error || !data.url) {
+  // A Deal Room with no OM file still answers with an access token and the
+  // room's contents, just no download URL.
+  if (!res.ok || data.error || (!data.url && !data.access_token)) {
     throw new Error(data.error || "We couldn't prepare the download. Please try again.")
   }
   return data
+}
+
+/**
+ * Deal Room documents beyond the OM: rent rolls and T-12s arrive as Excel,
+ * CSV, Word, photos or a zip as often as a PDF. Same private bucket, same
+ * rules (migration 0063 widened what it accepts).
+ */
+export const DEAL_ROOM_ACCEPT = [
+  '.pdf', '.xlsx', '.xls', '.csv', '.docx', '.doc', '.jpg', '.jpeg', '.png', '.webp', '.zip',
+].join(',')
+
+const DEAL_ROOM_EXT = /\.(pdf|xlsx|xls|csv|docx|doc|jpe?g|png|webp|zip)$/i
+
+export const DEAL_ROOM_DOC_KINDS = [
+  { value: 'rent_roll',  label: 'Rent Roll' },
+  { value: 't12',        label: 'T-12 Operating Statement' },
+  { value: 'financials', label: 'Financials' },
+  { value: 'photos',     label: 'Photo Package' },
+  { value: 'survey',     label: 'Survey / Site Plan' },
+  { value: 'other',      label: 'Other' },
+]
+
+export async function uploadDealRoomDoc(file) {
+  if (!file) throw new Error('No file selected')
+  if (!DEAL_ROOM_EXT.test(file.name || '')) {
+    throw new Error('Use a PDF, Excel, CSV, Word, image or zip file')
+  }
+  if (file.size > OM_MAX_BYTES) {
+    throw new Error(`That file is ${formatBytes(file.size)} — the limit is ${formatBytes(OM_MAX_BYTES)}`)
+  }
+  const safeName = (file.name || 'document')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .slice(-120)
+  const path = `${Date.now()}-${Math.random().toString(36).slice(2)}/${safeName}`
+  const { error } = await supabase.storage
+    .from(OM_BUCKET)
+    .upload(path, file, { contentType: file.type || 'application/octet-stream', upsert: false })
+  if (error) throw error
+  return {
+    id:          `doc-${Math.random().toString(36).slice(2, 10)}`,
+    path,
+    filename:    safeName,
+    title:       '',
+    kind:        'other',
+    size:        file.size,
+    uploaded_at: new Date().toISOString(),
+  }
 }

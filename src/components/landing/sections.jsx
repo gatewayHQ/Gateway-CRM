@@ -12,10 +12,10 @@ const initials = (name = '') =>
 /* ── LandingShell ───────────────────────────────────────────────────────────
    Page frame: sets the `.lx-root` scope + accent, sticky translucent header,
    scroll-progress bar, and footer. Children render between header and footer. */
-export function LandingShell({ accent, brand = 'Gateway Real Estate Advisors', headerCta, footer, children }) {
+export function LandingShell({ accent, brand = 'Gateway Real Estate Advisors', headerCta, footer, className = '', children }) {
   const stuck = useStuck()
   return (
-    <div className="lx-root" style={{ '--lx-accent': accent || undefined, minHeight: '100vh' }}>
+    <div className={`lx-root ${className}`.trim()} style={{ '--lx-accent': accent || undefined, minHeight: '100vh' }}>
       <ScrollProgress />
       <header className="lx-header" data-stuck={stuck}>
         <span className="lx-serif lx-brand">{brand}</span>
@@ -79,19 +79,20 @@ export function Section({ title, children, className = '', ...rest }) {
 
 /* ── DetailGrid ──────────────────────────────────────────────────────────────
    Key/value spec grid. Numeric values animate with a count-up on reveal. */
-export function DetailGrid({ items = [] }) {
+export function DetailGrid({ items = [], still = false }) {
   const [ref, shown] = useReveal()
   if (!items.length) return null
   return (
     <div className="lx-details" ref={ref}>
-      {items.map((d, i) => <Detail key={i} {...d} start={shown} />)}
+      {items.map((d, i) => <Detail key={i} {...d} start={shown} still={still} />)}
     </div>
   )
 }
-function Detail({ label, value, prefix = '', suffix = '', start }) {
+function Detail({ label, value, prefix = '', suffix = '', start, still }) {
   const numeric = typeof value === 'number'
-  const counted = useCountUp(numeric ? value : NaN, { start })
-  const display = numeric ? `${prefix}${Math.round(counted).toLocaleString()}${suffix}` : value
+  const counted = useCountUp(numeric && !still ? value : NaN, { start })
+  const shownNum = still ? value : counted
+  const display = numeric ? `${prefix}${Math.round(shownNum).toLocaleString()}${suffix}` : value
   return (
     <div>
       <div className="lx-detail__label">{label}</div>

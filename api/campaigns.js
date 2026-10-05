@@ -52,6 +52,17 @@
 import { createClient } from '@supabase/supabase-js'
 import crypto from 'crypto'
 import { log } from './_lib/observability.js'
+import {
+  publicTeaserConfig, privateDealRoom, dealRoomDocs, hasDealRoom, mintAccess, readAccess, cleanQualifiers,
+  dealRoomUpdates,
+} from './_lib/dealRoom.js'
+import { handleLandingLead } from './_lib/landingLeadAlert.js'
+import { buildDealRoomUpdateEmail } from './_lib/dealRoomEmail.js'
+import { requireAgent } from './_lib/auth.js'
+import { getValidAccessToken, sendGraphMail } from './_lib/msGraph.js'
+import { suppressedEmails } from './_lib/massEmail.js'
+import { mintRecipientUnsubscribeToken, canMintUnsubscribeTokens } from './_lib/unsubscribeToken.js'
+import { unsubscribeUrl } from '../src/lib/emailFooter.js'
 import { readUnsubscribeToken, isContactUnsubscribeToken, readOpenToken } from './_lib/unsubscribeToken.js'
 
 // ─── Supabase client (lazy singleton — avoids cold-start env-var crashes) ───
@@ -469,6 +480,18 @@ const OM_BUCKET = 'campaign-oms'
 // that the URL is worthless if it gets forwarded or ends up in a screenshot.
 const OM_URL_TTL_SECONDS = 15 * 60
 
+// The longest a visitor waits on the agent alert (email + SMS + task) before
+// their form answers anyway. The alert keeps its own failures to itself.
+const LEAD_ALERT_BUDGET_MS = 6000
+
+// Stop starting new Deal Room update emails well inside the function's limit.
+const NOTIFY_BUDGET_MS = 40_000
+
+/** One row of Deal Room activity (migration 0063). Best effort: attribution only. */
+async function logDealRoomEvent(row) {
+  try { await db().from('deal_room_events').insert(row) } catch { /* pre-0063 database */ }
+}
+
 /**
  * The OM descriptor stored on `landing_config.om` by the landing-page builder:
  *   { path, filename, title, size, uploaded_at }
@@ -489,21 +512,12 @@ function omFromConfig(cfg) {
 }
 
 /**
- * Strip the OM's storage path out of the config before it is handed to an
- * anonymous browser.
- *
- * The bucket is private, so leaking the path would not by itself give anyone
- * the file — but it is also of no use to the page, which asks the server for a
- * signed URL rather than building one. The public payload keeps only what the
- * gate needs to render (that an OM exists, what it is called, how big it is),
- * which is the smallest thing that works. Same reasoning as the fixed
- * four-column projection on the `landing` action itself.
+ * The config an anonymous browser receives: storage paths always stripped, and
+ * in Deal Room teaser mode the underwriting numbers, the extra photos and any
+ * hidden price stripped too. The rules live in api/_lib/dealRoom.js.
  */
 function publicLandingConfig(cfg) {
-  const om = omFromConfig(cfg)
-  if (!om) return cfg || {}
-  const { path, ...rest } = cfg.om
-  return { ...cfg, om: { ...rest, path: undefined, available: true } }
+  return publicTeaserConfig(cfg)
 }
 
 /**
@@ -518,7 +532,7 @@ function publicLandingConfig(cfg) {
  */
 async function captureLeadAndContact({
   mailing_id, name, email, phone, message, property_address, property_type,
-  source_landing, visit_id, ip_hash, om_requested = false,
+  source_landing, visit_id, ip_hash, om_requested = false, qualifiers = null,
 }) {
   const cleanEmail = email?.trim()?.toLowerCase() || null
 
@@ -546,6 +560,15 @@ async function captureLeadAndContact({
   if (om_requested) {
     try { await db().from('mailing_leads').update({ om_requested: true }).eq('id', lead.id) } catch { /* pre-0045 database */ }
   }
+  // The Deal Room's optional qualifiers (migration 0063) — same reasoning:
+  // stamped after the insert so a database without the columns keeps the lead.
+  const q = qualifiers || {}
+  const qPatch = Object.fromEntries(
+    ['mailing_address', 'buyer_role', 'is_1031'].filter(k => q[k] != null).map(k => [k, q[k]])
+  )
+  if (Object.keys(qPatch).length) {
+    try { await db().from('mailing_leads').update(qPatch).eq('id', lead.id) } catch { /* pre-0063 database */ }
+  }
 
   // Upsert into contacts (best-effort — don't fail the lead capture if this errors)
   let contactId = null
@@ -557,7 +580,17 @@ async function captureLeadAndContact({
       if (cleanEmail) {
         const { data: existing } = await db()
           .from('contacts').select('id').eq('email', cleanEmail).limit(1)
-        if (existing?.length) contactId = existing[0].id
+        if (existing?.length) {
+          contactId = existing[0].id
+          // Fill a missing mailing address on a contact we already had; never
+          // overwrite one an agent entered.
+          if (q.mailing_address) {
+            try {
+              await db().from('contacts').update({ owner_address: q.mailing_address })
+                .eq('id', contactId).is('owner_address', null)
+            } catch { /* best effort */ }
+          }
+        }
       }
       if (!contactId) {
         const base = {
@@ -567,6 +600,8 @@ async function captureLeadAndContact({
           phone:      phone?.trim() || null,
           type:       source_landing === 'valuation' ? 'seller' : 'buyer',
           status:     'active',
+          // Where they live — what the next mail drop needs (contacts.owner_address).
+          ...(q.mailing_address ? { owner_address: q.mailing_address } : {}),
         }
         const source = om_requested ? 'om-download' : 'mailing-landing'
         let { data: created } = await db().from('contacts').insert([{ ...base, source }]).select('id').single()
@@ -1476,20 +1511,36 @@ export default async function handler(req, res) {
       if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
       if (!name && !email && !phone) return json(res, 400, { error: 'Provide at least name, email, or phone' })
 
-      const { lead } = await captureLeadAndContact({
+      const qualifiers = cleanQualifiers(req.body)
+      const { lead, contactId } = await captureLeadAndContact({
         mailing_id, name, email, phone, message, property_address, property_type,
-        source_landing, visit_id, ip_hash: hashIp(clientIp(req)),
+        source_landing, visit_id, ip_hash: hashIp(clientIp(req)), qualifiers,
       })
+
+      // Tell the agent now, not whenever they next open Campaigns. Bounded so a
+      // slow mail or SMS provider never holds the visitor's "thank you".
+      const { data: alertMailing } = await db()
+        .from('mailings').select('id, name, agent_id, landing_config').eq('id', mailing_id).maybeSingle()
+      if (alertMailing) {
+        await withTimeout(handleLandingLead(db(), {
+          lead: { name: name || email || phone, email, phone, message, ...qualifiers, contact_id: contactId },
+          mailing: alertMailing, dealRoom: false, crmUrl: baseUrl(req),
+        }), LEAD_ALERT_BUDGET_MS)
+      }
 
       return json(res, 200, { ok: true, lead_id: lead.id })
     }
 
-    // ── Public: unlock the Offering Memorandum ──────────────────────────────
-    // The gate behind the OM download on every /lp/* page. Unlike capture_lead,
-    // all three of name, phone and email are REQUIRED: this is an exchange, and
-    // handing over a PDF worth six figures of commission for a first name alone
-    // is not one. The reward is a signed URL to the private bucket, good for a
-    // few minutes — forwarding it later gets the next person nothing.
+    // ── Public: register for the Deal Room (and unlock the OM) ──────────────
+    // The gate behind the OM download on every /lp/* page, widened into a Deal
+    // Room. Unlike capture_lead, name, phone and email are REQUIRED: this is an
+    // exchange, and handing over a PDF worth six figures of commission for a
+    // first name alone is not one. Mailing address, role and 1031 are optional
+    // — asked for, never demanded, because a required address turns people away.
+    //
+    // The reward: a signed URL to the OM (good for a few minutes — forwarding
+    // it later gets the next person nothing), the Deal Room contents, and an
+    // access token that keeps this visitor signed in on their device.
     if (action === 'om_request') {
       const { mailing_id, name, email, phone, message, source_landing, visit_id } = req.body
       if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
@@ -1506,56 +1557,96 @@ export default async function handler(req, res) {
       if ((cleanPhone.match(/\d/g) || []).length < 10) {
         return json(res, 400, { error: 'A valid phone number is required' })
       }
+      const qualifiers = cleanQualifiers(req.body)
 
-      // Resolve the OM from the campaign's own config — never from the request.
-      // Taking a path from the client would turn this endpoint into an
+      // Resolve the files from the campaign's own config — never from the
+      // request. Taking a path from the client would turn this endpoint into an
       // unauthenticated reader for the whole bucket.
       const { data: m, error: mErr } = await db()
-        .from('mailings').select('id, name, landing_config').eq('id', mailing_id).maybeSingle()
+        .from('mailings').select('id, name, agent_id, landing_config').eq('id', mailing_id).maybeSingle()
       if (mErr) throw mErr
       if (!m) return json(res, 404, { error: 'Mailing not found' })
 
+      if (!hasDealRoom(m.landing_config)) {
+        return json(res, 404, { error: 'No offering memorandum is attached to this page' })
+      }
       const om = omFromConfig(m.landing_config)
-      if (!om) return json(res, 404, { error: 'No offering memorandum is attached to this page' })
 
       // Sign first. If storage is having a bad minute we would rather tell the
       // visitor to retry than record a download that never happened — and the
       // lead is not lost either way, because they still have the form in front
       // of them.
-      const { data: signed, error: signErr } = await db().storage
-        .from(OM_BUCKET).createSignedUrl(om.path, OM_URL_TTL_SECONDS, { download: om.filename })
-      if (signErr || !signed?.signedUrl) {
-        log.error('om_request.sign_failed', { mailing_id, error: signErr?.message })
-        return json(res, 502, { error: "We couldn't prepare the download. Please try again in a moment." })
+      let signed = null
+      if (om) {
+        const r = await db().storage
+          .from(OM_BUCKET).createSignedUrl(om.path, OM_URL_TTL_SECONDS, { download: om.filename })
+        if (r.error || !r.data?.signedUrl) {
+          log.error('om_request.sign_failed', { mailing_id, error: r.error?.message })
+          return json(res, 502, { error: "We couldn't prepare the download. Please try again in a moment." })
+        }
+        signed = r.data
       }
+
+      // Already registered on this campaign (another device, a cleared
+      // browser)? Then the agent already has them — no second alert.
+      let returning = false
+      try {
+        const { data: prior } = await db().from('mailing_om_requests').select('id')
+          .eq('mailing_id', mailing_id).eq('email', cleanEmail).limit(1)
+        returning = !!prior?.length
+      } catch { /* pre-0045 database */ }
 
       const ipHash = hashIp(clientIp(req))
       const { lead, contactId, visitId } = await captureLeadAndContact({
         mailing_id,
         name: cleanName, email: cleanEmail, phone: cleanPhone,
-        message: message || `Downloaded the offering memorandum${om.title ? ` — ${om.title}` : ''}`,
-        source_landing, visit_id, ip_hash: ipHash, om_requested: true,
+        message: message || (om
+          ? `Downloaded the offering memorandum${om.title ? ` — ${om.title}` : ''}`
+          : 'Registered for the Deal Room'),
+        source_landing, visit_id, ip_hash: ipHash, om_requested: true, qualifiers,
       })
 
       // The OM audit trail. Best-effort and deliberately after the lead: on a
       // pre-0045 database this table doesn't exist yet, and that must cost the
       // visitor their download no more than it costs the agent their lead.
+      let requestId = null
       try {
-        await db().from('mailing_om_requests').upsert({
+        const { data: row } = await db().from('mailing_om_requests').upsert({
           mailing_id,
           lead_id:     lead.id,
           contact_id:  contactId,
           name:        cleanName,
           email:       cleanEmail,
           phone:       cleanPhone,
-          om_path:     om.path,
-          om_filename: om.filename,
+          om_path:     om?.path || null,
+          om_filename: om?.filename || null,
           visit_id:    visitId,
           ip_hash:     ipHash,
           user_agent:  String(req.headers['user-agent'] || '').slice(0, 400) || null,
           last_download_at: new Date().toISOString(),
-        }, { onConflict: 'mailing_id,email' })
+        }, { onConflict: 'mailing_id,email' }).select('id').maybeSingle()
+        requestId = row?.id || null
       } catch { /* pre-0045 database — the lead and the download both stand */ }
+      if (requestId) {
+        const qPatch = Object.fromEntries(Object.entries(qualifiers).filter(([, v]) => v != null))
+        try {
+          if (Object.keys(qPatch).length) await db().from('mailing_om_requests').update(qPatch).eq('id', requestId)
+        } catch { /* pre-0063 database */ }
+        await logDealRoomEvent({ mailing_id, om_request_id: requestId, email: cleanEmail, kind: returning ? 'return' : 'enter' })
+      }
+
+      if (!returning) {
+        await withTimeout(handleLandingLead(db(), {
+          lead: {
+            name: cleanName, email: cleanEmail, phone: cleanPhone, message: message || null,
+            ...qualifiers, contact_id: contactId,
+          },
+          mailing: m, dealRoom: true, crmUrl: baseUrl(req),
+        }), LEAD_ALERT_BUDGET_MS)
+      }
+
+      let accessToken = null
+      try { accessToken = mintAccess({ mailingId: mailing_id, email: cleanEmail }) } catch { /* no secret configured */ }
 
       // The response carries a working (if brief) download URL — never let an
       // edge or proxy hold onto it.
@@ -1563,9 +1654,170 @@ export default async function handler(req, res) {
       return json(res, 200, {
         ok: true,
         lead_id:  lead.id,
-        url:      signed.signedUrl,
-        filename: om.filename,
+        url:      signed?.signedUrl || null,
+        filename: om?.filename || null,
         expires_in: OM_URL_TTL_SECONDS,
+        access_token: accessToken,
+        deal_room: { ...privateDealRoom(m.landing_config), visitor: { first_name: cleanName.split(/\s+/)[0] } },
+      })
+    }
+
+    // ── Public: re-open the Deal Room with a stored access token ────────────
+    // A registered visitor's browser (or a link in a "New in the Deal Room"
+    // email) carries a signed token naming this mailing and their email. It
+    // opens this campaign's Deal Room only, and every open is counted so the
+    // agent can see who came back.
+    if (action === 'deal_room') {
+      const { mailing_id, access_token } = req.body
+      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      const access = readAccess(access_token, mailing_id)
+      if (!access) return json(res, 401, { error: 'Please register to enter the Deal Room' })
+
+      const { data: m, error: mErr } = await db()
+        .from('mailings').select('id, landing_config').eq('id', mailing_id).maybeSingle()
+      if (mErr) throw mErr
+      if (!m || !hasDealRoom(m.landing_config)) return json(res, 404, { error: 'This Deal Room is no longer available' })
+
+      let visitor = null
+      try {
+        const { data: row } = await db().from('mailing_om_requests')
+          .select('id, name, visit_count').eq('mailing_id', mailing_id).eq('email', access.email).maybeSingle()
+        if (row) {
+          visitor = { first_name: String(row.name || '').split(/\s+/)[0] || null }
+          try {
+            await db().from('mailing_om_requests').update({
+              visit_count: (Number(row.visit_count) || 1) + 1, last_visit_at: new Date().toISOString(),
+            }).eq('id', row.id)
+          } catch { /* pre-0063 database */ }
+          await logDealRoomEvent({ mailing_id, om_request_id: row.id, email: access.email, kind: 'return' })
+        }
+      } catch { /* pre-0045 database — the token alone still opens the room */ }
+
+      noStore(res)
+      return json(res, 200, { ok: true, deal_room: { ...privateDealRoom(m.landing_config), visitor } })
+    }
+
+    // ── Public: download one Deal Room document ──────────────────────────────
+    if (action === 'deal_room_doc') {
+      const { mailing_id, access_token, doc_id } = req.body
+      if (!mailing_id || !doc_id) return json(res, 400, { error: 'mailing_id and doc_id required' })
+      const access = readAccess(access_token, mailing_id)
+      if (!access) return json(res, 401, { error: 'Please register to enter the Deal Room' })
+
+      const { data: m, error: mErr } = await db()
+        .from('mailings').select('id, landing_config').eq('id', mailing_id).maybeSingle()
+      if (mErr) throw mErr
+      const doc = m ? dealRoomDocs(m.landing_config).find(d => d.id === String(doc_id)) : null
+      if (!doc) return json(res, 404, { error: 'That document is no longer in the Deal Room' })
+
+      const { data: signed, error: signErr } = await db().storage
+        .from(OM_BUCKET).createSignedUrl(doc.path, OM_URL_TTL_SECONDS, { download: doc.filename })
+      if (signErr || !signed?.signedUrl) {
+        log.error('deal_room_doc.sign_failed', { mailing_id, doc_id, error: signErr?.message })
+        return json(res, 502, { error: "We couldn't prepare the download. Please try again in a moment." })
+      }
+
+      try {
+        const { data: row } = await db().from('mailing_om_requests')
+          .select('id').eq('mailing_id', mailing_id).eq('email', access.email).maybeSingle()
+        await logDealRoomEvent({ mailing_id, om_request_id: row?.id || null, email: access.email, kind: 'document', doc_id: doc.id })
+      } catch { /* attribution only */ }
+
+      noStore(res)
+      return json(res, 200, { ok: true, url: signed.signedUrl, filename: doc.filename, expires_in: OM_URL_TTL_SECONDS })
+    }
+
+    // ── Agent: email registered buyers that the Deal Room has something new ──
+    // "We just uploaded the September financials." Sent from the agent's own
+    // Outlook, one message per registered visitor, each with that person's own
+    // signed link so the click lands them inside and counts as a return visit.
+    //
+    // Idempotent per update: a person is emailed about a given update once,
+    // however often Send is pressed (deal_room_events_update_once). A long list
+    // goes out across several calls — the response says how many remain.
+    if (action === 'deal_room_notify') {
+      const { agent, isAdmin } = await requireAgent(req)
+      const { mailing_id, update_id = null, note = '', subject = '' } = req.body
+      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+
+      const { data: m, error: mErr } = await db()
+        .from('mailings').select('id, name, agent_id, landing_type, landing_config').eq('id', mailing_id).maybeSingle()
+      if (mErr) throw mErr
+      if (!m) return json(res, 404, { error: 'Mailing not found' })
+      const coAgents = Array.isArray(m.landing_config?.agent_ids) ? m.landing_config.agent_ids : []
+      if (!isAdmin && m.agent_id !== agent.id && !coAgents.includes(agent.id)) {
+        return json(res, 403, { error: 'Only the campaign\'s advisors can email its Deal Room' })
+      }
+      const update = update_id ? dealRoomUpdates(m.landing_config).find(u => u.id === String(update_id)) : null
+      if (update_id && !update) return json(res, 404, { error: 'That update is no longer on the page' })
+      if (!update && !String(note).trim()) return json(res, 400, { error: 'Write a message or pick an update to send' })
+      if (!canMintUnsubscribeTokens()) return json(res, 500, { error: 'Unsubscribe links are not configured — nothing was sent' })
+
+      const { data: regs, error: rErr } = await db().from('mailing_om_requests')
+        .select('id, name, email').eq('mailing_id', mailing_id)
+      if (rErr) throw rErr
+      const people = (regs || []).filter(r => r.email)
+
+      // Already emailed about this update, or about this exact note today.
+      const sendKey = update ? update.id : `note-${crypto.createHash('sha1').update(String(note)).digest('hex').slice(0, 12)}`
+      let done = new Set()
+      try {
+        const { data: sent } = await db().from('deal_room_events').select('email')
+          .eq('mailing_id', mailing_id).eq('kind', 'update_email').eq('update_id', sendKey)
+        done = new Set((sent || []).map(r => String(r.email).toLowerCase()))
+      } catch { /* pre-0063 database */ }
+      const emails = people.map(p => p.email)
+      const [suppressed, { data: optedOut }] = await Promise.all([
+        suppressedEmails(db(), emails),
+        db().from('contacts').select('email').in('email', emails).eq('email_opt_out', true),
+      ])
+      const optOut = new Set((optedOut || []).map(r => String(r.email).toLowerCase()))
+
+      const queue = people.filter(p => {
+        const e = p.email.toLowerCase()
+        return !done.has(e) && !suppressed.has(e) && !optOut.has(e)
+      })
+
+      let accessToken
+      try { ({ accessToken } = await getValidAccessToken(db(), agent.id)) } catch (err) {
+        return json(res, err.status === 409 ? 409 : 502, {
+          error: err.status === 409 ? 'Connect Outlook in Integrations to email your Deal Room' : err.message,
+        })
+      }
+
+      const { data: agentRow } = await db().from('agents').select('name, email, phone').eq('id', agent.id).maybeSingle()
+      const base = baseUrl(req)
+      const page = destinationFor(m)
+      const headline = m.landing_config?.headline || m.name
+      const started = Date.now()
+      let sent = 0, failed = 0
+      for (const p of queue) {
+        if (Date.now() - started > NOTIFY_BUDGET_MS) break
+        const token = mintAccess({ mailingId: m.id, email: p.email })
+        const link = `${base}${page}?dr=${encodeURIComponent(token)}`
+        const unsub = unsubscribeUrl(base, mintRecipientUnsubscribeToken({ email: p.email }))
+        const mail = buildDealRoomUpdateEmail({
+          recipient: p, agent: agentRow || agent, headline, update, note, link,
+          unsubscribeUrl: unsub, callForOffers: m.landing_config?.call_for_offers_date || null,
+          subject: String(subject || '').trim() || undefined,
+        })
+        try {
+          await sendGraphMail(accessToken, { subject: mail.subject, html: mail.html, to: [p.email] })
+          sent++
+          await logDealRoomEvent({ mailing_id, om_request_id: p.id, email: p.email.toLowerCase(), kind: 'update_email', update_id: sendKey })
+        } catch (err) {
+          failed++
+          log.warn('deal_room_notify.send_failed', { mailing_id, err_message: String(err.message).slice(0, 200) })
+          if (err.status === 401) break
+        }
+        await new Promise(r => setTimeout(r, 250))
+      }
+
+      return json(res, 200, {
+        ok: true, sent, failed,
+        remaining: Math.max(0, queue.length - sent - failed),
+        skipped: people.length - queue.length,
+        registered: people.length,
       })
     }
 

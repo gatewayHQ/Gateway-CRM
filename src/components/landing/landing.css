@@ -293,3 +293,106 @@
 @media (max-width: 420px) {
   .lx-advisor { flex-direction: column; }
 }
+
+/* ── Deal hero (listing pages with a Deal Room) ─────────────────────────────
+   Deliberately still: no zoom, no parallax, no reveal, no pulse. Clean lines —
+   hairline rules, small square corners, letter-spaced labels. */
+.lx-dhero {
+  position: relative; overflow: hidden; isolation: isolate; color: #fff;
+  min-height: min(84vh, 740px); display: flex; flex-direction: column; justify-content: flex-end;
+}
+.lx-dhero .lx-hero__bg { inset: 0; }
+.lx-dhero__scrim {
+  position: absolute; inset: 0; z-index: -1;
+  background: linear-gradient(180deg, rgba(8,10,18,.45) 0%, rgba(8,10,18,.05) 30%, rgba(8,10,18,.25) 55%, rgba(8,10,18,.86) 100%);
+}
+.lx-dhero > .lx-container { width: 100%; box-sizing: border-box; }
+.lx-dhero__inner { padding-block: clamp(96px, 16vh, 160px) clamp(26px, 4vh, 40px); }
+.lx-dhero__meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin-bottom: 22px;
+  font-size: 11px; font-weight: 600; letter-spacing: .18em; text-transform: uppercase;
+}
+.lx-dhero__meta > span:first-child { padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,.7); }
+.lx-dhero__cfo { padding: 6px 10px; border: 1px solid var(--lx-gold); border-radius: 2px; }
+.lx-dhero__cfo b { color: var(--lx-gold); font-weight: 700; }
+.lx-dhero__asset { font-size: 12px; font-weight: 600; letter-spacing: .2em; text-transform: uppercase; color: var(--lx-gold); }
+.lx-dhero__title { font-size: clamp(36px, 6vw, 72px); font-weight: 500; line-height: 1.04; margin: 12px 0 14px; max-width: 18ch; text-wrap: balance; letter-spacing: -.005em; }
+.lx-dhero__loc { font-size: clamp(12px, 1.4vw, 14px); letter-spacing: .22em; text-transform: uppercase; opacity: .88; }
+.lx-dhero__ctas { display: flex; flex-wrap: wrap; gap: 10px; margin-top: clamp(24px, 3.5vh, 34px); }
+.lx-btn--gold {
+  background: var(--lx-gold); color: #15130f; font-weight: 600; font-size: 13px;
+  letter-spacing: .08em; text-transform: uppercase; border-radius: 2px; padding: 15px 22px;
+}
+.lx-btn--gold:hover { background: color-mix(in srgb, var(--lx-gold) 88%, #fff); }
+.lx-dhero__barwrap { padding-bottom: clamp(20px, 3vh, 30px); }
+.lx-dhero__bar {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  border-top: 1px solid rgba(255,255,255,.35);
+}
+.lx-dhero__stat { padding: 16px 20px 2px 0; }
+.lx-dhero__stat + .lx-dhero__stat { padding-left: 20px; border-left: 1px solid rgba(255,255,255,.2); }
+.lx-dhero__statl { font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; opacity: .72; }
+.lx-dhero__statv { font-size: clamp(22px, 2.6vw, 30px); font-weight: 500; line-height: 1.15; margin-top: 4px; }
+
+/* ── In-page anchors ──────────────────────────────────────────────────────── */
+.lx-anchors { position: sticky; top: 56px; z-index: 30; background: var(--lx-paper); border-bottom: 1px solid var(--lx-line); }
+.lx-anchors__row { display: flex; gap: clamp(18px, 3vw, 34px); overflow-x: auto; scrollbar-width: none; }
+.lx-anchors__row::-webkit-scrollbar { display: none; }
+.lx-anchors__a { flex-shrink: 0; padding: 15px 0 13px; font-size: 11.5px; font-weight: 600; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--lx-ink-2); text-decoration: none; border-bottom: 1px solid transparent; }
+.lx-anchors__a:hover { color: var(--lx-ink); border-bottom-color: var(--lx-ink); }
+.lx-root [id] { scroll-margin-top: 120px; }
+
+/* ── Highlights ───────────────────────────────────────────────────────────── */
+.lx-hl { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0 28px; list-style: none; margin: 0; padding: 0; }
+.lx-hl__item { padding: 14px 0; border-top: 1px solid var(--lx-line); font-size: 14px; line-height: 1.55; color: var(--lx-ink-2); }
+.lx-hl__n { display: block; font-size: 10.5px; font-weight: 600; letter-spacing: .16em; color: var(--lx-mist); margin-bottom: 4px; }
+
+/* ── Deal Room: locked + open ─────────────────────────────────────────────── */
+.lx-locked__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); margin: 12px 0 16px;
+  border-top: 1px solid var(--lx-line); border-left: 1px solid var(--lx-line); }
+.lx-locked__tile { padding: 10px 12px; border-right: 1px solid var(--lx-line); border-bottom: 1px solid var(--lx-line); }
+.lx-locked__val { color: var(--lx-mist); margin-top: 6px; }
+.lx-locked__list { list-style: none; margin: 0; padding: 0; font-size: 14px; color: var(--lx-ink-2); }
+.lx-locked__list li { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--lx-line); }
+.lx-locked__list svg, .lx-doc__icon { color: var(--lx-mist); }
+.lx-open__h { font-size: 11px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: var(--lx-mist); margin: 22px 0 8px; }
+.lx-docs { list-style: none; margin: 0; padding: 0; }
+.lx-doc { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--lx-line); }
+.lx-doc__icon { display: grid; place-items: center; }
+.lx-doc__name { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.lx-doc__name b { font-size: 14px; font-weight: 600; color: var(--lx-ink); }
+.lx-doc__name small { font-size: 11.5px; color: var(--lx-mist); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lx-updates { list-style: none; margin: 0; padding: 0; }
+.lx-update { padding: 12px 0; border-top: 1px solid var(--lx-line); }
+.lx-update__date { font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--lx-mist); }
+.lx-update__title { font-weight: 600; color: var(--lx-ink); margin-top: 3px; }
+.lx-update__body { margin: 4px 0 0; font-size: 14px; line-height: 1.6; color: var(--lx-ink-2); white-space: pre-line; }
+
+/* ── Still mode: the property page with a Deal Room ───────────────────────── */
+.lx-root--still .lx-reveal { opacity: 1; transform: none; transition: none; }
+.lx-root--still .lx-btn--primary::after { display: none; }
+.lx-root--still .lx-btn:hover { transform: none; box-shadow: none; }
+.lx-root--still .lx-gallery__cell:hover .lx-gallery__img { transform: none; }
+.lx-root--still .lx-progress { display: none; }
+.lx-root--still .lx-card { border-radius: 4px; box-shadow: none; }
+.lx-root--still .lx-btn { border-radius: 2px; }
+.lx-root--still .lx-gallery__cell { border-radius: 2px; }
+
+/* ── Phone bottom bar ─────────────────────────────────────────────────────── */
+.lx-mbar { display: none; }
+@media (max-width: 860px) {
+  .lx-mbar {
+    display: flex; gap: 8px; position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    background: var(--lx-paper); border-top: 1px solid var(--lx-line);
+  }
+  .lx-mbar__main { flex: 1; text-align: center; }
+  .lx-root--mbar .lx-footer { padding-bottom: 96px; }
+  .lx-dhero { min-height: 80svh; }
+  .lx-dhero__bar { grid-template-columns: 1fr 1fr; }
+  .lx-dhero__stat + .lx-dhero__stat { padding-left: 0; border-left: 0; }
+  .lx-dhero__stat:nth-child(even) { padding-left: 16px; border-left: 1px solid rgba(255,255,255,.2); }
+  .lx-dhero__stat:nth-child(n+3) { border-top: 1px solid rgba(255,255,255,.2); margin-top: 12px; }
+}
+.lx-root--still .lx-eyebrow { padding: 0; border: 0; border-radius: 0; }

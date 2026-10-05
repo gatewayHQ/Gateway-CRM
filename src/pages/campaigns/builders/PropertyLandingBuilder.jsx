@@ -3,7 +3,7 @@ import { Icon, pushToast } from '../../../components/UI.jsx'
 import { streetLine } from '../../../lib/address.js'
 import { fieldLabel, normImg, uploadImageToStorage } from './imageUpload.js'
 import { ImageRow } from './ImageRow.jsx'
-import { OmUploadField } from './OmUploadField.jsx'
+import { DealRoomBuilder } from './DealRoomBuilder.jsx'
 
 // ─── Property Showcase landing config builder ─────────────────────────────────
 
@@ -38,10 +38,16 @@ export function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
 
     if (!cfg.headline)                   setCfg('headline',    [streetLine(p), p.city, p.state].filter(Boolean).join(', '))
     if (!cfg.price      && p.list_price) setCfg('price',       String(p.list_price))
+    if (!cfg.location_line && (p.city || p.state)) setCfg('location_line', [p.city, p.state].filter(Boolean).join(', '))
 
     if (commercial) {
       setCfg('detail_mode', 'commercial')
       if (!cfg.units        && d.total_units) setCfg('units',        String(d.total_units))
+      if (!cfg.asset_line) {
+        const typeLabel = { multifamily:'Multifamily', office:'Office', land:'Land', retail:'Retail', industrial:'Industrial',
+                            'mixed-use':'Mixed-Use', commercial:'Commercial' }[p.type] || 'Investment'
+        setCfg('asset_line', [typeLabel, d.total_units ? `${d.total_units} Units` : null].filter(Boolean).join(' · '))
+      }
       if (!cfg.building_sqft && p.sqft)       setCfg('building_sqft', String(p.sqft))
       if (!cfg.year_built   && d.year_built)  setCfg('year_built',   String(d.year_built))
       if (!cfg.price_per_unit && p.list_price && d.total_units)
@@ -133,6 +139,27 @@ export function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
                  placeholder="123 Oak Street, Oakland — A Rare Opportunity" />
         </div>
 
+        {/* Hero lines: the pill, the gold line over the headline, and the
+            letter-spaced location line under it. */}
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8 }}>
+          <div>
+            <label style={fieldLabel}>Status pill</label>
+            <input className="input" maxLength={40} value={cfg.eyebrow || ''}
+                   onChange={e => setCfg('eyebrow', e.target.value)}
+                   placeholder={detailMode === 'commercial' ? 'Exclusive Offering' : 'Property For Sale'} />
+          </div>
+          <div>
+            <label style={fieldLabel}>Asset line</label>
+            <input className="input" maxLength={60} value={cfg.asset_line || ''}
+                   onChange={e => setCfg('asset_line', e.target.value)} placeholder="Multifamily · 24 Units" />
+          </div>
+          <div>
+            <label style={fieldLabel}>Location line</label>
+            <input className="input" maxLength={100} value={cfg.location_line || ''}
+                   onChange={e => setCfg('location_line', e.target.value)} placeholder="Ames · Ankeny · Des Moines" />
+          </div>
+        </div>
+
         <div>
           <label style={fieldLabel}>Opening Copy</label>
           <textarea className="input" rows={3} value={cfg.subheadline || ''}
@@ -171,7 +198,8 @@ export function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
           {detailMode === 'commercial' && (
             <div style={{ fontSize:11, color:'var(--gw-mist)', marginTop:6, lineHeight:1.4 }}>
               Leave any field blank to hide it on the live page. Cap rate, NOI &amp; gross income aren't stored on the
-              CRM property record — enter the figures you want to advertise.
+              CRM property record — enter the figures you want to advertise. With a Deal Room in teaser mode (below),
+              cap rate, NOI, gross income, price/unit and occupancy show only to registered visitors.
             </div>
           )}
         </div>
@@ -184,7 +212,7 @@ export function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
         </div>
 
         <div>
-          <label style={fieldLabel}>Key Features / Selling Points</label>
+          <label style={fieldLabel}>Investment Highlights / Selling Points</label>
           <div style={{ display:'grid', gap:6, marginTop:4 }}>
             {features.map((feat, i) => (
               <div key={i} style={{ display:'flex', gap:6 }}>
@@ -236,7 +264,7 @@ export function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
           </div>
         </div>
 
-        <OmUploadField cfg={cfg} setCfg={setCfg} />
+        <DealRoomBuilder cfg={cfg} setCfg={setCfg} agentId={form.agent_id} />
 
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
           <div>
