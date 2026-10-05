@@ -247,9 +247,6 @@ export function OmGate({
                     style={primaryBtn}>
               {submitText}
             </button>
-            <p style={{ fontSize: 11, color: inkSoft, textAlign: 'center', margin: '2px 0 0', lineHeight: 1.5 }}>
-              We'll only use this to follow up on this property. No lists, no spam.
-            </p>
           </form>
         </>
       )}
