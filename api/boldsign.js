@@ -5179,6 +5179,35 @@ function signedByNames(record, incomingSigners) {
   return (signed.length ? signed : rows).map(r => r.name).filter(Boolean)
 }
 
+// ─── Signed-copy email ledger (migration 0064) ────────────────────────────────
+// Claim the right to email a completed packet's signed copy. Compare-and-set on
+// signed_copy_emailed_at, so of any number of completion deliveries exactly one
+// wins, whichever one it is. A database without the column falls back to the
+// old rule — the delivery that moved the row to completed — rather than either
+// sending on every redelivery or never sending at all.
+export async function claimSignedCopy(supabase, record, { advanced }) {
+  if (!record?.deal_id) return false
+  if (record.signed_copy_emailed_at === undefined) return advanced
+  if (record.signed_copy_emailed_at) return false
+  const { data, error } = await supabase.from('boldsign_documents')
+    .update({ signed_copy_emailed_at: new Date().toISOString() })
+    .eq('id', record.id)
+    .is('signed_copy_emailed_at', null)
+    .select('id')
+  if (error) {
+    console.warn(`[boldsign] could not claim the signed-copy email for ${record.document_id}: ${error.message}`)
+    return advanced
+  }
+  return Boolean(data?.length)
+}
+
+export async function releaseSignedCopy(supabase, record) {
+  if (record?.signed_copy_emailed_at === undefined) return
+  const { error } = await supabase.from('boldsign_documents')
+    .update({ signed_copy_emailed_at: null }).eq('id', record.id)
+  if (error) console.warn(`[boldsign] could not release the signed-copy claim for ${record.document_id}: ${error.message}`)
+}
+
 // ─── BoldSign webhook handler ──────────────────────────────────────────────────
 // BoldSign POSTs document lifecycle events (Sent, Viewed, Signed, Completed,
 // Declined, Revoked, Expired) to the registered callback URL as:
@@ -5367,7 +5396,12 @@ async function handleWebhook(req, res) {
     // its second chance.
     const needsArchive = status === 'completed' && record.status === 'completed'
       && record.deal_id && !record.signed_storage_path
-    if (!advanced && !needsArchive) {
+    // …or one whose signed copy never reached the agents. Strictly `null`: the
+    // column is absent (undefined) on a database without migration 0064, and
+    // there this stays false and the old gate applies.
+    const needsSignedCopy = status === 'completed' && record.status === 'completed'
+      && record.deal_id && record.signed_copy_emailed_at === null
+    if (!advanced && !needsArchive && !needsSignedCopy) {
       return res.status(200).json({ received: true, documentId, status, note: 'Already processed' })
     }
 
@@ -5531,15 +5565,17 @@ async function handleWebhook(req, res) {
       // unlike the notification it reaches the co-agents too — a co-listed deal
       // used to tell the co-agent nothing at all.
       //
-      // Only the delivery that actually made the transition sends, the same
-      // gate the notification uses: BoldSign redelivers freely, and a second
-      // copy of "your document was signed" teaches an agent to ignore the
-      // first. Best-effort by contract — see signedCopyMail.js; a mail failure
-      // must never cost the archive that already succeeded by turning this into
-      // a redelivery.
+      // Exactly one delivery sends: the one that claims signed_copy_emailed_at
+      // (see claimSignedCopy). That used to be "the delivery that moved the row
+      // to completed", which silently lost the email whenever something else
+      // got there first — Refresh status pressed after the last signature, or a
+      // first delivery that timed out archiving a big packet. Best-effort by
+      // contract — see signedCopyMail.js; a mail failure must never cost the
+      // archive that already succeeded by turning this into a redelivery.
       const deal = record.deals
       let mailed = { sent: false, reason: 'not attempted' }
-      if (advanced) {
+      const claimed = await claimSignedCopy(supabase, record, { advanced })
+      if (claimed) {
         mailed = await mailSignedCopyToAgents(supabase, {
           dealId:            record.deal_id,
           documentId,
@@ -5547,7 +5583,7 @@ async function handleWebhook(req, res) {
           dealTitle:         deal?.title || null,
           signerNames:       signedByNames(record, incomingSigners),
           completedAt:       completedAt || new Date().toISOString(),
-          signedStoragePath: signed?.storagePath || null,
+          signedStoragePath: signed?.storagePath || record.signed_storage_path || null,
           bucket:            DEAL_BUCKET,
           baseUrl:           crmBaseUrl(req),
         })
@@ -5555,6 +5591,9 @@ async function handleWebhook(req, res) {
           console.log(`[boldsign] emailed the signed copy for ${documentId} to ${mailed.recipients} agent(s)${mailed.attached ? ' with the PDF attached' : ' as a link'}`)
         } else {
           console.warn(`[boldsign] signed copy for ${documentId} was not emailed: ${mailed.reason}`)
+          // Give the claim back, so the next completion delivery tries again
+          // rather than finding the email "already sent".
+          await releaseSignedCopy(supabase, record)
         }
       }
 
@@ -5562,7 +5601,9 @@ async function handleWebhook(req, res) {
       // actually happened. "Check your email" on a deployment where the mail
       // did not go is the kind of small lie that sends an agent hunting through
       // a junk folder for a message that was never sent.
-      if (advanced && deal?.agent_id) {
+      // Same gate as the email, so a completion first seen by Refresh status
+      // still tells the agent.
+      if ((advanced || claimed) && deal?.agent_id) {
         const whereItIs = mailed.sent
           ? `The signed copy has been emailed to ${mailed.recipients > 1 ? 'everyone on the deal' : 'you'} and saved to the deal's Documents tab.`
           : `The signed copy has been saved to the deal's Documents tab.`

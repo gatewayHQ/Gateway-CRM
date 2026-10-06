@@ -705,6 +705,10 @@ create table if not exists boldsign_documents (
   -- through a serverless function (4.5 MB payload cap).
   signed_storage_path text,
   audit_storage_path  text,
+  -- When the signed copy was emailed to the deal's agents (migration 0064).
+  -- The webhook claims it with a compare-and-set so exactly one completion
+  -- delivery sends, whichever delivery that turns out to be.
+  signed_copy_emailed_at timestamptz,
   -- Reminder ledger — nightly auto-reminder sweep + the manual Remind button.
   last_reminded_at  timestamptz,
   reminder_count    integer default 0,

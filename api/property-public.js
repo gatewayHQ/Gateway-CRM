@@ -26,6 +26,7 @@
  * despite being a serverless function. It uses the service key now.
  */
 
+import { resendFrom } from './_lib/resendFrom.js'
 import { streetLine } from '../src/lib/address.js'
 
 const TYPE_LABELS = {
@@ -374,7 +375,7 @@ async function handleGate(req, res) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RESEND_KEY}` },
             body: JSON.stringify({
-              from: process.env.RESEND_FROM || 'Gateway CRM <noreply@gatewayreadvisors.com>',
+              from: resendFrom(),
               to: agentRow.email,
               subject: `🔔 New website lead: ${leadName}`,
               html: `<p>Hi ${agentRow.name?.split(' ')[0] || ''},</p>
