@@ -2133,6 +2133,13 @@ describe('appendSendOptions (multipart)', () => {
     const form = new FormData()
     appendSendOptions(form, {})
     expect(form.get('ExpiryDays')).toBeNull()
+    expect(form.getAll('CC')).toEqual([])
+  })
+
+  it('sends one CC part per recipient, in the shape the live API binds', () => {
+    const form = new FormData()
+    appendSendOptions(form, { cc: [{ emailAddress: 'a@x.com' }, 'b@x.com', 'not-an-email'] })
+    expect(form.getAll('CC').map(v => JSON.parse(v))).toEqual([{ emailAddress: 'a@x.com' }, { emailAddress: 'b@x.com' }])
   })
 })
 

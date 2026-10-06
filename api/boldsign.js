@@ -7,7 +7,7 @@ import { extractPdfWords } from './_lib/pdfText.js'
 import { winAnsiLine, winAnsiLines } from './_lib/winAnsi.js'
 import { captionFields, detectSelectionCues } from '../src/lib/services/boldsignCaptions.js'
 import { normalizeSigners, outstandingSigners, signerRows } from '../src/lib/services/boldsignSigners.js'
-import { mailSignedCopyToAgents } from './_lib/signedCopyMail.js'
+import { mailSignedCopyToAgents, signedCopyAudience } from './_lib/signedCopyMail.js'
 // The packet module's pure rules — status vocabulary, what each state allows,
 // the local-file manifest, and the MLS selection helpers. Imported the same way
 // boldsignSigners.js and boldsignCaptions.js are: it holds no browser or
@@ -2594,6 +2594,74 @@ export function normalizeCc(list) {
   return out
 }
 
+// ─── The deal's agents, copied on every send ─────────────────────────────────
+// BoldSign emails the completed, signed document to every signer and every CC.
+// Agents used to get it because they were signers on the listing and buyer
+// packets; on everything a client signs alone (addenda, counters, change forms)
+// nobody but the sending account — admin@ — ever saw the finished copy. So the
+// deal's assigned agent and co-agents ride along as CC on every send.
+//
+// BoldSign refuses the whole send when a CC is also a signer ("already specified
+// as signers") or is the account's own user or a sender identity ("Sender or
+// sender identity email cannot be added in CC") — both confirmed against the
+// live API. Those are dropped here, and anything that stops us knowing who they
+// are drops the automatic CC rather than risk the send.
+
+const CREATES_DOCUMENT = new Set([
+  'send', 'document-embed-url',
+  'template-send', 'template-draft', 'template-embed-url',
+  'template-merge-send', 'template-merge-embed-url', 'packet-split-send',
+])
+
+let accountEmailsPromise = null
+/** Every BoldSign user on this account (lowercase), fetched once per instance. */
+async function boldsignAccountEmails() {
+  if (!accountEmailsPromise) {
+    accountEmailsPromise = boldsign('/users/list?page=1&pageSize=100')
+      .then(d => (d?.result || []).map(u => String(u?.email || '').trim().toLowerCase()).filter(Boolean))
+      .catch((e) => { accountEmailsPromise = null; throw e })
+  }
+  return accountEmailsPromise
+}
+
+/**
+ * The agents first (so a long hand-typed list cannot push them past the cap),
+ * then whatever CC the agent added, minus anyone BoldSign would refuse.
+ */
+export function mergeAgentCc({ cc, agentEmails = [], exclude = [] } = {}) {
+  const lower = (e) => String(e?.emailAddress || e?.email || e || '').trim().toLowerCase()
+  const skip  = new Set(exclude.map(lower).filter(Boolean))
+  return normalizeCc([...agentEmails, ...(Array.isArray(cc) ? cc : [])].filter(e => !skip.has(lower(e))))
+}
+
+/** Signer addresses on either send shape: ad-hoc `signers` or template `roles`. */
+export function sendSignerEmails(body = {}) {
+  return [
+    ...(Array.isArray(body.signers) ? body.signers : []).map(s => s?.email || s?.emailAddress),
+    ...(Array.isArray(body.roles)   ? body.roles   : []).map(r => r?.signerEmail || r?.emailAddress),
+  ].filter(Boolean)
+}
+
+export async function ccWithDealAgents(svc, body = {}) {
+  if (!body.deal_id) return body.cc
+  try {
+    const [{ recipients }, accountEmails, identities] = await Promise.all([
+      signedCopyAudience(svc, body.deal_id),
+      boldsignAccountEmails(),
+      svc.from('boldsign_sender_identities').select('email'),
+    ])
+    if (identities.error) throw new Error(identities.error.message)
+    return mergeAgentCc({
+      cc:          body.cc,
+      agentEmails: recipients.map(r => r.email),
+      exclude:     [...sendSignerEmails(body), ...accountEmails, ...(identities.data || []).map(i => i.email)],
+    })
+  } catch (e) {
+    console.warn(`[boldsign] not copying the deal's agents on this send (${e.message})`)
+    return body.cc
+  }
+}
+
 /** Auto-reminder settings, or null when the caller does not want them. */
 export function normalizeReminders(raw) {
   if (!raw || raw.enabled === false) return null
@@ -2629,16 +2697,19 @@ export function buildSendOptions({ cc, expiryDays, reminders, brandId } = {}) {
 /**
  * The same options on a MULTIPART send (the two ad-hoc PDF paths).
  *
- * Only the scalars. BoldSign documents `cc` and `reminderSettings` as objects,
- * and how a multipart body nests those is not something this file will guess at
- * — this integration has already retired one feature built on a guess about
- * BoldSign's wire format (see the coordinate auto-placement note above). The
- * template paths, which are the ones the CRM actually sends agreements through,
- * carry the full set as JSON.
+ * The scalars, plus CC — whose multipart shape was verified against the live
+ * API rather than guessed (this integration has already retired one feature
+ * built on a guess about BoldSign's wire format; see the coordinate
+ * auto-placement note above). Reminder settings stay JSON-only, on the
+ * template paths.
  */
-export function appendSendOptions(form, { expiryDays, brandId } = {}) {
+export function appendSendOptions(form, { cc, expiryDays, brandId } = {}) {
   const brand = brandId || BRAND_ID
   if (brand) form.append('BrandId', brand)
+  // One `CC` part per recipient, each a JSON object with camelCase keys — the
+  // same convention as `Signers`. Confirmed against the live API: BoldSign
+  // binds these to CC[n] and validates each address.
+  for (const c of normalizeCc(cc)) form.append('CC', JSON.stringify(c))
   const expiry = Number(expiryDays)
   if (Number.isFinite(expiry) && expiry > 0) form.append('ExpiryDays', String(Math.min(Math.round(expiry), MAX_EXPIRY_DAYS)))
 }
@@ -3056,6 +3127,10 @@ async function handler(req, res) {
   try { actor = await requireAgent(req) } catch (e) { return errorResponse(res, e) }
 
   try {
+    // Every action that creates a document copies the deal's agents, so BoldSign
+    // emails them the signed copy on completion. See ccWithDealAgents.
+    if (CREATES_DOCUMENT.has(body.action)) body.cc = await ccWithDealAgents(getServiceClient(), body)
+
     if (body.action === 'send') {
       const { signers, documentUrl, documentPath, documentBase64, documentName, emailSubject, useTextTags, textTagDefinitions, deal_id } = body
       const invalid = validateSigners(signers)
