@@ -29,7 +29,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { dealCoAgentIds } from '../../src/lib/coAgents.js'
 import { streetLine, readPropertiesWithUnit } from '../../src/lib/address.js'
-import { resendFrom } from './resendFrom.js'
 
 // Resend accepts a good deal more than this, but a signed commercial packet can
 // run to hundreds of pages and a mailbox that bounces the message helps nobody.
@@ -202,11 +201,9 @@ async function sendSignedCopy(svc, {
   dealId, documentId, documentName, dealTitle,
   signerNames = [], completedAt, signedStoragePath, bucket, baseUrl,
 }) {
-  // The shared fallback sender: requiring RESEND_FROM here alone meant a
-  // deployment without it sent lead alerts and silently skipped this email.
   const apiKey = process.env.RESEND_API_KEY || ''
-  const from   = resendFrom()
-  if (!apiKey) return { sent: false, reason: 'Resend is not configured (RESEND_API_KEY)' }
+  const from   = process.env.RESEND_FROM    || ''
+  if (!apiKey || !from) return { sent: false, reason: 'Resend is not configured' }
 
   let audience
   try {

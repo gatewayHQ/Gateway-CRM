@@ -7,7 +7,7 @@ import { extractPdfWords } from './_lib/pdfText.js'
 import { winAnsiLine, winAnsiLines } from './_lib/winAnsi.js'
 import { captionFields, detectSelectionCues } from '../src/lib/services/boldsignCaptions.js'
 import { normalizeSigners, outstandingSigners, signerRows } from '../src/lib/services/boldsignSigners.js'
-import { mailSignedCopyToAgents } from './_lib/signedCopyMail.js'
+import { mailSignedCopyToAgents, signedCopyAudience } from './_lib/signedCopyMail.js'
 // The packet module's pure rules — status vocabulary, what each state allows,
 // the local-file manifest, and the MLS selection helpers. Imported the same way
 // boldsignSigners.js and boldsignCaptions.js are: it holds no browser or
@@ -2594,6 +2594,74 @@ export function normalizeCc(list) {
   return out
 }
 
+// ─── The deal's agents, copied on every send ─────────────────────────────────
+// BoldSign emails the completed, signed document to every signer and every CC.
+// Agents used to get it because they were signers on the listing and buyer
+// packets; on everything a client signs alone (addenda, counters, change forms)
+// nobody but the sending account — admin@ — ever saw the finished copy. So the
+// deal's assigned agent and co-agents ride along as CC on every send.
+//
+// BoldSign refuses the whole send when a CC is also a signer ("already specified
+// as signers") or is the account's own user or a sender identity ("Sender or
+// sender identity email cannot be added in CC") — both confirmed against the
+// live API. Those are dropped here, and anything that stops us knowing who they
+// are drops the automatic CC rather than risk the send.
+
+const CREATES_DOCUMENT = new Set([
+  'send', 'document-embed-url',
+  'template-send', 'template-draft', 'template-embed-url',
+  'template-merge-send', 'template-merge-embed-url', 'packet-split-send',
+])
+
+let accountEmailsPromise = null
+/** Every BoldSign user on this account (lowercase), fetched once per instance. */
+async function boldsignAccountEmails() {
+  if (!accountEmailsPromise) {
+    accountEmailsPromise = boldsign('/users/list?page=1&pageSize=100')
+      .then(d => (d?.result || []).map(u => String(u?.email || '').trim().toLowerCase()).filter(Boolean))
+      .catch((e) => { accountEmailsPromise = null; throw e })
+  }
+  return accountEmailsPromise
+}
+
+/**
+ * The agents first (so a long hand-typed list cannot push them past the cap),
+ * then whatever CC the agent added, minus anyone BoldSign would refuse.
+ */
+export function mergeAgentCc({ cc, agentEmails = [], exclude = [] } = {}) {
+  const lower = (e) => String(e?.emailAddress || e?.email || e || '').trim().toLowerCase()
+  const skip  = new Set(exclude.map(lower).filter(Boolean))
+  return normalizeCc([...agentEmails, ...(Array.isArray(cc) ? cc : [])].filter(e => !skip.has(lower(e))))
+}
+
+/** Signer addresses on either send shape: ad-hoc `signers` or template `roles`. */
+export function sendSignerEmails(body = {}) {
+  return [
+    ...(Array.isArray(body.signers) ? body.signers : []).map(s => s?.email || s?.emailAddress),
+    ...(Array.isArray(body.roles)   ? body.roles   : []).map(r => r?.signerEmail || r?.emailAddress),
+  ].filter(Boolean)
+}
+
+export async function ccWithDealAgents(svc, body = {}) {
+  if (!body.deal_id) return body.cc
+  try {
+    const [{ recipients }, accountEmails, identities] = await Promise.all([
+      signedCopyAudience(svc, body.deal_id),
+      boldsignAccountEmails(),
+      svc.from('boldsign_sender_identities').select('email'),
+    ])
+    if (identities.error) throw new Error(identities.error.message)
+    return mergeAgentCc({
+      cc:          body.cc,
+      agentEmails: recipients.map(r => r.email),
+      exclude:     [...sendSignerEmails(body), ...accountEmails, ...(identities.data || []).map(i => i.email)],
+    })
+  } catch (e) {
+    console.warn(`[boldsign] not copying the deal's agents on this send (${e.message})`)
+    return body.cc
+  }
+}
+
 /** Auto-reminder settings, or null when the caller does not want them. */
 export function normalizeReminders(raw) {
   if (!raw || raw.enabled === false) return null
@@ -2629,16 +2697,19 @@ export function buildSendOptions({ cc, expiryDays, reminders, brandId } = {}) {
 /**
  * The same options on a MULTIPART send (the two ad-hoc PDF paths).
  *
- * Only the scalars. BoldSign documents `cc` and `reminderSettings` as objects,
- * and how a multipart body nests those is not something this file will guess at
- * — this integration has already retired one feature built on a guess about
- * BoldSign's wire format (see the coordinate auto-placement note above). The
- * template paths, which are the ones the CRM actually sends agreements through,
- * carry the full set as JSON.
+ * The scalars, plus CC — whose multipart shape was verified against the live
+ * API rather than guessed (this integration has already retired one feature
+ * built on a guess about BoldSign's wire format; see the coordinate
+ * auto-placement note above). Reminder settings stay JSON-only, on the
+ * template paths.
  */
-export function appendSendOptions(form, { expiryDays, brandId } = {}) {
+export function appendSendOptions(form, { cc, expiryDays, brandId } = {}) {
   const brand = brandId || BRAND_ID
   if (brand) form.append('BrandId', brand)
+  // One `CC` part per recipient, each a JSON object with camelCase keys — the
+  // same convention as `Signers`. Confirmed against the live API: BoldSign
+  // binds these to CC[n] and validates each address.
+  for (const c of normalizeCc(cc)) form.append('CC', JSON.stringify(c))
   const expiry = Number(expiryDays)
   if (Number.isFinite(expiry) && expiry > 0) form.append('ExpiryDays', String(Math.min(Math.round(expiry), MAX_EXPIRY_DAYS)))
 }
@@ -3056,6 +3127,10 @@ async function handler(req, res) {
   try { actor = await requireAgent(req) } catch (e) { return errorResponse(res, e) }
 
   try {
+    // Every action that creates a document copies the deal's agents, so BoldSign
+    // emails them the signed copy on completion. See ccWithDealAgents.
+    if (CREATES_DOCUMENT.has(body.action)) body.cc = await ccWithDealAgents(getServiceClient(), body)
+
     if (body.action === 'send') {
       const { signers, documentUrl, documentPath, documentBase64, documentName, emailSubject, useTextTags, textTagDefinitions, deal_id } = body
       const invalid = validateSigners(signers)
@@ -5179,35 +5254,6 @@ function signedByNames(record, incomingSigners) {
   return (signed.length ? signed : rows).map(r => r.name).filter(Boolean)
 }
 
-// ─── Signed-copy email ledger (migration 0064) ────────────────────────────────
-// Claim the right to email a completed packet's signed copy. Compare-and-set on
-// signed_copy_emailed_at, so of any number of completion deliveries exactly one
-// wins, whichever one it is. A database without the column falls back to the
-// old rule — the delivery that moved the row to completed — rather than either
-// sending on every redelivery or never sending at all.
-export async function claimSignedCopy(supabase, record, { advanced }) {
-  if (!record?.deal_id) return false
-  if (record.signed_copy_emailed_at === undefined) return advanced
-  if (record.signed_copy_emailed_at) return false
-  const { data, error } = await supabase.from('boldsign_documents')
-    .update({ signed_copy_emailed_at: new Date().toISOString() })
-    .eq('id', record.id)
-    .is('signed_copy_emailed_at', null)
-    .select('id')
-  if (error) {
-    console.warn(`[boldsign] could not claim the signed-copy email for ${record.document_id}: ${error.message}`)
-    return advanced
-  }
-  return Boolean(data?.length)
-}
-
-export async function releaseSignedCopy(supabase, record) {
-  if (record?.signed_copy_emailed_at === undefined) return
-  const { error } = await supabase.from('boldsign_documents')
-    .update({ signed_copy_emailed_at: null }).eq('id', record.id)
-  if (error) console.warn(`[boldsign] could not release the signed-copy claim for ${record.document_id}: ${error.message}`)
-}
-
 // ─── BoldSign webhook handler ──────────────────────────────────────────────────
 // BoldSign POSTs document lifecycle events (Sent, Viewed, Signed, Completed,
 // Declined, Revoked, Expired) to the registered callback URL as:
@@ -5396,12 +5442,7 @@ async function handleWebhook(req, res) {
     // its second chance.
     const needsArchive = status === 'completed' && record.status === 'completed'
       && record.deal_id && !record.signed_storage_path
-    // …or one whose signed copy never reached the agents. Strictly `null`: the
-    // column is absent (undefined) on a database without migration 0064, and
-    // there this stays false and the old gate applies.
-    const needsSignedCopy = status === 'completed' && record.status === 'completed'
-      && record.deal_id && record.signed_copy_emailed_at === null
-    if (!advanced && !needsArchive && !needsSignedCopy) {
+    if (!advanced && !needsArchive) {
       return res.status(200).json({ received: true, documentId, status, note: 'Already processed' })
     }
 
@@ -5565,17 +5606,15 @@ async function handleWebhook(req, res) {
       // unlike the notification it reaches the co-agents too — a co-listed deal
       // used to tell the co-agent nothing at all.
       //
-      // Exactly one delivery sends: the one that claims signed_copy_emailed_at
-      // (see claimSignedCopy). That used to be "the delivery that moved the row
-      // to completed", which silently lost the email whenever something else
-      // got there first — Refresh status pressed after the last signature, or a
-      // first delivery that timed out archiving a big packet. Best-effort by
-      // contract — see signedCopyMail.js; a mail failure must never cost the
-      // archive that already succeeded by turning this into a redelivery.
+      // Only the delivery that actually made the transition sends, the same
+      // gate the notification uses: BoldSign redelivers freely, and a second
+      // copy of "your document was signed" teaches an agent to ignore the
+      // first. Best-effort by contract — see signedCopyMail.js; a mail failure
+      // must never cost the archive that already succeeded by turning this into
+      // a redelivery.
       const deal = record.deals
       let mailed = { sent: false, reason: 'not attempted' }
-      const claimed = await claimSignedCopy(supabase, record, { advanced })
-      if (claimed) {
+      if (advanced) {
         mailed = await mailSignedCopyToAgents(supabase, {
           dealId:            record.deal_id,
           documentId,
@@ -5583,7 +5622,7 @@ async function handleWebhook(req, res) {
           dealTitle:         deal?.title || null,
           signerNames:       signedByNames(record, incomingSigners),
           completedAt:       completedAt || new Date().toISOString(),
-          signedStoragePath: signed?.storagePath || record.signed_storage_path || null,
+          signedStoragePath: signed?.storagePath || null,
           bucket:            DEAL_BUCKET,
           baseUrl:           crmBaseUrl(req),
         })
@@ -5591,9 +5630,6 @@ async function handleWebhook(req, res) {
           console.log(`[boldsign] emailed the signed copy for ${documentId} to ${mailed.recipients} agent(s)${mailed.attached ? ' with the PDF attached' : ' as a link'}`)
         } else {
           console.warn(`[boldsign] signed copy for ${documentId} was not emailed: ${mailed.reason}`)
-          // Give the claim back, so the next completion delivery tries again
-          // rather than finding the email "already sent".
-          await releaseSignedCopy(supabase, record)
         }
       }
 
@@ -5601,9 +5637,7 @@ async function handleWebhook(req, res) {
       // actually happened. "Check your email" on a deployment where the mail
       // did not go is the kind of small lie that sends an agent hunting through
       // a junk folder for a message that was never sent.
-      // Same gate as the email, so a completion first seen by Refresh status
-      // still tells the agent.
-      if ((advanced || claimed) && deal?.agent_id) {
+      if (advanced && deal?.agent_id) {
         const whereItIs = mailed.sent
           ? `The signed copy has been emailed to ${mailed.recipients > 1 ? 'everyone on the deal' : 'you'} and saved to the deal's Documents tab.`
           : `The signed copy has been saved to the deal's Documents tab.`

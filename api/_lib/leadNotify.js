@@ -11,7 +11,6 @@
  * Brand colors match the landing pages (src/components/landing/landing.css):
  * ink #1e2642, gold #c9a961.
  */
-import { resendFrom } from './resendFrom.js'
 
 const INK  = '#1e2642'
 const GOLD = '#c9a961'
@@ -217,7 +216,7 @@ export async function sendLeadEmail({ to, subject, html, text }) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
       body: JSON.stringify({
-        from: resendFrom(),
+        from: process.env.RESEND_FROM || 'Gateway CRM <noreply@gatewayreadvisors.com>',
         to,
         subject,
         html,

@@ -274,13 +274,6 @@ describe('sending', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('falls back to the firm sender when RESEND_FROM is unset, like the other mailers', async () => {
-    delete process.env.RESEND_FROM
-    const svc = fakeClient({ deals: [deal()], file: Buffer.from('%PDF-1.7') })
-    await expect(send(svc)).resolves.toMatchObject({ sent: true })
-    expect(body().from).toBe('Gateway CRM <noreply@gatewayreadvisors.com>')
-  })
-
   it('does not send to nobody when the deal has no agent with an address', async () => {
     const svc = fakeClient({ deals: [deal({ agent_id: null })] })
     await expect(send(svc)).resolves.toMatchObject({ sent: false })
