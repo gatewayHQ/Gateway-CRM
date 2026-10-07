@@ -36,7 +36,7 @@
     { "source": "/lp/mailing/:id",
       "has": [{ "type": "header", "key": "user-agent", "value": "(?i).*(facebookexternalhit|facebot|twitterbot|linkedinbot|slackbot|slack-imgproxy|whatsapp|telegrambot|discordbot|pinterest|redditbot|embedly|skypeuripreview|applebot|googlebot|bingbot|iframely|vkshare).*" }],
       "destination": "/api/campaigns?action=og&id=:id&lt=mailing" },
-    { "source": "/((?!api/)(?!share/)(?!m/)(?!e/).*)", "destination": "/index.html" }
+    { "source": "/((?!api/)(?!share/)(?!m/)(?!e/)(?!assets/).*)", "destination": "/index.html" }
   ],
   "headers": [
     {

@@ -8,35 +8,36 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import React from 'react'
 import { HIDEABLE_NAV, isDealRoute, parseDealRoute } from './navigation.js'
+import { lazyWithReload } from '../lib/chunkReload.js'
 
-const Dashboard          = React.lazy(() => import('../pages/Dashboard.jsx'))
-const ContactsPage       = React.lazy(() => import('../pages/Contacts.jsx'))
-const PropertiesPage     = React.lazy(() => import('../pages/properties/PropertiesPage.jsx'))
-const PipelinePage       = React.lazy(() => import('../pages/pipeline/PipelinePage.jsx'))
-const DealPage           = React.lazy(() => import('../pages/DealPage.jsx'))
-const TasksPage          = React.lazy(() => import('../pages/Tasks.jsx'))
-const MessagesPage       = React.lazy(() => import('../pages/Messages.jsx'))
-const CommissionPage     = React.lazy(() => import('../pages/commission/CommissionPage.jsx'))
-const TemplatesPage      = React.lazy(() => import('../pages/Templates.jsx'))
-const TeamPage           = React.lazy(() => import('../pages/Team/index.jsx'))
-const SettingsPage       = React.lazy(() => import('../pages/Settings.jsx'))
-const LeadsPage          = React.lazy(() => import('../pages/Leads.jsx'))
-const DataManagementPage = React.lazy(() => import('../pages/DataManagement.jsx'))
-const ReportsPage        = React.lazy(() => import('../pages/Reports.jsx'))
-const SequencesPage      = React.lazy(() => import('../pages/Sequences.jsx'))
-const MassEmailPage      = React.lazy(() => import('../pages/MassEmail.jsx'))
-const ColdCallsPage      = React.lazy(() => import('../pages/ColdCalls.jsx'))
-const IntegrationsPage   = React.lazy(() => import('../pages/Integrations.jsx'))
-const CampaignsPage      = React.lazy(() => import('../pages/campaigns/CampaignsPage.jsx'))
-const FormLibraryPage    = React.lazy(() => import('../pages/FormLibrary.jsx'))
-const AdminReviewPage    = React.lazy(() => import('../pages/AdminReview.jsx'))
-const HelpPage           = React.lazy(() => import('../pages/help/HelpPage.jsx'))
+const Dashboard          = lazyWithReload(() => import('../pages/Dashboard.jsx'))
+const ContactsPage       = lazyWithReload(() => import('../pages/Contacts.jsx'))
+const PropertiesPage     = lazyWithReload(() => import('../pages/properties/PropertiesPage.jsx'))
+const PipelinePage       = lazyWithReload(() => import('../pages/pipeline/PipelinePage.jsx'))
+const DealPage           = lazyWithReload(() => import('../pages/DealPage.jsx'))
+const TasksPage          = lazyWithReload(() => import('../pages/Tasks.jsx'))
+const MessagesPage       = lazyWithReload(() => import('../pages/Messages.jsx'))
+const CommissionPage     = lazyWithReload(() => import('../pages/commission/CommissionPage.jsx'))
+const TemplatesPage      = lazyWithReload(() => import('../pages/Templates.jsx'))
+const TeamPage           = lazyWithReload(() => import('../pages/Team/index.jsx'))
+const SettingsPage       = lazyWithReload(() => import('../pages/Settings.jsx'))
+const LeadsPage          = lazyWithReload(() => import('../pages/Leads.jsx'))
+const DataManagementPage = lazyWithReload(() => import('../pages/DataManagement.jsx'))
+const ReportsPage        = lazyWithReload(() => import('../pages/Reports.jsx'))
+const SequencesPage      = lazyWithReload(() => import('../pages/Sequences.jsx'))
+const MassEmailPage      = lazyWithReload(() => import('../pages/MassEmail.jsx'))
+const ColdCallsPage      = lazyWithReload(() => import('../pages/ColdCalls.jsx'))
+const IntegrationsPage   = lazyWithReload(() => import('../pages/Integrations.jsx'))
+const CampaignsPage      = lazyWithReload(() => import('../pages/campaigns/CampaignsPage.jsx'))
+const FormLibraryPage    = lazyWithReload(() => import('../pages/FormLibrary.jsx'))
+const AdminReviewPage    = lazyWithReload(() => import('../pages/AdminReview.jsx'))
+const HelpPage           = lazyWithReload(() => import('../pages/help/HelpPage.jsx'))
 // Unreleased. Reached only by ?preview=markup — deliberately not in the nav,
 // so testing it cannot become an agent stumbling onto it mid-transaction.
-const MarkupPreviewPage  = React.lazy(() => import('../pages/MarkupPreview.jsx'))
+const MarkupPreviewPage  = lazyWithReload(() => import('../pages/MarkupPreview.jsx'))
 
 // ComposeModal is a named export — wrap in a lazy default-export shim
-export const ComposeModalLazy = React.lazy(() =>
+export const ComposeModalLazy = lazyWithReload(() =>
   import('../pages/Templates.jsx').then(m => ({ default: m.ComposeModal }))
 )
 
