@@ -10,6 +10,7 @@ import { Tabs } from './ui/Tabs.jsx'
 // importing this file (which re-exports them).
 export { Icon } from './ui/Icon.jsx'
 import { Icon } from './ui/Icon.jsx'
+import { isChunkLoadError } from '../lib/chunkReload.js'
 
 // ─── AVATAR ───────────────────────────────────────────────────────────────────
 export function Avatar({ agent, size = 32 }) {
@@ -448,7 +449,11 @@ export class ErrorBoundary extends Component {
           <div style={{ fontSize: 13, color: 'var(--gw-mist)', marginBottom: 20, maxWidth: 400, margin: '0 auto 20px' }}>
             {this.state.error.message}
           </div>
-          <button className="btn btn--secondary" onClick={() => this.setState({ error: null })}>
+          {/* A missing chunk (app updated since this tab opened) can't be retried in
+              place — React.lazy caches the failure — so reload onto the new version. */}
+          <button className="btn btn--secondary" onClick={() =>
+            isChunkLoadError(this.state.error) ? window.location.reload() : this.setState({ error: null })
+          }>
             Try again
           </button>
         </div>

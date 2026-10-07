@@ -13,10 +13,17 @@ import { DEMO_LISTING } from './pages/landingDemoData.js'
 import ClientPortal from './pages/ClientPortal.jsx'
 import { initWebVitals } from './lib/perf.js'
 import { enableInstallableApp } from './lib/pwa.js'
+import { reloadForNewVersion } from './lib/chunkReload.js'
 import './styles/app.css'
 import './styles/ui.css'
 
 initWebVitals()
+
+// Vite fires this when a chunk's preload fails — typically a deploy landed while
+// the tab was open. Reload onto the new build instead of erroring (see chunkReload.js).
+window.addEventListener('vite:preloadError', (event) => {
+  if (reloadForNewVersion()) event.preventDefault()
+})
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
