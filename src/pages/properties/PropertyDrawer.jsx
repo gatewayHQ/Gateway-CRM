@@ -53,7 +53,14 @@ export function PropertyDrawer({ open, onClose, property, agents, contacts, prop
   const [saving, setSaving]         = useState(false)
   const [startingDeal, setStartingDeal] = useState(false)
   const [tab, setTab]               = useState('details')
-  const [tempId] = useState(() => property?.id || crypto.randomUUID())
+  // The new listing's id, chosen up front so photos can upload under it before
+  // the first save. The drawer stays mounted between opens, so it must be minted
+  // fresh for every new property: reusing the last one made the next "Add
+  // Property" insert an id that already existed ("This record already exists").
+  const [tempId, setTempId] = useState(() => property?.id || crypto.randomUUID())
+  React.useEffect(() => {
+    if (open) setTempId(property?.id || crypto.randomUUID())
+  }, [open, property?.id])
   // Additional contacts (co-owners, husband & wife) — primary stays linked_contact_id.
   const [additionalContactIds, setAdditionalContactIds] = useState([])
 
