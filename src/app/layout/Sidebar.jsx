@@ -32,11 +32,11 @@ export default function Sidebar({
       </div>
 
       <nav className="sidebar__nav" aria-label="Main navigation">
-        {/* ── Core ── An admin's book is the whole firm, so Contacts gives way. */}
-        {nav.core.filter(n => !(isAdmin && n.id === 'contacts')).map(n => (
+        {/* ── Core ── An admin's Contacts and Pipeline span the whole firm. */}
+        {nav.core.map(n => (
           <NavItem key={n.id} item={n} collapsed={collapsed} onSelect={navTo}
             active={isActive(n.id) || (n.id === 'pipeline' && route.startsWith('deal/'))}>
-            {isAdmin && n.id === 'pipeline' && !collapsed && (
+            {isAdmin && (n.id === 'pipeline' || n.id === 'contacts') && !collapsed && (
               <span style={{ marginLeft: 'auto', fontSize: 9, fontWeight: 700, background: 'rgba(255,255,255,0.15)', color: '#fff', padding: '1px 5px', borderRadius: 6, letterSpacing: '0.05em' }}>ALL</span>
             )}
           </NavItem>

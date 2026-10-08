@@ -43,14 +43,14 @@ describe('buildNav', () => {
 describe('mobile navigation', () => {
   const nav = buildNav({ isAdmin: false, hiddenNav: [] })
   it('puts the four daily screens on the bottom bar', () => {
-    expect(ids(mobileTabsFor(nav, false))).toEqual(['dashboard', 'contacts', 'pipeline', 'tasks'])
+    expect(ids(mobileTabsFor(nav))).toEqual(['dashboard', 'contacts', 'pipeline', 'tasks'])
   })
-  it('gives Contacts way for an admin', () => {
-    expect(ids(mobileTabsFor(buildNav({ isAdmin: true, hiddenNav: [] }), true)))
-      .toEqual(['dashboard', 'pipeline', 'tasks'])
+  it('keeps Contacts on the bar for an admin', () => {
+    expect(ids(mobileTabsFor(buildNav({ isAdmin: true, hiddenNav: [] }))))
+      .toEqual(['dashboard', 'contacts', 'pipeline', 'tasks'])
   })
   it('skips a hidden tab', () => {
-    expect(ids(mobileTabsFor(buildNav({ isAdmin: false, hiddenNav: ['tasks'] }), false)))
+    expect(ids(mobileTabsFor(buildNav({ isAdmin: false, hiddenNav: ['tasks'] }))))
       .toEqual(['dashboard', 'contacts', 'pipeline'])
   })
   it('lists everything else under More, grouped, with no bottom-bar duplicates', () => {

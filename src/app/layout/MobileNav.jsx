@@ -3,7 +3,7 @@ import { Icon } from '../../components/UI.jsx'
 import { mobileTabsFor, mobileMoreGroups, navRouteFor } from '../navigation.js'
 
 /** The phone's bottom tab bar and its "More" sheet. */
-export default function MobileNav({ nav, route, navTo, isAdmin, onSignOut }) {
+export default function MobileNav({ nav, route, navTo, onSignOut }) {
   const [moreOpen, setMoreOpen] = useState(false)
   // The bottom-nav tab a page belongs to — a deal is part of Pipeline.
   const navRoute = navRouteFor(route)
@@ -12,7 +12,7 @@ export default function MobileNav({ nav, route, navTo, isAdmin, onSignOut }) {
   return (
     <>
       <nav className="mobile-nav">
-        {mobileTabsFor(nav, isAdmin).map(n => (
+        {mobileTabsFor(nav).map(n => (
           <button key={n.id} className={`mobile-nav__item${navRoute === n.id && !moreOpen ? ' active' : ''}`}
             aria-current={navRoute === n.id ? 'page' : undefined}
             onClick={() => { setMoreOpen(false); navTo(n.id) }}>

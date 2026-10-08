@@ -168,7 +168,7 @@ export default function App() {
         </React.Suspense>
       )}
 
-      <MobileNav nav={nav} route={route} navTo={navTo} isAdmin={isAdmin} onSignOut={signOut} />
+      <MobileNav nav={nav} route={route} navTo={navTo} onSignOut={signOut} />
 
       <QuickAdd db={db} setDb={setDb} activeAgent={activeAgent} go={setRoute} />
       <InstallPrompt />
