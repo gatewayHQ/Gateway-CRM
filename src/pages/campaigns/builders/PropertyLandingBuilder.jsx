@@ -4,6 +4,7 @@ import { streetLine } from '../../../lib/address.js'
 import { fieldLabel, normImg, uploadImageToStorage } from './imageUpload.js'
 import { ImageRow } from './ImageRow.jsx'
 import { DealRoomBuilder } from './DealRoomBuilder.jsx'
+import { PortfolioBuilder } from './PortfolioBuilder.jsx'
 
 // ─── Property Showcase landing config builder ─────────────────────────────────
 
@@ -263,6 +264,8 @@ export function PropertyLandingBuilder({ cfg, setCfg, properties, form, set }) {
             The first photo becomes the page's hero banner; the rest fill the gallery below it.
           </div>
         </div>
+
+        <PortfolioBuilder cfg={cfg} setCfg={setCfg} properties={properties} />
 
         <DealRoomBuilder cfg={cfg} setCfg={setCfg} agentId={form.agent_id} />
 

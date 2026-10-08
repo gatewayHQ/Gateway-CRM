@@ -103,6 +103,58 @@ describe('privateDealRoom — what a registered visitor receives', () => {
   })
 })
 
+const PORTFOLIO = {
+  headline: 'Central Iowa Portfolio',
+  price_display: 'gated',
+  portfolio: [
+    { id: 'p-oak', crm_property_id: 'crm-1', name: 'Oak Apartments', units: '12', price: '900000',
+      cap_rate: '6.4', noi: '58000', images: ['o1.jpg', 'o2.jpg', 'o3.jpg', 'o4.jpg'],
+      om: { path: 'p/oak-om.pdf', filename: 'oak-om.pdf' },
+      documents: [{ id: 'rr', path: 'p/oak-rr.xlsx', filename: 'oak-rr.xlsx', kind: 'rent_roll' }] },
+    { name: 'Elm Court', units: '8', occupancy: '97', images: ['e1.jpg'],
+      om: { path: 'p/elm-om.pdf', filename: 'elm-om.pdf' } },
+  ],
+}
+
+describe('portfolio — one page, several properties', () => {
+  it('keys every property file under its property id', () => {
+    expect(dealRoomDocs(PORTFOLIO).map(d => d.id)).toEqual(['p-oak:om', 'p-oak:rr', 'p-2:om'])
+  })
+
+  it('strips each property\'s numbers, extra photos, files and CRM link from the public page', () => {
+    const pub = publicTeaserConfig(PORTFOLIO)
+    const [oak, elm] = pub.portfolio
+    expect(oak).not.toHaveProperty('cap_rate')
+    expect(oak).not.toHaveProperty('noi')
+    expect(oak).not.toHaveProperty('price')
+    expect(oak).not.toHaveProperty('crm_property_id')
+    expect(oak).not.toHaveProperty('documents')
+    expect(oak.units).toBe('12')
+    expect(oak.images).toHaveLength(3)
+    expect(oak.gated_photo_count).toBe(1)
+    expect(oak.doc_titles).toEqual(['Offering Memorandum', 'Rent Roll'])
+    expect(elm).not.toHaveProperty('occupancy')
+    expect(JSON.stringify(pub)).not.toMatch(/p\/oak|p\/elm/)
+    expect(pub.deal_room.doc_titles[0]).toBe('Oak Apartments · Offering Memorandum')
+    expect(pub.deal_room.gated_fields).toEqual(expect.arrayContaining(['cap_rate', 'noi', 'occupancy']))
+  })
+
+  it('opens each property\'s numbers, photos and documents to a registered visitor', () => {
+    const room = privateDealRoom(PORTFOLIO)
+    expect(room.documents).toEqual([])
+    const oak = room.properties.find(p => p.id === 'p-oak')
+    expect(oak.financials).toMatchObject({ cap_rate: '6.4', noi: '58000', price: '900000' })
+    expect(oak.images).toHaveLength(4)
+    expect(oak.documents.map(d => d.id)).toEqual(['p-oak:om', 'p-oak:rr'])
+    expect(oak.documents.every(d => !('path' in d))).toBe(true)
+  })
+
+  it('leaves a single-property page without a portfolio key', () => {
+    expect(publicTeaserConfig(CFG)).not.toHaveProperty('portfolio')
+    expect(privateDealRoom(CFG)).not.toHaveProperty('properties')
+  })
+})
+
 describe('access tokens', () => {
   it('opens the mailing it was minted for', () => {
     const t = mintAccess({ mailingId: MAILING_ID, email: 'Jane@Fund.com' })

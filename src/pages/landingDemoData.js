@@ -72,3 +72,64 @@ export const DEMO_LISTING = {
     ],
   },
 }
+
+/**
+ * Sample data for /lp/demo-portfolio — one QR code, several properties. Mirrors
+ * the PUBLIC shape the server sends in teaser mode: each property's gated
+ * numbers and storage paths are already gone (api/_lib/dealRoom.js).
+ */
+export const DEMO_PORTFOLIO = {
+  name: 'Demo — Central Iowa Multifamily Portfolio',
+  agents: DEMO_LISTING.agents,
+  get agent() { return this.agents[0] },
+  config: {
+    accent: '#1e2642',
+    eyebrow: 'Exclusive Portfolio Offering',
+    asset_line: 'Multifamily · 3 Properties · 44 Units',
+    headline: 'Central Iowa Multifamily Portfolio',
+    location_line: 'Marshalltown · Ames · Newton',
+    subheadline: 'Three stabilized, well-kept apartment properties offered together or separately.',
+    description: 'A rare chance to add 44 units across three growing central Iowa markets. Each property is broken out below with its own photos, numbers and documents.',
+    detail_mode: 'commercial',
+    price_display: 'call_for_offers',
+    deal_room: {
+      available: true, teaser: true, doc_count: 5, update_count: 0, gated_photo_count: 3,
+      gated_fields: ['cap_rate', 'noi', 'occupancy'],
+      doc_titles: ['Portfolio Summary', 'Oak Street Apartments · Offering Memorandum', 'Oak Street Apartments · Rent Roll',
+                   'Linden Court · Offering Memorandum', 'Elm Terrace · Offering Memorandum'],
+    },
+    portfolio: [
+      {
+        id: 'p-oak', name: 'Oak Street Apartments', asset_line: 'Multifamily · 20 Units', location_line: 'Marshalltown, IA',
+        units: '20', building_sqft: '16400', year_built: '1984',
+        description: 'Two-story garden-style buildings on a quiet block, with off-street parking and on-site laundry.',
+        images: [
+          { url: img('photo-1545324418-cc1a3fa10c00'), caption: '' },
+          { url: img('photo-1502672260266-1c1ef2d93688'), caption: 'Typical unit' },
+          { url: img('photo-1484154218962-a197022b5858'), caption: 'Kitchen' },
+        ],
+        om: { available: true, filename: 'Oak-Street-OM.pdf', title: 'Offering Memorandum', size: 23_300_000 },
+        doc_titles: ['Offering Memorandum', 'Rent Roll'], gated_photo_count: 2,
+      },
+      {
+        id: 'p-linden', name: 'Linden Court', asset_line: 'Multifamily · 16 Units', location_line: 'Ames, IA',
+        units: '16', building_sqft: '12800', year_built: '1996',
+        description: 'Walkable to campus, with steady student and young-professional demand.',
+        images: [
+          { url: img('photo-1460317442991-0ec209397118'), caption: '' },
+          { url: img('photo-1493809842364-78817add7ffb'), caption: 'Living room' },
+        ],
+        om: { available: true, filename: 'Linden-Court-OM.pdf', title: 'Offering Memorandum', size: 18_100_000 },
+        doc_titles: ['Offering Memorandum'], gated_photo_count: 1,
+      },
+      {
+        id: 'p-elm', name: 'Elm Terrace', asset_line: 'Multifamily · 8 Units', location_line: 'Newton, IA',
+        units: '8', year_built: '1972',
+        description: 'A small, fully occupied building with long-tenured residents.',
+        images: [{ url: img('photo-1512917774080-9991f1c4c750'), caption: '' }],
+        om: { available: true, filename: 'Elm-Terrace-OM.pdf', title: 'Offering Memorandum', size: 9_800_000 },
+        doc_titles: ['Offering Memorandum'], gated_photo_count: 0,
+      },
+    ],
+  },
+}

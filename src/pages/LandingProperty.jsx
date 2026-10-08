@@ -9,7 +9,14 @@
  *     building_sqft, occupancy,
  *     eyebrow, asset_line, location_line, call_for_offers_date, price_display,
  *     om: { filename, title, size, available },     ← gated OM download
- *     deal_room: { available, teaser, doc_titles, gated_fields, … } }
+ *     deal_room: { available, teaser, doc_titles, gated_fields, … },
+ *     portfolio: [{ id, name, asset_line, location_line, description, images,
+ *                   facts…, om, doc_titles, gated_photo_count }] }
+ *
+ * PORTFOLIO. When `portfolio` has entries, one page (one QR code) carries
+ * several properties: the hero and story describe the whole offering, and each
+ * property is broken out below with its own photos, facts and — inside the
+ * Deal Room — its own numbers and documents. One registration opens them all.
  *
  * DEAL ROOM. When the campaign has an OM or other Deal Room documents, the page
  * is a public teaser (hero, story, highlights, a few photos) and ONE
@@ -29,6 +36,7 @@ import '../components/landing/landing.css'
 import {
   LandingShell, Section, DetailGrid, Gallery, Lightbox, LeadForm, AgentCard, AgentTeam, Button, Skeleton, StatePanel, OmGate,
   DealHero, AnchorNav, DealRoomTeaser, DealRoomOpen, MobileCtaBar, openDownload, LineIcon,
+  PortfolioProperty, normalizeImages,
 } from '../components/landing'
 import { normalizeOm, requestOm } from '../lib/om.js'
 import { loadAccessToken, saveAccessToken, takeTokenFromUrl, fetchDealRoom, requestDocument } from '../lib/dealRoomAccess.js'
@@ -52,7 +60,7 @@ export default function LandingProperty({ mailingId, preview = null }) {
   const [agent, setAgent] = useState(previewAgents[0] || null)
   const [loading, setLoading] = useState(!preview)
   const [error, setError] = useState(null)
-  const [lightbox, setLightbox] = useState(-1) // -1 = closed
+  const [lightbox, setLightbox] = useState(null) // { images, index } while open
   // Deal Room: the unlocked contents, the visitor's access token, and the
   // document currently being fetched.
   const [dealRoom, setDealRoom] = useState(null)
@@ -143,17 +151,13 @@ export default function LandingProperty({ mailingId, preview = null }) {
   const headline = cfg.headline || mailing.name || 'Property For Sale'
   const ctaText = cfg.cta_text || 'Get more info'
   const features = (Array.isArray(cfg.features) ? cfg.features : []).filter(Boolean)
-  const normImages = (list) => (Array.isArray(list) ? list : [])
-    .map(v => (typeof v === 'string'
-      ? { url: v, caption: '', price: '' }
-      // Existing mailings store a `units` field used as a caption fallback —
-      // preserve that so already-created campaigns render unchanged.
-      : { url: v.url, caption: v.caption || v.units || '', price: v.price || '' }))
-    .filter(v => v?.url)
   // Once the visitor is inside the Deal Room they get the full photo set; the
   // public page only ever received the first few (api/_lib/dealRoom.js).
-  const images = normImages(dealRoom?.images?.length ? dealRoom.images : cfg.images)
-  const heroImage = images[0]?.url
+  const images = normalizeImages(dealRoom?.images?.length ? dealRoom.images : cfg.images)
+  const portfolio = Array.isArray(cfg.portfolio) ? cfg.portfolio.filter(Boolean) : []
+  const openProperty = (id) => dealRoom?.properties?.find(p => p.id === id) || null
+  // A portfolio with no page-level photos borrows the first property's cover.
+  const heroImage = images[0]?.url || portfolio.map(p => normalizeImages(p.images)[0]?.url).find(Boolean)
   const galleryImages = images.slice(1)
 
   const isCommercial = cfg.detail_mode === 'commercial'
@@ -184,11 +188,17 @@ export default function LandingProperty({ mailingId, preview = null }) {
     cfg.year_built != null && { label: 'Year Built', value: String(cfg.year_built) },
   ]).filter(Boolean).filter(d => d.value !== null && d.value !== '' && d.value !== 'NaN')
 
-  // Hero stat bar: the first four public facts, formatted as text.
-  const heroStats = details.slice(0, 4).map(d => ({
-    label: d.label,
-    value: typeof d.value === 'number' ? `${d.prefix || ''}${d.value.toLocaleString()}${d.suffix || ''}` : d.value,
-  }))
+  // Hero stat bar: the first four public facts, formatted as text. A
+  // portfolio leads with how many properties and, when known, total units.
+  const totalUnits = portfolio.reduce((sum, p) => sum + (toNum(p.units) || 0), 0)
+  const heroStats = [
+    portfolio.length > 0 && { label: 'Properties', value: String(portfolio.length) },
+    portfolio.length > 0 && totalUnits > 0 && cfg.units == null && { label: 'Total Units', value: totalUnits.toLocaleString() },
+    ...details.map(d => ({
+      label: d.label,
+      value: typeof d.value === 'number' ? `${d.prefix || ''}${d.value.toLocaleString()}${d.suffix || ''}` : d.value,
+    })),
+  ].filter(Boolean).slice(0, 4)
 
   // The Deal Room. `room` is the public summary (what is behind the wall);
   // `dealRoom` is the unlocked contents once this visitor has registered.
@@ -202,7 +212,14 @@ export default function LandingProperty({ mailingId, preview = null }) {
   const unlockOm = async (fields) => {
     if (preview) {
       await new Promise(r => setTimeout(r, 700))
-      setDealRoom({ financials: {}, images: cfg.images || [], documents: om ? [{ id: 'om', kind: 'om', title: om.title, filename: om.filename, size: om.size }] : [], updates: [] })
+      setDealRoom({
+        financials: {}, images: cfg.images || [], updates: [],
+        documents: om ? [{ id: 'om', kind: 'om', title: om.title, filename: om.filename, size: om.size }] : [],
+        properties: portfolio.map(p => ({
+          id: p.id, financials: {}, images: p.images || [],
+          documents: p.om ? [{ id: `${p.id}:om`, kind: 'om', title: p.om.title, filename: p.om.filename, size: p.om.size }] : [],
+        })),
+      })
       return { url: '', filename: om?.filename }
     }
     const res = await requestOm(withVisitId({ mailing_id: mailingId, source_landing: 'property', ...fields }))
@@ -241,6 +258,7 @@ export default function LandingProperty({ mailingId, preview = null }) {
   const anchors = [
     { href: '#overview', label: 'Overview' },
     features.length > 0 && { href: '#highlights', label: 'Highlights' },
+    portfolio.length > 0 && { href: '#properties', label: 'Properties' },
     galleryImages.length > 0 && { href: '#gallery', label: 'Gallery' },
     hasRoom ? { href: '#deal-room', label: 'Deal Room' } : { href: '#contact', label: 'Contact' },
     agents.length > 0 && { href: '#advisors', label: agents.length > 1 ? 'Advisors' : 'Advisor' },
@@ -312,9 +330,22 @@ export default function LandingProperty({ mailingId, preview = null }) {
               </Section>
             )}
 
+            {portfolio.length > 0 && (
+              <Section title={`The Portfolio · ${portfolio.length} Properties`} delay={90} id="properties">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                  {portfolio.map((p, i) => (
+                    <PortfolioProperty key={p.id || i} property={p} index={i} open={openProperty(p.id)}
+                                       priceMode={priceMode}
+                                       onOpenPhoto={(imgs, index) => setLightbox({ images: imgs, index })}
+                                       onDownload={downloadDoc} downloading={docBusy} error={docError} />
+                  ))}
+                </div>
+              </Section>
+            )}
+
             {galleryImages.length > 0 && (
               <Section title="Gallery" delay={100} id="gallery">
-                <Gallery images={galleryImages} onOpen={(i) => setLightbox(i + 1)} />
+                <Gallery images={galleryImages} onOpen={(i) => setLightbox({ images, index: i + 1 })} />
                 {!unlocked && room?.gated_photo_count > 0 && (
                   <p style={{ fontSize: 13, color: 'var(--lx-mist)', margin: '10px 0 0' }}>
                     <LineIcon name="lock" size={13} style={{ verticalAlign: '-2px', marginRight: 6 }} />
@@ -368,8 +399,9 @@ export default function LandingProperty({ mailingId, preview = null }) {
 
       <MobileCtaBar label={primaryCta.label} href={primaryCta.href} phone={agent?.phone} />
 
-      {lightbox >= 0 && (
-        <Lightbox images={images} index={lightbox} onClose={() => setLightbox(-1)} onIndex={setLightbox} />
+      {lightbox && (
+        <Lightbox images={lightbox.images} index={lightbox.index} onClose={() => setLightbox(null)}
+                  onIndex={(index) => setLightbox(lb => ({ ...lb, index }))} />
       )}
     </LandingShell>
   )
