@@ -152,13 +152,9 @@ export function buildNav({ isAdmin, hiddenNav }) {
   return { core, office, tools, admin, all: [...core, ...office, ...tools, ...admin] }
 }
 
-/**
- * The phone's bottom bar. An admin's book is the whole firm, so Contacts makes
- * way for them here just as it does in the sidebar.
- */
-export const mobileTabsFor = (nav, isAdmin) =>
-  MOBILE_TABS.filter(id => !(isAdmin && id === 'contacts'))
-    .map(id => nav.all.find(x => x.id === id))
+/** The phone's bottom bar. */
+export const mobileTabsFor = (nav) =>
+  MOBILE_TABS.map(id => nav.all.find(x => x.id === id))
     .filter(Boolean)
 
 /** The "More" sheet: everything not already on the bottom bar, grouped like the sidebar. */
