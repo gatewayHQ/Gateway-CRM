@@ -20,6 +20,10 @@
  *   • Mailing address, "I am a" and 1031 are OPTIONAL. Asked, never demanded:
  *     a required address turns people away, and a lead without one still has
  *     a name, a phone and an email.
+ *   • When the campaign has an NDA attached, registering leads to a signing step
+ *     (NdaStep) instead of the download: the server releases nothing until the
+ *     NDA is signed. `ndaPending` opens straight onto that step for a visitor
+ *     who registered earlier but never signed.
  *   • A visitor who registered on any Gateway page before is offered
  *     "Continue as Jane" (src/lib/dealRoomAccess.js) — one tap, and the agent
  *     on THIS campaign still gets the lead.
@@ -30,6 +34,7 @@
 import React, { useEffect, useState } from 'react'
 import { loadIdentity, saveIdentity, forgetIdentity } from '../../lib/dealRoomAccess.js'
 import { LineIcon } from './dealRoom.jsx'
+import { NdaStep } from './NdaStep.jsx'
 
 const isEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(v).trim())
 const digits  = (v) => (String(v).match(/\d/g) || []).length
@@ -50,16 +55,20 @@ export function OmGate({
   ctaLabel,                 // submit button text (default "Get the OM →")
   qualifiers = false,       // show the optional "I am a" + 1031 questions
   forceShow = false,        // render even with no OM file (a Deal Room with other documents)
+  ndaPending = null,        // { mailing_id, access_token, nda, visitor } — open on the NDA step
+  onNdaSigned,              // (res) => void, once the NDA is signed and the room is open
   id,
 }) {
   const [form, setForm]     = useState({ name: '', phone: '', email: '', mailing_address: '', buyer_role: '', is_1031: '' })
   const [errors, setErrors] = useState({})
-  const [status, setStatus] = useState('idle')   // idle | submitting | done | error
+  const [status, setStatus] = useState(ndaPending ? 'nda' : 'idle')   // idle | submitting | nda | done | error
   const [topError, setTopError] = useState(null)
   const [grant, setGrant]   = useState(null)     // { url, filename } once unlocked
   const [known, setKnown]   = useState(null)     // a returning visitor's saved details
+  const [nda, setNda]       = useState(ndaPending) // registered, NDA still to sign
 
   useEffect(() => { setKnown(loadIdentity()) }, [])
+  useEffect(() => { if (ndaPending) { setNda(ndaPending); setStatus('nda') } }, [ndaPending])
 
   if (!om && !forceShow) return null
 
@@ -83,6 +92,11 @@ export function OmGate({
         name: fields.name.trim(), phone: fields.phone.trim(), email: fields.email.trim(),
         mailing_address: String(fields.mailing_address || '').trim(),
       })
+      if (res?.nda_required) {
+        setNda({ mailing_id: res.mailing_id, access_token: res.access_token, nda: res.nda, visitor: res.visitor })
+        setStatus('nda')
+        return
+      }
       setGrant(res || {})
       setStatus('done')
       if (res?.url) openDownload(res)
@@ -128,6 +142,14 @@ export function OmGate({
   }
   const submitText = status === 'submitting' ? 'Opening…' : (ctaLabel || 'Get the OM')
 
+  const ndaSigned = (res) => {
+    setNda(null)
+    setGrant(res || {})
+    setStatus('done')
+    if (res?.url) openDownload(res)
+    onNdaSigned?.(res)
+  }
+
   return (
     <section id={id} style={panel} aria-labelledby="om-gate-heading">
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
@@ -137,18 +159,20 @@ export function OmGate({
         }}><LineIcon name={status === 'done' ? 'unlock' : 'lock'} size={18} /></div>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 10.5, letterSpacing: 1.6, textTransform: 'uppercase', color: accent, marginBottom: 4 }}>
-            {status === 'done' ? 'Unlocked' : 'Instant access'}
+            {status === 'done' ? 'Unlocked' : status === 'nda' ? 'Step 2 of 2 · Sign the NDA' : 'Instant access'}
           </div>
           <h2 id="om-gate-heading" className="lx-serif"
               style={{ fontFamily: 'Cormorant Garamond, serif', fontSize: 22, fontWeight: 600,
                        margin: 0, color: inkStrong, lineHeight: 1.2 }}>
-            {heading}
+            {status === 'nda' ? (nda?.nda?.title || 'Confidentiality Agreement') : heading}
           </h2>
           <div style={{ fontSize: 11.5, color: inkSoft, marginTop: 3 }}>{sizeHint}</div>
         </div>
       </div>
 
-      {status === 'done' && grant ? (
+      {status === 'nda' && nda ? (
+        <NdaStep pending={nda} accent={accent} dark={dark} primaryBtn={primaryBtn} onSigned={ndaSigned} />
+      ) : status === 'done' && grant ? (
         <div style={{ marginTop: 16 }} role="status">
           {grant.url ? (
             <>
@@ -171,6 +195,13 @@ export function OmGate({
           ) : (
             <p style={{ fontSize: 13.5, lineHeight: 1.6, color: inkBody, margin: 0 }}>
               You're in. Everything is open below.
+            </p>
+          )}
+          {grant.nda_copy_url && (
+            <p style={{ fontSize: 12, textAlign: 'center', margin: '12px 0 0' }}>
+              <a href={grant.nda_copy_url} target="_blank" rel="noopener noreferrer" style={{ color: accent }}>
+                Download your signed NDA
+              </a>
             </p>
           )}
         </div>

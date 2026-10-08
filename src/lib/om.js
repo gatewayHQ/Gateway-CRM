@@ -102,6 +102,18 @@ export async function uploadOm(file) {
   }
 }
 
+/**
+ * Upload an NDA PDF from the builder. Same private bucket and rules as the OM;
+ * returns the descriptor to store on `landing_config.nda`.
+ */
+export async function uploadNda(file) {
+  if (file && !(file.type === 'application/pdf' || /\.pdf$/i.test(file.name || ''))) {
+    throw new Error('The NDA must be a PDF')
+  }
+  const doc = await uploadOm(file)
+  return { ...doc, title: '' }
+}
+
 /** Remove an OM object. Best-effort: a stale object costs storage, not correctness. */
 export async function deleteOm(path) {
   if (!path) return
@@ -127,7 +139,8 @@ export async function requestOm(payload) {
   if (!res.ok || data.error || (!data.url && !data.access_token)) {
     throw new Error(data.error || "We couldn't prepare the download. Please try again.")
   }
-  return data
+  // The NDA step (OmGate) needs to know which campaign it is signing for.
+  return data.nda_required ? { ...data, mailing_id: payload.mailing_id } : data
 }
 
 /**

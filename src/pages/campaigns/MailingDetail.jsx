@@ -5,7 +5,8 @@ import { Icon, Modal, pushToast, EmptyState, ConfirmDialog } from '../../compone
 import QrCode from '../../components/QrCode.jsx'
 import { shortUrl, downloadQr } from '../../lib/qr.js'
 import { streetLine } from '../../lib/address.js'
-import { normalizeOm } from '../../lib/om.js'
+import { normalizeOm, OM_BUCKET } from '../../lib/om.js'
+import { supabase } from '../../lib/supabase.js'
 import { api } from '../../lib/services/campaignsApi.js'
 import { Breakdowns, StatCard, StatusBadge } from './CampaignWidgets.jsx'
 import { MailingForm } from './MailingForm.jsx'
@@ -32,6 +33,15 @@ export function MailingDetail({ mailing, agents, properties, contacts, activeAge
   const roomUpdates   = Array.isArray(mailing.landing_config?.deal_room?.updates) ? mailing.landing_config.deal_room.updates : []
   // "Has a Deal Room": an OM, or any other document behind the registration.
   const hasOmAttached = !!attachedOm || roomDocs.length > 0
+  const ndaAttached   = !!mailing.landing_config?.nda?.path
+
+  // The signed NDA (agreement + signature certificate), from the private bucket.
+  const openSignedNda = async (r) => {
+    const { data, error } = await supabase.storage.from(OM_BUCKET)
+      .createSignedUrl(r.nda_signed_copy_path, 300, { download: `NDA-${(r.name || 'signed').replace(/[^a-z0-9]+/gi, '-')}.pdf` })
+    if (error || !data?.signedUrl) { pushToast("Couldn't open the signed NDA: " + (error?.message || 'try again'), 'error'); return }
+    window.open(data.signedUrl, '_blank', 'noopener')
+  }
 
   const refresh = async () => {
     setLoading(true)
@@ -130,13 +140,15 @@ export function MailingDetail({ mailing, agents, properties, contacts, activeAge
     a.click()
   }
   const exportOmRequestsCSV = () => {
-    const headers = ['Name', 'Email', 'Phone', 'Mailing Address', 'Role', '1031', 'Visits', 'Downloads', 'First Download', 'Last Download', 'From A Scan']
+    const headers = ['Name', 'Email', 'Phone', 'Mailing Address', 'Role', '1031', 'Visits', 'Downloads', 'First Download', 'Last Download', 'From A Scan', 'NDA Signed', 'NDA Signer', 'NDA Company']
     const rows = omRequests.map(r => [
       r.name || '', r.email || '', r.phone || '', r.mailing_address || '', r.buyer_role || '',
       r.is_1031 === true ? 'Yes' : r.is_1031 === false ? 'No' : '', r.visit_count ?? 1, r.download_count ?? 1,
       r.created_at ? new Date(r.created_at).toISOString().slice(0, 16).replace('T', ' ') : '',
       r.last_download_at ? new Date(r.last_download_at).toISOString().slice(0, 16).replace('T', ' ') : '',
       r.visit_id ? 'Yes' : 'No',
+      r.nda_signed_at ? new Date(r.nda_signed_at).toISOString().slice(0, 16).replace('T', ' ') : '',
+      r.nda_signer_name || '', r.nda_signer_company || '',
     ])
     const csv = [headers, ...rows].map(row => row.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n')
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
@@ -474,6 +486,9 @@ export function MailingDetail({ mailing, agents, properties, contacts, activeAge
               <div style={{ fontSize:13, color:'var(--gw-mist)' }}>
                 <strong style={{ color:'var(--gw-ink)' }}>{omRequests.length}</strong> registered
                 {' · '}{(attachedOm ? 1 : 0) + roomDocs.length} document{(attachedOm ? 1 : 0) + roomDocs.length === 1 ? '' : 's'}
+                {ndaAttached && (
+                  <> · <strong style={{ color:'var(--gw-ink)' }}>{omRequests.filter(r => r.nda_signed_at).length}</strong> signed the NDA</>
+                )}
                 {omRequests.some(r => (r.visit_count ?? 1) > 1) && (
                   <> · <strong style={{ color:'var(--gw-ink)' }}>{omRequests.filter(r => (r.visit_count ?? 1) > 1).length}</strong> came back</>
                 )}
@@ -483,7 +498,8 @@ export function MailingDetail({ mailing, agents, properties, contacts, activeAge
                 <Icon name="download" size={12} /> Export CSV
               </button>
             </div>
-            <DealRoomNotify mailing={mailing} updates={roomUpdates} registered={omRequests.length} />
+            <DealRoomNotify mailing={mailing} updates={roomUpdates}
+                            registered={ndaAttached ? omRequests.filter(r => r.nda_signed_at).length : omRequests.length} />
             {omRequests.length === 0 ? (
               <EmptyState title="Nobody has opened the OM yet"
                           message="The download is gated: whoever wants the offering memorandum gives their name, phone and email first. Everyone who does shows up here — and as a lead." />
@@ -515,6 +531,28 @@ export function MailingDetail({ mailing, agents, properties, contacts, activeAge
                       {r.buyer_role && <span style={{ textTransform:'capitalize' }}>{r.buyer_role}</span>}
                       {r.is_1031 === true && <span style={{ fontWeight:700, color:'var(--gw-ink)' }}>1031</span>}
                     </div>
+                    {(ndaAttached || r.nda_signed_at) && (
+                      <div style={{ fontSize:12, marginTop:6, display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
+                        {r.nda_signed_at ? (
+                          <>
+                            <span style={{ fontWeight:700, color:'#047857' }}>
+                              <Icon name="check" size={11} /> NDA signed {new Date(r.nda_signed_at).toLocaleString()}
+                            </span>
+                            <span style={{ color:'var(--gw-mist)' }}>
+                              as {r.nda_signer_name}{r.nda_signer_company ? ` · ${r.nda_signer_company}` : ''}
+                            </span>
+                            {r.nda_signed_copy_path && (
+                              <button type="button" className="btn btn--ghost" style={{ fontSize:11.5, padding:'2px 8px' }}
+                                      onClick={() => openSignedNda(r)}>
+                                <Icon name="download" size={11} /> Signed NDA
+                              </button>
+                            )}
+                          </>
+                        ) : (
+                          <span style={{ fontWeight:700, color:'#b45309' }}>NDA not signed — Deal Room locked</span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
