@@ -4,7 +4,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
 import { OmGate } from '../OmGate.jsx'
 
-afterEach(() => { cleanup(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear() })
 
 const PENDING = {
   mailing_id: 'm1', access_token: 'tok',
@@ -42,5 +42,31 @@ describe('OmGate — NDA step', () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body)
     expect(body).toMatchObject({ action: 'nda_sign', mailing_id: 'm1', access_token: 'tok', signer_name: 'Jane Investor', agree: true })
     expect(screen.getByText('Download your signed NDA')).toBeTruthy()
+  })
+})
+
+describe('OmGate — download on unlock', () => {
+  const register = () => {
+    fireEvent.change(screen.getByLabelText('Full name *'), { target: { value: 'Jane Investor' } })
+    fireEvent.change(screen.getByLabelText('Phone *'), { target: { value: '5155550134' } })
+    fireEvent.change(screen.getByLabelText('Email *'), { target: { value: 'jane@fund.com' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Get the OM' }))
+  }
+  const grant = async () => ({ url: 'https://x/om.pdf', filename: 'OM.pdf' })
+
+  it('opens the OM straight away by default', async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    render(<OmGate om={{ title: 'OM' }} onUnlock={grant} />)
+    register()
+    await screen.findByText(/download has started/)
+    expect(click).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves the OM to the Documents list when autoDownload is off', async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    render(<OmGate om={{ title: 'OM' }} onUnlock={grant} autoDownload={false} />)
+    register()
+    await screen.findByText(/Download the file below/)
+    expect(click).not.toHaveBeenCalled()
   })
 })

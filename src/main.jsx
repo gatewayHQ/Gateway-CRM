@@ -9,7 +9,7 @@ import LandingMultifamily from './pages/LandingMultifamily.jsx'
 import LandingMailing from './pages/LandingMailing.jsx'
 import Unsubscribe from './pages/Unsubscribe.jsx'
 import AdvisorProfile from './pages/AdvisorProfile.jsx'
-import { DEMO_LISTING } from './pages/landingDemoData.js'
+import { DEMO_LISTING, DEMO_PORTFOLIO } from './pages/landingDemoData.js'
 import ClientPortal from './pages/ClientPortal.jsx'
 import { initWebVitals } from './lib/perf.js'
 import { enableInstallableApp } from './lib/pwa.js'
@@ -66,9 +66,11 @@ const advisorMatch   = pathname.match(/^\/advisor\/([0-9a-f-]{36})/i)
 const portalMatch    = pathname.match(/^\/portal\/([0-9a-f-]{36})/i)
 
 const isDemoPage     = pathname === '/lp/demo'
+const isDemoPortfolio = pathname === '/lp/demo-portfolio'
 
 let publicView = null
 if (isDemoPage)          publicView = <LandingProperty preview={DEMO_LISTING} />
+else if (isDemoPortfolio) publicView = <LandingProperty preview={DEMO_PORTFOLIO} />
 else if (listingMatch)   publicView = <PropertyLandingPage propertyId={listingMatch[1]} />
 else if (lpPropMatch)    publicView = <LandingProperty   mailingId={lpPropMatch[1]} />
 else if (lpValMatch)     publicView = <LandingValuation  mailingId={lpValMatch[1]} />

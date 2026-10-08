@@ -12,6 +12,8 @@
  *                 with their values hidden, the document list, the photo and
  *                 update counts. Shown beside the registration form.
  *   DealRoomOpen  the same room, unlocked: numbers, documents, updates.
+ *   DocList       the documents list with a Download per file (also used per
+ *                 property on a portfolio page).
  *   MobileCtaBar  a bottom bar on phones so the call to action never scrolls away.
  */
 import React from 'react'
@@ -196,23 +198,14 @@ export function DealRoomOpen({ room, visitorName, onDownload, downloading, error
       {room.documents?.length > 0 && (
         <>
           <h3 className="lx-open__h">Documents</h3>
-          <ul className="lx-docs">
-            {room.documents.map(d => (
-              <li key={d.id} className="lx-doc">
-                <span className="lx-doc__icon"><LineIcon name={KIND_ICON[d.kind]} size={18} /></span>
-                <span className="lx-doc__name">
-                  <b>{d.title || KIND_LABEL[d.kind] || d.filename}</b>
-                  <small>{[d.filename, formatBytes(d.size)].filter(Boolean).join(' · ')}</small>
-                </span>
-                <Button variant="ghost" onClick={() => onDownload?.(d)} loading={downloading === d.id}
-                        style={{ padding: '7px 12px', fontSize: 12.5 }}>
-                  <LineIcon name="download" size={14} /> Download
-                </Button>
-              </li>
-            ))}
-          </ul>
-          {error && <div role="alert" className="lx-field__error" style={{ marginTop: 8 }}>{error}</div>}
+          <DocList docs={room.documents} onDownload={onDownload} downloading={downloading} error={error} />
         </>
+      )}
+      {room.properties?.length > 0 && (
+        <p style={{ fontSize: 13.5, color: 'var(--lx-ink-2)', margin: '12px 0 0' }}>
+          Each property's numbers, photos and documents are open in{' '}
+          <a href="#properties" style={{ color: 'var(--lx-accent)' }}>the portfolio below</a>.
+        </p>
       )}
       {room.updates?.length > 0 && (
         <>
@@ -229,6 +222,31 @@ export function DealRoomOpen({ room, visitorName, onDownload, downloading, error
         </>
       )}
     </div>
+  )
+}
+
+/** A list of Deal Room documents, each with its own Download button. */
+export function DocList({ docs = [], onDownload, downloading, error }) {
+  if (!docs.length) return null
+  return (
+    <>
+      <ul className="lx-docs">
+        {docs.map(d => (
+          <li key={d.id} className="lx-doc">
+            <span className="lx-doc__icon"><LineIcon name={KIND_ICON[d.kind]} size={18} /></span>
+            <span className="lx-doc__name">
+              <b>{d.title || KIND_LABEL[d.kind] || d.filename}</b>
+              <small>{[d.filename, formatBytes(d.size)].filter(Boolean).join(' · ')}</small>
+            </span>
+            <Button variant="ghost" onClick={() => onDownload?.(d)} loading={downloading === d.id}
+                    style={{ padding: '7px 12px', fontSize: 12.5 }}>
+              <LineIcon name="download" size={14} /> Download
+            </Button>
+          </li>
+        ))}
+      </ul>
+      {error && <div role="alert" className="lx-field__error" style={{ marginTop: 8 }}>{error}</div>}
+    </>
   )
 }
 

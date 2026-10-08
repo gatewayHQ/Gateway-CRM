@@ -24,6 +24,8 @@
  *     (NdaStep) instead of the download: the server releases nothing until the
  *     NDA is signed. `ndaPending` opens straight onto that step for a visitor
  *     who registered earlier but never signed.
+ *   • `autoDownload={false}` (the Deal Room) skips opening the file on unlock:
+ *     the room's Documents list is where the visitor downloads it.
  *   • A visitor who registered on any Gateway page before is offered
  *     "Continue as Jane" (src/lib/dealRoomAccess.js) — one tap, and the agent
  *     on THIS campaign still gets the lead.
@@ -55,6 +57,7 @@ export function OmGate({
   ctaLabel,                 // submit button text (default "Get the OM →")
   qualifiers = false,       // show the optional "I am a" + 1031 questions
   forceShow = false,        // render even with no OM file (a Deal Room with other documents)
+  autoDownload = true,      // open the OM as soon as it unlocks (false → leave it to the Documents list)
   ndaPending = null,        // { mailing_id, access_token, nda, visitor } — open on the NDA step
   onNdaSigned,              // (res) => void, once the NDA is signed and the room is open
   id,
@@ -99,7 +102,7 @@ export function OmGate({
       }
       setGrant(res || {})
       setStatus('done')
-      if (res?.url) openDownload(res)
+      if (autoDownload && res?.url) openDownload(res)
     } catch (err) {
       setStatus('error')
       setTopError(err?.message || "We couldn't prepare the download. Please try again.")
@@ -146,7 +149,7 @@ export function OmGate({
     setNda(null)
     setGrant(res || {})
     setStatus('done')
-    if (res?.url) openDownload(res)
+    if (autoDownload && res?.url) openDownload(res)
     onNdaSigned?.(res)
   }
 
@@ -177,7 +180,9 @@ export function OmGate({
           {grant.url ? (
             <>
               <p style={{ fontSize: 13.5, lineHeight: 1.6, color: inkBody, margin: '0 0 14px' }}>
-                Your download has started. If nothing happened, use the button below.
+                {autoDownload
+                  ? 'Your download has started. If nothing happened, use the button below.'
+                  : "You're in. Download the file below."}
               </p>
               <a href={grant.url} download={grant.filename} target="_blank" rel="noopener noreferrer"
                  onClick={(e) => { e.preventDefault(); openDownload(grant) }}

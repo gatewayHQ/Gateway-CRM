@@ -30,12 +30,13 @@ const newId = (p) => `${p}-${Math.random().toString(36).slice(2, 10)}`
 const today = () => new Date().toISOString().slice(0, 10)
 
 export function DealRoomBuilder({ cfg, setCfg, agentId }) {
-  const [busy, setBusy] = useState(false)
   const [sequences, setSequences] = useState([])
   const room    = cfg.deal_room || {}
   const docs    = Array.isArray(room.documents) ? room.documents : []
   const updates = Array.isArray(room.updates) ? room.updates : []
-  const hasRoom = !!normalizeOm(cfg.om) || docs.length > 0
+  const portfolioHasFiles = (Array.isArray(cfg.portfolio) ? cfg.portfolio : [])
+    .some(p => normalizeOm(p?.om) || p?.documents?.length)
+  const hasRoom = !!normalizeOm(cfg.om) || docs.length > 0 || portfolioHasFiles
   const nda     = cfg.nda?.path ? cfg.nda : null
   const teaser  = cfg.teaser_mode !== false || !!nda
 
@@ -51,25 +52,6 @@ export function DealRoomBuilder({ cfg, setCfg, agentId }) {
   }, [agentId])
 
   const setRoom = (patch) => setCfg('deal_room', { ...room, ...patch })
-  const setDoc = (i, patch) => setRoom({ documents: docs.map((d, idx) => idx === i ? { ...d, ...patch } : d) })
-  const removeDoc = (i) => {
-    if (docs[i]?.path) deleteOm(docs[i].path)
-    setRoom({ documents: docs.filter((_, idx) => idx !== i) })
-  }
-  const addDoc = async (file) => {
-    if (!file) return
-    setBusy(true)
-    try {
-      const doc = await uploadDealRoomDoc(file)
-      const guess = /rent.?roll/i.test(file.name) ? 'rent_roll' : /t-?12|operating/i.test(file.name) ? 't12' : 'other'
-      setRoom({ documents: [...docs, { ...doc, kind: guess }].slice(0, 20) })
-      pushToast('Added to the Deal Room', 'success')
-    } catch (err) {
-      pushToast('Upload failed: ' + err.message, 'error')
-    } finally {
-      setBusy(false)
-    }
-  }
 
   const setUpdate = (i, patch) => setRoom({ updates: updates.map((u, idx) => idx === i ? { ...u, ...patch } : u) })
   const addUpdate = () => setRoom({ updates: [{ id: newId('upd'), date: today(), title: '', body: '' }, ...updates].slice(0, 30) })
@@ -88,38 +70,10 @@ export function DealRoomBuilder({ cfg, setCfg, agentId }) {
       <OmUploadField cfg={cfg} setCfg={setCfg}
                      hint="The OM, plus anything you add below, unlocks after the visitor gives their name, phone and email (mailing address optional). Every registration alerts you by email and text, adds a call task, and lands in the campaign's Deal Room tab." />
 
-      <div>
-        <label style={fieldLabel}>Other documents (rent roll, T-12, photos…)</label>
-        <div style={{ display:'grid', gap:6, marginTop:4 }}>
-          {docs.map((d, i) => (
-            <div key={d.id || i} style={{ display:'grid', gridTemplateColumns:'1fr 150px auto', gap:6, alignItems:'center',
-                                          border:'1px solid var(--gw-border)', borderRadius:8, padding:8, background:'#fff' }}>
-              <div style={{ minWidth:0 }}>
-                <input className="input" style={{ fontSize:12 }} maxLength={80} value={d.title || ''}
-                       placeholder={DEAL_ROOM_DOC_KINDS.find(k => k.value === d.kind)?.label || 'Title'}
-                       onChange={e => setDoc(i, { title: e.target.value })} />
-                <div style={{ ...small, marginTop:3, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                  {[d.filename, formatBytes(d.size)].filter(Boolean).join(' · ')}
-                </div>
-              </div>
-              <select className="input" style={{ fontSize:12 }} value={d.kind || 'other'}
-                      onChange={e => setDoc(i, { kind: e.target.value })}>
-                {DEAL_ROOM_DOC_KINDS.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
-              </select>
-              <button type="button" className="btn btn--ghost" onClick={() => removeDoc(i)} style={{ padding:'6px 8px' }} title="Remove">
-                <Icon name="x" size={12} />
-              </button>
-            </div>
-          ))}
-          <label style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:7, cursor: busy ? 'wait' : 'pointer',
-                          padding:'11px 10px', fontSize:12.5, fontWeight:600, border:'1px dashed var(--gw-border)',
-                          borderRadius:8, background:'#fff', color:'var(--gw-mist)' }}>
-            {busy ? 'Uploading…' : <><Icon name="upload" size={13} /> Add a document (PDF, Excel, CSV, Word, image, zip)</>}
-            <input type="file" accept={DEAL_ROOM_ACCEPT} style={{ display:'none' }}
-                   onChange={e => { addDoc(e.target.files?.[0]); e.target.value = '' }} />
-          </label>
-        </div>
-      </div>
+      <DocumentsField docs={docs} onChange={(documents) => setRoom({ documents })}
+                      label={Array.isArray(cfg.portfolio) && cfg.portfolio.length
+                        ? 'Portfolio-wide documents (combined OM, summary…)'
+                        : 'Other documents (rent roll, T-12, photos…)'} />
 
       <NdaUploadField nda={nda} setCfg={setCfg} hasRoom={hasRoom} />
 
@@ -191,6 +145,72 @@ export function DealRoomBuilder({ cfg, setCfg, agentId }) {
           Enrolls each new registrant in one of your drip sequences. It stops on its own when they reply. Set the first
           step's delay (e.g. 3 days) in Sequences.
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Documents list (shared with the portfolio builder) ──────────────────────
+/**
+ * Upload, title, categorize and remove Deal Room documents. Files go to the
+ * private campaign-oms bucket; `docs` is the descriptor list
+ * [{ id, path, filename, title, kind, size, uploaded_at }].
+ */
+export function DocumentsField({ docs = [], onChange, label = 'Other documents (rent roll, T-12, photos…)', max = 20 }) {
+  const [busy, setBusy] = useState(false)
+  const small = { fontSize:11, color:'var(--gw-mist)', lineHeight:1.45 }
+
+  const setDoc = (i, patch) => onChange(docs.map((d, idx) => idx === i ? { ...d, ...patch } : d))
+  const removeDoc = (i) => {
+    if (docs[i]?.path) deleteOm(docs[i].path)
+    onChange(docs.filter((_, idx) => idx !== i))
+  }
+  const addDoc = async (file) => {
+    if (!file) return
+    setBusy(true)
+    try {
+      const doc = await uploadDealRoomDoc(file)
+      const guess = /rent.?roll/i.test(file.name) ? 'rent_roll' : /t-?12|operating/i.test(file.name) ? 't12' : 'other'
+      onChange([...docs, { ...doc, kind: guess }].slice(0, max))
+      pushToast('Added to the Deal Room', 'success')
+    } catch (err) {
+      pushToast('Upload failed: ' + err.message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div>
+      <label style={fieldLabel}>{label}</label>
+      <div style={{ display:'grid', gap:6, marginTop:4 }}>
+        {docs.map((d, i) => (
+          <div key={d.id || i} style={{ display:'grid', gridTemplateColumns:'1fr 150px auto', gap:6, alignItems:'center',
+                                        border:'1px solid var(--gw-border)', borderRadius:8, padding:8, background:'#fff' }}>
+            <div style={{ minWidth:0 }}>
+              <input className="input" style={{ fontSize:12 }} maxLength={80} value={d.title || ''}
+                     placeholder={DEAL_ROOM_DOC_KINDS.find(k => k.value === d.kind)?.label || 'Title'}
+                     onChange={e => setDoc(i, { title: e.target.value })} />
+              <div style={{ ...small, marginTop:3, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                {[d.filename, formatBytes(d.size)].filter(Boolean).join(' · ')}
+              </div>
+            </div>
+            <select className="input" style={{ fontSize:12 }} value={d.kind || 'other'}
+                    onChange={e => setDoc(i, { kind: e.target.value })}>
+              {DEAL_ROOM_DOC_KINDS.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
+            </select>
+            <button type="button" className="btn btn--ghost" onClick={() => removeDoc(i)} style={{ padding:'6px 8px' }} title="Remove">
+              <Icon name="x" size={12} />
+            </button>
+          </div>
+        ))}
+        <label style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:7, cursor: busy ? 'wait' : 'pointer',
+                        padding:'11px 10px', fontSize:12.5, fontWeight:600, border:'1px dashed var(--gw-border)',
+                        borderRadius:8, background:'#fff', color:'var(--gw-mist)' }}>
+          {busy ? 'Uploading…' : <><Icon name="upload" size={13} /> Add a document (PDF, Excel, CSV, Word, image, zip)</>}
+          <input type="file" accept={DEAL_ROOM_ACCEPT} style={{ display:'none' }}
+                 onChange={e => { addDoc(e.target.files?.[0]); e.target.value = '' }} />
+        </label>
       </div>
     </div>
   )

@@ -11,7 +11,8 @@
 export { Reveal, ScrollProgress, Button, Field, Skeleton, StatePanel } from './primitives.jsx'
 export { LandingShell, Hero, Section, DetailGrid, Gallery, Lightbox, LeadForm, AgentCard, AgentTeam } from './sections.jsx'
 export { OmGate, openDownload } from './OmGate.jsx'
-export { DealHero, AnchorNav, DealRoomTeaser, DealRoomOpen, MobileCtaBar, LineIcon, callForOffersLabel, financialItems } from './dealRoom.jsx'
+export { DealHero, AnchorNav, DealRoomTeaser, DealRoomOpen, MobileCtaBar, LineIcon, DocList, callForOffersLabel, financialItems } from './dealRoom.jsx'
+export { PortfolioProperty, propertyFacts, normalizeImages } from './portfolio.jsx'
 export {
   usePrefersReducedMotion, useReveal, useCountUp, useParallax,
   useScrollProgress, useStuck, useLockBodyScroll,

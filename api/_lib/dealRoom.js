@@ -32,6 +32,13 @@
  *     documents: [{ id, path, filename, title, kind, size, uploaded_at }],
  *     updates:   [{ id, date, title, body }],
  *   }
+ *   portfolio            [{ id, crm_property_id, name, asset_line, location_line,
+ *                           description, images[], om, documents[], and the
+ *                           same fact keys as the page (price, units, cap_rate…) }]
+ *                        — one QR code for several properties. Each property's
+ *                        numbers, photos and files follow the same public /
+ *                        gated rules as a single-property page; its documents
+ *                        join the room under ids prefixed with the property id.
  */
 import crypto from 'crypto'
 
@@ -48,6 +55,9 @@ export const DEFAULT_PUBLIC_PHOTOS = 3
 export const ACCESS_MAX_AGE_MS = 180 * 24 * 60 * 60 * 1000
 
 const OM_DOC_ID = 'om'
+
+/** The most properties one portfolio page carries. */
+export const MAX_PORTFOLIO = 12
 
 function cleanDoc(d, fallbackId) {
   if (!d || typeof d !== 'object') return null
@@ -77,7 +87,33 @@ export function dealRoomDocs(cfg) {
   else if (om && typeof om === 'object') push(cleanDoc({ ...om, id: OM_DOC_ID, kind: 'om' }, OM_DOC_ID))
   const list = Array.isArray(cfg?.deal_room?.documents) ? cfg.deal_room.documents : []
   list.forEach((d, i) => push(cleanDoc(d, `doc-${i + 1}`)))
+  // A portfolio's per-property files: `${propertyId}:om`, `${propertyId}:${docId}`.
+  portfolioOf(cfg).forEach(p => {
+    const tag = (d) => d && { ...d, property_id: p.id }
+    if (typeof p.om === 'string') push(tag(cleanDoc({ path: p.om, kind: 'om', id: `${p.id}:${OM_DOC_ID}` })))
+    else if (p.om && typeof p.om === 'object') push(tag(cleanDoc({ ...p.om, id: `${p.id}:${OM_DOC_ID}`, kind: 'om' })))
+    const docs = Array.isArray(p.documents) ? p.documents : []
+    docs.forEach((d, i) => push(tag(cleanDoc({ ...d, id: `${p.id}:${d?.id || `doc-${i + 1}`}` }))))
+  })
   return out
+}
+
+/**
+ * The portfolio's properties, each with a stable id (`p-1`, `p-2`… when the
+ * builder did not set one). Empty for an ordinary single-property page.
+ */
+export function portfolioOf(cfg) {
+  const list = Array.isArray(cfg?.portfolio) ? cfg.portfolio : []
+  const seen = new Set()
+  return list
+    .filter(p => p && typeof p === 'object')
+    .slice(0, MAX_PORTFOLIO)
+    .map((p, i) => {
+      let id = String(p.id || `p-${i + 1}`).replace(/[^a-z0-9_-]/gi, '').slice(0, 24) || `p-${i + 1}`
+      if (seen.has(id)) id = `p-${i + 1}`
+      seen.add(id)
+      return { ...p, id }
+    })
 }
 
 export function dealRoomUpdates(cfg) {
@@ -158,16 +194,51 @@ export function publicTeaserConfig(cfg) {
   }
   if (price !== 'public') delete base.price
 
+  // Each property in a portfolio follows the page's rules, on its own photos.
+  const portfolio = portfolioOf(base)
+  let gatedPortfolioPhotos = 0
+  const gatedPortfolioFields = new Set()
+  if (portfolio.length) {
+    base.portfolio = portfolio.map(p => {
+      const pub = { ...p }
+      const own = docs.filter(d => d.property_id === p.id)
+      const pom = own.find(d => d.id === `${p.id}:${OM_DOC_ID}`)
+      if (pom) pub.om = { filename: pom.filename, title: pom.title, size: pom.size, available: true }
+      else delete pub.om
+      delete pub.documents
+      delete pub.crm_property_id
+      const pics = imagesOf(p)
+      if (teaser) {
+        GATED_FIELDS.forEach(k => {
+          if (pub[k] != null && pub[k] !== '') gatedPortfolioFields.add(k)
+          delete pub[k]
+        })
+        pub.images = pics.slice(0, publicPhotoCount(base))
+        gatedPortfolioPhotos += pics.length - pub.images.length
+      }
+      if (price !== 'public') delete pub.price
+      pub.doc_titles = own.map(d => d.title || kindLabel(d.kind))
+      pub.gated_photo_count = teaser ? pics.length - pub.images.length : 0
+      return pub
+    })
+  } else {
+    delete base.portfolio
+  }
+
   if (docs.length) {
     base.deal_room = {
       available:      true,
       teaser,
       doc_count:      docs.length,
-      doc_titles:     docs.map(d => d.title || kindLabel(d.kind)),
+      doc_titles:     docs.map(d => {
+        const t = d.title || kindLabel(d.kind)
+        const owner = d.property_id && portfolio.find(p => p.id === d.property_id)
+        return owner?.name ? `${owner.name} · ${t}` : t
+      }),
       update_count:   updates.length,
       last_update_at: updates[0]?.date || null,
-      gated_photo_count: teaser ? Math.max(0, images.length - base.images.length) : 0,
-      gated_fields:   teaser ? GATED_FIELDS.filter(k => cfg?.[k] != null && cfg[k] !== '') : [],
+      gated_photo_count: teaser ? Math.max(0, images.length - base.images.length) + gatedPortfolioPhotos : 0,
+      gated_fields:   teaser ? GATED_FIELDS.filter(k => (cfg?.[k] != null && cfg[k] !== '') || gatedPortfolioFields.has(k)) : [],
       nda_required:   !!ndaFromConfig(cfg),
     }
   }
@@ -175,17 +246,34 @@ export function publicTeaserConfig(cfg) {
 }
 
 /** What a registered visitor gets: the numbers, the photos, the documents, the updates. */
-export function privateDealRoom(cfg) {
-  const c = cfg || {}
+function financialsOf(c, gatedPrice) {
   const financials = {}
   GATED_FIELDS.forEach(k => { if (c[k] != null && c[k] !== '') financials[k] = c[k] })
-  if (c.price != null && c.price !== '' && priceDisplay(c) === 'gated') financials.price = c.price
-  return {
-    financials,
-    images:    imagesOf(c),
-    documents: dealRoomDocs(c).map(docSummary),
-    updates:   dealRoomUpdates(c),
+  if (c.price != null && c.price !== '' && gatedPrice) financials.price = c.price
+  return financials
+}
+
+export function privateDealRoom(cfg) {
+  const c = cfg || {}
+  const gatedPrice = priceDisplay(c) === 'gated'
+  const docs = dealRoomDocs(c).map(docSummary)
+  const room = {
+    financials: financialsOf(c, gatedPrice),
+    images:     imagesOf(c),
+    // A portfolio's per-property files are listed under their property.
+    documents:  docs.filter(d => !d.property_id),
+    updates:    dealRoomUpdates(c),
   }
+  const portfolio = portfolioOf(c)
+  if (portfolio.length) {
+    room.properties = portfolio.map(p => ({
+      id:         p.id,
+      financials: financialsOf(p, gatedPrice),
+      images:     imagesOf(p),
+      documents:  docs.filter(d => d.property_id === p.id),
+    }))
+  }
+  return room
 }
 
 // ─── NDA ─────────────────────────────────────────────────────────────────────

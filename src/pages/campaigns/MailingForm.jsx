@@ -130,7 +130,8 @@ export function MailingForm({ initial, agents, properties, activeAgent, onSave, 
     if (!form.name.trim()) return pushToast('Name is required', 'error')
     if (form.landing_type === 'property') {
       const hasHeadline = form.landing_config?.headline?.trim()
-      const hasImages   = (form.landing_config?.images || []).some(img => (typeof img === 'string' ? img : img?.url)?.trim())
+      const hasImages   = [form.landing_config?.images, ...(form.landing_config?.portfolio || []).map(p => p?.images)]
+        .some(list => (list || []).some(img => (typeof img === 'string' ? img : img?.url)?.trim()))
       if (!hasHeadline && !hasImages) return pushToast('Add a headline or at least one photo for the property showcase', 'error')
     }
     if (form.landing_type === 'custom' && !form.landing_custom_url?.trim()) {
@@ -148,6 +149,17 @@ export function MailingForm({ initial, agents, properties, activeAgent, onSave, 
         if (typeof img === 'string') return { url: img.trim(), units: '', price: '', caption: '' }
         return { url: (img.url || '').trim(), units: (img.units || '').trim(), price: (img.price || '').trim(), caption: (img.caption || '').trim() }
       }).filter(img => img.url)
+    }
+    if (Array.isArray(cfg.portfolio) && cfg.portfolio.length) {
+      const unnamed = cfg.portfolio.findIndex(p => !String(p?.name || '').trim())
+      if (unnamed >= 0) return pushToast(`Give portfolio property ${unnamed + 1} a name`, 'error')
+      cfg.portfolio = cfg.portfolio.map(p => ({
+        ...p,
+        name: p.name.trim(),
+        images: (Array.isArray(p.images) ? p.images : [])
+          .map(img => (typeof img === 'string' ? { url: img.trim(), caption: '' } : { ...img, url: (img?.url || '').trim() }))
+          .filter(img => img.url),
+      }))
     }
     if (Array.isArray(cfg.highlights)) cfg.highlights = cfg.highlights.filter(h => (h.label || '').trim() && (h.value || '').trim()).slice(0, 4)
     if (Array.isArray(cfg.features))   cfg.features   = cfg.features.map(f => (f || '').trim()).filter(Boolean)
