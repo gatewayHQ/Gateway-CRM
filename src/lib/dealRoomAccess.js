@@ -81,10 +81,17 @@ async function post(body) {
   return { ok: res.ok && !data.error, status: res.status, data }
 }
 
-/** Re-open the Deal Room with a stored token. Null when the token is refused. */
+/**
+ * Re-open the Deal Room with a stored token. Null when the token is refused.
+ * When the page has an NDA this visitor hasn't signed yet, resolves to
+ * { ndaPending: { mailing_id, access_token, nda, visitor } } instead of the room.
+ */
 export async function fetchDealRoom(mailingId, token) {
   if (!token) return null
   const { ok, status, data } = await post({ action: 'deal_room', mailing_id: mailingId, access_token: token })
+  if (status === 403 && data.nda_required) {
+    return { ndaPending: { mailing_id: mailingId, access_token: token, nda: data.nda, visitor: data.visitor } }
+  }
   if (status === 401 || status === 404) { clearAccessToken(mailingId); return null }
   if (!ok) throw new Error(data.error || 'Could not open the Deal Room')
   return data.deal_room || null
@@ -94,6 +101,25 @@ export async function fetchDealRoom(mailingId, token) {
 export async function requestDocument(mailingId, token, docId) {
   const { ok, data } = await post({ action: 'deal_room_doc', mailing_id: mailingId, access_token: token, doc_id: docId })
   if (!ok || !data.url) throw new Error(data.error || "We couldn't prepare the download. Please try again.")
+  return data
+}
+
+/** A short-lived URL to read the NDA before signing it. */
+export async function requestNda(mailingId, token) {
+  const { ok, data } = await post({ action: 'nda_view', mailing_id: mailingId, access_token: token })
+  if (!ok || !data.url) throw new Error(data.error || "We couldn't open the agreement. Please try again.")
+  return data
+}
+
+/**
+ * E-sign the NDA. Resolves to { url, filename, nda_copy_url, deal_room } — the
+ * same shape a registration without an NDA returns, plus the signed copy.
+ */
+export async function signNda(mailingId, token, { signer_name, company, agree }) {
+  const { ok, data } = await post({
+    action: 'nda_sign', mailing_id: mailingId, access_token: token, signer_name, company, agree,
+  })
+  if (!ok) throw new Error(data.error || "We couldn't record your signature. Please try again.")
   return data
 }
 

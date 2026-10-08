@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { Icon, pushToast } from '../../../components/UI.jsx'
 import { supabase } from '../../../lib/supabase.js'
 import {
-  normalizeOm, uploadDealRoomDoc, deleteOm, formatBytes, DEAL_ROOM_ACCEPT, DEAL_ROOM_DOC_KINDS,
+  normalizeOm, uploadDealRoomDoc, uploadNda, deleteOm, formatBytes, DEAL_ROOM_ACCEPT, DEAL_ROOM_DOC_KINDS,
 } from '../../../lib/om.js'
 import { fieldLabel } from './imageUpload.js'
 import { OmUploadField } from './OmUploadField.jsx'
@@ -13,7 +13,7 @@ import { OmUploadField } from './OmUploadField.jsx'
  * what stays public. Stored on landing_config:
  *
  *   teaser_mode, price_display, call_for_offers_date, public_photo_count,
- *   followup_sequence_id, om, deal_room: { documents[], updates[] }
+ *   followup_sequence_id, om, nda, deal_room: { documents[], updates[] }
  *
  * What a visitor may see is enforced on the server (api/_lib/dealRoom.js) —
  * this panel only sets the switches.
@@ -36,7 +36,8 @@ export function DealRoomBuilder({ cfg, setCfg, agentId }) {
   const docs    = Array.isArray(room.documents) ? room.documents : []
   const updates = Array.isArray(room.updates) ? room.updates : []
   const hasRoom = !!normalizeOm(cfg.om) || docs.length > 0
-  const teaser  = cfg.teaser_mode !== false
+  const nda     = cfg.nda?.path ? cfg.nda : null
+  const teaser  = cfg.teaser_mode !== false || !!nda
 
   useEffect(() => {
     let active = true
@@ -120,6 +121,8 @@ export function DealRoomBuilder({ cfg, setCfg, agentId }) {
         </div>
       </div>
 
+      <NdaUploadField nda={nda} setCfg={setCfg} hasRoom={hasRoom} />
+
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
         <div>
           <label style={fieldLabel}>Asking price on the public page</label>
@@ -136,7 +139,7 @@ export function DealRoomBuilder({ cfg, setCfg, agentId }) {
       </div>
 
       <label style={{ display:'flex', gap:8, alignItems:'flex-start', fontSize:12.5, cursor:'pointer' }}>
-        <input type="checkbox" checked={teaser} onChange={e => setCfg('teaser_mode', e.target.checked)} style={{ marginTop:2 }} />
+        <input type="checkbox" checked={teaser} disabled={!!nda} onChange={e => setCfg('teaser_mode', e.target.checked)} style={{ marginTop:2 }} />
         <span>
           <b>Teaser mode</b> — keep cap rate, NOI, gross income, price/unit and occupancy, and all but the first{' '}
           <input type="number" min={1} max={10} value={cfg.public_photo_count || 3}
@@ -144,6 +147,7 @@ export function DealRoomBuilder({ cfg, setCfg, agentId }) {
                  onClick={e => e.stopPropagation()}
                  style={{ width:44, fontSize:12, padding:'1px 4px' }} /> photos, inside the Deal Room.
           {!hasRoom && <span style={{ ...small, display:'block' }}>Takes effect once the Deal Room has a document.</span>}
+          {nda && <span style={{ ...small, display:'block' }}>Always on while an NDA is attached — the numbers and photos are covered by it.</span>}
         </span>
       </label>
 
@@ -188,6 +192,92 @@ export function DealRoomBuilder({ cfg, setCfg, agentId }) {
           step's delay (e.g. 3 days) in Sequences.
         </div>
       </div>
+    </div>
+  )
+}
+
+// ─── NDA (optional) ───────────────────────────────────────────────────────────
+/**
+ * A Confidentiality Agreement the visitor must e-sign before anything behind the
+ * wall is released. Registering still alerts the agent; signing opens the room.
+ * Stored on landing_config.nda as { path, filename, title, size, uploaded_at }
+ * in the private campaign-oms bucket. Enforced on the server (api/campaigns.js).
+ */
+function NdaUploadField({ nda, setCfg, hasRoom }) {
+  const [busy, setBusy] = useState(false)
+  const small = { fontSize:11, color:'var(--gw-mist)', lineHeight:1.45 }
+
+  const pick = async (file) => {
+    if (!file) return
+    setBusy(true)
+    try {
+      const next = await uploadNda(file)
+      // Previous signers keep their signed copies (those are separate files);
+      // only the unreferenced template is removed.
+      if (nda?.path && nda.path !== next.path) deleteOm(nda.path)
+      setCfg('nda', { ...next, title: nda?.title || '' })
+      pushToast('NDA attached — visitors must sign it before the Deal Room opens', 'success')
+    } catch (err) {
+      pushToast('Upload failed: ' + err.message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = () => {
+    if (nda?.path) deleteOm(nda.path)
+    setCfg('nda', null)
+    pushToast('NDA removed — registering opens the Deal Room again')
+  }
+
+  return (
+    <div>
+      <label style={fieldLabel}>Require a signed NDA (optional)</label>
+      <div style={{ ...small, margin:'3px 0 7px' }}>
+        Upload your confidentiality agreement (PDF). Visitors still register — you get the lead and the alert — but the
+        OM, photos, rent roll, T-12 and every other document stay locked until they e-sign it on the page. Each
+        signature is recorded with the time, IP address and a signed copy you can download from the campaign's
+        Deal Room tab.
+        {!hasRoom && ' Takes effect once the Deal Room has a document.'}
+      </div>
+      {nda ? (
+        <div style={{ display:'grid', gap:6 }}>
+          <div style={{ border:'1px solid var(--gw-border)', borderRadius:8, padding:10, background:'#fff',
+                        display:'flex', alignItems:'center', gap:10 }}>
+            <div style={{ width:36, height:36, borderRadius:6, flexShrink:0, display:'grid', placeItems:'center',
+                          background:'#fdf3e0', color:'#b8860b', border:'1px solid #f0e0c0' }}>
+              <Icon name="document" size={16} />
+            </div>
+            <div style={{ minWidth:0, flex:1 }}>
+              <div style={{ fontSize:12.5, fontWeight:700, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                {nda.filename}
+              </div>
+              <div style={small}>{[formatBytes(nda.size), 'signature required'].filter(Boolean).join(' · ')}</div>
+            </div>
+            <label title="Replace this PDF"
+                   style={{ cursor: busy ? 'wait' : 'pointer', padding:'6px 10px', fontSize:11.5, fontWeight:600,
+                            border:'1px solid var(--gw-border)', borderRadius:6, background:'#fff', flexShrink:0 }}>
+              {busy ? 'Uploading…' : 'Replace'}
+              <input type="file" accept="application/pdf" style={{ display:'none' }}
+                     onChange={e => { pick(e.target.files?.[0]); e.target.value = '' }} />
+            </label>
+            <button type="button" className="btn btn--ghost" onClick={remove} style={{ padding:'6px 8px', flexShrink:0 }} title="Remove">
+              <Icon name="x" size={12} />
+            </button>
+          </div>
+          <input className="input" maxLength={80} value={nda.title || ''} style={{ fontSize:12 }}
+                 placeholder="Name shown to visitors — e.g. “Confidentiality Agreement”"
+                 onChange={e => setCfg('nda', { ...nda, title: e.target.value })} />
+        </div>
+      ) : (
+        <label style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:7,
+                        cursor: busy ? 'wait' : 'pointer', padding:'12px 10px', fontSize:12.5, fontWeight:600,
+                        border:'1px dashed var(--gw-border)', borderRadius:8, background:'#fff', color:'var(--gw-mist)' }}>
+          {busy ? 'Uploading…' : <><Icon name="upload" size={13} /> Upload an NDA (PDF)</>}
+          <input type="file" accept="application/pdf" style={{ display:'none' }}
+                 onChange={e => { pick(e.target.files?.[0]); e.target.value = '' }} />
+        </label>
+      )}
     </div>
   )
 }

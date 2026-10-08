@@ -2036,6 +2036,24 @@ end $$;
 comment on table deal_room_events is
   'Deal Room activity on a /lp/* landing page: registrations, return visits, document opens and update emails sent. Written only by api/campaigns.js on the service key.';
 
+-- ─── NDA before the Deal Room (migration 0064) ───────────────────────────────
+-- Click-through e-signature evidence for the campaign's NDA. While
+-- landing_config.nda is set, the Deal Room stays locked until nda_signed_at is.
+alter table mailing_om_requests add column if not exists nda_signed_at        timestamptz;
+alter table mailing_om_requests add column if not exists nda_signer_name      text;
+alter table mailing_om_requests add column if not exists nda_signer_company   text;
+alter table mailing_om_requests add column if not exists nda_ip               text;
+alter table mailing_om_requests add column if not exists nda_user_agent       text;
+alter table mailing_om_requests add column if not exists nda_path             text;
+alter table mailing_om_requests add column if not exists nda_sha256           text;
+alter table mailing_om_requests add column if not exists nda_signed_copy_path text;
+
+do $$ begin
+  alter table deal_room_events drop constraint if exists deal_room_events_kind_check;
+  alter table deal_room_events add constraint deal_room_events_kind_check
+    check (kind in ('enter','return','document','update_email','nda_signed'));
+exception when others then null; end $$;
+
 -- ─── Campaign Images Storage (run once in Supabase SQL Editor) ───────────────
 -- Creates a public bucket for direct browser uploads from the landing page
 -- builder. Agents upload photos; the public URL is stored in landing_config.

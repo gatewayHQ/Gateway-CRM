@@ -27,6 +27,10 @@
  *   POST {action:'om_request',...}             → public; trade name/phone/email
  *                                                for a signed OM download URL
  *   GET  ?action=om_requests&mailing_id=X      → who unlocked the OM
+ *   POST {action:'deal_room',...}              → public; re-open with an access token
+ *   POST {action:'deal_room_doc',...}          → public; one document's signed URL
+ *   POST {action:'nda_view',...}               → public; the NDA to read before signing
+ *   POST {action:'nda_sign',...}               → public; e-sign the NDA, open the room
  *
  * Auth: service role key bypasses RLS for server-side writes. The 'scan',
  *       'scan_replay', 'landing', 'og', 'capture_lead', 'om_request',
@@ -54,8 +58,9 @@ import crypto from 'crypto'
 import { log } from './_lib/observability.js'
 import {
   publicTeaserConfig, privateDealRoom, dealRoomDocs, hasDealRoom, mintAccess, readAccess, cleanQualifiers,
-  dealRoomUpdates,
+  dealRoomUpdates, ndaFromConfig, ndaRequired, publicNda, cleanNdaSignature,
 } from './_lib/dealRoom.js'
+import { buildSignedNda, sha256Hex } from './_lib/ndaCertificate.js'
 import { handleLandingLead } from './_lib/landingLeadAlert.js'
 import { buildDealRoomUpdateEmail } from './_lib/dealRoomEmail.js'
 import { requireAgent } from './_lib/auth.js'
@@ -486,6 +491,32 @@ const LEAD_ALERT_BUDGET_MS = 6000
 
 // Stop starting new Deal Room update emails well inside the function's limit.
 const NOTIFY_BUDGET_MS = 40_000
+
+/**
+ * Has this registered visitor signed the campaign's NDA? Fails CLOSED: a read
+ * error (including a database without migration 0064) counts as unsigned, so a
+ * campaign with an NDA attached never leaks the room because a column is
+ * missing. Returns { signed, row } where row is their registration, if found.
+ */
+async function ndaStatus(mailingId, email) {
+  try {
+    const { data: row, error } = await db().from('mailing_om_requests')
+      .select('id, name, nda_signed_at').eq('mailing_id', mailingId).eq('email', email).maybeSingle()
+    if (error || !row) return { signed: false, row: null }
+    return { signed: !!row.nda_signed_at, row }
+  } catch { return { signed: false, row: null } }
+}
+
+/** The 403 a visitor gets while the NDA stands between them and the room. */
+function ndaRequiredResponse(res, cfg, row) {
+  noStore(res)
+  return json(res, 403, {
+    error: 'Please sign the Confidentiality Agreement to enter the Deal Room',
+    nda_required: true,
+    nda: publicNda(cfg),
+    visitor: row ? { first_name: String(row.name || '').split(/\s+/)[0] || null, name: row.name || null } : null,
+  })
+}
 
 /** One row of Deal Room activity (migration 0063). Best effort: attribution only. */
 async function logDealRoomEvent(row) {
@@ -1572,12 +1603,17 @@ export default async function handler(req, res) {
       }
       const om = omFromConfig(m.landing_config)
 
+      // An NDA on the page: registering still records the lead and alerts the
+      // agent, but nothing is released until this visitor has signed it. Someone
+      // who signed before (another device, a cleared browser) walks straight in.
+      const ndaLocked = ndaRequired(m.landing_config) && !(await ndaStatus(mailing_id, cleanEmail)).signed
+
       // Sign first. If storage is having a bad minute we would rather tell the
       // visitor to retry than record a download that never happened — and the
       // lead is not lost either way, because they still have the form in front
       // of them.
       let signed = null
-      if (om) {
+      if (om && !ndaLocked) {
         const r = await db().storage
           .from(OM_BUCKET).createSignedUrl(om.path, OM_URL_TTL_SECONDS, { download: om.filename })
         if (r.error || !r.data?.signedUrl) {
@@ -1600,9 +1636,11 @@ export default async function handler(req, res) {
       const { lead, contactId, visitId } = await captureLeadAndContact({
         mailing_id,
         name: cleanName, email: cleanEmail, phone: cleanPhone,
-        message: message || (om
-          ? `Downloaded the offering memorandum${om.title ? ` — ${om.title}` : ''}`
-          : 'Registered for the Deal Room'),
+        message: message || (ndaLocked
+          ? 'Registered for the Deal Room — NDA not yet signed'
+          : om
+            ? `Downloaded the offering memorandum${om.title ? ` — ${om.title}` : ''}`
+            : 'Registered for the Deal Room'),
         source_landing, visit_id, ip_hash: ipHash, om_requested: true, qualifiers,
       })
 
@@ -1648,6 +1686,21 @@ export default async function handler(req, res) {
       let accessToken = null
       try { accessToken = mintAccess({ mailingId: mailing_id, email: cleanEmail }) } catch { /* no secret configured */ }
 
+      // NDA still to sign: the token identifies them to nda_view / nda_sign, and
+      // opens nothing else until the signature is on file.
+      if (ndaLocked) {
+        if (!accessToken) return json(res, 500, { error: 'The Deal Room is not set up to take signatures yet. Please call the agent.' })
+        noStore(res)
+        return json(res, 200, {
+          ok: true,
+          lead_id: lead.id,
+          nda_required: true,
+          nda: publicNda(m.landing_config),
+          access_token: accessToken,
+          visitor: { first_name: cleanName.split(/\s+/)[0], name: cleanName },
+        })
+      }
+
       // The response carries a working (if brief) download URL — never let an
       // edge or proxy hold onto it.
       noStore(res)
@@ -1677,6 +1730,11 @@ export default async function handler(req, res) {
         .from('mailings').select('id, landing_config').eq('id', mailing_id).maybeSingle()
       if (mErr) throw mErr
       if (!m || !hasDealRoom(m.landing_config)) return json(res, 404, { error: 'This Deal Room is no longer available' })
+
+      if (ndaRequired(m.landing_config)) {
+        const nda = await ndaStatus(mailing_id, access.email)
+        if (!nda.signed) return ndaRequiredResponse(res, m.landing_config, nda.row)
+      }
 
       let visitor = null
       try {
@@ -1709,6 +1767,10 @@ export default async function handler(req, res) {
       if (mErr) throw mErr
       const doc = m ? dealRoomDocs(m.landing_config).find(d => d.id === String(doc_id)) : null
       if (!doc) return json(res, 404, { error: 'That document is no longer in the Deal Room' })
+      if (ndaRequired(m.landing_config)) {
+        const nda = await ndaStatus(mailing_id, access.email)
+        if (!nda.signed) return ndaRequiredResponse(res, m.landing_config, nda.row)
+      }
 
       const { data: signed, error: signErr } = await db().storage
         .from(OM_BUCKET).createSignedUrl(doc.path, OM_URL_TTL_SECONDS, { download: doc.filename })
@@ -1725,6 +1787,134 @@ export default async function handler(req, res) {
 
       noStore(res)
       return json(res, 200, { ok: true, url: signed.signedUrl, filename: doc.filename, expires_in: OM_URL_TTL_SECONDS })
+    }
+
+    // ── Public: read the NDA before signing it ──────────────────────────────
+    // A registered visitor (access token) may open the agreement itself. Not
+    // inline-download: it opens in the browser's PDF viewer to be read.
+    if (action === 'nda_view') {
+      const { mailing_id, access_token } = req.body
+      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      const access = readAccess(access_token, mailing_id)
+      if (!access) return json(res, 401, { error: 'Please register to enter the Deal Room' })
+
+      const { data: m, error: mErr } = await db()
+        .from('mailings').select('id, landing_config').eq('id', mailing_id).maybeSingle()
+      if (mErr) throw mErr
+      const nda = m ? ndaFromConfig(m.landing_config) : null
+      if (!nda) return json(res, 404, { error: 'This page has no Confidentiality Agreement' })
+
+      const { data: signed, error: signErr } = await db().storage
+        .from(OM_BUCKET).createSignedUrl(nda.path, OM_URL_TTL_SECONDS)
+      if (signErr || !signed?.signedUrl) {
+        log.error('nda_view.sign_failed', { mailing_id, error: signErr?.message })
+        return json(res, 502, { error: "We couldn't open the agreement. Please try again in a moment." })
+      }
+      noStore(res)
+      return json(res, 200, { ok: true, url: signed.signedUrl, filename: nda.filename, expires_in: OM_URL_TTL_SECONDS })
+    }
+
+    // ── Public: e-sign the NDA and enter the Deal Room ──────────────────────
+    // A click-through signature: the typed full name is the signature and the
+    // "I agree" box is the assent. Recorded with the time, IP, browser and the
+    // SHA-256 of the exact NDA file, and a signed copy (the NDA plus a
+    // certificate page) is kept in the private bucket for the agent and handed
+    // to the signer. Only then is anything behind the wall released.
+    if (action === 'nda_sign') {
+      const { mailing_id, access_token } = req.body
+      if (!mailing_id) return json(res, 400, { error: 'mailing_id required' })
+      const access = readAccess(access_token, mailing_id)
+      if (!access) return json(res, 401, { error: 'Please register to enter the Deal Room' })
+      const sig = cleanNdaSignature(req.body)
+      if (sig.error) return json(res, 400, { error: sig.error })
+
+      const { data: m, error: mErr } = await db()
+        .from('mailings').select('id, name, landing_config').eq('id', mailing_id).maybeSingle()
+      if (mErr) throw mErr
+      if (!m || !hasDealRoom(m.landing_config)) return json(res, 404, { error: 'This Deal Room is no longer available' })
+      const nda = ndaFromConfig(m.landing_config)
+      if (!nda) return json(res, 400, { error: 'This page has no Confidentiality Agreement to sign' })
+
+      const { data: reg, error: regErr } = await db().from('mailing_om_requests')
+        .select('id, name, email, phone, nda_signed_at, nda_signed_copy_path').eq('mailing_id', mailing_id).eq('email', access.email).maybeSingle()
+      if (regErr) {
+        log.error('nda_sign.lookup_failed', { mailing_id, error: regErr.message })
+        return json(res, 503, { error: "Signing isn't available right now. Please call the agent." })
+      }
+      if (!reg) return json(res, 401, { error: 'Please register to enter the Deal Room' })
+
+      let copyPath = reg.nda_signed_copy_path || null
+      if (!reg.nda_signed_at) {
+        // The exact bytes they are agreeing to — hashed so the record names
+        // this file and no later replacement.
+        const { data: blob, error: dlErr } = await db().storage.from(OM_BUCKET).download(nda.path)
+        if (dlErr || !blob) {
+          log.error('nda_sign.download_failed', { mailing_id, error: dlErr?.message })
+          return json(res, 502, { error: "We couldn't load the agreement. Please try again in a moment." })
+        }
+        const ndaBytes = new Uint8Array(await blob.arrayBuffer())
+        const ndaSha = sha256Hex(ndaBytes)
+        const signedAt = new Date().toISOString()
+        const ip = clientIp(req)
+        const ua = String(req.headers['user-agent'] || '').slice(0, 400) || null
+
+        // The signature record is what counts. If it can't be written (a
+        // database without migration 0064), nobody gets in.
+        const { error: upErr } = await db().from('mailing_om_requests').update({
+          nda_signed_at:      signedAt,
+          nda_signer_name:    sig.name,
+          nda_signer_company: sig.company,
+          nda_ip:             ip,
+          nda_user_agent:     ua,
+          nda_path:           nda.path,
+          nda_sha256:         ndaSha,
+        }).eq('id', reg.id)
+        if (upErr) {
+          log.error('nda_sign.record_failed', { mailing_id, error: upErr.message })
+          return json(res, 503, { error: "Signing isn't available right now. Please call the agent." })
+        }
+
+        // The signed copy. Best effort: the record above already stands.
+        try {
+          const pdf = await buildSignedNda({
+            ndaBytes, ndaSha256: ndaSha, ndaFilename: nda.filename,
+            propertyName: m.landing_config?.headline || m.name,
+            signer: { name: sig.name, company: sig.company, email: access.email, phone: reg.phone, ip, userAgent: ua, signedAt },
+          })
+          const path = `nda-signed/${mailing_id}/${reg.id}-${Date.now()}.pdf`
+          const { error: putErr } = await db().storage.from(OM_BUCKET)
+            .upload(path, pdf, { contentType: 'application/pdf', upsert: false })
+          if (putErr) throw putErr
+          await db().from('mailing_om_requests').update({ nda_signed_copy_path: path }).eq('id', reg.id)
+          copyPath = path
+        } catch (err) {
+          log.error('nda_sign.copy_failed', { mailing_id, err_message: String(err?.message || err).slice(0, 200) })
+        }
+        await logDealRoomEvent({ mailing_id, om_request_id: reg.id, email: access.email, kind: 'nda_signed' })
+      }
+
+      // Now the room opens: the OM download and the contents, as om_request
+      // would have handed them over without an NDA.
+      const om = omFromConfig(m.landing_config)
+      const signUrl = async (path, download) => {
+        if (!path) return null
+        const r = await db().storage.from(OM_BUCKET).createSignedUrl(path, OM_URL_TTL_SECONDS, { download })
+        return r.data?.signedUrl || null
+      }
+      const [omUrl, copyUrl] = await Promise.all([
+        signUrl(om?.path, om?.filename),
+        signUrl(copyPath, `Signed-${nda.filename}`),
+      ])
+
+      noStore(res)
+      return json(res, 200, {
+        ok: true,
+        url: omUrl,
+        filename: om?.filename || null,
+        expires_in: OM_URL_TTL_SECONDS,
+        nda_copy_url: copyUrl,
+        deal_room: { ...privateDealRoom(m.landing_config), visitor: { first_name: String(reg.name || sig.name).split(/\s+/)[0] } },
+      })
     }
 
     // ── Agent: email registered buyers that the Deal Room has something new ──
@@ -1753,10 +1943,13 @@ export default async function handler(req, res) {
       if (!update && !String(note).trim()) return json(res, 400, { error: 'Write a message or pick an update to send' })
       if (!canMintUnsubscribeTokens()) return json(res, 500, { error: 'Unsubscribe links are not configured — nothing was sent' })
 
+      // With an NDA attached, an update is confidential too: only people who
+      // signed it are emailed.
+      const needsNda = ndaRequired(m.landing_config)
       const { data: regs, error: rErr } = await db().from('mailing_om_requests')
-        .select('id, name, email').eq('mailing_id', mailing_id)
+        .select(needsNda ? 'id, name, email, nda_signed_at' : 'id, name, email').eq('mailing_id', mailing_id)
       if (rErr) throw rErr
-      const people = (regs || []).filter(r => r.email)
+      const people = (regs || []).filter(r => r.email && (!needsNda || r.nda_signed_at))
 
       // Already emailed about this update, or about this exact note today.
       const sendKey = update ? update.id : `note-${crypto.createHash('sha1').update(String(note)).digest('hex').slice(0, 12)}`

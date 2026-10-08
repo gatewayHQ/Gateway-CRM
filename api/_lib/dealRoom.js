@@ -25,6 +25,9 @@
  *   call_for_offers_date 'YYYY-MM-DD'
  *   public_photo_count   int   — photos shown before the wall (default 3)
  *   om                   { path, filename, title, size }      — see src/lib/om.js
+ *   nda                  { path, filename, title, size }      — when set, the
+ *                        visitor must e-sign it before anything behind the
+ *                        wall is released (see ndaFromConfig below)
  *   deal_room: {
  *     documents: [{ id, path, filename, title, kind, size, uploaded_at }],
  *     updates:   [{ id, date, title, body }],
@@ -96,9 +99,13 @@ export function hasDealRoom(cfg) {
   return dealRoomDocs(cfg).length > 0
 }
 
-/** Teaser mode is on by default whenever there is a Deal Room to send people to. */
+/**
+ * Teaser mode is on by default whenever there is a Deal Room to send people to,
+ * and cannot be turned off while an NDA is attached: the numbers and photos are
+ * part of what the NDA protects.
+ */
 export function isTeaser(cfg) {
-  return hasDealRoom(cfg) && cfg?.teaser_mode !== false
+  return hasDealRoom(cfg) && (cfg?.teaser_mode !== false || !!ndaFromConfig(cfg))
 }
 
 export function priceDisplay(cfg) {
@@ -142,6 +149,7 @@ export function publicTeaserConfig(cfg) {
 
   delete base.deal_room
   delete base.followup_sequence_id
+  delete base.nda
 
   const images = imagesOf(base)
   if (teaser) {
@@ -160,6 +168,7 @@ export function publicTeaserConfig(cfg) {
       last_update_at: updates[0]?.date || null,
       gated_photo_count: teaser ? Math.max(0, images.length - base.images.length) : 0,
       gated_fields:   teaser ? GATED_FIELDS.filter(k => cfg?.[k] != null && cfg[k] !== '') : [],
+      nda_required:   !!ndaFromConfig(cfg),
     }
   }
   return base
@@ -177,6 +186,53 @@ export function privateDealRoom(cfg) {
     documents: dealRoomDocs(c).map(docSummary),
     updates:   dealRoomUpdates(c),
   }
+}
+
+// ─── NDA ─────────────────────────────────────────────────────────────────────
+// An agent may attach a Confidentiality Agreement to the page. While one is
+// attached, registering still records the lead, but nothing behind the wall —
+// OM, numbers, photos, documents, updates — is released until the visitor has
+// e-signed it. The server enforces that on every Deal Room action; the page
+// only follows.
+
+/** The NDA descriptor on landing_config.nda, or null when none is attached. */
+export function ndaFromConfig(cfg) {
+  const n = cfg?.nda
+  if (!n || typeof n !== 'object') return null
+  const path = String(n.path || '').trim()
+  if (!path) return null
+  return {
+    path,
+    filename: String(n.filename || 'confidentiality-agreement.pdf').slice(0, 200),
+    title:    String(n.title || '').slice(0, 160) || 'Confidentiality Agreement',
+    size:     Number.isFinite(Number(n.size)) ? Number(n.size) : null,
+  }
+}
+
+/** An NDA only gates anything when there is a Deal Room behind it. */
+export function ndaRequired(cfg) {
+  return hasDealRoom(cfg) && !!ndaFromConfig(cfg)
+}
+
+/** The NDA as a browser may see it: never the storage path. */
+export function publicNda(cfg) {
+  const n = ndaFromConfig(cfg)
+  if (!n) return null
+  const { path, ...rest } = n
+  return rest
+}
+
+/**
+ * Validate what the visitor typed to sign. The typed name IS the signature, so
+ * it must look like a name; the agreement box must be ticked. Returns
+ * { error } or { name, company }.
+ */
+export function cleanNdaSignature({ signer_name, company, agree } = {}) {
+  const name = String(signer_name || '').replace(/\s+/g, ' ').trim().slice(0, 120)
+  if (name.length < 2 || !/[a-z]/i.test(name)) return { error: 'Type your full legal name to sign' }
+  if (agree !== true) return { error: 'Please confirm you agree to the Confidentiality Agreement' }
+  const co = String(company || '').replace(/\s+/g, ' ').trim().slice(0, 160)
+  return { name, company: co || null }
 }
 
 export function kindLabel(kind) {

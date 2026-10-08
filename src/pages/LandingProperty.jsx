@@ -59,6 +59,8 @@ export default function LandingProperty({ mailingId, preview = null }) {
   const [accessToken, setAccessToken] = useState(null)
   const [docBusy, setDocBusy] = useState(null)
   const [docError, setDocError] = useState(null)
+  // Registered, but the page's NDA is not signed yet: the gate opens on that step.
+  const [ndaPending, setNdaPending] = useState(null)
 
   // A visitor who registered before (or clicked a "New in the Deal Room" email)
   // walks straight back in.
@@ -68,7 +70,12 @@ export default function LandingProperty({ mailingId, preview = null }) {
     if (!token) return
     let active = true
     fetchDealRoom(mailingId, token)
-      .then(room => { if (active && room) { setAccessToken(token); setDealRoom(room) } })
+      .then(room => {
+        if (!active || !room) return
+        setAccessToken(token)
+        if (room.ndaPending) setNdaPending(room.ndaPending)
+        else setDealRoom(room)
+      })
       .catch(() => { /* stay on the public page; the form still works */ })
     return () => { active = false }
   }, [mailingId, preview])
@@ -327,8 +334,12 @@ export default function LandingProperty({ mailingId, preview = null }) {
                     ask. A plain "call me" form beside it used to win the
                     easier half of every visitor and lose the email. */}
                 <OmGate id="deal-room" om={om} forceShow onUnlock={unlockOm} accent={accent} qualifiers
+                        ndaPending={ndaPending}
+                        onNdaSigned={(res) => { setNdaPending(null); if (res?.deal_room) setDealRoom(res.deal_room) }}
                         title={room.teaser ? 'Offering Memorandum & Deal Room' : (om?.title || 'Offering Memorandum')}
-                        subtext={room.teaser
+                        subtext={room.nda_required
+                          ? 'Financials, rent roll, photos, the OM and every update as the deal moves. Register and sign the NDA — it opens instantly.'
+                          : room.teaser
                           ? 'Financials, rent roll, the OM and every update as the deal moves. Register once — it opens instantly.'
                           : undefined}
                         ctaLabel="Enter the Deal Room" />
