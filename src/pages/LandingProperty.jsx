@@ -333,7 +333,7 @@ export default function LandingProperty({ mailingId, preview = null }) {
                 {/* One form, not two: the Deal Room registration is the only
                     ask. A plain "call me" form beside it used to win the
                     easier half of every visitor and lose the email. */}
-                <OmGate id="deal-room" om={om} forceShow onUnlock={unlockOm} accent={accent} qualifiers
+                <OmGate id="deal-room" om={om} forceShow autoDownload={false} onUnlock={unlockOm} accent={accent} qualifiers
                         ndaPending={ndaPending}
                         onNdaSigned={(res) => { setNdaPending(null); if (res?.deal_room) setDealRoom(res.deal_room) }}
                         title={room.teaser ? 'Offering Memorandum & Deal Room' : (om?.title || 'Offering Memorandum')}
